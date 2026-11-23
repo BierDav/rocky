@@ -166,21 +166,9 @@ impl Settings {
             .transpose()?
             .is_some_and(|extended| extended.issues);
         let chain = if issues {
-            let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
-            let partitions = crate::enrollment::whole_partitions(domain, &grants);
             let certified = links.with_certificate(certificate.clone());
             let authority = Authority::issuer(key, &certified)?;
-            let hold = if domain.families.is_empty() {
-                Authority::hold
-            } else {
-                Authority::hold_families
-            };
-            let held = hold(
-                &authority,
-                domain.families.compact_resources(&grants),
-                domain.families.compact_partitions(&partitions),
-                self.validity()?,
-            )?;
+            let held = authority.hold(domain.administer(), self.validity()?)?;
             let mut chain = links;
             chain.0.push(held);
             chain.0.push(certificate);

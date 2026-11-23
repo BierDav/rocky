@@ -857,13 +857,13 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
-        let families = match tables {
+        let whole_tables = match tables {
             Some((schema, domain, readers)) => {
-                typed::Typed::new(schema.clone(), *domain, readers)?.families
+                typed::Typed::new(schema.clone(), *domain, readers)?.whole_tables
             }
-            None => config_families(&security, &manifest)?,
+            None => config_tables(&security, &manifest)?,
         };
-        check_config_with_families(&security, &manifest, &families)?;
+        check_config(&security, &manifest, &whole_tables)?;
         let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
         security.keys = current;
         for key in &self.config.keys {
@@ -892,7 +892,7 @@ impl<A: RowApplication> Inner<A> {
             permission_fields,
             chain: Chain::new(security.credentials.clone())?,
             node_author: self.node_author.clone(),
-            families,
+            whole_tables,
             config: security,
             history,
             manifest: manifest.hash(),

@@ -409,7 +409,7 @@ async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), validity())
+        .issue_untrusted_issuer(issuer.public_key(), validity())
         .unwrap(),
     ]);
     let continued = SignedSeal::endorse(

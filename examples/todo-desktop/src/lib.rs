@@ -622,7 +622,7 @@ fn Invite(todos: Shared) -> Element {
         details { class: "box",
             summary { "Invite a device" }
             div { class: "row",
-                for role in Role::ALL {
+                for role in Role::INVITABLE {
                     button { class: "secondary",
                         onclick: { let todos = todos.clone(); move |_| { let todos = todos.clone(); spawn(async move {
                             match todos.invite(role).await { Ok(uri) => code.set(Some(uri)), Err(failure) => error.set(Some(failure.to_string())) }
@@ -631,7 +631,7 @@ fn Invite(todos: Shared) -> Element {
                     }
                 }
             }
-            p { class: "muted small", "Trusted devices invite and seal. Full devices receive every list. Partial devices receive only lists shared with them. Treat each code as a secret and mint a fresh code for each device; paste it into that device's Join box." }
+            p { class: "muted small", "Only this trusted device administers the lists. Full devices receive every list. Partial devices receive only lists this device grants them. Treat each code as a secret and mint a fresh code for each device; paste it into that device's Join box." }
             if let Some(uri) = code() { textarea { class: "code", readonly: true, rows: 3, value: uri } }
             if let Some(message) = error() { p { role: "alert", "{message}" } }
         }

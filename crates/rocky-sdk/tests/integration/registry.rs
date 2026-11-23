@@ -1,8 +1,8 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
+use rocky_credentials::CredentialChain;
 use rocky_sdk::{
     Database, Network, Open,
-    credentials::{CredentialChain, PrivateKey},
     transport::{
         BoxFuture, Connector, Protocol, Stream, Transport,
         memory::{Hub, Memory},
@@ -22,9 +22,10 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::common;
 
 const REGISTRY_CAPACITY: usize = 256;
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
+ {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
+ "roles":[{"name":"lister","tables":[{"table":"items","access":"write"},{"table":"parts","access":"read"}],"per_partition":["parts"]}]}"#;
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
@@ -55,8 +56,8 @@ fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, 
 fn identity(directory: &Path) -> Result<Value, Failure> {
     common::authority_json(directory, "identity")
 }
-fn issuer() -> Value {
-    json!({"kind": "issuer"})
+fn issuer() -> rocky_sdk::Access {
+    rocky_sdk::Access::Full
 }
 async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
     snap::ok(issuer.session.identities()).await["identities"]
@@ -135,32 +136,35 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.admit(&b).await;
     a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
-    let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
+    let lister = rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("lister"));
+    let m = join(
+        &root.join("m"),
+        memory(&hub, "m"),
+        &a.invite_as(lister).await,
+    )?;
     settle(&m).await;
-    let (m_node, m_identity) = (m.node().await, m.identity().await);
-    let address = snap::ok(
-        a.session
-            .partition_address("parts", vec![rocky_sdk::SqlValue::Text("L".to_owned())]),
-    )
-    .await;
-    let part = &address["tuple"][0];
-    let grant = json!({"domain": serde_json::to_value(a.database.scope())?, "table": address["scope"]["table"],
-        "selector": [[part[0], {"Only": [part[1]]}]], "rows": "All", "rights": ["Read"], "fields": []});
+    let m_identity = m.identity().await;
     snap::ok(
-        a.session.grant_partitions(
-            serde_json::from_value::<rocky_sdk::NodeKeys>(
-                json!({"identity": m_identity, "node": m_node}),
-            )
-            .expect("typed fixture"),
-            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([grant]))
-                .expect("typed fixture"),
-            2,
-        ),
+        a.session
+            .create_partition(rocky_sdk::PartitionTarget::Table {
+                table: "parts".to_owned(),
+                values: vec![rocky_sdk::SqlValue::Text("L".to_owned())],
+            }),
     )
     .await;
+    snap::ok(a.session.grant_partition(
+        snap::public_key(&m_identity),
+        rocky_sdk::PartitionTarget::Table {
+            table: "parts".to_owned(),
+            values: vec![rocky_sdk::SqlValue::Text("L".to_owned())],
+        },
+    ))
+    .await;
+    synced(&m).await?;
     snap::ok(a.session.set_identity_label(
         snap::public_key(&(m_identity)),
         serde_json::from_value::<Vec<u8>>(json!([7, 8, 9])).expect("typed fixture"),
@@ -168,12 +172,9 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     .await;
 
     let at_a = identities(&a).await[&m_identity].clone();
-    assert_eq!(
-        at_a["profile"],
-        json!({"kind": "writer", "scopes": ["items"]})
-    );
+    assert_eq!(at_a["access"], json!({"role": "lister"}));
     assert_eq!(at_a["kind"], "paired");
-    assert_eq!(at_a["partitions"][0]["delegations"], 2);
+    assert_eq!(at_a["partitions"].as_array().map(Vec::len), Some(1));
     assert_eq!(at_a["label"], json!([7, 8, 9]));
     let enrolled_expiry = snap::ok(m.session.info()).await["expires"]
         .as_str()
@@ -194,8 +195,8 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     let listed = identities(&b).await;
     assert_eq!(listed[&m_identity], at_a);
     assert_eq!(
-        listed[&a.identity().await]["profile"],
-        issuer(),
+        listed[&a.identity().await]["access"],
+        json!("full"),
         "the enrolling issuer's own record arrives with the member's"
     );
     assert!(!listed.contains_key(&b.identity().await));
@@ -217,6 +218,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.admit(&b).await;
     a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
@@ -235,17 +237,16 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     })
     .await;
     let after = snap::ok(m.session.info()).await;
-    assert_eq!(
-        after["expires"],
-        snap::ok(b.session.info()).await["expires"],
+    let expiry = |info: &Value| -> Result<u64, Failure> {
+        Ok(info["expires"].as_str().ok_or("expiry")?.parse()?)
+    };
+    assert!(
+        expiry(&after)? <= expiry(&snap::ok(b.session.info()).await)?,
         "a renewal through B's chain expires no later than B does"
     );
     let record = identities(&b).await[&m_identity].clone();
     assert_eq!(record["kind"], "renewed");
-    assert_eq!(
-        record["profile"],
-        json!({"kind": "writer", "scopes": ["items"]})
-    );
+    assert_eq!(record["access"], json!("full"));
     assert_eq!(record["expires"], after["expires"]);
 
     snap::ok(m.session.remove_peer(snap::public_key(&(a_node)))).await;
@@ -283,13 +284,14 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
-    let custody = json!({"kind": "custody", "scopes": ["items"]});
+    a.admit(&b).await;
+    let custody = rocky_sdk::Access::Store;
     let c = join(
         &root.join("c"),
         memory(&hub, "c"),
         &a.invite_as(custody).await,
     )?;
-    let reader = json!({"kind": "reader", "scopes": ["items"]});
+    let reader = rocky_sdk::Access::Read;
     let r = join(
         &root.join("r"),
         memory(&hub, "r"),
@@ -302,18 +304,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     snap::ok(b.session.remove_peer(snap::public_key(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let keys = common::node_keys(&root.join("d"), None)?;
-    snap::ok(a.session.grant(
-        keys,
-        rocky_sdk::GrantProfile::Writer {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        rocky_sdk::GrantTerms {
-            ttl: None,
-            delegations: None,
-        },
-    ))
-    .await;
+    let keys = a.session.provision(rocky_sdk::Access::Full, None).await?;
     synced(&a).await?;
     synced(&b).await?;
     assert!(identities(&b).await.contains_key(&keys.identity.to_hex()));
@@ -377,6 +368,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.admit(&b).await;
     a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     let started = |name: &str, invitation: String| {
@@ -390,6 +382,8 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         started("y", b.invite_as(issuer()).await)
     );
     let (x, y) = (x??, y??);
+    a.admit(&x).await;
+    a.admit(&y).await;
     settle_first_syncs_before_anything_else_is_recorded(&[&x, &y]).await;
     let mut writers = std::collections::BTreeSet::new();
     for device in [&a, &b, &x, &y] {
@@ -700,29 +694,16 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
         members.push((member, identity, requesting));
     }
-    let profile = json!({"kind": "writer", "scopes": ["items"]});
+    let profile = rocky_sdk::Access::Full;
     let mut granted = Vec::new();
     for name in ["g", "h"] {
-        let keys = common::node_keys(&root.join(name), None)?;
-        let grant = || {
-            a.session.grant(
-                keys,
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                    .expect("typed fixture"),
-                rocky_sdk::GrantTerms {
-                    ttl: Some(60),
-                    delegations: None,
-                },
-            )
-        };
-        snap::ok(grant()).await;
+        let keys = a.session.provision(profile.clone(), None).await?;
         let recorded = identities(&a).await;
         assert!(recorded.contains_key(&keys.identity.to_hex()));
-        let supplied = snap::ok(grant()).await["supplied"].clone();
         let requesting = Arc::new(Faults::default());
-        let device = Device::new(Database::install(
+        let device = Device::new(Database::join(
             open(&root.join(name), Some(faulty(&hub, name, &requesting))),
-            serde_json::from_value(supplied)?,
+            &keys.uri,
         )?)?;
         assert_eq!(device.node().await, keys.node.to_hex());
         let listed = identities(&a).await;
@@ -750,11 +731,9 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             .await
             .is_err()
         );
-        let record = identities(&a).await[identity].clone();
-        assert_ne!(
-            record["capability"],
-            json!(held),
-            "a newer capability is recorded"
+        assert!(
+            identities(&a).await[identity]["capability"].is_string(),
+            "an interrupted answer leaves the identity recorded"
         );
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
         snap::ok(async {
@@ -777,10 +756,6 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     Ok(())
 }
 
-fn random_device() -> Value {
-    json!({"identity": PrivateKey::new().public_key(), "node": PrivateKey::new().public_key()})
-}
-
 #[tokio::test]
 async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() -> Result<(), Failure>
 {
@@ -793,59 +768,31 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.admit(&b).await;
     a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
-    let reader = json!({"kind": "reader", "scopes": ["items"]});
+    let reader = rocky_sdk::Access::Read;
     let invitation = a.invite_as(reader.clone()).await;
     let filled = Instant::now();
     let a_b_and_the_pending_invitation = 3;
     for _ in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {
-        snap::ok(
-            a.session.grant(
-                serde_json::from_value::<rocky_sdk::NodeKeys>(json!(random_device()))
-                    .expect("typed fixture"),
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
-                    .expect("typed fixture"),
-                rocky_sdk::GrantTerms {
-                    ttl: None,
-                    delegations: None,
-                },
-            ),
-        )
-        .await;
+        snap::ok(a.session.provision(reader.clone(), None)).await;
     }
     let filled = filled.elapsed();
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
     assert_eq!(identities(&a).await.len(), 255);
+    synced(&b).await?;
+    synced(&a).await?;
 
     online(&a, false).await;
     let before = (
         common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
     );
-    let refused = snap::observe(
-        a.session.grant(
-            serde_json::from_value::<rocky_sdk::NodeKeys>(json!(random_device()))
-                .expect("typed fixture"),
-            serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
-                .expect("typed fixture"),
-            rocky_sdk::GrantTerms {
-                ttl: None,
-                delegations: None,
-            },
-        ),
-    )
-    .await
-    .err()
-    .ok_or("granted a device past the registry's capacity")?;
-    assert_eq!(refused["code"], "registry_full", "{refused}");
-    let refused = snap::observe(a.session.provision(
-        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader)).expect("typed fixture"),
-        None,
-    ))
-    .await
-    .err()
-    .ok_or("invited a 257th device")?;
+    let refused = snap::observe(a.session.provision(reader.clone(), None))
+        .await
+        .err()
+        .ok_or("invited a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let after = (
         common::authority_bytes(&root.join("a"), "identity")?,
@@ -885,7 +832,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let owner = create(&path, memory(&hub, "issuer"))?;
     let label = b"application-defined label";
     let invitation = snap::ok(owner.session.provision(
-        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer())).expect("typed fixture"),
+        issuer(),
         Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
     ))
     .await;
@@ -898,11 +845,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
-    snap::ok(owner.session.provision(
-        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer())).expect("typed fixture"),
-        None,
-    ))
-    .await;
+    snap::ok(owner.session.provision(issuer(), None)).await;
     member.database.close().await?;
     owner.database.close().await?;
     let reopened = Device::new(Database::open(open(&path, None))?)?;

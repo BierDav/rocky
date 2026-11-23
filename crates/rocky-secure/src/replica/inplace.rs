@@ -40,7 +40,7 @@ pub(super) fn qualifies(before: &LogicalSchema, after: &LogicalSchema) -> bool {
             || old.partition_by != new.partition_by
             || old.partition_group != new.partition_group
             || old.foreign_keys != new.foreign_keys
-            || old.granted_like != new.granted_like
+            || old.explicit_access_only != new.explicit_access_only
             || old.auto_generate != new.auto_generate
             || old.indexes.iter().any(|index| !new.indexes.contains(index))
             || new

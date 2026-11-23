@@ -170,8 +170,7 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
     );
     let held = authority
         .hold(
-            vec![grant()],
-            Vec::new(),
+            Granted::explicit(vec![grant()]),
             rocky_credentials::Validity {
                 issued_at: NOW,
                 lifetime: std::time::Duration::from_secs(DAY),
@@ -283,19 +282,12 @@ fn an_identity_unlinks_only_its_certified_node_and_the_unlink_does_not_expire() 
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_node_delegates_its_identitys_rights_without_the_identity_key() {
-    let (root, identity, node, recipient, recipient_node) = (
-        PrivateKey::new(),
-        PrivateKey::new(),
-        PrivateKey::new(),
-        PrivateKey::new(),
-        PrivateKey::new(),
-    );
+fn a_node_writes_its_identitys_tables_without_the_identity_key() {
+    let (root, identity, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let grant = Authority::owner(&root)
-        .issue_delegable(
+        .issue(
             identity.public_key(),
             vec![grant()],
-            2,
             rocky_credentials::Validity {
                 issued_at: NOW,
                 lifetime: std::time::Duration::from_secs(DAY),
@@ -317,47 +309,18 @@ fn a_node_delegates_its_identitys_rights_without_the_identity_key() {
         root.public_key(),
         self::grant().scope.table,
         node.public_key(),
+        &WholeTables::default(),
     )
     .unwrap();
     assert!(
-        AuthorBinding::verify_chain(&bindings, root.public_key(), [99; 32], node.public_key())
-            .is_err()
-    );
-    let delegated = held
-        .capabilities()
-        .delegate(
-            Signer::node(&node, &held).unwrap(),
-            rocky_credentials::Delegation {
-                subject: recipient.public_key(),
-                kind: rocky_core::PrincipalKind::User,
-                grants: vec![self::grant()],
-                partitions: Vec::new(),
-                terms: rocky_credentials::DelegationTerms { delegations: 1 },
-                validity: rocky_credentials::Validity {
-                    issued_at: NOW,
-                    lifetime: std::time::Duration::from_secs(DAY),
-                    clock_skew: std::time::Duration::from_secs(0),
-                },
-            },
-        )
-        .unwrap()
-        .certify(&recipient, &recipient_node)
-        .unwrap();
-    delegated
-        .verify(
+        AuthorBinding::verify_chain(
+            &bindings,
             root.public_key(),
-            recipient_node.public_key(),
-            &RevocationSet::new(),
-            NOW,
+            [99; 32],
+            node.public_key(),
+            &WholeTables::default()
         )
-        .unwrap();
-    let ended = revoking(&root, |statement| {
-        statement.nodes.insert(PeerId::of(node.public_key()));
-    });
-    assert!(
-        delegated
-            .verify(root.public_key(), recipient_node.public_key(), &ended, NOW)
-            .is_err()
+        .is_err()
     );
 }
 

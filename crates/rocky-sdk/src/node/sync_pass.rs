@@ -260,7 +260,7 @@ impl Node {
     ) -> Result<(), Failure> {
         let member = !settings.issuer();
         let renew_to_widen_grants = member
-            && settings.profile_widens(&self.domain())?
+            && settings.access_widens(&self.domain())?
             && self
                 .widened
                 .lock()

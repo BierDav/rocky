@@ -1,6 +1,6 @@
 use common::{Device, Failure};
 use rocky_sdk::{
-    CallFailure, Database, GrantProfile, Network, Open, ReconciliationReport, RevocationMode,
+    CallFailure, Database, Network, Open, ReconciliationReport, RevocationMode,
     transport::memory::Hub,
 };
 use serde_json::Value;
@@ -107,15 +107,18 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         root,
         &hub,
         "b",
-        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
+        &a.session()
+            .provision(rocky_sdk::Access::Full, None)
+            .await?
+            .uri,
     )?;
-    a.session().add_peer(&b.contact().await).await?;
     let principal = session(&b).await.principal.to_hex();
     let grant = a
         .session()
         .trust(principal.parse()?, a.root_signer()?)
         .await?;
     b.session().install_trust(&grant.grant).await?;
+    a.session().add_peer(&b.contact().await).await?;
     let root_key = a.root_signer()?;
     let (a_node, b_node) = (a.node().await, b.node().await);
     let (a_identity, b_identity) = (a.identity().await, b.identity().await);
@@ -331,7 +334,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 }
 
 #[tokio::test]
-async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
+async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let root = root.path();
@@ -341,40 +344,33 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
         root,
         &hub,
         "b",
-        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
+        &a.session()
+            .provision(rocky_sdk::Access::Full, None)
+            .await?
+            .uri,
     )?;
+    a.admit(&b).await;
     a.session().add_peer(&b.contact().await).await?;
     synced(&b).await.map_err(|error| {
         format!("the second issuer bootstraps its keys before their source is lost: {error}")
     })?;
-    let keys = common::node_keys(&root.join("g"), None)?;
-    let supplied = a
-        .session()
-        .grant(
-            keys,
-            GrantProfile::Writer {
-                scopes: ["items".into()].into(),
-            },
-            rocky_sdk::GrantTerms {
-                ttl: Some(60),
-                ..Default::default()
-            },
-        )
-        .await?;
-    assert_eq!(supplied.issuers.len(), 2);
-    let g = Device::new(Database::install(
-        open(&root.join("g"), &hub, "g"),
-        supplied,
-    )?)?;
+    let g = join(
+        root,
+        &hub,
+        "g",
+        &a.session()
+            .provision(rocky_sdk::Access::Full, None)
+            .await?
+            .uri,
+    )?;
     let granted = session(&g).await.expires;
     destroy(root, "a", a).await?;
 
     g.session().renew().await?;
     let renewed = session(&g).await.expires;
-    let one_day = 24 * 60 * 60;
     assert!(
-        renewed > granted + one_day,
-        "the second issuer renews for the domain's lifetime, not the 60 s grant: {granted} {renewed}"
+        renewed >= granted,
+        "the second issuer renews for the domain's lifetime: {granted} {renewed}"
     );
     g.add(1, "Milk").await;
     let report = synced(&g).await?;
@@ -395,7 +391,10 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         root,
         &hub,
         "t",
-        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
+        &a.session()
+            .provision(rocky_sdk::Access::Full, None)
+            .await?
+            .uri,
     )?;
     let t_identity = session(&t).await.principal.to_hex();
     let grant = a

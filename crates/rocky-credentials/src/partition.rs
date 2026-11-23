@@ -111,71 +111,6 @@ impl crate::CredentialChain {
         }
         resolve_leaf(held, scope, tuple)
     }
-    pub fn delegate_partitions<'s>(
-        &self,
-        holder: impl Into<crate::Signer<'s>>,
-        request: crate::Delegation,
-    ) -> Result<Self, Error> {
-        if !matches!(
-            request.kind,
-            rocky_core::PrincipalKind::User | rocky_core::PrincipalKind::Deployment
-        ) || request.terms.delegations == 0
-        {
-            return Err(denied(
-                "partition delegation requires a delegable principal",
-            ));
-        }
-        self.append_partition_link(holder.into(), request)
-    }
-    fn append_partition_link(
-        &self,
-        holder: crate::Signer<'_>,
-        request: crate::Delegation,
-    ) -> Result<Self, Error> {
-        let crate::Delegation {
-            subject,
-            kind,
-            grants,
-            partitions,
-            terms,
-            validity,
-        } = request;
-        let crate::Validity {
-            issued_at: time,
-            lifetime,
-            clock_skew,
-        } = validity;
-        let ttl = lifetime.as_secs();
-        let skew = clock_skew.as_secs();
-        let delegations = terms.delegations;
-        let extended = crate::Extended {
-            partitions,
-            ..crate::Extended::default()
-        };
-        let root = self.0.first().ok_or_else(|| denied("credential depth"))?;
-        let parent = self.links(root.issuer, None)?;
-        if parent.subject != holder.principal()? {
-            return Err(denied("partition delegator holds another key"));
-        }
-        if parent.extended()?.issues {
-            return Err(denied("an issuer grants through its authority"));
-        }
-        let mut chain = self.clone();
-        chain.0.push(crate::SignedCapability::sign(
-            crate::Capability {
-                subject,
-                kind,
-                grants,
-                delegations,
-                not_before: time.saturating_sub(skew).max(parent.not_before),
-                expires: time.saturating_add(ttl).min(parent.expires),
-                extension: crate::Extension::new(extended)?,
-            },
-            holder,
-        )?);
-        chain.links(root.issuer, None)?;
-        Ok(chain)
-    }
 }
 fn resolve_leaf(
     leaf: &crate::Capability,
@@ -198,51 +133,6 @@ fn resolve_leaf(
     }
     Ok(grants)
 }
-impl crate::Authority<'_> {
-    pub fn issue_partition_terms(
-        &self,
-        subject: PublicKey,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        terms: crate::DelegationTerms,
-        validity: crate::Validity,
-    ) -> Result<crate::SignedCapability, Error> {
-        self.issue_table_terms(subject, grants, partitions, terms, validity, false)
-    }
-    pub fn issue_family_terms(
-        &self,
-        subject: PublicKey,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        terms: crate::DelegationTerms,
-        validity: crate::Validity,
-    ) -> Result<crate::SignedCapability, Error> {
-        self.issue_table_terms(subject, grants, partitions, terms, validity, true)
-    }
-    fn issue_table_terms(
-        &self,
-        subject: PublicKey,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        crate::DelegationTerms { delegations }: crate::DelegationTerms,
-        validity: crate::Validity,
-        families: bool,
-    ) -> Result<crate::SignedCapability, Error> {
-        self.sign_link(
-            subject,
-            grants,
-            crate::Extended {
-                partitions,
-                families,
-                origin: self.origin()?,
-                ..crate::Extended::default()
-            },
-            delegations,
-            validity,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests;
 

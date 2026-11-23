@@ -1165,88 +1165,6 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
-    let fixture = Fixture::new();
-    let user = PrivateKey::new();
-    let node = PrivateKey::new();
-    let delegate = PrivateKey::new();
-    let narrow = grant(
-        fixture.public,
-        &[Right::Update],
-        &[fixture.app().field("display_name")],
-    );
-    let root = Capability {
-        subject: user.public_key(),
-        kind: PrincipalKind::User,
-        grants: vec![narrow.clone()],
-        not_before: 0,
-        expires: 100,
-        delegations: 2,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-            ..Default::default()
-        })
-        .unwrap(),
-    };
-    let base = Capability {
-        subject: delegate.public_key(),
-        kind: PrincipalKind::User,
-        delegations: 1,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-            ..Default::default()
-        })
-        .unwrap(),
-        ..root.clone()
-    };
-    for mutant in 0..4 {
-        let mut child = base.clone();
-        match mutant {
-            0 => {
-                if let FieldSelection::Only(fields) = &mut child.grants[0].fields {
-                    fields.insert(fixture.app().field("salary"));
-                }
-            }
-            1 => {
-                child.grants[0].rights.insert(Right::Delete);
-            }
-            2 => {
-                child.grants[0].scope = fixture.private;
-            }
-            _ => child.delegations = 2,
-        }
-        let chain = CredentialChain(vec![
-            SignedCapability::sign(root.clone(), &fixture.publisher).unwrap(),
-            SignedCapability::sign(child, &user).unwrap(),
-        ]);
-        assert!(
-            chain
-                .certify(&delegate, &node)
-                .and_then(|chain| chain.verify(
-                    fixture.publisher.public_key(),
-                    node.public_key(),
-                    &fixture.policy,
-                    1
-                ))
-                .is_err()
-        );
-    }
-    let chain = CredentialChain(vec![
-        SignedCapability::sign(root, &fixture.publisher).unwrap(),
-        SignedCapability::sign(base, &user).unwrap(),
-    ]);
-    assert!(
-        chain
-            .certify(&delegate, &node)
-            .and_then(|chain| chain.verify(
-                fixture.publisher.public_key(),
-                node.public_key(),
-                &fixture.policy,
-                1
-            ))
-            .is_ok()
-    );
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn concurrent_field_updates_converge_and_no_remote_operation_is_reauthored() {
     let fixture = Fixture::new();
@@ -1629,8 +1547,6 @@ pub(crate) mod blockers;
 mod bundles;
 mod chains;
 mod compaction;
-#[cfg(not(target_family = "wasm"))]
-mod delegation;
 mod delivery;
 mod failed_commit;
 mod formats;

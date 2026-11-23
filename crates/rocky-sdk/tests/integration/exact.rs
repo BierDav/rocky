@@ -8,7 +8,7 @@ use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":6,
+const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":7,
     "tables":[
         {"name":"balances","class":"replayed",
          "columns":[{"name":"key","type":"text","not_null":true},
@@ -148,9 +148,7 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["balances"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(Database::join(
         open(&root.path().join("b"), &hub, "b"),
         &invitation,

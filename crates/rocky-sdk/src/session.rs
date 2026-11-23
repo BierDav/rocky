@@ -1,12 +1,12 @@
 use crate::request::Request;
-use crate::{Failure, GrantProfile, PublicKey, Session};
+use crate::{Access, Failure, PublicKey, Session};
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Provisioning {
     pub uri: String,
     pub node: PublicKey,
     pub identity: PublicKey,
-    pub profile: GrantProfile,
+    pub access: Access,
     pub sequence: u64,
 }
 impl std::fmt::Debug for Provisioning {
@@ -15,7 +15,7 @@ impl std::fmt::Debug for Provisioning {
             .field("uri", &"<redacted>")
             .field("node", &self.node)
             .field("identity", &self.identity)
-            .field("profile", &self.profile)
+            .field("access", &self.access)
             .field("sequence", &self.sequence)
             .finish()
     }
@@ -82,12 +82,12 @@ pub struct TrustGrant {
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
-    pub principal: crate::credentials::PublicKey,
-    pub node: crate::credentials::PublicKey,
+    pub principal: rocky_credentials::PublicKey,
+    pub node: rocky_credentials::PublicKey,
     pub revocations: crate::RevocationStatus,
     pub expires: u64,
     pub issuer: bool,
-    pub profile: GrantProfile,
+    pub access: Access,
     pub transport: String,
     pub readable: usize,
     pub writable: usize,
@@ -97,28 +97,6 @@ pub struct SessionInfo {
 impl Session {
     pub async fn info(&self) -> Result<SessionInfo, Failure> {
         self.send(Request::Info).await
-    }
-    pub async fn grant(
-        &self,
-        device: crate::NodeKeys,
-        profile: GrantProfile,
-        terms: crate::GrantTerms,
-    ) -> Result<crate::Supplied, Failure> {
-        self.send(|reply| Request::Grant(device, profile, terms, false, reply))
-            .await
-    }
-    pub async fn delegate(
-        &self,
-        device: crate::NodeKeys,
-        profile: GrantProfile,
-        terms: crate::GrantTerms,
-    ) -> Result<crate::Supplied, Failure> {
-        self.send(|reply| Request::Grant(device, profile, terms, true, reply))
-            .await
-    }
-    pub async fn install_credentials(&self, supplied: crate::Supplied) -> Result<(), Failure> {
-        self.send(|reply| Request::Install(Box::new(supplied), reply))
-            .await
     }
 
     pub async fn unlink(
@@ -138,19 +116,19 @@ impl Session {
     }
     pub async fn provision(
         &self,
-        profile: GrantProfile,
+        access: Access,
         label: Option<Vec<u8>>,
     ) -> Result<Provisioning, Failure> {
-        self.send(|reply| Request::Provision(profile, label, reply))
+        self.send(|reply| Request::Provision(access, label, reply))
             .await
     }
     pub async fn invite(
         &self,
         identity: PublicKey,
-        profile: GrantProfile,
+        access: Access,
         terms: crate::InviteTerms,
     ) -> Result<crate::Invitation, Failure> {
-        self.send(|reply| Request::Invite(identity, profile, terms, reply))
+        self.send(|reply| Request::Invite(identity, access, terms, reply))
             .await
     }
     pub async fn withdraw_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {

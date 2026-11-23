@@ -1,7 +1,6 @@
 use rocky_core::{
     AppId, ApplicationManifest, AuthorLogScope, DefinitionItem, DomainId, DomainRule,
-    FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
-    Scope,
+    FieldSelection, MeshId, ResourceGrant, ResourceScope, Right, RowSelection, Scope,
 };
 use rocky_credentials::*;
 use std::collections::BTreeSet;
@@ -13,11 +12,22 @@ const VALIDITY: rocky_credentials::Validity = rocky_credentials::Validity {
     clock_skew: std::time::Duration::from_secs(300),
 };
 
+struct Table {
+    scope: ResourceScope,
+}
 struct Domain {
     publisher: PrivateKey,
     manifest: ApplicationManifest,
-    resources: Vec<Resource>,
+    resources: Vec<Table>,
 }
+const READ: [Right; 2] = [Right::Read, Right::Custody];
+const WRITE: [Right; 5] = [
+    Right::Read,
+    Right::Insert,
+    Right::Update,
+    Right::Delete,
+    Right::Custody,
+];
 impl Domain {
     fn new() -> Self {
         let publisher = PrivateKey::new();
@@ -32,6 +42,7 @@ impl Domain {
             entities: Vec::new(),
             fields: Vec::new(),
             operations: Vec::new(),
+            roles: Vec::new(),
             domains: vec![DomainRule {
                 domain: DomainId([2; 16]),
                 author_log: AuthorLogScope::Domain,
@@ -52,8 +63,7 @@ impl Domain {
                     shape: "record".into(),
                 });
             }
-            resources.push(Resource {
-                name: name.into(),
+            resources.push(Table {
                 scope: ResourceScope {
                     domain: Scope {
                         mesh: MeshId([1; 16]),
@@ -63,7 +73,6 @@ impl Domain {
                     encryption: [index as u8 + 1; 32],
                     table,
                 },
-                columns: [("text".to_owned(), field)].into(),
             });
         }
         Self {
@@ -92,18 +101,22 @@ impl Domain {
         let signed = self.authority().revoke(statement).expect("revocation");
         RevocationSet::try_from(vec![signed]).expect("set")
     }
-    fn names(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|name| (*name).to_owned()).collect()
+    fn grants(&self, tables: &[usize], rights: &[Right]) -> Vec<ResourceGrant> {
+        tables
+            .iter()
+            .map(|index| ResourceGrant {
+                scope: self.resources[*index].scope,
+                rows: RowSelection::All,
+                rights: rights.iter().copied().collect(),
+                fields: FieldSelection::All,
+            })
+            .collect()
     }
-    fn device(&self, profile: &Profile) -> (PrivateKey, PrivateKey, CredentialChain) {
+    fn device(&self, grants: Vec<ResourceGrant>) -> (PrivateKey, PrivateKey, CredentialChain) {
         let (user, node) = (PrivateKey::new(), PrivateKey::new());
         let root = self
             .authority()
-            .issue(
-                user.public_key(),
-                profile.grants(&self.resources).expect("grants"),
-                VALIDITY,
-            )
+            .issue(user.public_key(), grants, VALIDITY)
             .expect("capability");
         let chain = device_chain(root, &user, &node).expect("chain");
         (user, node, chain)
@@ -128,14 +141,11 @@ fn rights(grants: &[ResourceGrant]) -> BTreeSet<Right> {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     let domain = Domain::new();
-    let writer = Profile::Writer {
-        scopes: Domain::names(&["notes"]),
-    };
-    let (user, node, chain) = domain.device(&writer);
+    let (user, node, chain) = domain.device(domain.grants(&[0], &WRITE));
     let credentials = Credentials {
         publisher: domain.publisher.public_key(),
         revocations: domain.policy(),
-        capabilities: chain.delegable(),
+        capabilities: chain.without_certificate(),
         certificate: chain.certificate().cloned(),
     };
     let received = Credentials::from_bytes(&credentials.to_bytes().expect("bytes")).expect("set");
@@ -188,10 +198,7 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
 fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     let domain = Domain::new();
     let policy = domain.policy();
-    let writer = Profile::Writer {
-        scopes: Domain::names(&["notes"]),
-    };
-    let (user, node, chain) = domain.device(&writer);
+    let (user, node, chain) = domain.device(domain.grants(&[0], &WRITE));
     assert!(domain.verify(&chain, &node, &policy, NOW).is_ok());
     assert!(domain.verify(&chain, &node, &policy, NOW - 301).is_err());
     assert!(
@@ -258,7 +265,7 @@ fn a_self_signed_capability_grants_nothing() {
     let domain = Domain::new();
     let policy = domain.policy();
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
-    let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
+    let grants = domain.grants(&[0, 1], &WRITE);
     let claimed = Authority::owner(&user)
         .issue(user.public_key(), grants, VALIDITY)
         .expect("self-signed");
@@ -277,68 +284,11 @@ fn a_self_signed_capability_grants_nothing() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn profiles_are_scoped_and_hold_no_schema_right() {
-    let domain = Domain::new();
-    let custody = Profile::Custody {
-        scopes: Domain::names(&["notes"]),
-    };
-    let grants = custody.grants(&domain.resources).expect("custody");
-    assert_eq!(rights(&grants), [Right::Custody].into());
-    assert!(grants[0].fields.is_none());
-    assert!(!custody.reads("notes") && !custody.issues());
-    let reader = Profile::Reader {
-        scopes: Domain::names(&["notes"]),
-    };
-    let writer = Profile::Writer {
-        scopes: Domain::names(&["payroll"]),
-    };
-    for profile in [&reader, &writer, &Profile::Issuer] {
-        let grants = profile.grants(&domain.resources).expect("grants");
-        assert!(!rights(&grants).contains(&Right::PublishSchema));
-        assert!(grants.iter().all(|grant| grant.rows == RowSelection::All));
-    }
-    let grants = reader.grants(&domain.resources).expect("reader");
-    assert_eq!(rights(&grants), [Right::Read, Right::Custody].into());
-    assert_eq!(grants.len(), 1);
-    assert_eq!(grants[0].scope, domain.resources[0].scope);
-    assert!(reader.reads("notes") && !reader.reads("payroll") && !reader.issues());
-    let grants = writer.grants(&domain.resources).expect("writer");
-    assert_eq!(grants[0].scope, domain.resources[1].scope);
-    assert!(rights(&grants).contains(&Right::Insert));
-    assert_eq!(
-        Profile::Issuer
-            .grants(&domain.resources)
-            .expect("issuer")
-            .len(),
-        2
-    );
-    for names in [&[][..], &["missing"][..], &["notes", "missing"][..]] {
-        let scopes = Domain::names(names);
-        assert!(
-            Profile::Reader {
-                scopes: scopes.clone()
-            }
-            .grants(&domain.resources)
-            .is_err(),
-            "a reader profile has no default and no unknown scope"
-        );
-        assert!(
-            Profile::Writer { scopes }
-                .grants(&domain.resources)
-                .is_err()
-        );
-    }
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     let domain = Domain::new();
     let policy = domain.policy();
     let issuer = PrivateKey::new().public_key();
-    let reader = Profile::Reader {
-        scopes: Domain::names(&["notes"]),
-    };
-    let (user, node, chain) = domain.device(&reader);
+    let (user, node, chain) = domain.device(domain.grants(&[0], &READ));
     let (request, secret) = RenewRequest::sign(&node, issuer, chain.clone(), NOW).expect("request");
     let request = RenewRequest::from_bytes(&request.to_bytes().expect("bytes")).expect("request");
     let prior = request
@@ -402,7 +352,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     assert!(forged.open(anchor.0, &request, &secret).is_err());
 
     let mut widened = chain.0[0].capability.clone();
-    widened.grants = Profile::Issuer.grants(&domain.resources).expect("grants");
+    widened.grants = domain.grants(&[0, 1], &WRITE);
     let claimed = CredentialChain(vec![
         SignedCapability::sign(widened, &user).expect("self-signed"),
         chain.0[1].clone(),
@@ -467,221 +417,14 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
-    let mut resources = Domain::new().resources;
-    resources[0].columns.insert("title".into(), [6; 32]);
-    let parse = |value: serde_json::Value| serde_json::from_value::<Vec<Grant>>(value);
-    let raw = parse(serde_json::json!([
-        {"scope": "notes", "rights": ["read", "update", "custody"], "columns": ["title"]},
-        {"scope": "payroll", "rights": ["delete", "custody"]},
-    ]))
-    .expect("grants");
-    let grants = Grant::resolve_all(&raw, &resources).expect("resolved");
-    assert_eq!(
-        grants[0].fields,
-        FieldSelection::Only([[6; 32]].into()),
-        "columns narrow fields"
-    );
-    assert_eq!(rights(&grants[1..]), [Right::Delete, Right::Custody].into());
-    assert_eq!(
-        serde_json::to_value(&raw[0]).expect("json")["rights"],
-        serde_json::json!(["read", "update", "custody"])
-    );
-    let described: Vec<Grant> = grants
-        .iter()
-        .filter_map(|grant| Grant::describe(grant, &resources))
-        .collect();
-    assert_eq!(
-        described, raw,
-        "each signed grant describes back to the raw grant that made it"
-    );
-    assert_eq!(
-        Profile::of(&grants, &resources),
-        Profile::Grants { grants: raw }
-    );
-    for refused in [
-        serde_json::json!([{"scope": "notes", "rights": ["read"], "columns": ["x"]}]),
-        serde_json::json!([{"scope": "x", "rights": ["read"]}]),
-        serde_json::json!([{"scope": "notes", "rights": []}]),
-        serde_json::json!([{"scope": "notes", "rights": ["publish_schema"]}]),
-        serde_json::json!([]),
-    ] {
-        let parsed = parse(refused.clone()).expect("parsed");
-        assert!(
-            Grant::resolve_all(&parsed, &resources).is_err(),
-            "unknown names, empty sets and the schema right are refused: {refused}"
-        );
-    }
-    for name in ["fly", "invoke", "execute"] {
-        assert!(
-            parse(serde_json::json!([{"scope": "notes", "rights": [name]}])).is_err(),
-            "names that are no right, the removed command rights included, are refused"
-        );
-    }
-    assert!(parse(serde_json::json!([{"scope": "notes", "rights": [], "rows": "all"}])).is_err());
-    let writer = Profile::Writer {
-        scopes: Domain::names(&["payroll"]),
-    };
-    let raw = writer.raw(&resources).expect("raw");
-    assert_eq!(
-        raw.len(),
-        1,
-        "the starter profiles are functions over raw grants"
-    );
-    assert!(raw[0].rights.contains(&Right::Insert) && raw[0].columns.is_none());
-    assert_eq!(
-        Profile::Grants { grants: raw }
-            .grants(&resources)
-            .expect("grants"),
-        writer.grants(&resources).expect("writer")
-    );
-    let reader = Profile::Reader {
-        scopes: Domain::names(&["notes"]),
-    };
-    let grants = reader.grants(&resources).expect("reader");
-    assert_eq!(Profile::of(&grants, &resources), reader);
-    assert!(
-        Profile::Grants { grants: Vec::new() }
-            .grants(&resources)
-            .is_err()
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
-    let domain = Domain::new();
-    let policy = domain.policy();
-    let grants = Profile::Writer {
-        scopes: Domain::names(&["notes", "payroll"]),
-    }
-    .grants(&domain.resources)
-    .expect("grants");
-    let (holder, holder_node) = (PrivateKey::new(), PrivateKey::new());
-    let root = domain
-        .authority()
-        .issue_delegable(holder.public_key(), grants.clone(), 2, VALIDITY)
-        .expect("root");
-    let own = device_chain(root.clone(), &holder, &holder_node).expect("own");
-    assert_eq!(own.delegable().0.len(), 1);
-    let (delegate, node) = (PrivateKey::new(), PrivateKey::new());
-    let mut narrow = grants[0].clone();
-    narrow.rights = [Right::Read, Right::Custody].into();
-    let link = own
-        .delegable()
-        .delegate(
-            &holder,
-            rocky_credentials::Delegation {
-                subject: delegate.public_key(),
-                kind: PrincipalKind::User,
-                grants: vec![narrow.clone()],
-                partitions: Vec::new(),
-                terms: rocky_credentials::DelegationTerms { delegations: 1 },
-                validity: rocky_credentials::Validity {
-                    issued_at: NOW,
-                    lifetime: std::time::Duration::from_secs(90 * DAY),
-                    clock_skew: std::time::Duration::from_secs(300),
-                },
-            },
-        )
-        .expect("delegated");
-    assert_eq!(
-        link.expires(),
-        NOW + 30 * DAY,
-        "the delegation ends with its parent, however long it was asked for"
-    );
-    let chain = link.clone().complete(&delegate, &node).expect("chain");
-    assert_eq!(chain.0.len(), 3);
-    assert_eq!(
-        domain
-            .verify(&chain, &node, &policy, NOW)
-            .expect("verified"),
-        [narrow.clone()]
-    );
-    assert_eq!(chain.grants(), [narrow.clone()]);
-    let mut wider = narrow.clone();
-    wider.rights.insert(Right::Delete);
-    let mut other = narrow.clone();
-    other.scope = ResourceScope {
-        table: [9; 32],
-        ..narrow.scope
-    };
-    let delegate_with = |holder: &PrivateKey, grants: Vec<ResourceGrant>, depth: u8| {
-        own.delegable().delegate(
-            holder,
-            rocky_credentials::Delegation {
-                subject: delegate.public_key(),
-                kind: PrincipalKind::User,
-                grants,
-                partitions: Vec::new(),
-                terms: rocky_credentials::DelegationTerms { delegations: depth },
-                validity: VALIDITY,
-            },
-        )
-    };
-    let mut beyond = grants[0].clone();
-    beyond.rights.insert(Right::PublishSchema);
-    for (holder, grants, depth) in [
-        (&holder, vec![beyond], 1),
-        (&holder, vec![other], 1),
-        (&holder, vec![narrow.clone()], 2),
-        (&holder, vec![narrow.clone()], 0),
-        (&holder, Vec::new(), 1),
-        (&delegate, vec![narrow.clone()], 1),
-    ] {
-        assert!(
-            delegate_with(holder, grants, depth).is_err(),
-            "wider grants, other scopes, more depth and holding no key are refused"
-        );
-    }
-    let mut widened = wider.clone();
-    widened.rights.insert(Right::PublishSchema);
-    assert!(delegate_with(&holder, vec![wider, widened], 1).is_err());
-    assert!(
-        link.delegate(
-            &delegate,
-            rocky_credentials::Delegation {
-                subject: PrivateKey::new().public_key(),
-                kind: PrincipalKind::User,
-                grants: vec![narrow],
-                partitions: Vec::new(),
-                terms: rocky_credentials::DelegationTerms { delegations: 1 },
-                validity: VALIDITY
-            }
-        )
-        .is_err(),
-        "the delegate reaches only its own node"
-    );
-    let issuer = PrivateKey::new().public_key();
-    let (request, _) = RenewRequest::sign(&node, issuer, chain, NOW).expect("request");
-    let anchor = (domain.publisher.public_key(),);
-    assert!(
-        request.verify(issuer, anchor.0, (NOW, 300)).is_err(),
-        "an issuer renews the delegator, never the delegate"
-    );
-    let renewed = domain
-        .authority()
-        .renew(&root.capability, &policy, VALIDITY)
-        .expect("renewed");
-    assert_eq!(
-        renewed.capability.delegations, 2,
-        "a renewed delegator keeps its depth"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn node_leaves_are_writers_named_by_their_own_keys() {
     let domain = Domain::new();
     let identity = PrivateKey::new();
     let nodes = [PrivateKey::new(), PrivateKey::new()];
-    let grants = Profile::Issuer.grants(&domain.resources).unwrap();
+    let grants = domain.grants(&[0, 1], &WRITE);
     let root = domain
         .authority()
-        .issue_terms(
-            identity.public_key(),
-            grants.clone(),
-            rocky_credentials::DelegationTerms { delegations: 1 },
-            VALIDITY,
-        )
+        .issue(identity.public_key(), grants.clone(), VALIDITY)
         .unwrap();
     let prefix = CredentialChain(vec![root]);
     let first = prefix.clone().certify(&identity, &nodes[0]).unwrap();
@@ -755,43 +498,16 @@ fn node_leaves_are_writers_named_by_their_own_keys() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn delegations_narrow_and_unknown_extension_versions_are_refused() {
+fn a_person_signs_no_link_and_unknown_extension_versions_are_refused() {
     let domain = Domain::new();
     let policy = domain.policy();
-    let grants = Profile::Writer {
-        scopes: Domain::names(&["notes"]),
-    }
-    .grants(&domain.resources)
-    .expect("grants");
+    let grants = domain.grants(&[0], &WRITE);
     let holder = PrivateKey::new();
     let root = domain
         .authority()
-        .issue_terms(
-            holder.public_key(),
-            grants.clone(),
-            rocky_credentials::DelegationTerms { delegations: 2 },
-            VALIDITY,
-        )
+        .issue(holder.public_key(), grants.clone(), VALIDITY)
         .expect("root");
-    let prefix = CredentialChain(vec![root.clone()]);
-    let delegate = PrivateKey::new();
-    let delegate_with = |delegations| {
-        prefix.delegate(
-            &holder,
-            rocky_credentials::Delegation {
-                subject: delegate.public_key(),
-                kind: PrincipalKind::User,
-                grants: grants.clone(),
-                partitions: Vec::new(),
-                terms: rocky_credentials::DelegationTerms { delegations },
-                validity: VALIDITY,
-            },
-        )
-    };
-    let narrowed = delegate_with(1).expect("narrowed");
-    assert!(delegate_with(2).is_err());
-    let node = PrivateKey::new();
-    let chain = narrowed.clone().complete(&delegate, &node).expect("chain");
+    let (other, node) = (PrivateKey::new(), PrivateKey::new());
     let verify = |chain: &CredentialChain| {
         chain.verify(
             domain.publisher.public_key(),
@@ -800,29 +516,27 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
             NOW,
         )
     };
-    assert!(verify(&chain).is_ok());
-    let mut wide = narrowed.0[1].capability.clone();
-    wide.extension = Extension::new(Extended {
-        issues: true,
-        ..Extended::default()
-    })
-    .expect("extension");
-    let widened = CredentialChain(vec![
-        root.clone(),
-        SignedCapability::sign(wide, &holder).expect("signed"),
-    ])
-    .complete(&delegate, &node)
-    .expect("chain");
-    assert!(
-        verify(&widened).is_err(),
-        "a delegate that signs itself issuer authority is refused on verification"
-    );
-    let mut leaf = chain.0[2].capability.clone();
-    leaf.extension = narrowed.0[1].capability.extension.clone();
-    assert!(
-        SignedCapability::sign(leaf, &delegate).is_err(),
-        "a node link cannot carry a user extension"
-    );
+    for extended in [
+        Extended::default(),
+        Extended {
+            issues: true,
+            ..Extended::default()
+        },
+    ] {
+        let mut shared = root.capability.clone();
+        shared.subject = other.public_key();
+        shared.extension = Extension::new(extended).expect("extension");
+        let shared = CredentialChain(vec![
+            root.clone(),
+            SignedCapability::sign(shared, &holder).expect("signed"),
+        ])
+        .complete(&other, &node)
+        .expect("chain");
+        assert!(
+            verify(&shared).is_err(),
+            "a person shares no grant and signs itself no issuer authority"
+        );
+    }
     #[derive(serde::Serialize)]
     struct Later {
         version: u32,
@@ -843,26 +557,4 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         message.contains("unsupported credential extension version"),
         "a later extension version is refused with a clear error: {message}"
     );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_profile_refuses_fields_its_kind_does_not_have() {
-    let parse = |value: serde_json::Value| serde_json::from_value::<Profile>(value);
-    assert_eq!(
-        parse(serde_json::json!({ "kind": "issuer" })).expect("issuer"),
-        Profile::Issuer
-    );
-    assert_eq!(
-        parse(serde_json::json!({ "kind": "reader", "scopes": ["notes"] })).expect("reader"),
-        Profile::Reader {
-            scopes: Domain::names(&["notes"])
-        }
-    );
-    for refused in [
-        serde_json::json!({ "kind": "issuer", "scopes": ["notes"] }),
-        serde_json::json!({ "kind": "reader", "scopes": ["notes"], "issues": true }),
-        serde_json::json!({ "kind": "custody" }),
-    ] {
-        assert!(parse(refused.clone()).is_err(), "{refused} is refused");
-    }
 }

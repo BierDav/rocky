@@ -1,5 +1,6 @@
 use crate::{
-    Failure,
+    Access, Failure,
+    access::HeldPartition,
     domain::Domain,
     groups::{GroupPartition, GroupRecord, Member, secret_role},
     membership::Membership,
@@ -13,8 +14,8 @@ use crate::{
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Authority, Credentials, EpochRequest, IdentityKey, IdentityProvider, MAX_LIVE_REVOCATIONS,
-    Profile, REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
+    Authority, EpochRequest, IdentityKey, IdentityProvider, MAX_LIVE_REVOCATIONS,
+    REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -30,7 +31,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 41;
+pub const VERSION: u32 = 42;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -46,8 +47,8 @@ pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 pub(crate) const MAX_EPOCHS: usize = 256;
 pub(crate) const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
-pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<String>, Failure> {
-    if !profile.issues() {
+pub(crate) fn naming_for(vault: &Vault, issuer: bool) -> Result<Option<String>, Failure> {
+    if !issuer {
         return Ok(None);
     }
     Ok(Some(
@@ -255,7 +256,7 @@ pub struct Settings {
     pub revocations: RevocationSet,
     pub credentials: CredentialChain,
     pub ttl: u64,
-    pub profile: Profile,
+    pub access: Access,
     pub keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>>,
     pub groups: BTreeMap<String, GroupRecord>,
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
@@ -302,12 +303,15 @@ enum ReadBound {
     Recorded(Revoking),
 }
 impl ReadBound {
-    fn of(record: Option<&crate::registry::IdentityRecord>) -> Self {
-        record
-            .filter(|record| record.admitted.is_some() || !record.grants.is_empty())
-            .map_or(Self::Unbounded, |record| {
-                Self::Recorded(Revoking::of(record))
+    fn of(registry: &Registry, identity: Option<&PublicKey>) -> Self {
+        identity
+            .filter(|identity| {
+                registry
+                    .get(identity)
+                    .is_some_and(|record| record.admitted.is_some() || !record.grants.is_empty())
             })
+            .and_then(|identity| Revoking::of(registry, identity))
+            .map_or(Self::Unbounded, Self::Recorded)
     }
     fn reads(&self, read: impl FnOnce(&Revoking) -> bool) -> bool {
         match self {
@@ -318,20 +322,30 @@ impl ReadBound {
 }
 struct Revoking {
     capability: Option<Commitment>,
-    profile: Option<Profile>,
+    access: Option<Access>,
+    administers: bool,
     partitions: Vec<rocky_credentials::PartitionGrant>,
 }
 impl Revoking {
-    fn of(record: &registry::IdentityRecord) -> Self {
-        Self {
+    fn of(registry: &Registry, identity: &PublicKey) -> Option<Self> {
+        let record = registry.get(identity)?;
+        Some(Self {
             capability: record.capability().map(|capability| capability.id),
-            profile: record.profile().cloned(),
+            access: record.access().cloned(),
+            administers: registry.trusted.contains_key(identity),
             partitions: record
                 .grants
                 .iter()
                 .map(|grant| grant.grant.clone())
                 .collect(),
-        }
+        })
+    }
+    fn reads(&self, domain: &Domain, table: &str) -> bool {
+        self.administers
+            || self
+                .access
+                .as_ref()
+                .is_some_and(|access| domain.reads_table(access, table))
     }
     fn selects(&self, partition: &GroupPartition) -> bool {
         partition.members.iter().any(|member| {
@@ -440,7 +454,9 @@ pub(crate) struct Enrollment {
     bootstrap: crate::tip_schemas::Bootstrap,
     revocations: RevocationSet,
     capability: SignedCapability,
-    profile: Profile,
+    access: Access,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    partitions: BTreeSet<HeldPartition>,
     keys: Keys,
     groups: Vec<GroupDelivery>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
@@ -465,6 +481,8 @@ struct Sealed {
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    naming: Option<String>,
 }
 impl Sealed {
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
@@ -549,37 +567,10 @@ impl Intent {
         Ok((intent, vault))
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeKeys {
-    pub identity: PublicKey,
-    pub node: PublicKey,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Supplied {
-    pub mesh: MeshId,
-    pub domain: DomainId,
-    pub manifest: SignedManifest,
-    pub credentials: Credentials,
-    pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
-    pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
-    pub issuers: Vec<String>,
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Terms {
-    pub ttl: Option<u64>,
-    pub delegations: Option<u8>,
-}
-impl Terms {
-    fn ttl(&self, default: u64) -> Result<u64, Failure> {
-        let ttl = self.ttl.unwrap_or(default);
-        if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
-            return Err("credential lifetime must be between a minute and a year".into());
-        }
-        Ok(ttl)
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NodeKeys {
+    pub(crate) identity: PublicKey,
+    pub(crate) node: PublicKey,
 }
 pub struct Renewed {
     pub contacted: Option<PublicKey>,
@@ -588,8 +579,9 @@ pub struct Renewed {
     pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     pub groups: Vec<GroupDelivery>,
-    pub profile: Option<Profile>,
+    pub access: Option<Access>,
     pub issuers: Vec<String>,
+    pub naming: Option<String>,
 }
 
 pub fn now() -> Result<u64, Failure> {
@@ -630,42 +622,6 @@ pub(crate) fn reads(grants: &[ResourceGrant], scope: rocky_core::ResourceScope) 
             && grant.rows == RowSelection::All
             && grant.rights.contains(&Right::Read)
     })
-}
-fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
-    let registry = domain.registry();
-    if grants
-        .iter()
-        .any(|grant| grant.scope == registry && grant.rights.contains(&Right::Insert))
-    {
-        return Profile::Issuer;
-    }
-    let named: Vec<ResourceGrant> = grants
-        .iter()
-        .filter(|grant| grant.scope != registry)
-        .cloned()
-        .collect();
-    Profile::of(&named, &domain.resources())
-}
-pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
-    let mut grants = domain.effective(profile).grants(&domain.resources())?;
-    let registry = domain.registry_resource();
-    match profile {
-        Profile::Issuer => grants.extend(Profile::Issuer.grants(&registry)?),
-        Profile::Custody { .. } => grants.extend(
-            Profile::Custody {
-                scopes: [crate::domain::REGISTRY.to_owned()].into(),
-            }
-            .grants(&registry)?,
-        ),
-        _ => {}
-    }
-    Ok(grants)
-}
-fn profile_grants(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
-    if matches!(profile, Profile::Grants { grants } if grants.is_empty()) {
-        return Ok(Vec::new());
-    }
-    grants_of(profile, domain)
 }
 impl Settings {
     pub(crate) fn database_context(&self) -> Result<rocky_credentials::DatabaseContext, Failure> {
@@ -729,9 +685,6 @@ impl Settings {
             }
         }
         Ok(added)
-    }
-    fn tombstone_held_statements(&mut self) -> Result<(), Failure> {
-        self.learn_revocations(&RevocationSet::new()).map(drop)
     }
     pub(crate) fn revocation_status(&self) -> Result<crate::RevocationStatus, Failure> {
         let time = now()?;
@@ -835,7 +788,7 @@ impl Settings {
         self.authority.is_some()
     }
     pub(crate) fn stores_only(&self) -> bool {
-        matches!(self.profile, Profile::Custody { .. }) && !self.issuer() && self.keys.is_empty()
+        self.access == Access::Store && !self.issuer() && self.keys.is_empty()
     }
     pub(crate) fn renews_from_issuer(&self) -> bool {
         !self.issuer() || !self.issuers.is_empty()
@@ -858,13 +811,18 @@ impl Settings {
         )?)
     }
     fn grants(&self, domain: &Domain) -> Vec<ResourceGrant> {
-        match self.credentials.held() {
-            Some(held) => domain.families.for_capability(held).map_or_else(
-                |_| held.grants.clone(),
-                |families| families.resources(&held.grants),
-            ),
-            None => Vec::new(),
-        }
+        self.held(domain)
+            .map_or_else(Vec::new, |held| domain.expand(&held))
+    }
+    fn held(&self, domain: &Domain) -> Option<rocky_credentials::Granted> {
+        let held = self.credentials.held()?;
+        let extended = held.extended().ok()?;
+        Some(rocky_credentials::Granted {
+            grants: held.grants.clone(),
+            partitions: domain.effective_partitions(&extended.partitions),
+            whole: extended.whole,
+            role: extended.role,
+        })
     }
     fn selected(
         &self,
@@ -872,18 +830,10 @@ impl Settings {
         scope: &rocky_core::ResourceScope,
         tuple: &rocky_core::PartitionTuple,
     ) -> Vec<ResourceGrant> {
-        self.credentials
-            .held()
-            .and_then(|held| {
-                Some((
-                    domain.families.for_capability(held).ok()?,
-                    held.extended().ok()?.partitions,
-                ))
-            })
+        self.held(domain)
+            .map_or_else(Vec::new, |held| domain.expand_partitions(&held))
             .into_iter()
-            .flat_map(|(families, grants)| {
-                families.partitions_for(&grants, scope.domain, scope.table)
-            })
+            .filter(|grant| grant.table == scope.table)
             .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
             .collect()
     }
@@ -1030,6 +980,22 @@ impl Settings {
             .learn(learned.routes);
         Ok(record.node)
     }
+    pub(crate) fn regard_as_issuers(&mut self, nodes: &BTreeSet<PublicKey>) -> bool {
+        let mut changed = false;
+        for node in nodes {
+            if self.peers.contains_key(node)
+                && !self.issuers.contains(node)
+                && self.issuers.len() < MAX_ISSUERS
+            {
+                self.issuers.push(*node);
+                if let Some(meta) = self.contact_meta.get_mut(node) {
+                    meta.trusted = true;
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
         let saved = self
             .contact_refs
@@ -1069,6 +1035,15 @@ impl Settings {
             credentials: self.credentials.clone(),
             keys,
         })
+    }
+    pub fn open_config(
+        &self,
+        vault: &Vault,
+        domain: &Domain,
+    ) -> Result<rocky_secure::OpenConfig, Failure> {
+        Ok(self
+            .config(vault, domain)?
+            .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()))
     }
     pub fn roles(&self) -> Vec<String> {
         let mut roles: Vec<String> = [
@@ -1167,7 +1142,7 @@ impl Settings {
         !self.issuers.is_empty()
             || membership.nodes(&own).count() > 1
             || registry.records.iter().any(|(identity, record)| {
-                *identity != own && !record.revoked && record.profile().is_some_and(Profile::issues)
+                *identity != own && !record.revoked && registry.trusted.contains_key(identity)
             })
     }
 
@@ -1255,7 +1230,7 @@ impl Settings {
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl,
-            profile: Profile::Issuer,
+            access: Access::Full,
             keys: BTreeMap::new(),
             authority: None,
             device_revocations: BTreeMap::new(),
@@ -1293,9 +1268,6 @@ impl Settings {
             .filter(|record| !record.revoked)
             .ok_or("this identity is not recorded")?;
         record.capability().ok_or("this identity is not recorded")?;
-        if !record.profile().is_some_and(Profile::issues) {
-            return Err("only an identity enrolled with an issuer invitation is trusted".into());
-        }
         let live =
             registry.trusted_identities(self.database_context()?, &self.revocations, now()?)?;
         if !live.contains(&identity) && live.len() >= crate::registry::MAX_TRUSTED {
@@ -1326,9 +1298,8 @@ impl Settings {
         if identity != self.identity {
             return Err("the trusted grant names another identity".into());
         }
-        if !self.issuer() {
-            return Err("only an issuer identity becomes trusted".into());
-        }
+        self.authority.get_or_insert_with(Issuing::default);
+        self.access = Access::Full;
         let domain = self.domain()?;
         self.credentials = self.certify(vault, CredentialChain(vec![link]), &domain)?;
         Ok(())
@@ -1346,35 +1317,6 @@ impl Settings {
             .filter(|identity| *identity == self.identity)
             .map(|_| chain)
     }
-    fn issue(
-        &self,
-        authority: &Authority<'_>,
-        domain: &Domain,
-        identity: PublicKey,
-        grants: Vec<ResourceGrant>,
-        issues: bool,
-    ) -> Result<SignedCapability, Failure> {
-        if issues {
-            return Ok(authority.issue_issuer(identity, self.validity()?)?);
-        }
-        let partitions = domain
-            .families
-            .compact_partitions(&whole_partitions(domain, &grants));
-        let grants = domain.families.compact_resources(&grants);
-        let issue = if domain.families.is_empty() {
-            Authority::issue_partition_terms
-        } else {
-            Authority::issue_family_terms
-        };
-        Ok(issue(
-            authority,
-            identity,
-            grants,
-            partitions,
-            rocky_credentials::DelegationTerms { delegations: 1 },
-            self.validity()?,
-        )?)
-    }
     pub(crate) fn link_origin(&self) -> Result<Option<PublicKey>, Failure> {
         Ok(match self.identity_links().0.last() {
             Some(link) => link
@@ -1383,14 +1325,6 @@ impl Settings {
                 .origin
                 .map(|origin| origin.identity),
             None => None,
-        })
-    }
-    pub(crate) fn issuing_origin(&self) -> Result<Option<PublicKey>, Failure> {
-        Ok(match self.identity_links().0.last() {
-            Some(link) if link.capability.extended()?.trusted.is_some() => {
-                Some(link.capability.subject)
-            }
-            _ => self.link_origin()?,
         })
     }
     fn issuing(&mut self, action: &str) -> Result<&mut Issuing, Failure> {
@@ -1433,10 +1367,14 @@ impl Settings {
         all: bool,
     ) -> Result<Vec<GroupDelivery>, Failure> {
         let domain = self.domain()?;
-        let grants = domain
-            .families
-            .for_capability(capability)?
-            .partitions(&capability.extended()?.partitions);
+        let extended = capability.extended()?;
+        let every_partition = extended.whole.is_some_and(|whole| whole.reads())
+            || reads(&capability.grants, domain.registry());
+        let grants = domain.expand_partitions(&rocky_credentials::Granted {
+            partitions: extended.partitions,
+            whole: extended.whole,
+            ..rocky_credentials::Granted::default()
+        });
         let sender = PrivateKey::from_bytes(&vault.get("node")?);
         let mut deliveries = Vec::new();
         for partition in self.partitions(&domain)? {
@@ -1448,8 +1386,7 @@ impl Settings {
                     let names_partitions_only = grant.selector.0.values().all(|selection| {
                         matches!(selection, rocky_core::PartitionSelection::Only(_))
                     });
-                    let selected =
-                        reads(&capability.grants, domain.registry()) || names_partitions_only;
+                    let selected = every_partition || names_partitions_only;
                     selected
                         && grant
                             .resolve(member.scope, &member.tuple)
@@ -1637,24 +1574,11 @@ impl Settings {
             })
             .collect()
     }
-    fn statements_for_keys(&self, keys: &[NewKey]) -> BTreeMap<String, Vec<Commitment>> {
-        keys.iter()
-            .map(|(name, epoch, _)| {
-                let role = key_role(name, *epoch);
-                let ids = self
-                    .epoch_statements
-                    .get(&role)
-                    .cloned()
-                    .unwrap_or_default();
-                (role, ids)
-            })
-            .collect()
-    }
     pub(crate) fn provision(
         &mut self,
         vault: &Vault,
         routes: Vec<Route>,
-        admission: (Profile, Option<Vec<u8>>),
+        admission: (Access, Option<Vec<u8>>),
         registry: &Registry,
     ) -> Result<((String, PublicKey, PublicKey), Changes), Failure> {
         let provisioned_node = PrivateKey::from_bytes(&rocky_platform::entropy::random());
@@ -1663,8 +1587,14 @@ impl Settings {
             identity: provisioned_identity.public_key(),
             node: provisioned_node.public_key(),
         };
-        let (enrollment, changes) =
-            self.enrollment_for(vault, device, admission, None, registry)?;
+        let (access, label) = admission;
+        let (enrollment, changes) = self.enrollment_for(
+            vault,
+            device,
+            (access, BTreeSet::new(), label),
+            None,
+            registry,
+        )?;
         let bundle = ProvisioningBundle {
             v: PROVISION_VERSION,
             routes,
@@ -1684,7 +1614,7 @@ impl Settings {
         &mut self,
         vault: &Vault,
         device: NodeKeys,
-        (profile, label): (Profile, Option<Vec<u8>>),
+        (access, partitions, label): (Access, BTreeSet<HeldPartition>, Option<Vec<u8>>),
         invitation: Option<crate::InvitationId>,
         registry: &Registry,
     ) -> Result<(Enrollment, Changes), Failure> {
@@ -1694,7 +1624,6 @@ impl Settings {
         {
             return Err("device label exceeds 256 bytes".into());
         }
-        self.check_profile(&profile)?;
         self.issuing("provisions devices")?;
         if self.revoked_node(&device, registry) {
             return Err("the node or its identity was revoked".into());
@@ -1708,24 +1637,19 @@ impl Settings {
         let node = Self::node_key(vault)?;
         let links = self.issuer_links();
         let time = now()?;
-        let grants = grants_of(&profile, &domain)?;
+        let granted = domain.compile(&access, &partitions)?;
+        let grants = domain.expand(&granted);
         let authority = self.authority(&node)?;
-        let issued = self.issue(
-            &authority,
-            &domain,
-            device.identity,
-            grants.clone(),
-            profile.issues(),
-        )?;
+        let issued = authority.issue_person(device.identity, granted.clone(), self.validity()?)?;
         let mut changes = Changes::default();
-        let other_profile_replaces_record = known
-            .and_then(registry::IdentityRecord::profile)
-            .is_some_and(|known| *known != profile);
+        let other_access_replaces_record = known
+            .and_then(registry::IdentityRecord::access)
+            .is_some_and(|known| *known != access);
         changes.admitted(
             &device.identity,
             &registry::Admitted {
                 kind: registry::Kind::Paired,
-                profile: Some(profile.clone()),
+                access: Some(access.clone()),
                 issuer: self.identity,
                 origin: issued
                     .capability
@@ -1736,8 +1660,17 @@ impl Settings {
                 invitation,
                 single_use: false,
             },
-            other_profile_replaces_record,
+            other_access_replaces_record,
         )?;
+        for grant in &granted.partitions {
+            changes.grant(
+                &device.identity,
+                &registry::Grant {
+                    grant: grant.clone(),
+                },
+                known,
+            )?;
+        }
         if let Some(label) = &label {
             changes.label(&device.identity, label)?;
         }
@@ -1752,7 +1685,7 @@ impl Settings {
         let keys = self.keys_for(vault, &domain, &grants)?;
         let enrollment = Enrollment {
             groups: self.groups_for(vault, device.node, &issued.capability, false)?,
-            naming: naming_for(vault, &profile)?,
+            naming: None,
             epoch_statements: self.statements_for(&keys),
             mesh: self.mesh,
             domain: self.domain,
@@ -1765,302 +1698,11 @@ impl Settings {
             issuer,
             chain: links.clone(),
             ttl: self.ttl,
-            profile,
+            access,
+            partitions,
             issuers: self.issuer_contacts(&[device.node])?,
         };
         Ok((enrollment, changes))
-    }
-    pub(crate) fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
-        let domain = self.domain()?;
-        profile.grants(&domain.resources())?;
-        grants_of(profile, &domain)?;
-        Ok(())
-    }
-
-    pub fn grant(
-        &mut self,
-        vault: &Vault,
-        device: NodeKeys,
-        (profile, terms): (Profile, Terms),
-        contact: Option<String>,
-        registry: &Registry,
-    ) -> Result<(Supplied, Changes), Failure> {
-        let ttl = terms.ttl(self.ttl)?;
-        if profile.issues() {
-            return Err("issuer authority travels only in an issuer invitation".into());
-        }
-        let domain = self.domain()?;
-        profile.grants(&domain.resources())?;
-        let grants = grants_of(&profile, &domain)?;
-        self.issuing("grants credentials")?;
-        let known = registry.get(&device.identity);
-        if self.revoked_node(&device, registry) {
-            return Err("device was revoked".into());
-        }
-        if registry.full_for(&device.identity) {
-            return Err(Box::new(RegistryFull));
-        }
-        let node = Self::node_key(vault)?;
-        let authority = self.authority(&node)?;
-        let time = now()?;
-        let issue = if domain.families.is_empty() {
-            Authority::issue_partition_terms
-        } else {
-            Authority::issue_family_terms
-        };
-        let capability = issue(
-            &authority,
-            device.identity,
-            domain.families.compact_resources(&grants),
-            domain
-                .families
-                .compact_partitions(&whole_partitions(&domain, &grants)),
-            rocky_credentials::DelegationTerms {
-                delegations: terms.delegations.unwrap_or(1),
-            },
-            rocky_credentials::Validity {
-                issued_at: time,
-                lifetime: std::time::Duration::from_secs(ttl),
-                clock_skew: std::time::Duration::from_secs(SKEW),
-            },
-        )?;
-        let mut keys = Vec::new();
-        for (name, epochs) in self.keys_for(vault, &domain, &grants)? {
-            for (epoch, key) in epochs {
-                keys.push((name.clone(), epoch, hex32(&key)?));
-            }
-        }
-        let mut changes = Changes::default();
-        let other_profile_replaces_record = known
-            .and_then(registry::IdentityRecord::profile)
-            .is_some_and(|known| *known != profile);
-        changes.admitted(
-            &device.identity,
-            &registry::Admitted {
-                kind: registry::Kind::Granted,
-                profile: Some(profile),
-                issuer: self.identity,
-                origin: capability
-                    .capability
-                    .extended()?
-                    .origin
-                    .map(|origin| origin.identity),
-                enrolled: time,
-                invitation: None,
-                single_use: false,
-            },
-            other_profile_replaces_record,
-        )?;
-        changes.capability(
-            &device.identity,
-            registry::Capability {
-                id: capability.id()?,
-                expires: capability.capability.expires,
-            },
-            known,
-        )?;
-        let supplied = Supplied {
-            epoch_statements: self.statements_for_keys(&keys),
-            mesh: self.mesh,
-            domain: self.domain,
-            manifest: self.manifest()?,
-            credentials: Credentials::of(
-                self.publisher,
-                self.revocations.clone(),
-                &authority.chain_of(capability),
-            ),
-            keys,
-            issuers: contact
-                .into_iter()
-                .chain(self.issuer_contacts(&[device.node])?)
-                .collect(),
-        };
-        Ok((supplied, changes))
-    }
-    pub fn delegate(
-        &mut self,
-        vault: &Vault,
-        device: NodeKeys,
-        (profile, terms): (Profile, Terms),
-        registry: Option<&Registry>,
-    ) -> Result<(Supplied, Changes), Failure> {
-        let ttl = terms.ttl(self.ttl)?;
-        if profile.issues() {
-            return Err("issuer authority travels only in an issuer invitation".into());
-        }
-        if self.tombstoned(&device.node) || self.tombstoned(&device.identity) {
-            return Err("device was revoked".into());
-        }
-        let domain = self.domain()?;
-        let grants = grants_of(&profile, &domain)?;
-        if let Some(registry) = registry {
-            if self.revoked_node(&device, registry) {
-                return Err("device was revoked".into());
-            }
-            if registry.full_for(&device.identity) {
-                return Err(Box::new(RegistryFull));
-            }
-        }
-        let node = Self::node_key(vault)?;
-        let family_context = if domain.families.is_empty() {
-            rocky_credentials::GrantFamilies::default()
-        } else {
-            domain.families.clone()
-        };
-        let chain = self.credentials.delegable().delegate_with_families(
-            rocky_credentials::Signer::node(&node, &self.credentials)?,
-            rocky_credentials::Delegation {
-                subject: device.identity,
-                kind: rocky_core::PrincipalKind::User,
-                grants: domain.families.compact_resources(&grants),
-                partitions: domain
-                    .families
-                    .compact_partitions(&whole_partitions(&domain, &grants)),
-                terms: rocky_credentials::DelegationTerms {
-                    delegations: terms.delegations.unwrap_or(1),
-                },
-                validity: rocky_credentials::Validity {
-                    issued_at: now()?,
-                    lifetime: std::time::Duration::from_secs(ttl),
-                    clock_skew: std::time::Duration::from_secs(SKEW),
-                },
-            },
-            &family_context,
-        )?;
-        let mut keys = Vec::new();
-        for (name, epochs) in self.keys_for(vault, &domain, &grants)? {
-            for (epoch, key) in epochs {
-                keys.push((name.clone(), epoch, hex32(&key)?));
-            }
-        }
-        let mut changes = Changes::default();
-        if let Some(registry) = registry {
-            let known = registry.get(&device.identity);
-            let leaf = chain.0.last().ok_or("empty delegation")?;
-            changes.admitted(
-                &device.identity,
-                &registry::Admitted {
-                    kind: registry::Kind::Delegated,
-                    profile: Some(profile),
-                    issuer: self.identity,
-                    origin: self.issuing_origin()?,
-                    enrolled: now()?,
-                    invitation: None,
-                    single_use: false,
-                },
-                false,
-            )?;
-            changes.capability(
-                &device.identity,
-                registry::Capability {
-                    id: leaf.id()?,
-                    expires: chain.expires(),
-                },
-                known,
-            )?;
-        }
-        let supplied = Supplied {
-            epoch_statements: self.statements_for_keys(&keys),
-            mesh: self.mesh,
-            domain: self.domain,
-            manifest: self.manifest()?,
-            credentials: Credentials::of(self.publisher, self.revocations.clone(), &chain),
-            keys,
-            issuers: Vec::new(),
-        };
-        Ok((supplied, changes))
-    }
-    pub fn supplied_renewal(&self, vault: &Vault, supplied: &Supplied) -> Result<Renewed, Failure> {
-        if self.issuer() {
-            return Err("an issuer renews its own credentials".into());
-        }
-        let credentials = &supplied.credentials;
-        let domain = self.domain()?;
-        if supplied.mesh != self.mesh
-            || supplied.domain != self.domain
-            || credentials.publisher != self.publisher
-        {
-            return Err("the credentials belong to another domain".into());
-        }
-        let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let chain = self.own_chain(vault, &domain, credentials)?;
-        let mut revocations = self.revocations.clone();
-        revocations.merge(
-            &credentials.revocations,
-            self.publisher,
-            domain.manifest().app,
-            now()?,
-        )?;
-        let (grants, _) = domain
-            .verified(&chain, self.publisher, &revocations, now()?)?
-            .selectors(node.public_key(), &revocations, now()?)?;
-        let mut keys = Vec::new();
-        for (name, epoch, key) in &supplied.keys {
-            let scope = domain
-                .scopes()
-                .find(|(collection, _)| collection == name)
-                .map(|(_, scope)| scope);
-            if !scope.is_some_and(|scope| reads(&grants, scope)) || !epoch.valid() {
-                return Err(
-                    "a supplied key is for a collection the credentials do not read".into(),
-                );
-            }
-            keys.push((name.clone(), *epoch, *key));
-        }
-        let missing = domain.scopes().any(|(name, scope)| {
-            reads(&grants, scope)
-                && !self.keys.contains_key(name)
-                && !keys.iter().any(|(held, _, _)| held == name)
-        });
-        if missing {
-            return Err("missing reader key".into());
-        }
-        Ok(Renewed {
-            contacted: None,
-            revocations: credentials.revocations.clone(),
-            chain,
-            epoch_statements: supplied.epoch_statements.clone(),
-            groups: Vec::new(),
-            keys,
-            profile: Some(profile_of(&grants, &domain)),
-            issuers: Vec::new(),
-        })
-    }
-    fn own_chain(
-        &self,
-        vault: &Vault,
-        domain: &Domain,
-        credentials: &Credentials,
-    ) -> Result<CredentialChain, Failure> {
-        credentials
-            .revocations
-            .verify_in(self.database_context()?)?;
-        let mut chain = credentials.chain();
-        if chain.database_context(self.publisher)? != self.database_context()? {
-            return Err("supplied credentials belong to another database".into());
-        }
-        let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        if chain
-            .0
-            .last()
-            .is_some_and(|last| last.capability.kind == rocky_core::PrincipalKind::Node)
-            && chain.principal() == Some(self.identity)
-        {
-            domain
-                .verified(&chain, self.publisher, &credentials.revocations, now()?)?
-                .selectors(node, &credentials.revocations, now()?)?;
-            chain.0.pop();
-        }
-        if chain
-            .0
-            .last()
-            .is_some_and(|last| last.capability.subject == self.identity)
-        {
-            let mut certifying = self.clone();
-            certifying.learn_revocations(&credentials.revocations)?;
-            chain = certifying.certify(vault, chain, domain)?;
-        }
-        Ok(chain)
     }
     pub(crate) fn own_record(&self, registry: &Registry) -> Result<Changes, Failure> {
         let own = self.identity;
@@ -2072,7 +1714,7 @@ impl Settings {
             &own,
             &registry::Admitted {
                 kind: registry::Kind::Created,
-                profile: Some(self.profile.clone()),
+                access: Some(self.access.clone()),
                 issuer: own,
                 origin: self.link_origin()?,
                 enrolled: now()?,
@@ -2169,132 +1811,6 @@ impl Settings {
             self.issuers.retain(|issuer| *issuer != node);
         }
     }
-    pub fn prepare_install(
-        path: &Path,
-        store: &std::sync::Arc<dyn crate::SecretStore>,
-        provider: Option<Arc<dyn IdentityProvider>>,
-    ) -> Result<NodeKeys, Failure> {
-        let (_, vault) = Intent::resume(
-            &Intent::path(path, true),
-            None,
-            store,
-            provider.as_ref(),
-            false,
-        )?;
-        Ok(NodeKeys {
-            identity: provider
-                .as_ref()
-                .ok_or("supply the identity for this installation")?
-                .public_key()?,
-            node: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
-        })
-    }
-    pub async fn install(
-        path: &Path,
-        schema: &Schema,
-        store: &std::sync::Arc<dyn crate::SecretStore>,
-        supplied: &Supplied,
-        provider: Option<Arc<dyn IdentityProvider>>,
-    ) -> Result<Self, Failure> {
-        let intent_path = Intent::path(path, true);
-        if !rocky_platform::fs::exists(&intent_path) {
-            return Err("no device keys in this directory: prepare the device first".into());
-        }
-        let (intent, vault) = Intent::resume(&intent_path, None, store, provider.as_ref(), false)?;
-        let identity = provider
-            .as_ref()
-            .ok_or("supply the identity for this installation")?
-            .public_key()?;
-        let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let credentials = &supplied.credentials;
-        let mut settings = Self {
-            version: VERSION,
-            installation: intent.installation,
-            schema: schema.clone(),
-            mesh: supplied.mesh,
-            domain: supplied.domain,
-            publisher: credentials.publisher,
-            identity,
-            single_use: intent.single_use,
-            genesis: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
-            generation: schema.version,
-            engine: rocky_core::EngineIdentity::current(),
-            pending: None,
-            bootstrap: None,
-            revocations: RevocationSet::new(),
-            credentials: credentials.chain(),
-            ttl: DEFAULT_TTL,
-            profile: Profile::Issuer,
-            keys: BTreeMap::new(),
-            authority: None,
-            device_revocations: BTreeMap::new(),
-            issuers: Vec::new(),
-            delivery_nodes: BTreeMap::new(),
-            contact_refs: BTreeMap::new(),
-            resolved_refs: BTreeSet::new(),
-            contact_meta: BTreeMap::new(),
-            peers: BTreeMap::new(),
-            logged_out: false,
-            deliveries: BTreeMap::new(),
-            groups: BTreeMap::new(),
-            epoch_statements: BTreeMap::new(),
-        };
-        let domain = settings.domain()?;
-        if supplied
-            .manifest
-            .verify_historic(credentials.publisher)?
-            .hash()
-            != domain.manifest().hash()
-        {
-            return Err("the domain's manifest differs from this application schema".into());
-        }
-        settings.credentials = crate::identities::with_identity(
-            provider.ok_or("supply the identity for this installation")?,
-            || settings.own_chain(&vault, &domain, credentials),
-        )?;
-        settings.epoch_statements = supplied.epoch_statements.clone();
-        settings.learn_revocations(&credentials.revocations)?;
-        let (grants, _) = domain
-            .verified(
-                &settings.credentials,
-                settings.publisher,
-                &settings.revocations,
-                now()?,
-            )?
-            .selectors(node.public_key(), &settings.revocations, now()?)?;
-        settings.ttl = settings
-            .credentials
-            .expires()
-            .saturating_sub(now()?)
-            .clamp(60, DEFAULT_TTL);
-        settings.profile = profile_of(&grants, &domain);
-        let readable: BTreeMap<&str, _> = domain
-            .scopes()
-            .filter(|(_, scope)| reads(&grants, *scope))
-            .collect();
-        for (name, epoch, key) in &supplied.keys {
-            if !readable.contains_key(name.as_str()) || !epoch.valid() {
-                return Err(
-                    "a supplied key is for a collection the credentials do not read".into(),
-                );
-            }
-            settings.hold(&vault, name, *epoch, key)?;
-        }
-        if readable
-            .keys()
-            .any(|name| !settings.keys.contains_key(*name))
-        {
-            return Err("missing reader key".into());
-        }
-        for contact in &supplied.issuers {
-            let node = settings.add_peer(&vault, contact)?;
-            if !settings.issuers.contains(&node) {
-                settings.issuers.push(node);
-            }
-        }
-        settings.save(path).await?;
-        Ok(settings)
-    }
     pub(crate) fn hold(
         &mut self,
         vault: &Vault,
@@ -2327,21 +1843,27 @@ fn widen_to_current_generation(
     known: Option<&registry::IdentityRecord>,
     domain: &Domain,
 ) -> Result<(), Failure> {
-    if prior.extended()?.issues {
+    let mut extended = prior.extended()?;
+    if extended.issues {
         return Ok(());
     }
-    let profile = known
-        .and_then(registry::IdentityRecord::profile)
+    let recorded: Vec<_> = known
+        .into_iter()
+        .flat_map(|record| record.grants.iter().map(|grant| grant.grant.clone()))
+        .chain(extended.partitions.iter().cloned())
+        .collect();
+    let partitions = domain.held_partitions(&domain.effective_partitions(&recorded));
+    let access = known
+        .and_then(registry::IdentityRecord::access)
         .cloned()
-        .unwrap_or_else(|| profile_of(&prior.grants, domain));
-    let widened = profile_grants(&profile, domain)?;
-    if prior
-        .grants
-        .iter()
-        .all(|grant| widened.iter().any(|wide| wide.includes(grant)))
-    {
-        prior.grants = widened;
-    }
+        .or_else(|| domain.access_of(prior))
+        .ok_or("the renewed identity holds no recorded access")?;
+    let granted = domain.compile(&access, &partitions)?;
+    prior.grants = granted.grants;
+    extended.partitions = granted.partitions;
+    extended.whole = granted.whole;
+    extended.role = granted.role;
+    prior.extension = rocky_credentials::Extension::new(extended)?;
     Ok(())
 }
 
@@ -2406,7 +1928,7 @@ impl Settings {
             {
                 return Err("application mismatch".into());
             }
-            None if !matches!(enrollment.profile, Profile::Custody { .. }) => {
+            None if enrollment.access != Access::Store => {
                 return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
             }
             _ => {}
@@ -2433,7 +1955,7 @@ impl Settings {
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl: enrollment.ttl,
-            profile: enrollment.profile,
+            access: enrollment.access.clone(),
             keys: BTreeMap::new(),
             authority: None,
             device_revocations: BTreeMap::new(),
@@ -2452,24 +1974,25 @@ impl Settings {
         let domain = settings.domain()?;
         settings.epoch_statements = enrollment.epoch_statements.clone();
         settings.learn_revocations(&enrollment.revocations)?;
-        let grants = grants_of(&settings.profile, &domain)?;
+        let expected = domain.compile(&settings.access, &enrollment.partitions)?;
+        let grants = domain.expand(&expected);
         let signer = if enrollment.chain.0.is_empty() {
             settings.publisher
         } else {
             enrollment.chain.issuer(settings.publisher, None)?
         };
-        let issues = enrollment.capability.capability.extended()?.issues;
-        let granted = domain
-            .families
-            .for_capability(&enrollment.capability.capability)?
-            .resources(&enrollment.capability.capability.grants);
+        let capability = &enrollment.capability.capability;
+        let extended = capability.extended()?;
+        let issued = rocky_credentials::Granted {
+            grants: capability.grants.clone(),
+            partitions: extended.partitions,
+            whole: extended.whole,
+            role: extended.role,
+        };
         if enrollment.capability.issuer != signer
-            || enrollment.capability.capability.subject != identity
-            || issues != settings.profile.issues()
-            || (!issues
-                && (granted.len() != grants.len()
-                    || granted.iter().any(|grant| !grants.contains(grant))
-                    || grants.iter().any(|grant| !granted.contains(grant))))
+            || capability.subject != identity
+            || extended.issues
+            || issued != expected
         {
             return Err("the enrollment differs from its provisioning bundle".into());
         }
@@ -2489,11 +2012,6 @@ impl Settings {
                 return Err("missing reader key".into());
             }
         }
-        if settings.profile.issues() {
-            settings.authority = Some(Issuing::default());
-            hold_naming(vault, enrollment.naming.as_deref())?;
-            settings.tombstone_held_statements()?;
-        }
         settings.adopt_groups(vault, &enrollment.groups)?;
         settings.learn_issuers(vault, &enrollment.issuers);
         Ok(settings)
@@ -2510,12 +2028,12 @@ impl Settings {
             return Err("device was revoked".into());
         }
         let domain = self.domain()?;
-        let prior = request.verify_with_families(
+        let prior = request.verify(
             PrivateKey::from_bytes(&vault.get("node")?).public_key(),
             self.publisher,
             (now()?, SKEW),
-            &domain.families,
         )?;
+        let administers = prior.extended()?.issues;
         if self.tombstoned(&prior.subject) {
             return Err("device was revoked".into());
         }
@@ -2547,16 +2065,17 @@ impl Settings {
             keys,
             groups: self.groups_for(vault, request.node, prior, all)?,
             issuers: self.issuer_contacts(&[request.node])?,
+            naming: naming_for(vault, administers)?,
         };
         let node = Self::node_key(vault)?;
-        Ok(Renewal::seal_current_with_families(
+        Ok(Renewal::seal_current(
             &self.authority(&node)?,
             self.publisher,
             &request,
             self.revocations.clone(),
             now()?,
             &serde_json::to_vec(&sealed)?,
-            &domain.families,
+            &domain.whole_tables,
         )?
         .to_bytes()?)
     }
@@ -2620,6 +2139,7 @@ impl Settings {
                 groups,
                 epoch_statements,
                 issuers,
+                naming,
             } = Sealed::parse(&payload)?;
             let mut keys = Vec::new();
             let domain = self.domain()?;
@@ -2649,8 +2169,9 @@ impl Settings {
                 keys,
                 groups,
                 epoch_statements,
-                profile: None,
+                access: None,
                 issuers,
+                naming,
             });
         }
         Err(failure)
@@ -2679,8 +2200,9 @@ impl Settings {
                 keys: Vec::new(),
                 epoch_statements: BTreeMap::new(),
                 groups: Vec::new(),
-                profile: None,
+                access: None,
                 issuers: Vec::new(),
+                naming: None,
             });
         }
         let transport = transport.ok_or(ServiceError::NetworkRequired("renew"))?;
@@ -2760,15 +2282,15 @@ impl Settings {
         let mut next = self.clone();
         next.learn_revocations(&renewal.revocations)?;
         let chain = next.certify(vault, renewal.chain(), &domain)?;
-        let widened_grants = domain
-            .families
-            .for_capability(chain.held().ok_or("missing identity capability")?)?
-            .resources(chain.grants());
+        let widened_grants = domain.expand(&crate::access::granted_of(
+            chain.held().ok_or("missing identity capability")?,
+        )?);
         let Sealed {
             keys: received,
             groups,
             epoch_statements,
             issuers,
+            naming,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -2789,31 +2311,34 @@ impl Settings {
             groups,
             epoch_statements,
             keys,
-            profile: None,
+            access: None,
             issuers,
+            naming,
         })
     }
-    pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
-        let held = self.grants(domain);
-        let wanted = profile_grants(&self.profile, domain)?;
-        let partitions = self.credentials.partitions()?;
-        let held_partitions = match self.credentials.held() {
-            Some(held) => domain
-                .families
-                .for_capability(held)?
-                .partitions(&partitions),
-            None => Vec::new(),
+    pub(crate) fn access_widens(&self, domain: &Domain) -> Result<bool, Failure> {
+        let Some(held) = self.held(domain) else {
+            return Ok(false);
         };
-        Ok(domain.effective_partitions(&partitions) != held_partitions
-            || domain
-                .scopes()
-                .any(|(name, scope)| reads(&wanted, scope) && !self.keys.contains_key(name))
-            || (held
-                .iter()
-                .all(|grant| wanted.iter().any(|wide| wide.includes(grant)))
-                && wanted
+        let Ok(wanted) = domain.compile(&self.access, &domain.held_partitions(&held.partitions))
+        else {
+            return Ok(false);
+        };
+        let (held_grants, wanted_grants) = (domain.expand(&held), domain.expand(&wanted));
+        Ok(
+            self.credentials.partitions()?.len() != held.partitions.len()
+                || wanted.whole != held.whole
+                || wanted.role != held.role
+                || domain.scopes().any(|(name, scope)| {
+                    reads(&wanted_grants, scope) && !self.keys.contains_key(name)
+                })
+                || (held_grants
                     .iter()
-                    .any(|wide| !held.iter().any(|grant| grant.includes(wide)))))
+                    .all(|grant| wanted_grants.iter().any(|wide| wide.includes(grant)))
+                    && wanted_grants
+                        .iter()
+                        .any(|wide| !held_grants.iter().any(|grant| grant.includes(wide)))),
+        )
     }
     fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
         self.issue_own(vault)
@@ -2832,21 +2357,22 @@ impl Settings {
             .last()
             .ok_or("missing identity credential")?
             .capability;
-        let renewed_grants = domain
-            .families
-            .for_capability(renewed)?
-            .resources(&renewed.grants);
-        let held_grants = domain
-            .families
-            .for_capability(held)?
-            .resources(&held.grants);
-        let profile_grants = profile_grants(&self.profile, domain)?;
+        let renewed_granted = crate::access::granted_of(renewed)?;
+        let renewed_grants = domain.expand(&renewed_granted);
+        let held_grants = domain.expand(&crate::access::granted_of(held)?);
+        let wanted_grants = domain
+            .compile(
+                &self.access,
+                &domain.held_partitions(&renewed_granted.partitions),
+            )
+            .map(|wanted| domain.expand(&wanted))
+            .unwrap_or_default();
         let same = |other: &[ResourceGrant]| {
             renewed_grants.len() == other.len()
                 && renewed_grants.iter().all(|grant| other.contains(grant))
         };
         Ok(renewed.subject == self.identity
-            && (same(&held_grants) || same(&profile_grants))
+            && (same(&held_grants) || same(&wanted_grants))
             && renewed.extended()?.issues == held.extended()?.issues)
     }
     pub(crate) fn adopt_into(
@@ -2879,8 +2405,11 @@ impl Settings {
         draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
-        if let Some(profile) = &renewed.profile {
-            draft.profile = profile.clone();
+        if let Some(access) = &renewed.access {
+            draft.access = access.clone();
+        }
+        if draft.issuer() && renewed.naming.is_some() {
+            hold_naming(vault, renewed.naming.as_deref())?;
         }
         let changed = !draft.persisted_eq(self);
         Ok((draft, held, changed))
@@ -2915,20 +2444,12 @@ impl Settings {
             return Err("device was revoked".into());
         }
         request.chain.verify_database(self.database_context()?)?;
-        let mut prior = request
-            .verify_with_families(me, self.publisher, (time, SKEW), &domain.families)?
-            .clone();
+        let mut prior = request.verify(me, self.publisher, (time, SKEW))?.clone();
         let known = registry.get(&prior.subject);
         if self.revoked_identity(&prior.subject, registry) {
             return Err("device was revoked".into());
         }
         widen_to_current_generation(&mut prior, known, &domain)?;
-        let mut extended = prior.extended()?;
-        extended.partitions = domain.effective_partitions(&extended.partitions);
-        extended.partitions = domain.families.compact_partitions(&extended.partitions);
-        extended.families = !extended.issues && !domain.families.is_empty();
-        prior.grants = domain.families.compact_resources(&prior.grants);
-        prior.extension = rocky_credentials::Extension::new(extended)?;
         let (held_by, granted) = held(&prior, &domain)?;
         let prior = &prior;
         if self.tombstoned(&prior.subject) {
@@ -2944,6 +2465,7 @@ impl Settings {
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
             keys: self.keys_for(vault, &domain, &granted)?,
             issuers: self.issuer_contacts(&[request.node])?,
+            naming: None,
         };
         let renewal = Renewal::seal(
             &authority,
@@ -2962,7 +2484,10 @@ impl Settings {
             &prior.subject,
             &registry::Admitted {
                 kind: registry::Kind::Renewed,
-                profile: Some(profile_of(&granted, &domain)),
+                access: known
+                    .and_then(registry::IdentityRecord::access)
+                    .cloned()
+                    .or_else(|| domain.access_of(prior)),
                 issuer: self.identity,
                 origin: prior.extended()?.origin.map(|origin| origin.identity),
                 enrolled: time,
@@ -2994,46 +2519,6 @@ impl Settings {
     }
     pub(crate) fn revoked_node(&self, keys: &NodeKeys, registry: &Registry) -> bool {
         self.tombstoned(&keys.node) || self.revoked_identity(&keys.identity, registry)
-    }
-    pub(crate) fn holder_changes(
-        &self,
-        device: &NodeKeys,
-        grants: &[rocky_credentials::PartitionGrant],
-        delegations: u8,
-        registry: &Registry,
-    ) -> Result<Changes, Failure> {
-        if self.revoked_node(device, registry) {
-            return Err("the node or its identity was revoked".into());
-        }
-        let known = registry.get(&device.identity);
-        if registry.full_for(&device.identity) {
-            return Err(Box::new(RegistryFull));
-        }
-        let mut changes = Changes::default();
-        changes.admitted(
-            &device.identity,
-            &registry::Admitted {
-                kind: registry::Kind::Partition,
-                profile: None,
-                issuer: self.identity,
-                origin: self.issuing_origin()?,
-                enrolled: now()?,
-                invitation: None,
-                single_use: false,
-            },
-            false,
-        )?;
-        for grant in grants {
-            changes.grant(
-                &device.identity,
-                &registry::Grant {
-                    grant: grant.clone(),
-                    delegations,
-                },
-                known,
-            )?;
-        }
-        Ok(changes)
     }
     #[cfg(test)]
     pub fn begin_revocation(
@@ -3111,7 +2596,7 @@ impl Settings {
         let domain = self.domain()?;
         let records: Vec<Revoking> = identities
             .iter()
-            .filter_map(|identity| registry.get(identity).map(Revoking::of))
+            .filter_map(|identity| Revoking::of(registry, identity))
             .collect();
         let issuer = if root.is_some() { self.publisher } else { own };
         let statement = match target {
@@ -3136,14 +2621,9 @@ impl Settings {
             },
         };
         let bounded_by_records = !records.is_empty();
-        let readable: Vec<Profile> = records
-            .iter()
-            .filter_map(|record| record.profile.as_ref())
-            .map(|profile| domain.effective(profile))
-            .collect();
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
-            if bounded_by_records && !readable.iter().any(|profile| profile.reads(name)) {
+            if bounded_by_records && !records.iter().any(|record| record.reads(&domain, name)) {
                 continue;
             }
             if epochs.len() >= MAX_EPOCHS {
@@ -3154,7 +2634,7 @@ impl Settings {
                 RotationEpoch::after(epochs.iter().max().copied()).ok_or("key epoch overflow")?,
             );
         }
-        let groups = self.next_group_epochs(&domain, &records, &readable)?;
+        let groups = self.next_group_epochs(&domain, &records)?;
         let links = match root {
             Some(_) => CredentialChain::default(),
             None => self.issuer_links(),
@@ -3189,19 +2669,18 @@ impl Settings {
         &self,
         domain: &Domain,
         records: &[Revoking],
-        readable: &[Profile],
     ) -> Result<BTreeMap<String, RotationEpoch>, Failure> {
         let bounded_by_records = !records.is_empty();
         let mut groups = BTreeMap::new();
         for partition in self.partitions(domain)? {
             let read = !bounded_by_records
-                || readable.iter().any(|profile| {
-                    partition
-                        .members
-                        .iter()
-                        .any(|member| profile.reads(&member.table))
-                })
-                || records.iter().any(|record| record.selects(&partition));
+                || records.iter().any(|record| {
+                    record.selects(&partition)
+                        || partition
+                            .members
+                            .iter()
+                            .any(|member| record.reads(domain, &member.table))
+                });
             if let (true, Some(held)) = (read, partition.record.current()) {
                 let target =
                     RotationEpoch::after(Some(held)).ok_or("group secret epoch overflow")?;
@@ -3232,16 +2711,17 @@ impl Settings {
                 .statement
                 .identities
                 .iter()
-                .map(|identity| ReadBound::of(registry.get(identity)))
+                .map(|identity| ReadBound::of(registry, Some(identity)))
                 .chain(signed.statement.nodes.iter().map(|node| {
                     ReadBound::of(
+                        registry,
                         self.revocations
                             .certificates()
                             .find(|certificate| {
                                 rocky_credentials::PeerId::of(certificate.capability.subject)
                                     == *node
                             })
-                            .and_then(|certificate| registry.get(&certificate.issuer)),
+                            .map(|certificate| &certificate.issuer),
                     )
                 }))
                 .collect();
@@ -3253,14 +2733,9 @@ impl Settings {
                     .epoch_statements
                     .get(&key_role(name, *current))
                     .is_some_and(|ids| ids.contains(&id));
-                let read = read_bounds.iter().any(|bound| {
-                    bound.reads(|record| {
-                        record
-                            .profile
-                            .as_ref()
-                            .is_some_and(|profile| domain.effective(profile).reads(name))
-                    })
-                });
+                let read = read_bounds
+                    .iter()
+                    .any(|bound| bound.reads(|record| record.reads(&domain, name)));
                 if !covered && read {
                     if epochs.len() >= MAX_EPOCHS {
                         return Err("key epoch capacity reached".into());
@@ -3282,13 +2757,11 @@ impl Settings {
                     .is_some_and(|ids| ids.contains(&id));
                 let read = read_bounds.iter().any(|bound| {
                     bound.reads(|record| {
-                        record.profile.as_ref().is_some_and(|profile| {
-                            let profile = domain.effective(profile);
-                            partition
-                                .members
-                                .iter()
-                                .any(|member| profile.reads(&member.table))
-                        }) || record.selects(&partition)
+                        partition
+                            .members
+                            .iter()
+                            .any(|member| record.reads(&domain, &member.table))
+                            || record.selects(&partition)
                     })
                 });
                 if !covered && read {
@@ -3451,23 +2924,22 @@ fn held(
     capability: &rocky_credentials::Capability,
     domain: &Domain,
 ) -> Result<(rocky_credentials::Capability, Vec<ResourceGrant>), Failure> {
-    if !capability.extended()?.issues {
-        return Ok((
-            capability.clone(),
-            domain
-                .families
-                .for_capability(capability)?
-                .resources(&capability.grants),
-        ));
+    let extended = capability.extended()?;
+    if !extended.issues {
+        let granted = rocky_credentials::Granted {
+            grants: capability.grants.clone(),
+            partitions: extended.partitions,
+            whole: extended.whole,
+            role: extended.role,
+        };
+        return Ok((capability.clone(), domain.expand(&granted)));
     }
-    let grants = grants_of(&Profile::Issuer, domain)?;
+    let granted = domain.administer();
+    let grants = domain.expand(&granted);
     let mut held = capability.clone();
-    held.grants = domain.families.compact_resources(&grants);
+    held.grants = granted.grants;
     held.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
-        partitions: domain
-            .families
-            .compact_partitions(&whole_partitions(domain, &grants)),
-        families: !domain.families.is_empty(),
+        whole: granted.whole,
         ..rocky_credentials::Extended::default()
     })?;
     Ok((held, grants))
@@ -3538,45 +3010,6 @@ pub(crate) async fn exchange(
     }
     Ok(reply)
 }
-pub(crate) fn whole_partitions(
-    domain: &Domain,
-    grants: &[ResourceGrant],
-) -> Vec<rocky_credentials::PartitionGrant> {
-    let logical = domain.logical();
-    grants
-        .iter()
-        .filter_map(|grant| {
-            let table = logical.tables.iter().find(|table| {
-                table.class == rocky_core::TableClass::Replayed
-                    && logical.table_id(table) == grant.scope.table
-            })?;
-            if table.partition_by.is_empty() {
-                return None;
-            }
-            Some(rocky_credentials::PartitionGrant {
-                domain: grant.scope.domain,
-                table: grant.scope.table,
-                selector: rocky_core::PartitionSelector(
-                    table
-                        .partition_by
-                        .iter()
-                        .filter_map(|name| table.column(name))
-                        .map(|column| {
-                            (
-                                logical.field_id(table, column),
-                                rocky_core::PartitionSelection::Any,
-                            )
-                        })
-                        .collect(),
-                ),
-                rows: grant.rows.clone(),
-                rights: grant.rights.clone(),
-                fields: grant.fields.clone(),
-            })
-        })
-        .collect()
-}
-
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredContact {
@@ -3640,7 +3073,7 @@ impl Settings {
             revocations,
             credentials,
             ttl,
-            profile,
+            access,
             keys,
             groups,
             epoch_statements,
@@ -3668,7 +3101,7 @@ impl Settings {
             && *revocations == other.revocations
             && *credentials == other.credentials
             && *ttl == other.ttl
-            && *profile == other.profile
+            && *access == other.access
             && *keys == other.keys
             && *groups == other.groups
             && *epoch_statements == other.epoch_statements
@@ -3701,6 +3134,13 @@ impl Settings {
             }
         }
         Ok(())
+    }
+    pub(crate) fn known_issuer(&self, node: &PublicKey) -> bool {
+        self.issuers.contains(node)
+            || self
+                .contact_refs
+                .get(&rocky_credentials::PeerId::of(*node))
+                .is_some_and(|entry| entry.issuer)
     }
     pub(crate) fn bind_saved_contact(&mut self, node: PublicKey) {
         let id = rocky_credentials::PeerId::of(node);

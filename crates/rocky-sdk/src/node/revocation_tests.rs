@@ -2,7 +2,7 @@ use super::*;
 use crate::{enrollment::fault, schema::Schema};
 use rocky_credentials::ProviderError;
 
-const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":6,"tables":[
+const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
@@ -83,7 +83,7 @@ async fn issuer_with_root(
     let replica = EncryptedReplica::open(
         directory.join("rocky.sqlite"),
         domain.app.clone(),
-        settings.config(&vault, &domain)?,
+        settings.open_config(&vault, &domain)?,
     )
     .await?;
     replica
@@ -119,7 +119,7 @@ async fn reload(
     let replica = EncryptedReplica::open(
         directory.join("rocky.sqlite"),
         domain.app.clone(),
-        settings.config(&vault, &domain)?,
+        settings.open_config(&vault, &domain)?,
     )
     .await?;
     Ok(Node::new(
@@ -180,7 +180,7 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
         IdentityRecord {
             admitted: Some(Admitted {
                 kind: Kind::Paired,
-                profile: Some(crate::GrantProfile::Issuer),
+                access: Some(crate::Access::Full),
                 issuer: target,
                 origin: Some(target),
                 enrolled: now()?,
@@ -927,8 +927,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let person = IdentityKey::generate();
     let settings = node.settings.lock().await.clone();
     let registry = node.registry(&settings).await?;
-    let profile: Profile =
-        serde_json::from_value(serde_json::json!({"kind": "writer", "scopes": ["items"]}))?;
+    let profile = crate::Access::Full;
     let routes = || {
         vec![crate::enrollment::Route {
             transport: "memory".into(),
@@ -938,7 +937,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
     let terms = crate::InviteTerms::default();
-    let open = |book: &mut Book, profile: Profile| {
+    let open = |book: &mut Book, profile: crate::Access| {
         settings.invite(
             (&node.vault, routes()),
             book,
@@ -947,9 +946,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
             time,
         )
     };
-    let wider: Profile = serde_json::from_value(
-        serde_json::json!({"kind": "writer", "scopes": ["items", "notes"]}),
-    )?;
+    let wider = crate::Access::Read;
     let issued = open(&mut book, profile.clone())?;
     let spare = open(&mut book, profile.clone())?;
     let conflicting = open(&mut book, wider.clone())?;
@@ -1010,7 +1007,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .and_then(|record| record.admitted.as_ref())
         .ok_or("the invited identity is not admitted")?;
     assert_eq!(admitted.invitation, Some(issued.id));
-    assert_eq!(admitted.profile, Some(profile));
+    assert_eq!(admitted.access, Some(profile));
     assert!(
         settings
             .invite(
@@ -1037,16 +1034,11 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     let identity = person.public_key();
     let settings = node.settings.lock().await.clone();
     let registry = node.registry(&settings).await?;
-    let profile = |scopes: serde_json::Value| -> Result<Profile, Failure> {
-        Ok(serde_json::from_value(
-            serde_json::json!({"kind": "writer", "scopes": scopes}),
-        )?)
-    };
-    let narrow = profile(serde_json::json!(["items"]))?;
-    let wide = profile(serde_json::json!(["items", "notes"]))?;
+    let narrow = crate::Access::Read;
+    let wide = crate::Access::Full;
     let time = now()?;
     let mut book = Book::read(&node.replica).await?;
-    let mut open = |profile: Profile, label: &[u8]| {
+    let mut open = |profile: crate::Access, label: &[u8]| {
         settings.invite(
             (
                 &node.vault,
@@ -1062,6 +1054,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
                 &crate::InviteTerms {
                     valid_for: None,
                     label: Some(label.to_vec()),
+                    partitions: Vec::new(),
                 },
             ),
             &registry,
@@ -1159,9 +1152,9 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
         "a retried redemption keeps a label edited after the first"
     );
     assert_eq!(
-        record.profile(),
+        record.access(),
         Some(&narrow),
-        "the admitted profile is the one that won"
+        "the admitted access is the one that won"
     );
     assert_eq!(redemptions(), 1, "a retry records no second redemption");
     Ok(())

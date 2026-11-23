@@ -105,7 +105,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
                 },
             )
             .unwrap()
-            .issue_issuer(issuer.public_key(), validity())
+            .issue_untrusted_issuer(issuer.public_key(), validity())
             .unwrap(),
         ]);
         seals.push(

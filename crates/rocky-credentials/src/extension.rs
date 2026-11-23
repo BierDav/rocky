@@ -13,8 +13,8 @@ struct Body {
     version: u32,
     node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    families: bool,
+    whole: Option<crate::WholeAccess>,
+    role: Option<rocky_core::Commitment>,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
     origin: Option<Origin>,
@@ -31,7 +31,8 @@ struct Versioned {
 pub struct Extended {
     pub node: Option<crate::PeerId>,
     pub partitions: Vec<crate::PartitionGrant>,
-    pub families: bool,
+    pub whole: Option<crate::WholeAccess>,
+    pub role: Option<rocky_core::Commitment>,
     pub issues: bool,
     pub trusted: Option<rocky_core::Scope>,
     pub origin: Option<Origin>,
@@ -62,7 +63,8 @@ impl Extension {
         let body = Body {
             version: EXTENSION_VERSION,
             partitions: extended.partitions,
-            families: extended.families,
+            whole: extended.whole,
+            role: extended.role,
             node: extended.node,
             issues: extended.issues,
             trusted: extended.trusted,
@@ -99,7 +101,8 @@ impl Extension {
         }
         Ok(Extended {
             partitions: body.partitions,
-            families: body.families,
+            whole: body.whole,
+            role: body.role,
             node: body.node,
             issues: body.issues,
             trusted: body.trusted,
@@ -147,7 +150,8 @@ mod tests {
                     node: None,
                     version,
                     partitions: Vec::new(),
-                    families: false,
+                    whole: None,
+                    role: None,
                     issues: false,
                     trusted: None,
                     origin: None,

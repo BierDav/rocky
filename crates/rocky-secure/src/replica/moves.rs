@@ -23,7 +23,7 @@ pub(super) struct CreationClaim<'a> {
     pub table: Commitment,
     pub id: rocky_core::RowIdentity,
     pub ceiling: &'a Stamp,
-    pub families: &'a rocky_credentials::GrantFamilies,
+    pub whole_tables: &'a rocky_credentials::WholeTables,
 }
 
 pub(super) fn bindings_digest(encoded: &[u8]) -> Commitment {
@@ -274,7 +274,7 @@ impl CreationProof {
         table: Commitment,
         id: rocky_core::RowIdentity,
         ceiling: &Stamp,
-        families: &rocky_credentials::GrantFamilies,
+        whole_tables: &rocky_credentials::WholeTables,
     ) -> Result<(), Error> {
         self.verify_with_bindings(
             CreationClaim {
@@ -283,7 +283,7 @@ impl CreationProof {
                 table,
                 id,
                 ceiling,
-                families,
+                whole_tables,
             },
             None,
         )
@@ -299,7 +299,7 @@ impl CreationProof {
             table,
             id,
             ceiling,
-            families,
+            whole_tables,
         } = claim;
         if self.version != PROOF_VERSION
             || self.manifest != manifest
@@ -327,12 +327,12 @@ impl CreationProof {
         {
             return Ok(());
         }
-        rocky_credentials::AuthorBinding::verify_chain_with_families(
+        rocky_credentials::AuthorBinding::verify_chain(
             &self.bindings,
             publisher,
             table,
             signer,
-            families,
+            whole_tables,
         )
         .map_err(credential)?;
         if let Some(memo) = memo {
@@ -542,7 +542,7 @@ impl<A: RowApplication> Inner<A> {
             write.change.scope.table,
             id,
             ceiling,
-            self.families_at(carried.proof.manifest())?.as_ref(),
+            self.whole_tables_at(carried.proof.manifest())?.as_ref(),
         )?;
         let fields = write
             .change
@@ -943,11 +943,11 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("follow partition missing"))?;
         let grants = author
             .credentials
-            .verified_with_families(
+            .verified(
                 self.config.publisher,
                 &self.config.revocations,
                 time,
-                self.grant_families(),
+                self.whole_tables(),
             )
             .map_err(credential)?
             .partition_author(signer, destination, tuple, &self.config.revocations, time);

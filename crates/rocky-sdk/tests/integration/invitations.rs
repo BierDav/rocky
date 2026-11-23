@@ -6,8 +6,8 @@ use rocky_sdk::{
 use serde_json::json;
 use std::{path::Path, sync::Arc};
 
-fn writer() -> rocky_sdk::GrantProfile {
-    serde_json::from_value(json!({"kind": "writer", "scopes": ["items"]})).expect("writer")
+fn writer() -> rocky_sdk::Access {
+    rocky_sdk::Access::Full
 }
 fn issuer(directory: &Path, hub: &Arc<Hub>) -> Result<Device, Failure> {
     Device::new(Database::create(
@@ -93,7 +93,7 @@ async fn an_existing_identity_joins_once_by_invitation_with_its_own_provider() -
         info.principal, identity,
         "the invited identity holds the grants"
     );
-    assert_eq!(info.profile, writer());
+    assert_eq!(info.access, writer());
     common::introduce(&owner, &member).await;
     member.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(member.titles().await, ["Milk"]);
@@ -111,7 +111,7 @@ async fn an_existing_identity_joins_once_by_invitation_with_its_own_provider() -
         .find(|record| record.identity == identity)
         .ok_or("the issuer recorded no admission")?;
     assert_eq!(recorded.invitation, Some(invitation.id));
-    assert_eq!(recorded.profile, Some(writer()));
+    assert_eq!(recorded.access, Some(writer()));
     let open = owner.session.open_invitations().await?;
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].redeemed_by, Some(info.node));
@@ -194,6 +194,7 @@ async fn an_expired_invitation_is_refused_by_its_issuer() -> Result<(), Failure>
             InviteTerms {
                 valid_for: Some(std::time::Duration::from_secs(60)),
                 label: Some(b"Alice".to_vec()),
+                ..InviteTerms::default()
             },
         )
         .await?;

@@ -167,9 +167,10 @@ async fn only_trusted_devices_and_issuers_seal() -> Result<(), Failure> {
 
     let issuer = Device::join(
         &root.path().join("c"),
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
         Network::Owned(hub.connector("c")),
     )?;
+    a.admit(&issuer).await;
     introduce(&a, &issuer).await;
     issuer.sync().await.expect("issuer sync");
     issuer.add(1, "issued").await;
@@ -203,15 +204,9 @@ mod trusted {
         let mut devices = Vec::new();
         for index in 0..count {
             let name = format!("d{index}");
-            let is_first_device_and_the_only_issuer = index == 0;
-            let invitation = if is_first_device_and_the_only_issuer {
-                owner.invite_as(json!({"kind": "issuer"})).await
-            } else {
-                owner.invite().await
-            };
             let device = Device::join(
                 &root.path().join(&name),
-                &invitation,
+                &owner.invite().await,
                 Network::Owned(hub.connector(&name)),
             )?;
             introduce(&owner, &device).await;
@@ -252,6 +247,7 @@ mod trusted {
                 .install_trust(&(snap::text(&(granted["grant"])))),
         )
         .await;
+        settle(&[owner, device]).await;
         granted
     }
     async fn settle(devices: &[&Device]) {
@@ -344,13 +340,16 @@ mod races {
             let invitation = if name == "m" {
                 owner.invite().await
             } else {
-                owner.invite_as(json!({"kind": "issuer"})).await
+                owner.invite_as(rocky_sdk::Access::Full).await
             };
             let device = Device::join(
                 &root.path().join(name),
                 &invitation,
                 Network::Owned(hub.connector(name)),
             )?;
+            if name != "m" {
+                owner.admit(&device).await;
+            }
             introduce(&owner, &device).await;
             for other in &joined {
                 introduce(other, &device).await;

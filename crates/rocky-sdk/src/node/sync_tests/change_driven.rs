@@ -95,7 +95,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
                         &root.path().join(name),
                         &hub,
                         name,
-                        Some((&a, Profile::Issuer)),
+                        Some((&a, crate::Access::Full)),
                     )
                     .await?,
                 );
@@ -238,7 +238,7 @@ async fn pause_cancels_stalled_dial_and_foreground_starts_without_a_timer() -> R
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -318,7 +318,7 @@ async fn two_automatic_workers_converge_and_then_stop_dialing() -> Result<(), Fa
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -427,7 +427,7 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
                         &root.path().join(name),
                         &hub,
                         name,
-                        Some((&a, Profile::Issuer)),
+                        Some((&a, crate::Access::Full)),
                     )
                     .await?,
                 );
@@ -539,12 +539,7 @@ async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Fa
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;

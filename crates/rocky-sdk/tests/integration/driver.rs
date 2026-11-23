@@ -19,7 +19,7 @@ const SQLITE_TOOBIG: i32 = 18;
 const SQLITE_AUTH: i32 = 23;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 
-const SHOPPING: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":7,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},
@@ -714,17 +714,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     )
     .await?
     .database;
-    let invitation = snap::value(
-        a.session().provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: ["lists".to_owned(), "items".to_owned()]
-                    .into_iter()
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?;
+    let invitation = snap::value(a.session().provision(rocky_sdk::Access::Full, None)).await?;
     let b = Database::join(
         open(
             &root.path().join("b"),
@@ -809,6 +799,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
             "columns":[{"name":"key","type":"text","not_null":true},
                 {"name":"name","type":"text","not_null":true}], "primary_key":["key"], "indexes":[{"name":"devices_by_name", "columns":[{"name":"name","descending":false}]}]
         }));
+    schema["roles"] = json!([{"name":"list_reader","tables":[{"table":"lists","access":"read"}]}]);
     let schema = schema.to_string();
     let a_path = root.path().join("a");
     let b_path = root.path().join("b");
@@ -821,9 +812,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     };
     let a = Database::create(setup(&a_path, "a"), None)?.database;
     let invitation = snap::value(a.session().provision(
-        rocky_sdk::GrantProfile::Reader {
-            scopes: ["lists".to_owned()].into_iter().collect(),
-        },
+        rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("list_reader")),
         None,
     ))
     .await?;

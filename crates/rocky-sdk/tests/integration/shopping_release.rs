@@ -3,7 +3,7 @@ use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SCHEMA: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
+const SCHEMA: &str = r#"{"format":7,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -16,8 +16,8 @@ const SCHEMA: &str = r#"{"format":6,"application":"shopping","version":3,"tables
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
-]}"#;
-const TABLES: [&str; 3] = ["lists", "categories", "items"];
+],
+"roles":[{"name":"shopper","tables":[{"table":"lists","access":"read"},{"table":"categories","access":"write"},{"table":"items","access":"write"}]}]}"#;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -34,18 +34,13 @@ impl Peer {
         })
     }
 
-    async fn invite(&self, profile: Value) -> Result<String, Failure> {
-        Ok(snap::value(
-            self.session.provision(
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                    .expect("typed fixture"),
-                None,
-            ),
+    async fn invite(&self, access: rocky_sdk::Access) -> Result<String, Failure> {
+        Ok(
+            snap::value(self.session.provision(access, None)).await?["uri"]
+                .as_str()
+                .ok_or("uri")?
+                .to_owned(),
         )
-        .await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned())
     }
 
     async fn node(&self) -> Result<Value, Failure> {
@@ -151,9 +146,9 @@ impl Peer {
                     group: "list".to_owned(),
                     values: (values(list)).clone(),
                 },
-                serde_json::from_value::<
-                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
-                >(json!([reader.node().await?]))
+                serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                    json!([reader.node().await?]),
+                )
                 .expect("typed fixture"),
                 None,
             ),
@@ -204,18 +199,16 @@ async fn topology() -> Result<Topology, Failure> {
     let custody = Peer::new(
         Database::join(
             open(&root.path().join("custody"), &hub, "custody"),
-            &a.invite(json!({"kind":"custody","scopes":TABLES})).await?,
+            &a.invite(rocky_sdk::Access::Store).await?,
         )?
         .database,
     )?;
     let b = Peer::new(
         Database::join(
             open(&root.path().join("b"), &hub, "b"),
-            &a.invite(json!({"kind":"grants","grants":[
-                {"scope":"lists","rights":["read"]},
-                {"scope":"categories","rights":["read","insert","update","delete"]},
-                {"scope":"items","rights":["read","insert","update","delete"]}
-            ]}))
+            &a.invite(rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(
+                "shopper",
+            )))
             .await?,
         )?
         .database,
@@ -348,7 +341,7 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     let c = Peer::new(
         Database::join(
             open(&_root.path().join("c"), &hub, "c"),
-            &a.invite(json!({"kind":"writer","scopes":TABLES})).await?,
+            &a.invite(rocky_sdk::Access::Full).await?,
         )?
         .database,
     )?;

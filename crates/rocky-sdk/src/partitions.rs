@@ -79,6 +79,14 @@ impl Session {
         self.send(|reply| Request::SharePartition(target, recipients, epoch, reply))
             .await
     }
+    pub async fn grant_partition(
+        &self,
+        identity: PublicKey,
+        target: PartitionTarget,
+    ) -> Result<PartitionShare, Failure> {
+        self.send(|reply| Request::GrantPartition(identity, target, reply))
+            .await
+    }
     pub async fn identity_for_node(&self, node: PublicKey) -> Result<Option<PublicKey>, Failure> {
         self.send(|reply| Request::IdentityForNode(node, reply))
             .await
@@ -130,24 +138,6 @@ pub struct PartitionSelection {
     pub omit: BTreeSet<String>,
 }
 impl Session {
-    pub async fn grant_partitions(
-        &self,
-        device: crate::NodeKeys,
-        grants: Vec<crate::credentials::PartitionGrant>,
-        delegations: u8,
-    ) -> Result<crate::Supplied, Failure> {
-        self.send(|reply| Request::IssuePartitions(device, grants, delegations, false, reply))
-            .await
-    }
-    pub async fn delegate_partitions(
-        &self,
-        device: crate::NodeKeys,
-        grants: Vec<crate::credentials::PartitionGrant>,
-        delegations: u8,
-    ) -> Result<crate::Supplied, Failure> {
-        self.send(|reply| Request::IssuePartitions(device, grants, delegations, true, reply))
-            .await
-    }
     pub async fn partition_address(
         &self,
         table: &str,
@@ -170,7 +160,7 @@ impl Session {
     pub async fn install_partition(
         &self,
         target: PartitionTarget,
-        envelope: crate::credentials::GroupSecretEnvelope,
+        envelope: rocky_credentials::GroupSecretEnvelope,
         sender: CredentialChain,
     ) -> Result<(), Failure> {
         self.send(|reply| Request::InstallPartition(target, Box::new(envelope), sender, reply))

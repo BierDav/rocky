@@ -7,16 +7,16 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
-const ASKS_FOR_IDS: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const ASKS_FOR_IDS: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = rocky_next_id('items')"]}]}"#;
-const FIXED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
+const FIXED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
@@ -64,7 +64,7 @@ fn text(value: &str) -> rocky_sdk::SqlValue {
 const POSITIONS: &str = "SELECT title, position FROM items ORDER BY title";
 const TAGS: &str = "SELECT key, label FROM tags ORDER BY key";
 
-const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
@@ -163,13 +163,14 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let a = Device::create(&a_dir, network("a"))?;
     let b_opened = Database::join(
         open(&b_dir, common::SCHEMA, network("b")),
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?;
     let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
         Arc::new(rocky_sdk::IdentityKey::from_phrase(
             b_opened.identity.as_deref().ok_or("linkable identity")?,
         )?);
     let b = Device::new(b_opened)?;
+    a.admit(&b).await;
     introduce(&a, &b).await;
     a.add(1, "apples").await;
     b.add(2, "bread").await;
@@ -230,10 +231,10 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     Ok(())
 }
 
-const LISTS: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
+const LISTS: &str = r#"{"format":7,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}]}"#;
-const POSITIONED_LISTS: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
+const POSITIONED_LISTS: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true},{"name":"position","type":"text","not_null":true,"default":""}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}],
  "migrations":[{"version":2,"statements":["UPDATE lists SET position = title"]}]}"#;
@@ -261,13 +262,14 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
     let b_opened = Database::join(
         open(&b_dir, LISTS, network("b")),
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?;
     let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
         Arc::new(rocky_sdk::IdentityKey::from_phrase(
             b_opened.identity.as_deref().ok_or("linkable identity")?,
         )?);
     let b = Device::new(b_opened)?;
+    a.admit(&b).await;
     introduce(&a, &b).await;
     list(&a, "From a").await?;
     let theirs = list(&b, "From b").await?;
@@ -344,13 +346,13 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     Ok(())
 }
 
-const SEEDED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const SEEDED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-const TAGGED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
+const TAGGED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-const FILLED: &str = r#"{"application":"shopping","version":4,"format":6,"tables":[
+const FILLED: &str = r#"{"application":"shopping","version":4,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]},
   {"version":4,"statements":["UPDATE items SET position = title"]}]}"#;
@@ -657,13 +659,25 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
     let b = Device::new(Database::join(
         open(&b_dir, LISTS, network("b")),
-        &a.invite_as(json!({"kind": "grants", "grants": [{"scope": "lists", "rights": ["read", "insert", "update", "delete"]}]})).await,
+        &a.invite().await,
     )?)?;
     introduce(&a, &b).await;
     let id = list(&a, "Weekly").await?;
     let node = b.node().await;
-    snap::ok(a.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: vec![snap::row_id(&(id))] }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await;
+    snap::ok(
+        a.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: vec![snap::row_id(&(id))],
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await;
     sync(&b).await;
     a.close().await;
     let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
@@ -697,20 +711,18 @@ struct DescriptorIdentity {
     attempts: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 impl rocky_sdk::IdentityProvider for DescriptorIdentity {
-    fn public_key(
-        &self,
-    ) -> Result<rocky_sdk::credentials::PublicKey, rocky_sdk::credentials::Error> {
+    fn public_key(&self) -> Result<rocky_credentials::PublicKey, rocky_credentials::Error> {
         self.provider.public_key()
     }
     fn sign(
         &self,
         purpose: rocky_sdk::Purpose,
         message: &[u8],
-    ) -> Result<rocky_sdk::credentials::Signature, rocky_sdk::credentials::Error> {
+    ) -> Result<rocky_credentials::Signature, rocky_credentials::Error> {
         let label = b"rocky.migration-publication.v1";
         if message.windows(label.len()).any(|part| part == label) {
             self.attempts.lock().unwrap().push(message.to_vec());
-            return Err(rocky_sdk::credentials::Error::Provider(
+            return Err(rocky_credentials::Error::Provider(
                 "signer unavailable".into(),
             ));
         }
@@ -851,10 +863,10 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     Ok(())
 }
 
-const LISTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+const LISTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},
  {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}]}"#;
-const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET title = NULL"]}]}"#;
@@ -886,7 +898,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     Ok(())
 }
 
-const UNTITLED_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const UNTITLED_FAILING: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET completed = NULL"]}]}"#;
 

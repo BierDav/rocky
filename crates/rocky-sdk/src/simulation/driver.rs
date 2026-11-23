@@ -274,8 +274,7 @@ impl Simulation {
                 Ok(self.alerts(&alerts))
             }
             Action::Trust(node) => {
-                self.invite_as(0, *node, crate::GrantProfile::Issuer)
-                    .await?;
+                self.invite_as(0, *node, crate::Access::Full).await?;
                 let identity = self
                     .database(*node)?
                     .session()
@@ -788,21 +787,14 @@ impl Simulation {
         }
     }
     async fn invite(&mut self, by: usize, node: usize) -> Result<String, Failure> {
-        let writer = crate::GrantProfile::Writer {
-            scopes: self
-                .fixture
-                .scopes()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        };
+        let writer = crate::Access::Full;
         self.invite_as(by, node, writer).await
     }
     async fn invite_as(
         &mut self,
         by: usize,
         node: usize,
-        profile: crate::GrantProfile,
+        profile: crate::Access,
     ) -> Result<String, Failure> {
         if self.members[node].node_key.is_some() {
             return Err("skipped: already a member".into());

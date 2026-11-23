@@ -21,7 +21,7 @@ pub async fn write_authority(directory: &Path, key: &str, bytes: &[u8]) -> Resul
     Ok(())
 }
 
-pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
     Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
@@ -35,13 +35,6 @@ pub fn prepared_identity(directory: &Path) -> Option<Arc<dyn rocky_sdk::Identity
         .exists()
         .then(|| external_identity(directory))
 }
-pub fn node_keys(
-    directory: &Path,
-    secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
-) -> Result<rocky_sdk::NodeKeys, Failure> {
-    Database::node_keys_of(directory, secrets, Some(external_identity(directory)))
-}
-
 pub struct Device {
     pub database: Arc<Database>,
     pub network: Option<NetworkService>,
@@ -229,15 +222,27 @@ impl Device {
         snap::observe(self.sync_once()).await
     }
     pub async fn invite(&self) -> String {
-        self.invite_as(json!({"kind": "writer", "scopes": ["items"]}))
-            .await
+        self.invite_as(rocky_sdk::Access::Full).await
     }
-    pub async fn invite_as(&self, profile: Value) -> String {
+    pub async fn invite_as(&self, access: rocky_sdk::Access) -> String {
         self.session
-            .provision(serde_json::from_value(profile).expect("profile"), None)
+            .provision(access, None)
             .await
             .expect("invitation")
             .uri
+    }
+    pub async fn admit(&self, admin: &Device) {
+        let identity = admin.session.info().await.expect("session").principal;
+        let grant = self
+            .session
+            .trust(identity, self.root())
+            .await
+            .expect("trust");
+        admin
+            .session
+            .install_trust(&grant.grant)
+            .await
+            .expect("install trust");
     }
     pub async fn contact(&self) -> String {
         self.session.contact().await.expect("contact")

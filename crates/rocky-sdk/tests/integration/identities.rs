@@ -120,10 +120,7 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
             json!(key),
             "{name}: one identity holds the grants"
         );
-        assert_eq!(
-            session["profile"],
-            json!({"kind": "writer", "scopes": ["items"]})
-        );
+        assert_eq!(session["access"], json!("full"));
         nodes.push(session["node"].clone());
         assert!(
             !holds(root, name, "identity")?,
@@ -241,14 +238,7 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     created.database.close().await?;
     let database = Database::open(open(&path, &hub, "a", None))?.database;
     let session = database.session();
-    session
-        .provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: ["items".into()].into(),
-            },
-            None,
-        )
-        .await?;
+    session.provision(rocky_sdk::Access::Full, None).await?;
     session.sync_once_with_identity(key).await?;
     assert!(
         weak.upgrade().is_none(),
@@ -527,14 +517,7 @@ async fn approval_continuations_keep_identity_mode_and_phrase_until_admitted() -
     )?;
     let session = owner.database.session();
     for (name, linkable) in [("single", false), ("linkable", true)] {
-        let provisioning = session
-            .provision(
-                rocky_sdk::GrantProfile::Writer {
-                    scopes: ["items".into()].into(),
-                },
-                None,
-            )
-            .await?;
+        let provisioning = session.provision(rocky_sdk::Access::Full, None).await?;
         let path = root.path().join(name);
         let config =
             rocky_sdk::Configuration::new(&path, &rocky_sdk::Schema::parse(common::SCHEMA)?)?
@@ -733,9 +716,9 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 root,
             )?)?;
             let profile = if index == 0 {
-                json!({"kind":"issuer"})
+                rocky_sdk::Access::Full
             } else {
-                json!({"kind":"reader","scopes":["items"]})
+                rocky_sdk::Access::Read
             };
             let name = format!("member{index}");
             let member_opened = Database::join(
@@ -906,7 +889,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             snap::ok(owners[1].session.identities()).await,
             &person_key_1,
         )?;
-        assert_eq!(before_registry_b["profile"]["kind"], "reader");
+        assert_eq!(before_registry_b["access"], "read");
         let before_b = identity(path, "owner1")?["keys"].clone();
         let before_authority_b = identity(path, "owner1")?["revocations"].clone();
         let before_heard_b = identity(path, "owner1")?["authority"]["heard"].clone();
@@ -1159,7 +1142,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     )?)?;
     let first_opened = Database::join(
         open(&path.join("first"), &hub, "first", Some(personal.clone())),
-        &owner.invite_as(json!({"kind":"issuer"})).await,
+        &owner.invite_as(rocky_sdk::Access::Full).await,
     )?;
     let personal: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(
         first_opened

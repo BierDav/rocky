@@ -42,7 +42,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
     let sql = format!("{},id BLOB NOT NULL)", sql.trim_end_matches(')'));
     LogicalTable {
         sql_name: name.into(),
-        granted_like: None,
+        explicit_access_only: false,
         class: TableClass::Replayed,
         create_sql: sql,
         auto_generate: false,
@@ -111,6 +111,7 @@ impl Typed {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         };
         Self::with_schema(publisher, schema)
     }
@@ -1961,7 +1962,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":6, "publisher": "PUBLISHER",
+        "format":7, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"replayed", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -2088,7 +2089,7 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":6, "publisher": "PUBLISHER",
+        "format":7, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "replayed", "columns": [
                 {"name": "key", "type": "text", "not_null": true},
@@ -2441,10 +2442,9 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     let principal = PrivateKey::new();
     let nodes = [PrivateKey::new(), PrivateKey::new()];
     let root = crate::credentials::Authority::owner(&fixture.publisher)
-        .issue_terms(
+        .issue(
             principal.public_key(),
             fixture.full(),
-            rocky_credentials::DelegationTerms { delegations: 1 },
             crate::tests::validity(),
         )
         .unwrap();

@@ -3,6 +3,7 @@ mod frontiers;
 mod refresh;
 use crate::storage::rows;
 use rocky_core::TipId;
+use rocky_credentials::testing::UntrustedIssuer as _;
 use rocky_credentials::{
     AuthorMark, Authority, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction,
     SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
@@ -637,7 +638,7 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
                 },
             )
             .unwrap()
-            .issue_issuer(issuer.public_key(), validity())
+            .issue_untrusted_issuer(issuer.public_key(), validity())
             .unwrap(),
         ]);
         let signed = SignedSeal::endorse(
@@ -1337,7 +1338,7 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
                     },
                 )
                 .unwrap()
-                .issue_issuer(key.public_key(), validity())
+                .issue_untrusted_issuer(key.public_key(), validity())
                 .unwrap(),
             ]);
             (key, chain)

@@ -7,6 +7,7 @@
         reason = "native protocol test support is unused in browser tests"
     )
 )]
+mod access;
 mod activity;
 mod bootstrap_intent;
 mod configuration;
@@ -51,6 +52,7 @@ mod testing;
 mod tip_schemas;
 pub mod transport;
 
+pub use access::Access;
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use configuration::Configuration;
 pub use connection::{
@@ -58,7 +60,7 @@ pub use connection::{
 };
 pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
-pub use enrollment::{NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms};
+pub use enrollment::PublisherRequired;
 pub use error::{Error, ErrorKind};
 pub use extension::DeviceCredential;
 pub use inspection::*;
@@ -80,8 +82,7 @@ pub use rocky_core::{
     Commitment, KeyEpoch, NodeId, PartitionName, PartitionTuple, PrincipalId, ResourceScope,
     RowIdentity, Scope, SqlValue, TipId, TransactionToken, WriterId,
 };
-pub use rocky_credentials as credentials;
-pub use rocky_credentials::Profile as GrantProfile;
+pub use rocky_core::{RoleError, SchemaError};
 pub use rocky_credentials::{
     FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose,
     RevocationMode, RootKey,
@@ -92,7 +93,9 @@ pub use rocky_secure::{
 };
 pub use rocky_secure::{PageCache, PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
-pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
+pub use schema::{
+    Column, InvalidName, Migration, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,
+};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::{

@@ -1,4 +1,5 @@
 use super::*;
+use rocky_credentials::testing::UntrustedIssuer as _;
 
 fn rooted(lineage: &Lineage, version: u32, key: &PrivateKey) -> crate::SecureConfig {
     let mut config = lineage.config(version, key);
@@ -578,7 +579,7 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), crate::tests::validity())
+        .issue_untrusted_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let seal = SignedSeal::endorse(

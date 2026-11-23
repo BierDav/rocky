@@ -1,15 +1,13 @@
 use crate::common::{self, Device, Failure, introduce};
 use crate::support::snapshot as snap;
 use rocky_sdk::{
-    Configuration, GrantProfile, IdentityKey, IdentityProvider, InviteTerms, Network, Opened,
-    StoreOnlyRefusal, transport::memory::Hub,
+    Configuration, IdentityKey, IdentityProvider, InviteTerms, Network, Opened, StoreOnlyRefusal,
+    transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
-fn store_only() -> GrantProfile {
-    GrantProfile::Custody {
-        scopes: ["items".to_owned()].into(),
-    }
+fn store_only() -> rocky_sdk::Access {
+    rocky_sdk::Access::Store
 }
 fn relay_configuration(
     directory: &Path,
@@ -39,7 +37,7 @@ fn assert_keyless(directory: &Path) -> Result<(), Failure> {
     let identity = common::authority_json(directory, "identity")?;
     assert_eq!(identity["keys"], serde_json::json!({}));
     assert_eq!(identity["authority"], serde_json::json!(null));
-    assert_eq!(identity["profile"]["kind"], "custody");
+    assert_eq!(identity["access"], "store");
     for file in std::fs::read_dir(directory.join("secrets"))? {
         let name = file?.file_name().to_string_lossy().into_owned();
         assert!(
@@ -190,9 +188,7 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
         .session
         .invite(
             person.public_key()?,
-            GrantProfile::Writer {
-                scopes: ["items".to_owned()].into(),
-            },
+            rocky_sdk::Access::Full,
             InviteTerms::default(),
         )
         .await?;

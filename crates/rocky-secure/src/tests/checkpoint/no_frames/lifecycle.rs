@@ -1,4 +1,5 @@
 use super::*;
+use rocky_credentials::testing::UntrustedIssuer as _;
 use std::path::PathBuf;
 
 struct Contradicted {
@@ -1162,7 +1163,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), crate::tests::validity())
+        .issue_untrusted_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let tip = c.followed_tip().await;
@@ -1703,7 +1704,7 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), crate::tests::validity())
+        .issue_untrusted_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let issuer_seal_of_the_branch = SignedSeal::endorse(

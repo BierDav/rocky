@@ -1,13 +1,11 @@
 use common::{Device, Failure};
-use rocky_sdk::{
-    Database, GrantProfile, Network, Open, RevocationStatus, SqlValue, transport::memory::Hub,
-};
+use rocky_sdk::{Database, Network, Open, RevocationStatus, SqlValue, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"text","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"text","type":"text","not_null":true}],"primary_key":["key"]}],"roles":[{"name":"item_reader","tables":[{"table":"items","access":"read"}]},{"name":"note_reader","tables":[{"table":"notes","access":"read"}]}]}"#;
 
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
@@ -26,7 +24,7 @@ async fn join(
     hub: &Arc<Hub>,
     name: &str,
     issuer: &Device,
-    profile: GrantProfile,
+    profile: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
     let invitation = issuer.session().provision(profile, None).await?.uri;
     let device = Device::new(Database::join(
@@ -91,15 +89,12 @@ struct Domain {
 impl Domain {
     async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
         let a = create(root, hub, "a")?;
-        let b = join(root, hub, "b", &a, GrantProfile::Issuer).await?;
-        let reader = |scope: &str| GrantProfile::Reader {
-            scopes: [scope.into()].into(),
-        };
-        let writer = GrantProfile::Writer {
-            scopes: ["items".into(), "notes".into()].into(),
-        };
-        let x = join(root, hub, "x", &a, reader("items")).await?;
-        let y = join(root, hub, "y", &b, reader("notes")).await?;
+        let b = join(root, hub, "b", &a, rocky_sdk::Access::Full).await?;
+        a.admit(&b).await;
+        let writer = rocky_sdk::Access::Full;
+        let reader = |role| rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(role));
+        let x = join(root, hub, "x", &a, reader("item_reader")).await?;
+        let y = join(root, hub, "y", &b, reader("note_reader")).await?;
         let m = join(root, hub, "m", &a, writer.clone()).await?;
         let n = join(root, hub, "n", &b, writer).await?;
         common::introduce(&m, &n).await;
@@ -245,7 +240,7 @@ async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<()
 }
 
 async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
-    use rocky_sdk::{CallFailure, GrantProfile, RevocationMode, RevocationReason};
+    use rocky_sdk::{CallFailure, RevocationMode, RevocationReason};
 
     let directory = tempfile::tempdir()?;
     let root = directory.path();
@@ -257,7 +252,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     )?)?;
     let mut issuers = Vec::new();
     for name in ["b", "c"] {
-        let invitation = a.session().provision(GrantProfile::Issuer, None).await?;
+        let invitation = a.session().provision(rocky_sdk::Access::Full, None).await?;
         let issuer = Device::new(Database::join(
             open(&root.join(name), &hub, name),
             &invitation.uri,

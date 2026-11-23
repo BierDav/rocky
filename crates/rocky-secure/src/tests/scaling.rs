@@ -511,7 +511,6 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
     let manifest = Arc::new(manifest);
     let config = |node: &PrivateKey| {
         let user = crate::tests::identity_of(node);
-        let deployment = PrivateKey::new();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -551,17 +550,12 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
                 )
                 .unwrap(),
                 SignedCapability::sign(
-                    capability(deployment.public_key(), PrincipalKind::Deployment, 1),
-                    &user,
-                )
-                .unwrap(),
-                SignedCapability::sign(
                     crate::tests::proven(
                         capability(node.public_key(), PrincipalKind::Node, 0),
                         node,
-                        &deployment,
+                        &user,
                     ),
-                    &deployment,
+                    &user,
                 )
                 .unwrap(),
             ]),

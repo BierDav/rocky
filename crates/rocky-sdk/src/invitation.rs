@@ -1,5 +1,6 @@
 use crate::{
-    Failure,
+    Access, Failure,
+    access::HeldPartition,
     enrollment::{
         Contact, EnrollingIssuer, Enrollment, Intent, NodeKeys, Route, Settings, exchange, now,
     },
@@ -14,14 +15,20 @@ use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::Commitment;
 use rocky_credentials::{
     DatabaseContext, IdentityAnswer, IdentityEnrollment, IdentityProvider, IdentityReply,
-    IdentityRequest, InvitedEnrollmentRequest, Profile, PublicKey,
+    IdentityRequest, InvitedEnrollmentRequest, PublicKey,
 };
 use rocky_secure::{EncryptedReplica, PrivateKey};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::RangeInclusive,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
-const BOOK_VERSION: u32 = 1;
+const BOOK_VERSION: u32 = 2;
 const INVITE_VERSION: u32 = 3;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const SKEW: u64 = 300;
@@ -68,10 +75,11 @@ impl<'de> Deserialize<'de> for InvitationId {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InviteTerms {
     pub valid_for: Option<Duration>,
     pub label: Option<Vec<u8>>,
+    pub partitions: Vec<crate::PartitionTarget>,
 }
 impl InviteTerms {
     fn validity(&self) -> Result<u64, Failure> {
@@ -91,7 +99,7 @@ pub struct Invitation {
     pub uri: String,
     pub id: InvitationId,
     pub identity: PublicKey,
-    pub profile: crate::GrantProfile,
+    pub access: Access,
     pub expires: u64,
     pub sequence: u64,
 }
@@ -100,7 +108,7 @@ pub struct Invitation {
 pub struct OpenInvitation {
     pub id: InvitationId,
     pub identity: PublicKey,
-    pub profile: crate::GrantProfile,
+    pub access: Access,
     pub expires: u64,
     pub redeemed_by: Option<PublicKey>,
 }
@@ -158,7 +166,9 @@ impl std::error::Error for InvitationRefusal {}
 #[serde(deny_unknown_fields)]
 struct Pending {
     identity: PublicKey,
-    profile: Profile,
+    access: Access,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    partitions: BTreeSet<HeldPartition>,
     label: Option<Vec<u8>>,
     expires: u64,
     redeemed_by: Option<PublicKey>,
@@ -204,7 +214,7 @@ impl Book {
     fn open(
         &mut self,
         identity: PublicKey,
-        (profile, label): (Profile, Option<Vec<u8>>),
+        (access, partitions, label): (Access, BTreeSet<HeldPartition>, Option<Vec<u8>>),
         validity: u64,
         time: u64,
     ) -> Result<(InvitationId, u64), Failure> {
@@ -221,7 +231,8 @@ impl Book {
             id,
             Pending {
                 identity,
-                profile,
+                access,
+                partitions,
                 label,
                 expires,
                 redeemed_by: None,
@@ -250,7 +261,8 @@ impl Book {
         }
         let first = pending.redeemed_by.replace(device.node).is_none();
         Ok(Redemption {
-            profile: pending.profile.clone(),
+            access: pending.access.clone(),
+            partitions: pending.partitions.clone(),
             label: pending.label.clone().filter(|_| first),
             first,
         })
@@ -280,7 +292,7 @@ impl Book {
             .map(|(id, pending)| OpenInvitation {
                 id: *id,
                 identity: pending.identity,
-                profile: pending.profile.clone(),
+                access: pending.access.clone(),
                 expires: pending.expires,
                 redeemed_by: pending.redeemed_by,
             })
@@ -329,17 +341,17 @@ impl Invite {
         Ok(invite)
     }
 }
-fn keeps_recorded_profile(
+fn keeps_recorded_access(
     registry: &Registry,
     identity: &PublicKey,
-    profile: &Profile,
+    access: &Access,
 ) -> Result<(), Failure> {
     if registry
         .get(identity)
-        .and_then(crate::registry::IdentityRecord::profile)
-        .is_some_and(|held| held != profile)
+        .and_then(crate::registry::IdentityRecord::access)
+        .is_some_and(|held| held != access)
     {
-        return Err("the identity already holds another profile in this database".into());
+        return Err("the identity already holds other access in this database".into());
     }
     Ok(())
 }
@@ -354,7 +366,8 @@ pub(crate) struct Issued {
 }
 #[derive(Debug, PartialEq)]
 struct Redemption {
-    profile: Profile,
+    access: Access,
+    partitions: BTreeSet<HeldPartition>,
     label: Option<Vec<u8>>,
     first: bool,
 }
@@ -372,7 +385,7 @@ impl Settings {
         &self,
         (vault, routes): (&Vault, Vec<Route>),
         book: &mut Book,
-        (identity, profile, terms): (PublicKey, Profile, &InviteTerms),
+        (identity, access, terms): (PublicKey, Access, &InviteTerms),
         registry: &Registry,
         time: u64,
     ) -> Result<Issued, Failure> {
@@ -387,11 +400,13 @@ impl Settings {
         if !self.issuer() {
             return Err("only an issuer invites identities".into());
         }
-        self.check_profile(&profile)?;
+        let domain = self.domain()?;
+        let partitions = domain.partition_targets(&terms.partitions)?;
+        domain.compile(&access, &partitions)?;
         if self.revoked_identity(&identity, registry) {
             return Err("the identity was revoked".into());
         }
-        keeps_recorded_profile(registry, &identity, &profile)?;
+        keeps_recorded_access(registry, &identity, &access)?;
         if identity == self.identity || registry.trusted.contains_key(&identity) {
             return Err(
                 "a trusted identity links its nodes instead of accepting an invitation".into(),
@@ -400,7 +415,12 @@ impl Settings {
         if registry.full_for(&identity) {
             return Err(Box::new(RegistryFull));
         }
-        let (id, expires) = book.open(identity, (profile, terms.label.clone()), validity, time)?;
+        let (id, expires) = book.open(
+            identity,
+            (access, partitions, terms.label.clone()),
+            validity,
+            time,
+        )?;
         let uri = Invite {
             v: INVITE_VERSION,
             id,
@@ -441,13 +461,19 @@ impl Settings {
             node: request.node,
         };
         let Redemption {
-            profile,
+            access,
+            partitions,
             label,
             first,
         } = book.redeem(id, device, time)?;
-        keeps_recorded_profile(registry, &device.identity, &profile)?;
-        let (enrollment, changes) =
-            self.enrollment_for(vault, device, (profile, label), Some(id), registry)?;
+        keeps_recorded_access(registry, &device.identity, &access)?;
+        let (enrollment, changes) = self.enrollment_for(
+            vault,
+            device,
+            (access, partitions, label),
+            Some(id),
+            registry,
+        )?;
         Ok(Redeemed {
             answer: request
                 .answer(&answering, &serde_json::to_vec(&enrollment)?)?
@@ -556,14 +582,18 @@ mod tests {
             node: key(node),
         }
     }
-    fn writer() -> Profile {
-        serde_json::from_value(serde_json::json!({"kind": "writer", "scopes": ["items"]}))
-            .expect("writer profile")
+    fn writer() -> Access {
+        Access::Full
     }
     fn opened(book: &mut Book, identity: u8) -> InvitationId {
-        book.open(key(identity), (writer(), None), OPEN_FOR, NOW)
-            .expect("open invitation")
-            .0
+        book.open(
+            key(identity),
+            (writer(), BTreeSet::new(), None),
+            OPEN_FOR,
+            NOW,
+        )
+        .expect("open invitation")
+        .0
     }
 
     #[test]
@@ -577,7 +607,8 @@ mod tests {
         assert_eq!(
             book.redeem(id, device(1, 10), NOW),
             Ok(Redemption {
-                profile: writer(),
+                access: writer(),
+                partitions: BTreeSet::new(),
                 label: None,
                 first: true
             })
@@ -585,7 +616,8 @@ mod tests {
         assert_eq!(
             book.redeem(id, device(1, 10), NOW + 1),
             Ok(Redemption {
-                profile: writer(),
+                access: writer(),
+                partitions: BTreeSet::new(),
                 label: None,
                 first: false
             }),
@@ -602,7 +634,12 @@ mod tests {
     fn a_retried_redemption_leaves_the_label_alone_and_a_released_one_starts_over() {
         let mut book = Book::empty();
         let id = book
-            .open(key(1), (writer(), Some(b"Alice".to_vec())), OPEN_FOR, NOW)
+            .open(
+                key(1),
+                (writer(), BTreeSet::new(), Some(b"Alice".to_vec())),
+                OPEN_FOR,
+                NOW,
+            )
             .expect("open invitation")
             .0;
         let first = book.redeem(id, device(1, 10), NOW).expect("redeemed");
@@ -677,10 +714,18 @@ mod tests {
         for _ in 0..MAX_OPEN_INVITATIONS {
             opened(&mut book, 1);
         }
-        assert!(book.open(key(1), (writer(), None), OPEN_FOR, NOW).is_err());
         assert!(
-            book.open(key(1), (writer(), None), OPEN_FOR, NOW + OPEN_FOR + 1)
-                .is_ok(),
+            book.open(key(1), (writer(), BTreeSet::new(), None), OPEN_FOR, NOW)
+                .is_err()
+        );
+        assert!(
+            book.open(
+                key(1),
+                (writer(), BTreeSet::new(), None),
+                OPEN_FOR,
+                NOW + OPEN_FOR + 1
+            )
+            .is_ok(),
             "expired invitations free their slots"
         );
     }

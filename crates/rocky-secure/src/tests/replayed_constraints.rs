@@ -17,7 +17,7 @@ mod restrictions;
 
 fn definition() -> serde_json::Value {
     serde_json::json!({
-        "format": 6,
+        "format": 7,
         "application": "replayed-constraints",
         "tables": [
             {"name": "teams", "class": "replayed",
@@ -83,7 +83,7 @@ fn graph() -> Constrained {
         rest
     };
     let definition = serde_json::json!({
-        "format": 6,
+        "format": 7,
         "application": "replayed-graph",
         "tables": [
             replayed("teams", serde_json::json!([tenant, {"name": "name", "type": "text", "not_null": true}]), partitioned(serde_json::json!({}))),
@@ -288,11 +288,13 @@ impl Constrained {
         let user = crate::tests::identity_of(node);
         if let Some(tenant) = self.tenant {
             let root = Authority::owner(&self.publisher)
-                .issue_partition_terms(
+                .issue_person(
                     user.public_key(),
-                    vec![],
-                    self.partition_grants(tenant),
-                    rocky_credentials::DelegationTerms { delegations: 1 },
+                    rocky_credentials::Granted {
+                        grants: vec![],
+                        partitions: self.partition_grants(tenant),
+                        ..Default::default()
+                    },
                     rocky_credentials::Validity {
                         issued_at: now().unwrap(),
                         lifetime: std::time::Duration::from_secs(3600),

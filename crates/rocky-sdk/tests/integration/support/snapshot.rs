@@ -87,17 +87,12 @@ impl Snapshot for rocky_core::RowIdentity {
 }
 impl Snapshot for sdk::SessionInfo {
     fn snapshot(self) -> Value {
-        json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"profile":self.profile,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
+        json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
     }
 }
 impl Snapshot for sdk::Provisioning {
     fn snapshot(self) -> Value {
-        json!({"uri":self.uri,"node":self.node,"identity":self.identity,"profile":self.profile,"sequence":self.sequence.to_string()})
-    }
-}
-impl Snapshot for sdk::Supplied {
-    fn snapshot(self) -> Value {
-        json!({"supplied":self})
+        json!({"uri":self.uri,"node":self.node,"identity":self.identity,"access":self.access,"sequence":self.sequence.to_string()})
     }
 }
 impl Snapshot for sdk::Discovered {
@@ -112,7 +107,7 @@ impl Snapshot for sdk::ContactInfo {
 }
 impl Snapshot for sdk::DomainInfo {
     fn snapshot(self) -> Value {
-        json!({"scope":self.scope,"issuer":self.issuer,"profile":self.profile,"collections":self.collections,"durable_mutations":true,"transport":self.transport})
+        json!({"scope":self.scope,"issuer":self.issuer,"access":self.access,"collections":self.collections,"durable_mutations":true,"transport":self.transport})
     }
 }
 impl Snapshot for sdk::GenerationStatus {
@@ -125,7 +120,7 @@ impl Snapshot for sdk::GenerationStatus {
 }
 impl Snapshot for Vec<sdk::IdentityInfo> {
     fn snapshot(self) -> Value {
-        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"single_use":identity.single_use,"own":identity.own,"revoked":identity.revoked,"profile":identity.profile,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"single_use":identity.single_use,"own":identity.own,"revoked":identity.revoked,"access":identity.access,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 impl Snapshot for sdk::RetentionStatus {
@@ -199,7 +194,7 @@ scalar!(
     i32,
     i64,
     rocky_core::RowIdentity,
-    sdk::credentials::PublicKey
+    rocky_credentials::PublicKey
 );
 pub fn text(value: &impl Scalar) -> String {
     value.text()
@@ -212,13 +207,20 @@ pub fn schema(json: &str) -> &'static sdk::Schema {
         std::sync::Mutex<std::collections::BTreeMap<String, &'static sdk::Schema>>,
     > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    let mut guard = cache.lock().expect("schema cache");
-    if let Some(parsed) = guard.get(json) {
+    let cached = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(json)
+        .copied();
+    if let Some(parsed) = cached {
         return parsed;
     }
     let parsed: &'static sdk::Schema =
         Box::leak(Box::new(sdk::Schema::parse(json).expect("test schema")));
-    guard.insert(json.to_owned(), parsed);
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(json.to_owned(), parsed);
     parsed
 }
 pub fn integer(value: &impl Scalar) -> i64 {
@@ -251,7 +253,7 @@ pub fn digest(value: &impl Scalar) -> [u8; 32] {
         .try_into()
         .expect("digest")
 }
-pub fn key(value: &impl Scalar) -> sdk::credentials::PublicKey {
+pub fn key(value: &impl Scalar) -> rocky_credentials::PublicKey {
     value.text().parse().expect("public key")
 }
 pub async fn reply<T: Snapshot>(future: impl Future<Output = Result<T, sdk::Failure>>) -> Value {
@@ -401,8 +403,8 @@ impl Snapshot for sdk::ActivityPage {
         let events=self.events.into_iter().map(|event| {
             let mut detail=match event.detail {
                 sdk::ActivityKind::LinkAdmissionFailed { error } => json!({"kind":"link_admission_failed","error":error}),
-                sdk::ActivityKind::DeviceProvisioned { node, identity, profile } => json!({"kind":"device_provisioned","node":node,"identity":identity,"profile":profile}),
-                sdk::ActivityKind::IdentityInvited { invitation, identity, profile, expires } => json!({"kind":"identity_invited","invitation":invitation,"identity":identity,"profile":profile,"expires":expires.to_string()}),
+                sdk::ActivityKind::DeviceProvisioned { node, identity, access } => json!({"kind":"device_provisioned","node":node,"identity":identity,"access":access}),
+                sdk::ActivityKind::IdentityInvited { invitation, identity, access, expires } => json!({"kind":"identity_invited","invitation":invitation,"identity":identity,"access":access,"expires":expires.to_string()}),
                 sdk::ActivityKind::InvitationRedeemed { invitation, identity, node } => json!({"kind":"invitation_redeemed","invitation":invitation,"identity":identity,"node":node}),
                 sdk::ActivityKind::PeerAdded { peer } => json!({"kind":"peer_added","peer":peer}),
                 sdk::ActivityKind::PeerRemoved { peer } => json!({"kind":"peer_removed","peer":peer}),
@@ -423,7 +425,7 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::EpochDeliveryFailed { peer, error } => json!({"kind":"epoch_delivery_failed","peer":peer,"error":error}),
                 sdk::ActivityKind::BootstrapStarted { peer, scopes } => json!({"kind":"bootstrap_started","peer":peer,"scopes":scopes}),
                 sdk::ActivityKind::BootstrapFinished { peer } => json!({"kind":"bootstrap_finished","peer":peer}),
-                sdk::ActivityKind::IdentityAdmitted { identity, profile } => json!({"kind":"identity_admitted","identity":identity,"profile":profile}),
+                sdk::ActivityKind::IdentityAdmitted { identity, access } => json!({"kind":"identity_admitted","identity":identity,"access":access}),
                 sdk::ActivityKind::NodeLinked { identity, node } => json!({"kind":"node_linked","identity":identity,"node":node}),
                 sdk::ActivityKind::MemberSealFailed { error } => json!({"kind":"member_seal_failed","error":error}),
                 sdk::ActivityKind::ReplayedAwaitingOutcomes { transactions } => json!({"kind":"replayed_awaiting_outcomes","transactions":transactions}),

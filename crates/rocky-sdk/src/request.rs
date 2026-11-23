@@ -13,7 +13,6 @@ pub(crate) enum Kind {
     TrustedStaleAfter,
     Activity,
     ActivityNext,
-    PartitionGrant,
     PartitionAddress,
     PartitionComplete,
     PartitionCreate,
@@ -49,12 +48,11 @@ pub(crate) enum Kind {
     Unlink,
     Revoke,
     Session,
-    Grant,
-    Install,
     PartitionRole,
     PartitionNext,
     PartitionShare,
     Extension,
+    PartitionGrant,
 }
 impl Kind {
     pub(crate) fn waits(self) -> bool {
@@ -100,13 +98,6 @@ type Reply<T> = oneshot::Sender<Result<T, crate::Failure>>;
 pub(crate) enum Request {
     DiscoveryTopics(Reply<crate::DiscoveryTopics>),
     ResolveContact(rocky_core::NodeId, Reply<Option<PublicKey>>),
-    IssuePartitions(
-        crate::NodeKeys,
-        Vec<rocky_credentials::PartitionGrant>,
-        u8,
-        bool,
-        Reply<crate::Supplied>,
-    ),
     PartitionAddress(String, Vec<crate::SqlValue>, Reply<crate::PartitionAddress>),
     PartitionComplete(String, Reply<bool>),
     CreatePartition(crate::PartitionTarget, Reply<crate::PreparedPartition>),
@@ -174,14 +165,10 @@ pub(crate) enum Request {
         crate::node::Root,
         Reply<crate::TrustGrant>,
     ),
-    Provision(
-        crate::GrantProfile,
-        Option<Vec<u8>>,
-        Reply<crate::Provisioning>,
-    ),
+    Provision(crate::Access, Option<Vec<u8>>, Reply<crate::Provisioning>),
     Invite(
         rocky_credentials::PublicKey,
-        crate::GrantProfile,
+        crate::Access,
         crate::InviteTerms,
         Reply<crate::Invitation>,
     ),
@@ -206,14 +193,6 @@ pub(crate) enum Request {
         Reply<crate::RevocationResult>,
     ),
     Info(Reply<crate::SessionInfo>),
-    Grant(
-        crate::NodeKeys,
-        crate::GrantProfile,
-        crate::GrantTerms,
-        bool,
-        Reply<crate::Supplied>,
-    ),
-    Install(Box<crate::Supplied>, Reply<()>),
     ReplicaRole(crate::ReplicaRoleConfig, Reply<()>),
     PartitionCustody(
         rocky_core::ResourceScope,
@@ -224,6 +203,11 @@ pub(crate) enum Request {
     PartitionRecipients(
         crate::PartitionTarget,
         Reply<Vec<rocky_credentials::PublicKey>>,
+    ),
+    GrantPartition(
+        rocky_credentials::PublicKey,
+        crate::PartitionTarget,
+        Reply<crate::PartitionShare>,
     ),
     SharePartition(
         crate::PartitionTarget,
@@ -253,7 +237,6 @@ impl Request {
             Self::TrustedStaleAfter(..) => Kind::TrustedStaleAfter,
             Self::Activity(..) => Kind::Activity,
             Self::ActivityNext(..) => Kind::ActivityNext,
-            Self::IssuePartitions(..) => Kind::PartitionGrant,
             Self::PartitionAddress(..) => Kind::PartitionAddress,
             Self::PartitionComplete(..) => Kind::PartitionComplete,
             Self::CreatePartition(..) => Kind::PartitionCreate,
@@ -292,12 +275,11 @@ impl Request {
             Self::Unlink(..) => Kind::Unlink,
             Self::RevokeIdentity(..) => Kind::Revoke,
             Self::Info(..) => Kind::Session,
-            Self::Grant(..) => Kind::Grant,
-            Self::Install(..) => Kind::Install,
             Self::ReplicaRole(..) | Self::PartitionCustody(..) => Kind::PartitionRole,
             Self::NextPartition(..) => Kind::PartitionNext,
             Self::PartitionRecipients(..) => Kind::PartitionStatus,
             Self::SharePartition(..) => Kind::PartitionShare,
+            Self::GrantPartition(..) => Kind::PartitionGrant,
             Self::IdentityForNode(..) => Kind::Identities,
             Self::DeviceCredential(..) | Self::SignExtension(..) => Kind::Extension,
         }
@@ -339,9 +321,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::ActivityNext(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::IssuePartitions(_, _, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::PartitionAddress(_, _, reply) => {
@@ -457,12 +436,6 @@ impl Request {
             Self::Info(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Grant(_, _, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Install(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::ReplicaRole(_, reply) | Self::PartitionCustody(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
@@ -470,6 +443,9 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::PartitionRecipients(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::GrantPartition(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::SharePartition(_, _, _, reply) => {

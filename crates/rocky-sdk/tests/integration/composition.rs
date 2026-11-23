@@ -15,7 +15,7 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 use crate::support;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
@@ -145,12 +145,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(error["retryable"], json!(false));
     let provisioning = client
         .session
-        .provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: ["items".into()].into(),
-            },
-            None,
-        )
+        .provision(rocky_sdk::Access::Full, None)
         .await?;
     database.close().await?;
     database.close().await?;
@@ -188,12 +183,7 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let invitation = creator
         .database
         .session()
-        .provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: ["items".into()].into(),
-            },
-            None,
-        )
+        .provision(rocky_sdk::Access::Full, None)
         .await?
         .uri;
     let member = Database::join(
@@ -343,12 +333,11 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
         "memory",
         "the status names the attached network's kind"
     );
-    let invitation = snap::ok(creator_client.session.provision(
-        rocky_sdk::GrantProfile::Writer {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        None,
-    ))
+    let invitation = snap::ok(
+        creator_client
+            .session
+            .provision(rocky_sdk::Access::Full, None),
+    )
     .await["uri"]
         .as_str()
         .ok_or("invitation")?
@@ -448,12 +437,11 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
         None,
     )?;
     let creator_client = Client::new(&creator)?;
-    let invitation = snap::ok(creator_client.session.provision(
-        rocky_sdk::GrantProfile::Writer {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        None,
-    ))
+    let invitation = snap::ok(
+        creator_client
+            .session
+            .provision(rocky_sdk::Access::Full, None),
+    )
     .await["uri"]
         .as_str()
         .ok_or("invitation")?

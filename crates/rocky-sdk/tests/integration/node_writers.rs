@@ -1,41 +1,27 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{Database, Open};
-use serde_json::json;
+use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use std::sync::Arc;
 
 use crate::common;
 
 #[tokio::test]
-async fn a_supplied_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Result<(), Failure>
-{
+async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
-    let issuer = Device::create(&directory.path().join("issuer"), None)?;
+    let hub = Arc::new(Hub::default());
+    let issuer = Device::create(
+        &directory.path().join("issuer"),
+        Some(Network::Owned(hub.connector("issuer"))),
+    )?;
     let path = directory.path().join("writer");
-    let keys = common::node_keys(&path, None)?;
-    let profile = json!({"kind":"writer","scopes":["items"]});
-    let grant = || {
-        issuer.session.grant(
-            keys,
-            serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                .expect("typed fixture"),
-            rocky_sdk::GrantTerms {
-                ttl: None,
-                delegations: None,
-            },
-        )
-    };
-    let supplied = snap::ok(grant()).await["supplied"].clone();
     let open = || Open {
         identity: common::prepared_identity(&path),
         directory: &path,
         schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
-        network: None,
+        network: Some(Network::Owned(hub.connector("writer"))),
     };
-    let writer = Device::new(Database::install(
-        open(),
-        serde_json::from_value(supplied)?,
-    )?)?;
+    let writer = Device::new(Database::join(open(), &issuer.invite().await)?)?;
     let before = snap::ok(writer.session.info()).await;
     let own = before["writer"]
         .as_str()
@@ -54,18 +40,8 @@ async fn a_supplied_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> 
     writer.close().await;
     let writer = Device::new(Database::open(open())?)?;
     assert_eq!(snap::ok(writer.session.info()).await["writer"], own);
-    let supplied = snap::ok(grant()).await["supplied"].clone();
-    snap::ok(async {
-        writer
-            .session
-            .install_credentials(
-                serde_json::from_value::<rocky_sdk::Supplied>(json!(supplied))
-                    .expect("typed fixture"),
-            )
-            .await?;
-        writer.session.info().await
-    })
-    .await;
+    common::introduce(&issuer, &writer).await;
+    writer.session.renew().await?;
     assert_eq!(snap::ok(writer.session.info()).await["writer"], own);
     writer.add(2, "after reopen").await;
     writer.close().await;

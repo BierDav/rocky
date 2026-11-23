@@ -26,8 +26,6 @@ mod faults;
 #[cfg(not(target_family = "wasm"))]
 mod generations;
 #[cfg(not(target_family = "wasm"))]
-mod grants;
-#[cfg(not(target_family = "wasm"))]
 mod group_secrets;
 #[cfg(not(target_family = "wasm"))]
 mod identities;
@@ -59,6 +57,8 @@ mod removal;
 mod replayed;
 #[cfg(not(target_family = "wasm"))]
 mod revocations;
+#[cfg(not(target_family = "wasm"))]
+mod roles;
 #[cfg(not(target_family = "wasm"))]
 mod shared_lists;
 #[cfg(not(target_family = "wasm"))]

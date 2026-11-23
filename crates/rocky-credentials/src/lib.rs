@@ -18,7 +18,6 @@ mod delivery;
 mod discovery;
 mod enroll;
 mod extension;
-mod families;
 mod group;
 mod identity;
 mod identity_key;
@@ -38,6 +37,8 @@ mod revocation;
 mod root;
 mod signed;
 mod tips;
+mod whole;
+pub use whole::{WholeAccess, WholeTables};
 
 pub use author_binding::AuthorBinding;
 pub use checkpoint_record::{
@@ -47,12 +48,11 @@ pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
-pub use families::GrantFamilies;
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
 pub use identity::{FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose};
 pub use identity_key::IdentityKey;
-pub use issuance::{Delegation, DelegationTerms, Validity};
-pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_chain};
+pub use issuance::Validity;
+pub use issue::{Authority, Granted, NEVER, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::{PartitionContext, PartitionGrant};
@@ -69,6 +69,7 @@ pub use revocation::{
     MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL,
     Revocation, RevocationMode, RevocationSet, SIGNATURE_OVERHEAD, SignedRevocation,
 };
+pub use rocky_core::MAX_GRANTS;
 pub use root::RootKey;
 pub use signed::{
     Attestation, Capability, Certificate, CredentialChain, Credentials, Endorsement,

@@ -93,18 +93,7 @@ impl PublicationTraffic {
 
 async fn pair(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Arc<Node>, Arc<Node>), Failure> {
     let a = enrolled(&root.join("a"), hub, "a", None).await?;
-    let b = enrolled(
-        &root.join("b"),
-        hub,
-        "b",
-        Some((
-            &a,
-            Profile::Reader {
-                scopes: ["items".into()].into(),
-            },
-        )),
-    )
-    .await?;
+    let b = enrolled(&root.join("b"), hub, "b", Some((&a, crate::Access::Read))).await?;
     targets(&a, std::slice::from_ref(&b)).await?;
     targets(&b, std::slice::from_ref(&a)).await?;
     start(&a, true).await?;
@@ -265,12 +254,7 @@ async fn reverse_opened_link_delivers_when_receiver_cannot_be_dialed() -> Result
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&b, std::slice::from_ref(&a)).await?;
@@ -307,12 +291,7 @@ async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), 
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&b, std::slice::from_ref(&a)).await?;
@@ -352,12 +331,7 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
                 &root.path().join("c"),
                 &hub,
                 "c",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&c)).await?;
@@ -595,12 +569,7 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             a.automatic.store(true, Ordering::SeqCst);
@@ -642,12 +611,7 @@ async fn simultaneous_short_syncs_reconcile_after_a_duplicate_stream_ends() -> R
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -678,12 +642,7 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -796,12 +755,7 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             let authority = b.replica.observe_authority().await;
@@ -877,12 +831,7 @@ async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
@@ -960,18 +909,7 @@ async fn real_pair(
     hub: &Arc<Hub>,
 ) -> Result<(Arc<Node>, Arc<Node>, String, String), Failure> {
     let a = enrolled(&root.join("a"), hub, "a", None).await?;
-    let b = enrolled(
-        &root.join("b"),
-        hub,
-        "b",
-        Some((
-            &a,
-            Profile::Reader {
-                scopes: ["items".into()].into(),
-            },
-        )),
-    )
-    .await?;
+    let b = enrolled(&root.join("b"), hub, "b", Some((&a, crate::Access::Read))).await?;
     a.detach(None).await;
     b.detach(None).await;
     let connector: Arc<dyn Connector> = Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0"));
@@ -1290,12 +1228,7 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
                 &root.path().join("c"),
                 &hub,
                 "c",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             start(&c, true).await?;
@@ -1450,7 +1383,7 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -1535,9 +1468,7 @@ async fn a_local_commit_between_link_open_snapshots_remains_eligible_for_publica
                 "b",
                 Some((
                     &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
+                    crate::Access::Read,
                 )),
             )
             .await?;
@@ -1629,7 +1560,7 @@ async fn two_writers_push_concurrently_and_converge_on_the_same_scope() -> Resul
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -1718,12 +1649,7 @@ async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             add(&a, 1).await?;
@@ -1776,12 +1702,12 @@ async fn unchanged_epoch_probe_ignores_contacts_changed_while_the_reply_was_in_f
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let b = enrolled(
-                &root.path().join("b"),
+            let b = enrolled(&root.path().join("b"), &hub, "b", None).await?;
+            let a = enrolled(
+                &root.path().join("a"),
                 &hub,
-                "b",
-                Some((&a, Profile::Issuer)),
+                "a",
+                Some((&b, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -1832,7 +1758,7 @@ async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), 
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, std::slice::from_ref(&b)).await?;
@@ -1913,19 +1839,14 @@ async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             let c = enrolled(
                 &root.path().join("c"),
                 &hub,
                 "c",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             for (node, peers) in [
@@ -2036,9 +1957,7 @@ async fn a_stalled_peer_does_not_hold_publication_to_another() -> Result<(), Fai
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let reader = || Profile::Reader {
-                scopes: ["items".into()].into(),
-            };
+            let reader = || crate::Access::Read;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, reader()))).await?;
             let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, reader()))).await?;
             targets(&a, &[b.clone(), c.clone()]).await?;
@@ -2173,9 +2092,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
         }).collect());
         let schema = Schema::parse(&schema.to_string())?;
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
-        let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, Profile::Reader {
-            scopes: names.iter().cloned().collect(),
-        })), &schema).await?;
+        let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, crate::Access::Read)), &schema).await?;
         targets(&a, std::slice::from_ref(&b)).await?;
         targets(&b, std::slice::from_ref(&a)).await?;
         start(&a, true).await?;
@@ -2229,7 +2146,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             eprintln!("publication native traffic: {traffic:?}");
             assert_eq!(
                 [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
-                [if version == 1 { 8 } else { 9 }, 2],
+                [if version == 1 { 6 } else { 7 }, 2],
                 "one fragmented publication and receipt"
             );
             let notification_us = if notified >= committed {
@@ -2259,7 +2176,7 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let names: Vec<_> = std::iter::once("items".to_owned())
-                .chain((1..62).map(|n| format!("held_{n}")))
+                .chain((1..63).map(|n| format!("held_{n}")))
                 .collect();
             let mut schema: Value = serde_json::from_str(SCHEMA)?;
             let table = schema["tables"][0].clone();
@@ -2285,7 +2202,7 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((&a, Profile::Issuer)),
+                Some((&a, crate::Access::Full)),
                 &schema,
             )
             .await
@@ -2307,7 +2224,7 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                             values: (values).clone(),
                         },
                         serde_json::from_value::<
-                            std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                            std::collections::BTreeSet<rocky_credentials::PublicKey>,
                         >(json!([peer.to_hex()]))
                         .expect("typed fixture"),
                         None,
@@ -2321,14 +2238,14 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                             group: "held".to_owned(),
                             values: (values).clone(),
                         },
-                        &rocky_sdk::credentials::GroupSecretEnvelope::from_bytes(
+                        &rocky_credentials::GroupSecretEnvelope::from_bytes(
                             &serde_json::from_value::<Vec<u8>>(json!(
                                 shared["envelopes"][0]["envelope"]
                             ))
                             .expect("typed fixture"),
                         )
                         .expect("envelope"),
-                        &serde_json::from_value::<rocky_sdk::credentials::CredentialChain>(json!(
+                        &serde_json::from_value::<rocky_credentials::CredentialChain>(json!(
                             shared["sender"]
                         ))
                         .expect("typed fixture"),

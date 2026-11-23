@@ -1,4 +1,5 @@
 use super::*;
+use rocky_credentials::testing::UntrustedIssuer as _;
 type Candidate = (
     Lineage,
     Scratch,
@@ -37,7 +38,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
                     },
                 )
                 .unwrap()
-                .issue_issuer(
+                .issue_untrusted_issuer(
                     issuer.public_key(),
                     rocky_credentials::Validity {
                         issued_at: start,

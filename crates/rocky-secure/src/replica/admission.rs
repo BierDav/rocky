@@ -31,11 +31,11 @@ impl<A: RowApplication> Inner<A> {
             .map_err(credential)?;
         let no_revocations = RevocationSet::default();
         let (grants, selectors) = chain
-            .verified_with_families(
+            .verified(
                 self.config.publisher,
                 &no_revocations,
                 time,
-                self.grant_families(),
+                self.whole_tables(),
             )
             .map_err(credential)?
             .selectors(node, &no_revocations, time)

@@ -1,6 +1,6 @@
-use crate::{Configuration, DEVICES, LIST_GROUP, LISTS, TODOS, TodoError, Todos};
+use crate::{Configuration, DEVICES, LIST_GROUP, TodoError, Todos};
 use rocky_sdk::{
-    Failure, GrantProfile, PartitionTarget, ReplicaRole, ReplicaRoleConfig, RowIdentity, params,
+    Access, Failure, PartitionTarget, ReplicaRole, ReplicaRoleConfig, RoleName, RowIdentity, params,
 };
 use std::collections::BTreeSet;
 
@@ -10,8 +10,11 @@ pub enum Role {
     Full,
     Partial,
 }
+pub const PARTIAL: RoleName = RoleName::from_static("partial");
+
 impl Role {
     pub const ALL: [Self; 3] = [Self::Trusted, Self::Full, Self::Partial];
+    pub const INVITABLE: [Self; 2] = [Self::Full, Self::Partial];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Trusted => "trusted",
@@ -25,12 +28,11 @@ impl Role {
     pub fn holds_all(self) -> bool {
         self != Self::Partial
     }
-    fn profile(self) -> GrantProfile {
+    fn access(self) -> Result<Access, TodoError> {
         match self {
-            Self::Trusted => GrantProfile::Issuer,
-            Self::Full | Self::Partial => GrantProfile::Writer {
-                scopes: [LISTS, TODOS, DEVICES].map(String::from).into(),
-            },
+            Self::Trusted => Err(TodoError::NotInvitable),
+            Self::Full => Ok(Access::Full),
+            Self::Partial => Ok(Access::Role(PARTIAL)),
         }
     }
 }
@@ -52,7 +54,8 @@ pub fn parse_invitation(code: &str) -> Result<(Role, &str), Failure> {
     let (role, uri) = code
         .split_once(':')
         .and_then(|(role, uri)| Some((Role::parse(role)?, uri)))
-        .ok_or("an invitation starts with trusted:, full: or partial:")?;
+        .filter(|(role, _)| Role::INVITABLE.contains(role))
+        .ok_or("an invitation starts with full: or partial:")?;
     Ok((role, uri))
 }
 
@@ -86,7 +89,7 @@ impl Todos {
         let provisioning = self
             .database
             .session()
-            .provision(role.profile(), None)
+            .provision(role.access()?, None)
             .await?;
         Ok(format!("{role}:{}", provisioning.uri))
     }
@@ -181,15 +184,33 @@ impl Todos {
         if nodes.is_empty() {
             return Ok(());
         }
-        let nodes = nodes
-            .iter()
-            .map(|node| node.parse())
-            .collect::<Result<_, _>>()?;
-        self.database
-            .session()
-            .share_partition(list_target(list), nodes, None)
-            .await
-            .map(drop)
+        let partial: BTreeSet<String> = self
+            .members()
+            .await?
+            .into_iter()
+            .filter(|member| member.role == Role::Partial)
+            .map(|member| member.node)
+            .collect();
+        let session = self.database.session();
+        let mut full = BTreeSet::new();
+        for node in nodes {
+            let key = node.parse()?;
+            if partial.contains(node) {
+                let identity = session
+                    .identity_for_node(key)
+                    .await?
+                    .ok_or("the node is not linked to a recorded identity")?;
+                session.grant_partition(identity, list_target(list)).await?;
+            } else {
+                full.insert(key);
+            }
+        }
+        if !full.is_empty() {
+            session
+                .share_partition(list_target(list), full, None)
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn share_with_members(&self, list: RowIdentity) -> Result<(), Failure> {
@@ -207,7 +228,7 @@ impl Todos {
         self.share(list, &missing).await
     }
     pub async fn share_lists_with_members(&self) -> Result<(), Failure> {
-        if !self.role().await?.is_some_and(Role::holds_all) {
+        if self.role().await? != Some(Role::Trusted) {
             return Ok(());
         }
         for list in self.lists().await? {

@@ -3,7 +3,7 @@ use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-const BINDING_VERSION: u8 = 4;
+const BINDING_VERSION: u8 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,29 +16,19 @@ pub struct AuthorBinding {
     issues: bool,
     attestation: Attestation,
 }
-const LABEL: &str = "rocky.credentials.author-binding.v4";
+const LABEL: &str = "rocky.credentials.author-binding.v5";
+fn whole_binding() -> Commitment {
+    rocky_core::commitment("rocky.author-binding.whole.v1", &[])
+}
 impl AuthorBinding {
     pub(crate) fn sign(capability: &Capability, signer: &Signer<'_>) -> Result<Self, Error> {
         let extended = capability.extended()?;
         let tables = capability
             .grants
             .iter()
-            .map(|grant| {
-                crate::families::binding_table(
-                    grant.scope.table,
-                    extended.families,
-                    &grant.rows,
-                    &grant.fields,
-                )
-            })
-            .chain(extended.partitions.iter().map(|grant| {
-                crate::families::binding_table(
-                    grant.table,
-                    extended.families,
-                    &grant.rows,
-                    &grant.fields,
-                )
-            }))
+            .map(|grant| grant.scope.table)
+            .chain(extended.partitions.iter().map(|grant| grant.table))
+            .chain(extended.whole.map(|_| whole_binding()))
             .collect();
         let issuer = signer.principal()?;
         let bytes = Self::body(
@@ -70,6 +60,10 @@ impl AuthorBinding {
             &(BINDING_VERSION, issuer, subject, kind, tables, issues),
         )
     }
+    fn authorizes(&self, table: Commitment, tables: &crate::WholeTables) -> bool {
+        self.tables.contains(&table)
+            || (self.tables.contains(&whole_binding()) && tables.covers(table))
+    }
     fn bytes(&self) -> Result<Vec<u8>, Error> {
         Self::body(
             self.issuer,
@@ -97,21 +91,7 @@ impl AuthorBinding {
         publisher: PublicKey,
         table: Commitment,
         signer: PublicKey,
-    ) -> Result<(), Error> {
-        Self::verify_chain_with_families(
-            chain,
-            publisher,
-            table,
-            signer,
-            &crate::GrantFamilies::default(),
-        )
-    }
-    pub fn verify_chain_with_families(
-        chain: &[Self],
-        publisher: PublicKey,
-        table: Commitment,
-        signer: PublicKey,
-        families: &crate::GrantFamilies,
+        tables: &crate::WholeTables,
     ) -> Result<(), Error> {
         if chain.is_empty() || chain.len() > crate::MAX_CREDENTIAL_DEPTH {
             return Err(denied("author binding chain quota"));
@@ -122,7 +102,7 @@ impl AuthorBinding {
             if binding.version != BINDING_VERSION
                 || binding.issuer != issuer
                 || (binding.kind != PrincipalKind::Node
-                    && !(binding.issues || families.authorizes_binding(&binding.tables, table)))
+                    && !(binding.issues || binding.authorizes(table, tables)))
                 || (binding.issues
                     && (binding.kind != PrincipalKind::User || !parent_hands_on_issuance))
                 || binding

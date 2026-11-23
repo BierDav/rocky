@@ -248,15 +248,15 @@ impl OpenConfig {
             ..self
         }
     }
-    fn families(
+    fn whole_tables(
         &self,
         manifest: &rocky_core::ApplicationManifest,
-    ) -> Result<rocky_credentials::GrantFamilies, Error> {
+    ) -> Result<rocky_credentials::WholeTables, Error> {
         match &self.table_scopes {
             Some(scopes) => {
-                rocky_credentials::GrantFamilies::new(manifest, scopes).map_err(credential)
+                rocky_credentials::WholeTables::new(manifest, scopes).map_err(credential)
             }
-            None => config_families(&self.security, manifest),
+            None => config_tables(&self.security, manifest),
         }
     }
 }
@@ -398,7 +398,7 @@ pub(super) struct Inner<A> {
     pub(super) chain: Chain,
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
     crypto: Arc<crypto::Cache>,
-    families: rocky_credentials::GrantFamilies,
+    whole_tables: rocky_credentials::WholeTables,
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
     tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
     applied_heads: std::sync::Mutex<AppliedHeads>,
@@ -874,10 +874,10 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn config_families(
+fn config_tables(
     config: &SecureConfig,
     manifest: &rocky_core::ApplicationManifest,
-) -> Result<rocky_credentials::GrantFamilies, Error> {
+) -> Result<rocky_credentials::WholeTables, Error> {
     let unpartitioned: BTreeSet<_> = manifest
         .entities
         .iter()
@@ -903,13 +903,13 @@ fn config_families(
                 .filter(|scope| unpartitioned.contains(&scope.table)),
         )
         .collect();
-    rocky_credentials::GrantFamilies::new(manifest, &scopes.into_iter().collect::<Vec<_>>())
+    rocky_credentials::WholeTables::new(manifest, &scopes.into_iter().collect::<Vec<_>>())
         .map_err(credential)
 }
-fn check_config_with_families(
+fn check_config(
     config: &SecureConfig,
     manifest: &rocky_core::ApplicationManifest,
-    families: &rocky_credentials::GrantFamilies,
+    whole_tables: &rocky_credentials::WholeTables,
 ) -> Result<(), Error> {
     if config
         .credentials
@@ -932,7 +932,7 @@ fn check_config_with_families(
         .map_err(credential)?;
     let (grants, selectors) = config
         .credentials
-        .verified_with_families(config.publisher, &config.revocations, now()?, families)
+        .verified(config.publisher, &config.revocations, now()?, whole_tables)
         .map_err(credential)?
         .selectors(config.node.public_key(), &config.revocations, now()?)
         .map_err(credential)?;
@@ -991,7 +991,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         bootstrap: Option<(rocky_credentials::TipGraph, Option<String>)>,
     ) -> Result<Self, Error> {
         let manifest = app.manifest();
-        let families = config.families(&manifest)?;
+        let whole_tables = config.whole_tables(&manifest)?;
         let lease_clock = config.lease_clock;
         let page_cache = config.page_cache;
         let mut config = config.security;
@@ -1011,7 +1011,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .link(certificate.clone())
                 .map_err(credential)?;
         }
-        check_config_with_families(&config, &manifest, &families)?;
+        check_config(&config, &manifest, &whole_tables)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
         config.keys = current;
         let wal_index = rocky_storage::database::WalIndex::hold(path.as_ref())?;
@@ -1081,7 +1081,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             finalization_time: Default::default(),
             node_author: Some(identity::NodeAuthor::new(&config)?),
-            families,
+            whole_tables,
             config,
             credential_signer: None,
             partitions: BTreeMap::new(),
@@ -1253,11 +1253,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let (grants, selectors) = inner
                     .config
                     .credentials
-                    .verified_with_families(
+                    .verified(
                         inner.config.publisher,
                         &inner.config.revocations,
                         now()?,
-                        inner.grant_families(),
+                        inner.whole_tables(),
                     )
                     .map_err(credential)?
                     .selectors(
@@ -1266,11 +1266,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         now()?,
                     )
                     .map_err(credential)?;
+                let credential_domain = inner
+                    .config
+                    .credentials
+                    .database_context(inner.config.publisher)
+                    .map_err(credential)?
+                    .scope;
                 let scopes: BTreeSet<_> = grants
                     .iter()
                     .map(|grant| grant.scope.domain)
                     .chain(selectors.iter().map(|grant| grant.domain))
                     .chain(inner.config.keys.iter().map(|key| key.scope.domain))
+                    .chain([credential_domain])
                     .collect();
                 if inner.definition.domains.iter().any(|rule| {
                     !scopes.iter().any(|scope| {
@@ -2013,11 +2020,11 @@ impl<A: RowApplication> Inner<A> {
         let (_, selectors) = self
             .config
             .credentials
-            .verified_with_families(
+            .verified(
                 self.config.publisher,
                 &self.config.revocations,
                 time,
-                self.grant_families(),
+                self.whole_tables(),
             )
             .map_err(credential)?
             .selectors(

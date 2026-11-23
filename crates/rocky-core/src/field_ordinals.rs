@@ -70,6 +70,7 @@ mod tests {
             entities: Vec::new(),
             fields: Vec::new(),
             operations: Vec::new(),
+            roles: Vec::new(),
             domains: vec![DomainRule {
                 domain: DomainId([8; 16]),
                 author_log: AuthorLogScope::Domain,

@@ -25,10 +25,8 @@ async fn background(node: &Node) -> Result<Value, Failure> {
         .await?;
     Ok(serde_json::to_value(report)?)
 }
-fn writer() -> Profile {
-    Profile::Writer {
-        scopes: ["items".into()].into(),
-    }
+fn writer() -> crate::Access {
+    crate::Access::Full
 }
 
 #[tokio::test]
@@ -460,14 +458,14 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
 async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
-        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#)?;
+        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#)?;
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
-        let reader = Profile::Reader { scopes: ["items".into()].into() };
+        let reader = crate::Access::Read;
         let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, reader.clone())), &schema).await?;
         let c = enrolled_schema(&root.path().join("c"), &hub, "c", Some((&a, reader)), &schema).await?;
-        let d = enrolled_schema(&root.path().join("d"), &hub, "d", Some((&a, Profile::Custody { scopes: ["items".into()].into() })), &schema).await?;
+        let d = enrolled_schema(&root.path().join("d"), &hub, "d", Some((&a, crate::Access::Store)), &schema).await?;
         let target = crate::PartitionTarget::Table { table: "items".into(), values: vec![SqlValue::Text("only-custody".into())] };
         let created = a.create_partition(&target).await?;
         let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();

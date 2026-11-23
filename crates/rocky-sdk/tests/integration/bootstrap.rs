@@ -224,8 +224,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     let member_path = root.path().join("member");
     let member = Device::join(
         &member_path,
-        &a.invite_as(json!({"kind": "reader", "scopes": ["items"]}))
-            .await,
+        &a.invite_as(rocky_sdk::Access::Read).await,
         Network::Owned(hub.connector("member")),
     )?;
     member
@@ -642,7 +641,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let schema = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
     let a_path = root.path().join("a");
     let a = Device::new(Database::create(
         Open {
@@ -682,9 +681,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     });
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["items", "notes"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let member = Device::new(Database::join(
         Open {
             identity: None,
@@ -751,7 +748,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     use rocky_sdk::{Database, Open};
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let schema = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
     let a_path = root.path().join("a");
     let a = Device::new(Database::create(
         Open {
@@ -764,9 +761,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         None,
     )?)?;
     a.add(1, "base").await;
-    let invitation = a
-        .invite_as(json!({"kind": "reader", "scopes": ["notes"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Read).await;
     let c = Device::new(Database::join(
         Open {
             identity: None,
@@ -783,9 +778,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     c.close().await;
 
     let path = root.path().join("member");
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["items", "notes"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let member = Device::new(Database::join(
         Open {
             identity: None,

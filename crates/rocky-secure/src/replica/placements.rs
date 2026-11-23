@@ -125,11 +125,11 @@ impl<A: RowApplication> Inner<A> {
             )
             .map_err(credential)?;
         let (grants, selectors) = credentials
-            .verified_with_families(
+            .verified(
                 self.config.publisher,
                 &self.config.revocations,
                 time,
-                self.grant_families(),
+                self.whole_tables(),
             )
             .map_err(credential)?
             .selectors(peer, &self.config.revocations, time)

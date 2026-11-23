@@ -1,9 +1,9 @@
 use super::*;
 use crate::support::snapshot as snap;
 
-const ITEMS: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+const ITEMS: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"items","select":"SELECT 'copy-' || key AS key, 1 AS completed, title FROM items"}]}]}"#;
@@ -88,16 +88,16 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
 
 const LISTS: usize = 128;
 const FEW_LISTS: usize = 17;
-const LISTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+const LISTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
 const LISTED_SEED: &str = r#"{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('l%03d', i % LISTS) AS list, printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}"#;
-const LISTED_SEEDED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+const LISTED_SEEDED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED]}"#;
-const LISTED_TAGGED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
+const LISTED_TAGGED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED]}"#;
-const LISTED_FILLED: &str = r#"{"application":"shopping","version":4,"format":6,"tables":[
+const LISTED_FILLED: &str = r#"{"application":"shopping","version":4,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED,{"version":4,"statements":["UPDATE items SET position = title"]}]}"#;
 
@@ -160,7 +160,7 @@ impl Listed {
                         values: (list(index)).clone(),
                     },
                     serde_json::from_value::<
-                        std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                        std::collections::BTreeSet<rocky_credentials::PublicKey>,
                     >(json!([node]))
                     .expect("typed fixture"),
                     None,

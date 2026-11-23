@@ -28,7 +28,7 @@ impl Node {
         }
         Membership::replicated(&known, settings.database_context()?)
     }
-    async fn see(&self, identity: PublicKey, node: PublicKey) -> Result<(), Failure> {
+    pub(super) async fn see(&self, identity: PublicKey, node: PublicKey) -> Result<(), Failure> {
         let time = now()?;
         self.configure(|settings| {
             if let Some(issuing) = settings.authority.as_mut() {
@@ -109,64 +109,6 @@ impl Node {
         Ok(reply)
     }
 
-    pub(super) async fn answer_grant(
-        &self,
-        device: crate::NodeKeys,
-        issued: (Profile, Terms),
-        delegate: bool,
-        contact: Option<String>,
-    ) -> Result<crate::Supplied, Failure> {
-        let issuer = self.settings.lock().await.issuer();
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let (supplied, changes) = if delegate {
-            self.configure(|settings| {
-                settings.delegate(&self.vault, device, issued, issuer.then_some(&registry))
-            })
-            .await?
-        } else {
-            self.configure(|settings| {
-                settings.grant(&self.vault, device, issued, contact, &registry)
-            })
-            .await?
-        };
-        if issuer {
-            self.commit(changes).await?;
-            self.see(device.identity, device.node).await?;
-        }
-        Ok(supplied)
-    }
-    pub(super) async fn record_holder(
-        &self,
-        device: &crate::NodeKeys,
-        grants: &[rocky_credentials::PartitionGrant],
-        delegations: u8,
-        chain: &CredentialChain,
-    ) -> Result<(), Failure> {
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let mut changes = self
-            .settings
-            .lock()
-            .await
-            .holder_changes(device, grants, delegations, &registry)
-            .map_err(|error| {
-                if error.is::<registry::RegistryFull>() {
-                    error
-                } else {
-                    refused(error)
-                }
-            })?;
-        let leaf = chain.0.last().ok_or("missing partition credential")?;
-        changes.capability(
-            &device.identity,
-            registry::Capability {
-                id: leaf.id()?,
-                expires: chain.expires(),
-            },
-            registry.get(&device.identity),
-        )?;
-        self.commit(changes).await?;
-        self.see(device.identity, device.node).await
-    }
     pub(super) async fn record_revocation(&self, identity: PublicKey) -> Result<(), Failure> {
         let mut changes = Changes::default();
         changes.revoked(&identity)?;
@@ -235,7 +177,7 @@ impl Node {
                     single_use: admitted.single_use,
                     own: *identity == settings.identity,
                     revoked: settings.revoked_identity(identity, &registry),
-                    profile: record.profile().cloned(),
+                    access: record.access().cloned(),
                     capability: capability.map(|capability| capability.id),
                     expires: capability.map(|capability| capability.expires),
                     label: record.label.clone(),

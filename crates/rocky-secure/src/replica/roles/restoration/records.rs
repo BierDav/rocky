@@ -57,12 +57,12 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .map(|link| link.author_binding.clone())
                 .collect();
-            rocky_credentials::AuthorBinding::verify_chain_with_families(
+            rocky_credentials::AuthorBinding::verify_chain(
                 &bindings,
                 self.config.publisher,
                 scope.table,
                 node,
-                self.families_at(self.manifest_of_tip(header.extensions.tip)?)?
+                self.whole_tables_at(self.manifest_of_tip(header.extensions.tip)?)?
                     .as_ref(),
             )
             .map_err(credential)?;

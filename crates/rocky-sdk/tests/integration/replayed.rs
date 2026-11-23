@@ -3,12 +3,11 @@ use rocky_sdk::{
     Database, DropReason, Network, Open, SqlValue, TransactionOutcome, TransactionToken,
     transport::memory::Hub,
 };
-use serde_json::json;
 use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"counters","version":1,"format":6,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"counters","version":1,"format":7,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
@@ -64,9 +63,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(Database::join(
         open(&root.path().join("b"), &hub, "b"),
         &invitation,
@@ -141,9 +138,7 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
     )?)?;
     create(&a.database, "c", 0).await?;
     raise(&a.database, "c").await?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(Database::join(
         open(&root.path().join("b"), &hub, "b"),
         &invitation,
@@ -171,9 +166,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let directory = root.path().join("b");
     let b = Device::new(Database::join(open(&directory, &hub, "b"), &invitation)?)?;
     b.sync().await.map_err(|error| error.to_string())?;
@@ -224,9 +217,7 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(Database::join(
         open(&root.path().join("b"), &hub, "b"),
         &invitation,

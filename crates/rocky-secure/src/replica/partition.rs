@@ -313,11 +313,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(|error| denied(&error.to_string()))?;
         let grants = author
             .credentials
-            .verified_with_families(
+            .verified(
                 inner.config.publisher,
                 &inner.config.revocations,
                 now()?,
-                inner.grant_families(),
+                inner.whole_tables(),
             )
             .map_err(credential)?
             .partition_author(
@@ -438,11 +438,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .config
             .credentials
-            .verified_with_families(
+            .verified(
                 inner.config.publisher,
                 &inner.config.revocations,
                 now()?,
-                inner.grant_families(),
+                inner.whole_tables(),
             )
             .map_err(credential)?
             .partition(
@@ -743,11 +743,11 @@ impl<A: RowApplication> Inner<A> {
         tuple: &PartitionTuple,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         chain
-            .verified_with_families(
+            .verified(
                 self.config.publisher,
                 &self.config.revocations,
                 now()?,
-                self.grant_families(),
+                self.whole_tables(),
             )
             .map_err(credential)?
             .partition(key, scope, tuple, &self.config.revocations, now()?)
@@ -764,11 +764,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Vec<PartitionOffer>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Ok((_, selectors)) = credentials
-            .verified_with_families(
+            .verified(
                 inner.config.publisher,
                 &inner.config.revocations,
                 now()?,
-                inner.grant_families(),
+                inner.whole_tables(),
             )
             .map_err(credential)?
             .selectors(peer, &inner.config.revocations, now()?)

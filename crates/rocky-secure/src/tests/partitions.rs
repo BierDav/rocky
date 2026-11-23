@@ -27,7 +27,7 @@ impl Fixture {
         Self::build_class(constrained, publisher, "replayed")
     }
     fn build_class(constrained: bool, publisher: PrivateKey, class: &str) -> Self {
-        let mut definition = serde_json::json!({"format":6,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let mut definition = serde_json::json!({"format":7,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         if constrained {
             definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
             definition["tables"][0]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true}]);
@@ -133,11 +133,13 @@ impl Fixture {
         let user = crate::tests::identity_of(&node);
         let time = crate::tests::lifetime().0 + rocky_credentials::DAY;
         let root = Authority::owner(&self.publisher)
-            .issue_partition_terms(
+            .issue_person(
                 user.public_key(),
-                vec![],
-                vec![grant.clone()],
-                rocky_credentials::DelegationTerms { delegations: 1 },
+                rocky_credentials::Granted {
+                    grants: vec![],
+                    partitions: vec![grant.clone()],
+                    ..Default::default()
+                },
                 rocky_credentials::Validity {
                     issued_at: time,
                     lifetime: std::time::Duration::from_secs(rocky_credentials::DAY),

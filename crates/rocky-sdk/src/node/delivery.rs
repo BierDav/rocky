@@ -99,11 +99,11 @@ impl Node {
             return false;
         };
         chain
-            .verified_with_families(
+            .verified(
                 settings.publisher,
                 &settings.revocations,
                 time,
-                &self.domain().families,
+                &self.domain().whole_tables,
             )
             .and_then(|verified| verified.selectors(node, &settings.revocations, time))
             .is_ok_and(|(grants, partitions)| {
@@ -292,6 +292,9 @@ impl Node {
                 Some(rocky_secure::Holding::Left) | None => full && !first_epoch,
             });
         let bootstrap = !held && (contents.reason == Reason::Share || first_epoch);
+        if self.awaits_partition_grant(&partition).await {
+            let _ = Box::pin(self.renew(None, true, Some(envelope.issuer()), false)).await;
+        }
         let installed = self
             .install_envelope(
                 partition.clone(),
@@ -317,6 +320,23 @@ impl Node {
         }
         self.wake_sync();
         Ok(())
+    }
+    async fn awaits_partition_grant(&self, partition: &GroupPartition) -> bool {
+        let settings = self.settings.lock().await;
+        let crate::Access::Role(role) = &settings.access else {
+            return false;
+        };
+        self.domain()
+            .logical()
+            .role(role.as_str())
+            .is_some_and(|role| {
+                role.per_partition.contains(&partition.record.group)
+                    && partition
+                        .members
+                        .iter()
+                        .all(|member| role.tables.iter().any(|entry| entry.table == member.table))
+            })
+            && self.reads_group(&settings, partition).is_err()
     }
     async fn deposit(
         &self,

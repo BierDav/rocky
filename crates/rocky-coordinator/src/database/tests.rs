@@ -4,10 +4,10 @@ use crate::{
     counters::Lookup,
 };
 use p2panda_core::PrivateKey;
-use rocky_sdk::{GrantProfile, Open, Opened, RootKey, Schema, SqlValue};
-use std::{collections::BTreeSet, path::Path};
+use rocky_sdk::{Access, Open, Opened, RootKey, Schema, SqlValue};
+use std::path::Path;
 
-const SCHEMA: &str = r#"{"application":"billing","version":1,"format":6,"tables":[{"name":"invoices","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"number","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"billing","version":1,"format":7,"tables":[{"name":"invoices","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"number","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn schema() -> &'static Schema {
     static PARSED: std::sync::LazyLock<Schema> =
@@ -22,9 +22,6 @@ fn open(directory: &Path) -> Open<'_> {
         identity: None,
         network: None,
     }
-}
-fn scopes() -> BTreeSet<String> {
-    ["invoices".to_owned()].into()
 }
 fn invoices() -> Name {
     Name::new("invoices").unwrap()
@@ -56,18 +53,17 @@ impl Office {
             .unwrap()
             .database
     }
-    async fn person(&self, name: &str, profile: GrantProfile) -> Arc<Database> {
+    async fn person(&self, name: &str, access: Access) -> Arc<Database> {
         let invitation = self
             .publisher
             .session()
-            .provision(profile, None)
+            .provision(access, None)
             .await
             .unwrap();
         self.join(name, &invitation.uri)
     }
     async fn writer(&self, name: &str) -> Arc<Database> {
-        self.person(name, GrantProfile::Writer { scopes: scopes() })
-            .await
+        self.person(name, Access::Full).await
     }
     fn counters(&self, database: &Database) -> Counters {
         let client = self
@@ -147,9 +143,7 @@ async fn an_unreachable_coordinator_gives_a_typed_error_and_takes_no_number() {
 async fn a_removed_person_or_a_reader_never_claims() {
     let office = Office::open().await;
     let writer = office.writer("writer").await;
-    let reader = office
-        .person("reader", GrantProfile::Reader { scopes: scopes() })
-        .await;
+    let reader = office.person("reader", Access::Read).await;
     let (publisher, writing, reading) = (
         office.counters(&office.publisher),
         office.counters(&writer),

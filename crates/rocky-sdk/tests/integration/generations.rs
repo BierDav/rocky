@@ -5,14 +5,14 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SECOND: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const GRANTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
-const NULLABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const BARE: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}]}"#;
-const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
-const THIRD: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SECOND: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const GRANTED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const REQUIRED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
+const NULLABLE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const BARE: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}]}"#;
+const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
+const THIRD: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn reopen(options: Open<'_>) -> Result<Device, Failure> {
     let signer = common::external_identity(options.directory);
@@ -208,14 +208,13 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), Failure> {
+async fn a_table_added_later_reaches_existing_full_members() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    let raw_grants_naming_items_alone = json!({"kind": "grants", "grants": [{"scope": "items", "rights": ["read", "insert", "update", "delete"]}]});
-    let invitation = a.invite_as(raw_grants_naming_items_alone).await;
+    let invitation = a.invite().await;
     let b = Device::join(&b_dir, &invitation, Network::Owned(hub.connector("b")))?;
     introduce(&a, &b).await;
     b.close().await;
@@ -223,12 +222,10 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
 
     let a = reopen(open(&a_dir, GRANTED, network("a")))?;
     let b = reopen(open(&b_dir, GRANTED, network("b")))?;
-    let before = chain(&b_dir)?;
     b.sync().await.expect("sync");
-    assert_ne!(
-        chain(&b_dir)?,
-        before,
-        "the sync after adopting asks the issuer for the grant of the table that follows `items`"
+    assert!(
+        common::authority_json(&b_dir, "identity")?["keys"]["tags"].is_array(),
+        "full access covers a table added later"
     );
     snap::ok(snap::mutate(
         &b.database,
@@ -250,17 +247,6 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
     b.close().await;
     a.close().await;
 
-    let ungranted = GRANTED
-        .replace(r#""version":2"#, r#""version":3"#)
-        .replace(r#""granted_like":"items","#, "");
-    let error = Database::open(open(&a_dir, &ungranted, network("a")))
-        .err()
-        .expect("refused")
-        .to_string();
-    assert!(
-        error.contains("changed whom it is granted like"),
-        "changing whom a table is granted like would change what earlier grants mean: {error}"
-    );
     let a = reopen(open(&a_dir, GRANTED, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     a.close().await;
@@ -512,8 +498,8 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     Ok(())
 }
 
-const RETYPED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
-const RENAMED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const RETYPED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const RENAMED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Failure> {
@@ -592,7 +578,7 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     Ok(())
 }
 
-const NOTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const NOTED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
     for name in ["rocky.sqlite", "rocky.sqlite-wal", "rocky.sqlite-shm"] {
         let _ = std::fs::remove_file(to.join(name));
@@ -791,11 +777,6 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     Ok(())
 }
 
-fn chain(directory: &Path) -> Result<Value, Failure> {
-    let identity = common::authority_json(directory, "identity")?;
-    Ok(identity["credentials"].clone())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_reachable()
 -> Result<(), Failure> {
@@ -810,9 +791,10 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     let a = Device::create(&a_dir, network("a"))?;
     let b = Device::join(
         &b_dir,
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
         Network::Owned(hub.connector("b")),
     )?;
+    a.admit(&b).await;
     let c = Device::join(
         &c_dir,
         &a.invite().await,
@@ -918,8 +900,9 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     let a = Device::create(&a_dir, network("a"))?;
     let b = Device::new(Database::join(
         open(&b_dir, SCHEMA, network("b")),
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
+    a.admit(&b).await;
     introduce(&a, &b).await;
     b.add(1, "apples").await;
     b.sync().await.expect("sync");
@@ -956,7 +939,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     assert_eq!(
         tip(&a).await,
         tip(&b).await,
-        "the owner's seal wins: both devices end on its tip"
+        "equally trusted issuers end on the one tip the seal order picks"
     );
     let inspected = snap::ok(b.session.inspect_tips()).await;
     let losers = inspected["bookmarks"][0]["losers"]
@@ -968,18 +951,34 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
         losers[0]["name"], "main/1",
         "the losing issuer's tip stays a branch"
     );
+    let survivor = rows(&a, "SELECT label FROM tags ORDER BY label").await;
+    assert!(
+        [
+            json!([[snap::cell(text("fruit"))]]),
+            json!([[snap::cell(text("dairy"))]])
+        ]
+        .contains(&survivor),
+        "an unsent write on the losing tip goes with it: an intent has no rows to re-author: {survivor}"
+    );
+    let a_won = survivor == json!([[snap::cell(text("fruit"))]]);
+    let titles: &[&str] = if a_won {
+        &["apples", "bread"]
+    } else {
+        &["apples"]
+    };
     for device in [&a, &b] {
         assert_eq!(
             rows(device, "SELECT label FROM tags ORDER BY label").await,
-            json!([[snap::cell(text("fruit"))]]),
-            "an unsent write on the losing tip goes with it: an intent has no rows to re-author"
+            survivor
         );
-        assert_eq!(device.titles().await, ["apples", "bread"]);
+        assert_eq!(device.titles().await, titles);
         let status = generation(device).await;
         assert_eq!(status["manifest"], left["manifest"]);
         assert_eq!(status["current"]["schema"], 2);
     }
-    assert_eq!(snap::ok(b.session.held_changes()).await["count"], 0);
+    for device in [&a, &b] {
+        assert_eq!(snap::ok(device.session.held_changes()).await["count"], 0);
+    }
     assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     b.close().await;
     a.close().await;
@@ -1071,10 +1070,10 @@ async fn a_compacted_node_publishes_a_migration_adding_a_field() -> Result<(), F
     Ok(())
 }
 
-const RIVAL: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const RIVAL: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Result<(), Failure> {
+async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -1082,8 +1081,9 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     let a = Device::create(&a_dir, network("a"))?;
     let b = Device::new(Database::join(
         open(&b_dir, SCHEMA, network("b")),
-        &a.invite_as(json!({"kind": "issuer"})).await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
+    a.admit(&b).await;
     introduce(&a, &b).await;
     b.add(1, "apples").await;
     b.sync().await.expect("sync");
@@ -1091,8 +1091,11 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     b.close().await;
     let a = reopen(open(&a_dir, SECOND, None))?;
     let b = reopen(open(&b_dir, RIVAL, None))?;
-    let winner = generation(&a).await["manifest"].clone();
-    assert_ne!(winner, generation(&b).await["manifest"]);
+    let published = [
+        generation(&a).await["manifest"].clone(),
+        generation(&b).await["manifest"].clone(),
+    ];
+    assert_ne!(published[0], published[1]);
     a.close().await;
     b.close().await;
     let a = reopen(open(&a_dir, SECOND, network("a")))?;
@@ -1106,21 +1109,25 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     assert_eq!(
         tip(&a).await,
         tip(&b).await,
-        "the owner's tip wins: {status}"
+        "equally trusted issuers end on one tip: {status}"
     );
     assert_eq!(
-        status["manifest"], winner,
-        "the losing issuer's database follows the owner's schema: {status}"
+        status["manifest"],
+        generation(&a).await["manifest"],
+        "the losing issuer's database follows the winner's schema: {status}"
     );
-    assert_eq!(status["pending"], Value::Null, "{status}");
+    assert!(published.contains(&status["manifest"]), "{status}");
+    for device in [&a, &b] {
+        assert_eq!(generation(device).await["pending"], Value::Null);
+    }
     assert_eq!(b.titles().await, ["apples"]);
     b.close().await;
     a.close().await;
     Ok(())
 }
 
-const LINKABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-const LINKED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+const LINKABLE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+const LINKED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {

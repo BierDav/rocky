@@ -17,7 +17,7 @@ impl Node {
     pub(super) async fn invite(
         &self,
         identity: PublicKey,
-        profile: Profile,
+        access: crate::Access,
         terms: crate::InviteTerms,
     ) -> Result<crate::Invitation, Failure> {
         let routes = self.own_routes().await;
@@ -33,7 +33,7 @@ impl Node {
                 .invite(
                     (&self.vault, routes),
                     &mut book,
-                    (identity, profile.clone(), &terms),
+                    (identity, access.clone(), &terms),
                     &registry,
                     time,
                 )
@@ -46,14 +46,14 @@ impl Node {
         let sequence = self.activity.record(crate::ActivityKind::IdentityInvited {
             invitation: issued.id,
             identity,
-            profile: profile.clone(),
+            access: access.clone(),
             expires: issued.expires,
         });
         Ok(crate::Invitation {
             uri: issued.uri,
             id: issued.id,
             identity,
-            profile,
+            access,
             expires: issued.expires,
             sequence,
         })

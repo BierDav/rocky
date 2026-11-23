@@ -186,6 +186,7 @@ impl Node {
         settings.commit(Shared::new(draft), &self.replica).await?;
         self.apply(&mut settings, Vec::new()).await?;
         drop(settings);
+        let _ = Box::pin(self.renew(None, true, None, true)).await;
         self.observations.touch();
         self.wake_sync();
         Ok(())
@@ -210,6 +211,13 @@ impl Node {
                 }
             })?;
         crate::registry::write(&self.replica, self.domain().registry(), &changes).await?;
+        let nodes = self.identity_nodes(identity).await?;
+        let mut settings = self.settings.lock().await;
+        let mut draft = (**settings).clone();
+        if draft.regard_as_issuers(&nodes) {
+            settings.commit(Shared::new(draft), &self.replica).await?;
+        }
+        drop(settings);
         self.observations.touch();
         self.wake_sync();
         Ok(crate::TrustGrant {

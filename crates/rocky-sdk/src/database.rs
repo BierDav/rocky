@@ -2,7 +2,7 @@ use crate::{
     Failure,
     bootstrap_intent::BootstrapIntentFile,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
-    enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
+    enrollment::{DEFAULT_TTL, Settings, now},
     node::{self, Node},
     pause,
     schema::Schema,
@@ -56,10 +56,6 @@ pub struct Opened {
     pub identity: Option<String>,
 }
 
-#[cfg_attr(
-    target_family = "wasm",
-    expect(dead_code, reason = "blocking installation variants are native only")
-)]
 pub(crate) enum Install {
     Create {
         ttl: u64,
@@ -70,7 +66,6 @@ pub(crate) enum Install {
         single_use: bool,
         phrase: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     },
-    Supplied(Box<Supplied>),
     Identity {
         contact: String,
         confirmed: Option<Arc<crate::AwaitingLink>>,
@@ -88,10 +83,7 @@ impl Install {
         )
     }
     fn unwinds_on_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::Create { .. } | Self::Join { .. } | Self::Supplied(_)
-        )
+        matches!(self, Self::Create { .. } | Self::Join { .. })
     }
     fn discards_secrets(&self) -> bool {
         matches!(self, Self::Create { .. } | Self::Join { .. })
@@ -350,9 +342,6 @@ impl Database {
     pub fn accept_invitation(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
         Self::start(open.into(), Self::invited_install(invitation))
     }
-    pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
-        Self::start(open.into(), Install::Supplied(Box::new(supplied)))
-    }
     pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::start(open.into(), Install::Installed)
     }
@@ -417,20 +406,6 @@ impl Database {
             },
             phrase,
         )
-    }
-    pub fn node_keys_of(
-        directory: &Path,
-        secrets: Option<Arc<dyn SecretStore>>,
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<NodeKeys, Failure> {
-        rocky_platform::fs::create_dir_all(directory)?;
-        let path = directory.join(crate::enrollment::REPLICA_FILE);
-        if Settings::exists(&path)? {
-            return Err("a domain exists in this directory: open it instead".into());
-        }
-        let secrets =
-            secrets.unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets"))));
-        Settings::prepare_install(&path, &secrets, identity)
     }
     async fn launch(
         open: Opening<'_>,
@@ -552,8 +527,7 @@ impl Database {
                 return Err("accepting an invitation needs the invited identity's provider".into());
             }
         }
-        if open.schema.is_none() && matches!(install, Install::Create { .. } | Install::Supplied(_))
-        {
+        if open.schema.is_none() && matches!(install, Install::Create { .. }) {
             return Err(crate::StoreOnlyRefusal::NeedsSchema.into());
         }
         let setup = Setup {
@@ -1211,18 +1185,6 @@ async fn identity(
                 }
             }
         }
-        Install::Supplied(supplied) => {
-            let schema = schema
-                .as_ref()
-                .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
-            let settings =
-                Settings::install(path, schema, secrets, supplied, setup.identity.clone()).await?;
-            let Some(network) = network else {
-                return Ok((settings, None));
-            };
-            let key = Settings::route_secret(&settings.vault(secrets))?;
-            Ok((settings, Some(network.start(false, key).await?)))
-        }
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             if settings.logged_out {
@@ -1592,8 +1554,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
                 settings
-                    .config(&vault, &domain)?
-                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect())
+                    .open_config(&vault, &domain)?
                     .with_page_cache(setup.page_cache),
                 bootstrap.graph.clone(),
                 bootstrap.followed.clone(),
@@ -1604,8 +1565,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
                 settings
-                    .config(&vault, &domain)?
-                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect())
+                    .open_config(&vault, &domain)?
                     .with_page_cache(setup.page_cache),
             )
             .await?
@@ -1693,9 +1653,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         drain_migration_work(&replica, node.domain().scope).await?;
         fault::check(&directory, fault::Stage::Started)?;
-        if matches!(setup.install, Install::Supplied(_)) {
-            rocky_platform::fs::remove_file(crate::enrollment::Intent::path(&path, true))?;
-        }
         Ok::<_, Failure>(())
     }
     .await;
@@ -2174,7 +2131,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     fn held_schema() -> &'static Schema {
         static PARSED: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(|| {
-            Schema::parse(r#"{"application":"held","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
+            Schema::parse(r#"{"application":"held","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
         });
         &PARSED
     }
@@ -2457,6 +2414,7 @@ mod tests {
                     .column(crate::Column::new("body", crate::Affinity::Text)),
             )
             .build()
+            .map_err(Into::into)
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -2475,53 +2433,9 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_supplied_install_failing_before_it_is_handed_out_installs_on_a_retry()
-    -> Result<(), Failure> {
-        let root = rocky_platform::fs::Scratch::new().await;
-        let schema = notes()?;
-        let issuer = crate::Configuration::new(root.path().join("issuer"), &schema)?
-            .create()
-            .await?
-            .database;
-        let directory = root.path().join("device");
-        let identity: Arc<dyn crate::IdentityProvider> = Arc::new(crate::IdentityKey::generate());
-        let device = Database::node_keys_of(&directory, None, Some(identity.clone()))?;
-        let session = issuer.session();
-        let supplied = session
-            .grant(
-                device,
-                crate::GrantProfile::Reader {
-                    scopes: ["notes".into()].into(),
-                },
-                crate::GrantTerms::default(),
-            )
-            .await?;
-        session.close().await;
-        let install = || {
-            Database::install(
-                Open {
-                    directory: &directory,
-                    schema: &schema,
-                    secrets: None,
-                    identity: Some(identity.clone()),
-                    network: None,
-                },
-                supplied.clone(),
-            )
-        };
-        stop_once_started(&directory)?;
-        let stopped = install().err().ok_or("installed past the stop")?;
-        assert!(stopped.to_string().contains("injected stop"), "{stopped}");
-        assert_eq!(installed_files(&directory), Vec::<&str>::new());
-        install()?.database.close().await?;
-        issuer.close().await
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":7,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         for format in [0, 1, 2, 3, 5] {
             let directory = rocky_platform::fs::Scratch::new().await;
@@ -2582,7 +2496,7 @@ mod tests {
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
         let schema = Schema::parse(
-            r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":7,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         let directory = rocky_platform::fs::Scratch::new().await;
         let options = || Open {
@@ -2638,7 +2552,7 @@ mod tests {
     async fn saturated_waits_cannot_block_session_shutdown() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"saturation","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let opened = Database::create(
             Open {
@@ -2683,7 +2597,7 @@ mod tests {
         use crate::{Durability, SqlFailure, SqlValue};
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"poolcheck","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"poolcheck","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let opened = Database::create(
             Open {

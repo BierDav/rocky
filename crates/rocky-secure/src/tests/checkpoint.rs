@@ -1843,24 +1843,26 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
     let node = PrivateKey::new();
     let principal = PrivateKey::new();
     let root = crate::credentials::Authority::owner(&fixture.publisher)
-        .issue_partition_terms(
+        .issue_person(
             principal.public_key(),
-            fixture.full(),
-            vec![crate::credentials::PartitionGrant {
-                domain: fixture.private.domain,
-                table: fixture.private.table,
-                selector: rocky_core::PartitionSelector(
-                    [(
-                        fixture.app().field("salary"),
-                        rocky_core::PartitionSelection::Any,
-                    )]
-                    .into(),
-                ),
-                rows: RowSelection::All,
-                rights: [Right::Read].into(),
-                fields: [fixture.app().field("salary")].into_iter().collect(),
-            }],
-            rocky_credentials::DelegationTerms { delegations: 1 },
+            rocky_credentials::Granted {
+                grants: fixture.full(),
+                partitions: vec![crate::credentials::PartitionGrant {
+                    domain: fixture.private.domain,
+                    table: fixture.private.table,
+                    selector: rocky_core::PartitionSelector(
+                        [(
+                            fixture.app().field("salary"),
+                            rocky_core::PartitionSelection::Any,
+                        )]
+                        .into(),
+                    ),
+                    rows: RowSelection::All,
+                    rights: [Right::Read].into(),
+                    fields: [fixture.app().field("salary")].into_iter().collect(),
+                }],
+                ..Default::default()
+            },
             crate::tests::validity(),
         )
         .unwrap();

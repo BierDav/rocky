@@ -11,9 +11,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let writer = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let writer = crate::Access::Full;
             let b = enrolled(
                 &root.path().join("b"),
                 &hub,
@@ -22,18 +20,16 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             )
             .await?;
             let issuer_node = PrivateKey::from_bytes(&a.vault.get("node")?);
-            let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
+            let granted = a.domain().compile(&writer, &Default::default())?;
             let issuer_links = a.settings.lock().await.issuer_links();
             let credentials = a.settings.lock().await.credentials.clone();
             let authority = Authority::issuer(&issuer_node, &credentials)?;
             let strangers = (0..64)
                 .map(|_| {
                     let (user, node) = (PrivateKey::new(), PrivateKey::new());
-                    let capability = authority.issue_partition_terms(
+                    let capability = authority.issue_person(
                         user.public_key(),
-                        grants.clone(),
-                        Vec::new(),
-                        rocky_credentials::DelegationTerms { delegations: 1 },
+                        granted.clone(),
                         rocky_credentials::Validity {
                             issued_at: now()?,
                             lifetime: std::time::Duration::from_secs(
@@ -47,7 +43,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                     Ok((node.clone(), chain.complete(&user, &node)?))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
-            let config = a.settings.lock().await.config(&a.vault, &a.domain())?;
+            let config = a.settings.lock().await.open_config(&a.vault, &a.domain())?;
             let replica = EncryptedReplica::open(
                 root.path().join("strangers.sqlite"),
                 a.domain().app.clone(),
@@ -114,9 +110,7 @@ async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), F
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let writer = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let writer = crate::Access::Full;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer))).await?;
             let route_secret = Settings::route_secret(&b.vault)?;
             let node = PrivateKey::from_bytes(&b.vault.get("node")?);
@@ -129,7 +123,7 @@ async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), F
             let replica = EncryptedReplica::open(
                 root.path().join("impostor.sqlite"),
                 b.domain().app.clone(),
-                b.settings.lock().await.config(&b.vault, &b.domain())?,
+                b.settings.lock().await.open_config(&b.vault, &b.domain())?,
             )
             .await?;
             let impostor = hub.connector("impostor").start(false, route_secret).await?;

@@ -1,7 +1,8 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{Database, credentials::CredentialChain, transport::memory::Hub};
-use serde_json::{Value, json};
+use rocky_credentials::CredentialChain;
+use rocky_sdk::{Database, transport::memory::Hub};
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::common;
@@ -16,33 +17,14 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let m = join(
-        root,
-        &hub,
-        "m",
-        &a,
-        json!({"kind":"writer","scopes":["items"]}),
-    )
-    .await?;
+    let m = join(root, &hub, "m", &a, role("item_writer")).await?;
     let (node, member) = (m.node().await, m.identity().await);
     let before = m.add(1, "before").await;
     assert!(!before.is_empty());
     sync(&m)
         .await
         .map_err(|error| format!("member before revocation: {error}"))?;
-    snap::ok(
-        a.session.grant_partitions(
-            serde_json::from_value::<rocky_sdk::NodeKeys>(json!({"node":node,"identity":member}))
-                .expect("typed fixture"),
-            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([grant(
-                &a, "L"
-            )
-            .await]))
-            .expect("typed fixture"),
-            1,
-        ),
-    )
-    .await;
+    grant(&a, &member, "L").await;
     common::introduce(&m, &b).await;
     sync(&b)
         .await
@@ -59,7 +41,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     );
     assert_eq!(epoch(&b, "L").await, json!([1, 2]));
     assert_eq!(epoch(&b, "M").await, json!([1]));
-    let set: rocky_sdk::credentials::RevocationSet =
+    let set: rocky_credentials::RevocationSet =
         serde_json::from_value(state["revocations"].clone())?;
     let statement = set.statements().next().ok_or("statement")?;
     assert_eq!(
@@ -129,14 +111,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         "an issuer never revokes an identity twice"
     );
     b.seal_and_compact().await;
-    let w = join(
-        root,
-        &hub,
-        "w",
-        &b,
-        json!({"kind":"writer","scopes":["items"]}),
-    )
-    .await?;
+    let w = join(root, &hub, "w", &b, rocky_sdk::Access::Full).await?;
     w.add(2, "after").await;
     sync(&w)
         .await
@@ -159,21 +134,13 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         "the returning enrolling issuer learns the statement and tombstone in one sync"
     );
     assert!(
-        snap::observe(
-            a.session.grant(
-                serde_json::from_value::<rocky_sdk::NodeKeys>(
-                    json!({"node":node,"identity":member})
-                )
-                .expect("typed fixture"),
-                rocky_sdk::GrantProfile::Reader {
-                    scopes: ["items".to_owned()].into_iter().collect()
-                },
-                rocky_sdk::GrantTerms {
-                    ttl: None,
-                    delegations: None,
-                }
-            )
-        )
+        snap::observe(a.session.grant_partition(
+            snap::public_key(&member),
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: values("M"),
+            }
+        ))
         .await
         .is_err()
     );
@@ -189,19 +156,8 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = common::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
-    snap::ok(
-        a.session.grant_partitions(
-            keys,
-            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([grant(
-                &a, "L"
-            )
-            .await]))
-            .expect("typed fixture"),
-            1,
-        ),
-    )
-    .await;
+    let keys = a.session.provision(role("lister"), None).await?;
+    grant(&a, &keys.identity.to_hex(), "L").await;
     sync(&b).await?;
     a.close().await;
     let before = identity(root, "b")?["keys"].clone();
@@ -215,92 +171,6 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     assert_eq!(epoch(&b, "M").await, json!([1]));
     assert_eq!(listed(&b, &keys.identity.to_hex()).await["revoked"], true);
     b.close().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its_recorded_delegator()
--> Result<(), Failure> {
-    let root = crate::support::small_directory()?;
-    let root = root.path();
-    let hub = Arc::new(Hub::default());
-    let Domain { a, b } = Domain::new(root, &hub).await?;
-    let member = common::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
-    let supplied = snap::ok(a.session.grant(
-        member,
-        rocky_sdk::GrantProfile::Reader {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        rocky_sdk::GrantTerms {
-            ttl: None,
-            delegations: Some(2),
-        },
-    ))
-    .await["supplied"]
-        .clone();
-    let m = Device::new(Database::install(
-        open(&root.join("m"), &hub, "m"),
-        serde_json::from_value(supplied)?,
-    )?)?;
-    let delegate = common::node_keys(&root.join("d"), Some(keys(&root.join("d"))))?;
-    snap::ok(m.session.delegate(
-        delegate,
-        rocky_sdk::GrantProfile::Reader {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        rocky_sdk::GrantTerms {
-            ttl: None,
-            delegations: None,
-        },
-    ))
-    .await;
-    sync(&b).await?;
-    common::introduce(&m, &b).await;
-    a.close().await;
-    assert_eq!(listed(&b, &delegate.identity.to_hex()).await, Value::Null);
-    snap::ok(
-        b.session
-            .revoke_identity(snap::public_key(&(delegate.identity.to_hex()))),
-    )
-    .await;
-    for epochs in identity(root, "b")?["keys"]
-        .as_object()
-        .ok_or("keys")?
-        .values()
-    {
-        assert_eq!(*epochs, json!([1, 2]));
-    }
-    for list in ["L", "M"] {
-        assert_eq!(epoch(&b, list).await, json!([1, 2]));
-    }
-    assert_eq!(
-        listed(&b, &member.identity.to_hex()).await["revoked"],
-        false
-    );
-    let set: rocky_sdk::credentials::RevocationSet =
-        serde_json::from_value(identity(root, "b")?["revocations"].clone())?;
-    assert!(!set.revokes(&member.node));
-    assert!(!set.revokes(&member.identity));
-    sync(&m).await?;
-    assert_eq!(identity(root, "m")?["keys"]["items"], json!([1, 2]));
-    assert!(
-        snap::observe(m.session.delegate(
-            delegate,
-            rocky_sdk::GrantProfile::Reader {
-                scopes: ["items".to_owned()].into_iter().collect()
-            },
-            rocky_sdk::GrantTerms {
-                ttl: None,
-                delegations: None,
-            }
-        ))
-        .await
-        .is_err(),
-        "a device that learned the statement never hands the new key to the revoked node"
-    );
-    for device in [&a, &b, &m] {
-        device.close().await;
-    }
     Ok(())
 }
 
@@ -347,7 +217,7 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
         json!([1]),
         "self-renewal retains only the revoked issuer's old keys"
     );
-    let set: rocky_sdk::credentials::RevocationSet =
+    let set: rocky_credentials::RevocationSet =
         serde_json::from_value(identity(root, "b")?["revocations"].clone())?;
     assert!(set.revoking(&chain)?.is_some());
     a.close().await;
@@ -362,18 +232,7 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = common::node_keys(&root.join("m"), Some(keys(&root.join("m"))))?;
-    snap::ok(a.session.grant(
-        keys,
-        rocky_sdk::GrantProfile::Custody {
-            scopes: ["items".to_owned()].into_iter().collect(),
-        },
-        rocky_sdk::GrantTerms {
-            ttl: None,
-            delegations: None,
-        },
-    ))
-    .await;
+    let keys = a.session.provision(rocky_sdk::Access::Store, None).await?;
     sync(&b).await?;
     let before_a = identity(root, "a")?["keys"].clone();
     let before_b = identity(root, "b")?["keys"].clone();

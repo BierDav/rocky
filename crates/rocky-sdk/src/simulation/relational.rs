@@ -3,7 +3,7 @@ use crate::{Database, Failure, SqlValue, TransactionToken};
 use rocky_core::{SecureStamp, replay::TransactionOutcome};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const SCHEMA: &str = r#"{"application":"relational","version":1,"format":6,
+pub(super) const SCHEMA: &str = r#"{"application":"relational","version":1,"format":7,
 "tables":[
  {"name":"boards","class":"replayed","columns":[
    {"name":"list","type":"text","not_null":true},

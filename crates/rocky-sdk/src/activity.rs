@@ -22,12 +22,12 @@ pub enum ActivityKind {
     DeviceProvisioned {
         node: PublicKey,
         identity: PublicKey,
-        profile: crate::GrantProfile,
+        access: crate::Access,
     },
     IdentityInvited {
         invitation: crate::InvitationId,
         identity: PublicKey,
-        profile: crate::GrantProfile,
+        access: crate::Access,
         expires: u64,
     },
     InvitationRedeemed {
@@ -110,7 +110,7 @@ pub enum ActivityKind {
     },
     IdentityAdmitted {
         identity: PublicKey,
-        profile: crate::GrantProfile,
+        access: crate::Access,
     },
     NodeLinked {
         identity: PublicKey,

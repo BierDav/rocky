@@ -66,7 +66,7 @@ fn referencing(
         .collect();
     let mut table = LogicalTable {
         sql_name: name.into(),
-        granted_like: None,
+        explicit_access_only: false,
         class: TableClass::Replayed,
         create_sql: String::new(),
         auto_generate: false,
@@ -345,6 +345,7 @@ impl Lineage {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         }
     }
     fn indexed(&self) -> LogicalSchema {

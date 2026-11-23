@@ -1,5 +1,5 @@
 use super::*;
-use rocky_credentials::{PartitionGrant, testing::MemoryKeys};
+use rocky_credentials::testing::MemoryKeys;
 use serde_json::{Value, json};
 
 fn member_chain(
@@ -10,7 +10,8 @@ fn member_chain(
     Ok(links.clone().complete(user, node)?)
 }
 
-const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+const SCHEMA: &str = r#"{"format":7,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+const PER_LIST_SCHEMA: &str = r#"{"format":7,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}],"roles":[{"name":"list_member","tables":[{"table":"lists","access":"read"}],"per_partition":["list"]}]}"#;
 
 fn issuer_that_granted_nothing(issuer: &Settings) -> Settings {
     let mut other = issuer.clone();
@@ -24,14 +25,32 @@ fn unaware_issuer(issuer: &Settings) -> Settings {
     other
 }
 
+fn enroll(
+    issuer: &mut Settings,
+    vault: &Vault,
+    device: NodeKeys,
+    access: Access,
+    registry: &Registry,
+) -> Result<(CredentialChain, registry::Changes), Failure> {
+    let (enrollment, changes) = issuer.enrollment_for(
+        vault,
+        device,
+        (access, BTreeSet::new(), None),
+        None,
+        registry,
+    )?;
+    let mut links = enrollment.chain.clone();
+    links.0.push(enrollment.capability.clone());
+    Ok((links, changes))
+}
+
 fn known(registry: &Registry) -> (&Registry, &'static Membership) {
     static EMPTY: std::sync::LazyLock<Membership> = std::sync::LazyLock::new(Membership::default);
     (registry, &EMPTY)
 }
 
 #[test]
-fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> Result<(), Failure>
-{
+fn revoking_an_enrolled_identity_ends_it_under_any_node_key() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -44,49 +63,22 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
         &rocky_credentials::RootKey::generate(),
     )?;
     let vault = issuer.vault(&store);
-    let domain = issuer.domain()?;
-    let logical = domain.logical();
-    let lists = logical.table("lists").ok_or("lists")?;
-    let column = lists.column("name").ok_or("name")?;
-    let grants = vec![PartitionGrant {
-        domain: domain.scope,
-        table: logical.table_id(lists),
-        selector: rocky_core::PartitionSelector(
-            [(
-                logical.field_id(lists, column),
-                rocky_core::PartitionSelection::Any,
-            )]
-            .into(),
-        ),
-        rows: RowSelection::All,
-        rights: [Right::Read].into(),
-        fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
-    }];
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let device = NodeKeys {
         identity: user.public_key(),
         node: node.public_key(),
     };
-    let issuer_links = issuer.issuer_links();
-    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
-    let capability = Authority::issuer(&issuer_node, &issuer.credentials)?.issue_partition_terms(
-        user.public_key(),
-        vec![],
-        grants.clone(),
-        rocky_credentials::DelegationTerms { delegations: 1 },
-        issuer.validity()?,
-    )?;
     let mut rows = BTreeMap::new();
-    let changes = issuer.holder_changes(&device, &grants, 1, &Registry::default())?;
+    let (links, changes) = enroll(
+        &mut issuer,
+        &vault,
+        device,
+        Access::Read,
+        &Registry::default(),
+    )?;
     let registry = Registry::merged(&mut rows, &changes)?;
     assert_eq!(registry.identities(), 1);
-    assert_eq!(
-        registry.get(&device.identity).ok_or("record")?.grants.len(),
-        1
-    );
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-    let mut links = issuer_links.clone();
-    links.0.push(capability.clone());
     let renew = |issuer: &Settings, node: &PrivateKey| -> Result<Vec<u8>, Failure> {
         let chain = member_chain(&links, &user, node)?;
         let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
@@ -104,15 +96,6 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
     assert!(
         renew(&issuer, &PrivateKey::new()).is_err(),
         "revoking the identity ends a fresh node of it too"
-    );
-    let renamed = NodeKeys {
-        identity: user.public_key(),
-        node: PrivateKey::new().public_key(),
-    };
-    assert!(
-        issuer
-            .holder_changes(&renamed, &grants, 1, &registry)
-            .is_err()
     );
     Ok(())
 }
@@ -207,7 +190,7 @@ fn contact_records_of_other_versions_are_refused() {
 }
 
 #[test]
-fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(), Failure> {
+fn read_access_reads_every_partition_and_never_the_registry() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -225,26 +208,18 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         identity: user.public_key(),
         node: node.public_key(),
     };
-    let (supplied, _) = issuer.grant(
+    let (links, _) = enroll(
+        &mut issuer,
         &vault,
         device,
-        (
-            Profile::Reader {
-                scopes: ["lists".into()].into(),
-            },
-            Terms::default(),
-        ),
-        None,
+        Access::Read,
         &Registry::default(),
     )?;
     let domain = issuer.domain()?;
-    let chain = member_chain(&supplied.credentials.chain(), &user, &node)?;
-    let (_, selectors) = chain.verify_selectors(
-        issuer.publisher,
-        node.public_key(),
-        &issuer.revocations,
-        now()?,
-    )?;
+    let chain = member_chain(&links, &user, &node)?;
+    let (grants, selectors) = domain
+        .verified(&chain, issuer.publisher, &issuer.revocations, now()?)?
+        .selectors(node.public_key(), &issuer.revocations, now()?)?;
     let lists = domain.logical().table("lists").ok_or("lists")?;
     assert_eq!(selectors.len(), 1);
     assert_eq!(selectors[0].table, domain.logical().table_id(lists));
@@ -256,11 +231,12 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
             .all(|selection| *selection == rocky_core::PartitionSelection::Any)
     );
     assert!(selectors[0].rights.contains(&Right::Read));
+    assert!(grants.iter().all(|grant| grant.scope != domain.registry()));
     Ok(())
 }
 
 #[test]
-fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), Failure> {
+fn only_admins_and_store_access_hold_the_registry() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -274,48 +250,25 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
     )?;
     let domain = issuer.domain()?;
     let registry = domain.registry();
-    let lists: std::collections::BTreeSet<String> = ["lists".into()].into();
-    for (profile, rights) in [
-        (Profile::Issuer, Some(Right::Insert)),
-        (
-            Profile::Custody {
-                scopes: lists.clone(),
-            },
-            Some(Right::Custody),
-        ),
-        (
-            Profile::Writer {
-                scopes: lists.clone(),
-            },
-            None,
-        ),
-        (Profile::Reader { scopes: lists }, None),
+    let none = BTreeSet::new();
+    for (granted, right) in [
+        (domain.administer(), Some(Right::Insert)),
+        (domain.compile(&Access::Store, &none)?, Some(Right::Custody)),
+        (domain.compile(&Access::Full, &none)?, None),
+        (domain.compile(&Access::Read, &none)?, None),
     ] {
-        let grants = grants_of(&profile, &domain)?;
+        let grants = domain.expand(&granted);
         let held = grants.iter().find(|grant| grant.scope == registry);
-        assert_eq!(held.is_some(), rights.is_some(), "{profile:?}");
-        if let (Some(held), Some(right)) = (held, rights) {
+        assert_eq!(held.is_some(), right.is_some(), "{granted:?}");
+        if let (Some(held), Some(right)) = (held, right) {
             assert!(held.rights.contains(&right));
-            assert_eq!(held.rights.contains(&Right::Read), profile.issues());
         }
-        assert_eq!(
-            profile_of(&grants, &domain),
-            profile,
-            "a renewal without a record recognizes the same profile"
-        );
     }
-    let named = Profile::Reader {
-        scopes: [crate::domain::REGISTRY.into()].into(),
-    };
-    assert!(
-        grants_of(&named, &domain).is_err(),
-        "no raw grant or profile names the registry itself"
-    );
     assert!(issuer.keys.contains_key(crate::domain::REGISTRY));
     Ok(())
 }
 
-const TWO: &str = r#"{"format":6,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const TWO: &str = r#"{"format":7,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn issuer_at(
     schema: &str,
@@ -496,23 +449,18 @@ async fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the
                       registry: &mut Registry|
      -> Result<(PrivateKey, PublicKey, CredentialChain), Failure> {
         let (user, node) = (PrivateKey::new(), PrivateKey::new());
-        let (supplied, changes) = issuer.grant(
+        let (links, changes) = enroll(
+            issuer,
             &vault,
             NodeKeys {
                 identity: user.public_key(),
                 node: node.public_key(),
             },
-            (
-                Profile::Reader {
-                    scopes: ["items".into()].into(),
-                },
-                Terms::default(),
-            ),
-            None,
+            Access::Read,
             registry,
         )?;
         *registry = Registry::merged(&mut rows, &changes)?;
-        Ok((user, node.public_key(), supplied.credentials.chain()))
+        Ok((user, node.public_key(), links))
     };
     let (revoked_user, _, revoked_root) = enroll(&mut a, &mut registry)?;
     let (kept_user, _, kept_root) = enroll(&mut a, &mut registry)?;
@@ -577,7 +525,11 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
     let mut b = a.clone();
     b.installation = "second-issuer".into();
     let bv = b.vault(&store);
-    for role in a.roles() {
+    for role in a
+        .roles()
+        .into_iter()
+        .chain([crate::groups::NAMING_ROLE.to_owned()])
+    {
         let second_node_keeps_its_own_node_key = role == "node";
         if !second_node_keeps_its_own_node_key && let Some(key) = av.load_bytes(&role)? {
             bv.store_bytes(&role, &key)?;
@@ -596,12 +548,12 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
         PrivateKey::new().public_key(),
     ];
     let issuer = a.identity;
-    let admitted = |profile| -> Result<registry::IdentityRecord, Failure> {
+    let admitted = |access| -> Result<registry::IdentityRecord, Failure> {
         Ok(registry::IdentityRecord {
             admitted: Some(registry::Admitted {
                 origin: None,
                 kind: registry::Kind::Paired,
-                profile: Some(profile),
+                access: Some(access),
                 issuer,
                 enrolled: now()?,
                 invitation: None,
@@ -611,12 +563,7 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
         })
     };
     for identity in readers {
-        registry.records.insert(
-            identity,
-            admitted(Profile::Reader {
-                scopes: ["lists".into()].into(),
-            })?,
-        );
+        registry.records.insert(identity, admitted(Access::Read)?);
     }
     a.begin_revocation(Revoke::Identity(readers[0]), known(&registry), None)?;
     a.rotate(&av)?;
@@ -704,8 +651,9 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                         keys,
                         groups: sealed.groups,
                         epoch_statements: sealed.epoch_statements,
-                        profile: None,
+                        access: None,
                         issuers: Vec::new(),
+                        naming: None,
                     },
                 )?
                 .0;
@@ -721,12 +669,7 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
         }
     }
     let nonreader = PrivateKey::new().public_key();
-    registry.records.insert(
-        nonreader,
-        admitted(Profile::Custody {
-            scopes: ["lists".into()].into(),
-        })?,
-    );
+    registry.records.insert(nonreader, admitted(Access::Store)?);
     let before = a.groups[&address].epochs.clone();
     let before_keys = a.keys.clone();
     assert_eq!(b.keys, before_keys);
@@ -800,10 +743,10 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
 }
 
 #[test]
-fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), Failure> {
+fn a_per_partition_role_renews_without_group_keys_of_unheld_partitions() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let mut issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
+        &Schema::parse(PER_LIST_SCHEMA)?,
         &store,
         DEFAULT_TTL,
         None,
@@ -828,22 +771,17 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     );
     let node = PrivateKey::new();
     let user = PrivateKey::new();
-    let profile = Profile::Reader {
-        scopes: ["lists".into()].into(),
-    };
-    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
-    let capability = issuer.issue(
-        &issuer.authority(&issuer_node)?,
-        &domain,
-        user.public_key(),
-        grants_of(&profile, &domain)?,
-        false,
+    let (links, _) = enroll(
+        &mut issuer,
+        &vault,
+        NodeKeys {
+            identity: user.public_key(),
+            node: node.public_key(),
+        },
+        Access::Role(crate::schema::RoleName::new("list_member")?),
+        &Registry::default(),
     )?;
-    let chain = member_chain(
-        &issuer.authority(&issuer_node)?.chain_of(capability),
-        &user,
-        &node,
-    )?;
+    let chain = member_chain(&links, &user, &node)?;
     let issuer_node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let (request, exchange) = RenewRequest::sign(&node, issuer_node, chain, now()?)?;
     for bytes in [

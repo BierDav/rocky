@@ -321,18 +321,18 @@ impl SignedCheckpoint {
         publisher: PublicKey,
         revocations: &RevocationSet,
         time: u64,
-        families: &rocky_credentials::GrantFamilies,
+        whole_tables: &rocky_credentials::WholeTables,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         match &self.statement.partition {
             Some(tuple) => self
                 .credentials
-                .verified_with_families(publisher, revocations, time, families)
+                .verified(publisher, revocations, time, whole_tables)
                 .map_err(credential)?
                 .partition(self.node, self.statement.scope, tuple, revocations, time)
                 .map_err(credential),
             None => self
                 .credentials
-                .verified_with_families(publisher, revocations, time, families)
+                .verified(publisher, revocations, time, whole_tables)
                 .map_err(credential)?
                 .selectors(self.node, revocations, time)
                 .map(|(grants, _)| grants)
@@ -432,7 +432,7 @@ impl SignedCheckpoint {
                 &inner.config.revocations,
             )?,
             time,
-            inner.grant_families(),
+            inner.whole_tables(),
         )?;
         if !grants.iter().any(|grant| {
             grant.scope == self.statement.scope
@@ -1570,7 +1570,7 @@ impl<A: RowApplication> Inner<A> {
                             identity
                                 .ok_or_else(|| Error::Corrupt("restoration identity".into()))?,
                             &ceiling,
-                            self.families_at(
+                            self.whole_tables_at(
                                 self.manifest_of_tip(operation.header.extensions.tip)?,
                             )?
                             .as_ref(),

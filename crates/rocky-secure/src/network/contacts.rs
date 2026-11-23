@@ -225,16 +225,18 @@ mod tests {
         let config = |node: &PrivateKey| {
             let user = crate::tests::identity_of(node);
             let root = rocky_credentials::Authority::owner(&fixture.publisher)
-                .issue_partition_terms(
+                .issue_person(
                     user.public_key(),
-                    vec![rocky_core::ResourceGrant {
-                        scope: fixture.scope("products", 0),
-                        rows: rocky_core::RowSelection::All,
-                        rights: [rocky_core::Right::Read].into(),
-                        fields: rocky_core::FieldSelection::Only(Default::default()),
-                    }],
-                    vec![],
-                    rocky_credentials::DelegationTerms { delegations: 1 },
+                    rocky_credentials::Granted {
+                        grants: vec![rocky_core::ResourceGrant {
+                            scope: fixture.scope("products", 0),
+                            rows: rocky_core::RowSelection::All,
+                            rights: [rocky_core::Right::Read].into(),
+                            fields: rocky_core::FieldSelection::Only(Default::default()),
+                        }],
+                        partitions: vec![],
+                        ..Default::default()
+                    },
                     rocky_credentials::Validity {
                         issued_at: now().unwrap(),
                         lifetime: std::time::Duration::from_secs(3600),

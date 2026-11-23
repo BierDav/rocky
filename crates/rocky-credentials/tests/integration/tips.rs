@@ -142,29 +142,7 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
     let mut graph = graph();
     let mut seals = Vec::new();
     for (index, issuer) in issuers.iter().enumerate() {
-        let chain = CredentialChain(vec![
-            Authority::owner_in(
-                &owner,
-                rocky_credentials::DatabaseContext {
-                    publisher: owner.public_key(),
-                    scope: Scope {
-                        mesh: MeshId([1; 16]),
-                        app: AppId([2; 16]),
-                        domain: DomainId([3; 16]),
-                    },
-                },
-            )
-            .unwrap()
-            .issue_issuer(
-                issuer.public_key(),
-                rocky_credentials::Validity {
-                    issued_at: 100,
-                    lifetime: std::time::Duration::from_secs(1000),
-                    clock_skew: std::time::Duration::from_secs(0),
-                },
-            )
-            .unwrap(),
-        ]);
+        let chain = issuer_chain(&owner, issuer);
         let signed = SignedSeal::endorse_linked(
             seal(&graph, graph.genesis(), index as u64, &owner).statement,
             rocky_credentials::testing::lane_for(issuer, &chain),
@@ -277,29 +255,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     let issuer = PrivateKey::new();
     let trusted = PrivateKey::new();
     let mut graph = graph();
-    let issuer_chain = CredentialChain(vec![
-        Authority::owner_in(
-            &owner,
-            rocky_credentials::DatabaseContext {
-                publisher: owner.public_key(),
-                scope: Scope {
-                    mesh: MeshId([1; 16]),
-                    app: AppId([2; 16]),
-                    domain: DomainId([3; 16]),
-                },
-            },
-        )
-        .unwrap()
-        .issue_issuer(
-            issuer.public_key(),
-            rocky_credentials::Validity {
-                issued_at: 100,
-                lifetime: std::time::Duration::from_secs(1000),
-                clock_skew: std::time::Duration::from_secs(0),
-            },
-        )
-        .unwrap(),
-    ]);
+    let issuer_chain = issuer_chain(&owner, &issuer);
     let trusted_chain = CredentialChain(vec![
         Authority::owner_in(
             &owner,
@@ -564,29 +520,29 @@ fn node_signatures_never_inherit_trusted_identity_control() {
 }
 
 fn issuer_chain(owner: &PrivateKey, issuer: &PrivateKey) -> CredentialChain {
-    CredentialChain(vec![
-        Authority::owner_in(
-            owner,
-            rocky_credentials::DatabaseContext {
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    let capability = rocky_credentials::Capability {
+        subject: issuer.public_key(),
+        kind: rocky_core::PrincipalKind::User,
+        grants: Vec::new(),
+        not_before: 100,
+        expires: 1100,
+        delegations: 7,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            issues: true,
+            database: Some(rocky_credentials::DatabaseContext {
                 publisher: owner.public_key(),
-                scope: Scope {
-                    mesh: MeshId([1; 16]),
-                    app: AppId([2; 16]),
-                    domain: DomainId([3; 16]),
-                },
-            },
-        )
-        .unwrap()
-        .issue_issuer(
-            issuer.public_key(),
-            rocky_credentials::Validity {
-                issued_at: 100,
-                lifetime: std::time::Duration::from_secs(1000),
-                clock_skew: std::time::Duration::from_secs(0),
-            },
-        )
+                scope,
+            }),
+            ..rocky_credentials::Extended::default()
+        })
         .unwrap(),
-    ])
+    };
+    CredentialChain(vec![SignedCapability::sign(capability, owner).unwrap()])
 }
 fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> CredentialChain {
     CredentialChain(vec![

@@ -14,11 +14,10 @@ use std::{
 
 type Failure = crate::Failure;
 
-const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":6,"tables":[
+const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":7,"tables":[
  {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
-const TABLES: [&str; 3] = ["notes", "parts", "labels"];
 const LIST: &str = "Weekend";
 
 static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
@@ -95,7 +94,7 @@ impl Device {
         let database = Database::open(open(&directory, &hub, &name))?.database;
         Ok(Self::new(database, directory, &name, &hub))
     }
-    async fn invite(&self, profile: crate::GrantProfile) -> Result<String, Failure> {
+    async fn invite(&self, profile: crate::Access) -> Result<String, Failure> {
         Ok(self.session.provision(profile, None).await?.uri)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
@@ -184,26 +183,8 @@ impl Mesh {
             "a",
             &hub,
         );
-        let custody = join(
-            &root,
-            &hub,
-            &a,
-            "custody",
-            crate::GrantProfile::Custody {
-                scopes: TABLES.map(String::from).into(),
-            },
-        )
-        .await?;
-        let b = join(
-            &root,
-            &hub,
-            &a,
-            "b",
-            crate::GrantProfile::Writer {
-                scopes: TABLES.map(String::from).into(),
-            },
-        )
-        .await?;
+        let custody = join(&root, &hub, &a, "custody", crate::Access::Store).await?;
+        let b = join(&root, &hub, &a, "b", crate::Access::Full).await?;
         introduce(&a, &custody).await?;
         introduce(&b, &custody).await?;
         snap::value(
@@ -223,22 +204,7 @@ impl Mesh {
         })
     }
     async fn member(&self, name: &str) -> Result<Device, Failure> {
-        let device = join(
-            &self.root,
-            &self.hub,
-            &self.a,
-            name,
-            crate::GrantProfile::Grants {
-                grants: TABLES
-                    .map(|scope| rocky_credentials::Grant {
-                        scope: scope.into(),
-                        rights: [rocky_core::Right::Read].into(),
-                        columns: None,
-                    })
-                    .into(),
-            },
-        )
-        .await?;
+        let device = join(&self.root, &self.hub, &self.a, name, crate::Access::Read).await?;
         introduce(&device, &self.custody).await?;
         Ok(device)
     }
@@ -254,7 +220,7 @@ async fn join(
     hub: &Arc<Hub>,
     issuer: &Device,
     name: &str,
-    profile: crate::GrantProfile,
+    profile: crate::Access,
 ) -> Result<Device, Failure> {
     let directory = root.path().join(name);
     let invitation = issuer.invite(profile).await?;
@@ -388,16 +354,7 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
 -> Result<(), Failure> {
     let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let Mesh { a, custody, b, .. } = &mesh;
-    let second = join(
-        &mesh.root,
-        &mesh.hub,
-        a,
-        "second",
-        crate::GrantProfile::Custody {
-            scopes: TABLES.map(String::from).into(),
-        },
-    )
-    .await?;
+    let second = join(&mesh.root, &mesh.hub, a, "second", crate::Access::Store).await?;
     introduce(a, &second).await?;
     introduce(b, &second).await?;
     let node = b.node().await?;
@@ -436,22 +393,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     let mesh_member = |name: &'static str| {
         let (root, hub, a, custody) = (&root, &hub, &a, &custody);
         async move {
-            let device = join(
-                root,
-                hub,
-                a,
-                name,
-                crate::GrantProfile::Grants {
-                    grants: TABLES
-                        .map(|scope| rocky_credentials::Grant {
-                            scope: scope.into(),
-                            rights: [rocky_core::Right::Read].into(),
-                            columns: None,
-                        })
-                        .into(),
-                },
-            )
-            .await?;
+            let device = join(root, hub, a, name, crate::Access::Read).await?;
             introduce(&device, custody).await?;
             Ok::<_, Failure>(device)
         }
@@ -642,8 +584,20 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
         At::Recipient => node.parse()?,
     };
     b.online(direct).await?;
-    snap::value(a.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values()).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        a.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values()).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     let pending = || -> Result<bool, Failure> {
         Ok(fault::STOPS
             .lock()
@@ -749,31 +703,6 @@ async fn a_crash_of_the_mailbox_before_forgetting_a_taken_receipt_loses_no_envel
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_member_deposits_its_share_with_custody_for_an_offline_recipient() -> Result<(), Failure>
-{
-    let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
-    let member = mesh.member("sharer").await?;
-    let recipient = mesh.b.node().await?;
-    share(&mesh.a, &[&member.node().await?]).await?;
-    introduce(&mesh.a, &member).await?;
-    snap::value(member.session.sync_once()).await?;
-    mesh.a.online(false).await?;
-    mesh.b.online(false).await?;
-    share(&member, &[&recipient]).await?;
-    snap::value(member.session.sync_once()).await?;
-    assert_eq!(member.state(&recipient).await?, "deposited");
-    member.online(false).await?;
-    mesh.b.online(true).await?;
-    snap::value(mesh.b.session.sync_once()).await?;
-    assert_eq!(mesh.b.epochs().await?, [json!(1)]);
-    member.online(true).await?;
-    snap::value(member.session.sync_once()).await?;
-    assert_eq!(member.state(&recipient).await?, "delivered");
-    member.close().await?;
-    mesh.close().await
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_crash_of_the_recipient_after_preparing_bootstrap_loses_no_envelope()
 -> Result<(), Failure> {
     sweep(false, At::Recipient, fault::Stage::Prepared).await
@@ -788,13 +717,7 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
         &mesh.hub,
         &mesh.a,
         "raw-custody",
-        crate::GrantProfile::Grants {
-            grants: vec![rocky_credentials::Grant {
-                scope: "notes".into(),
-                rights: [rocky_core::Right::Custody].into(),
-                columns: None,
-            }],
-        },
+        crate::Access::Store,
     )
     .await?;
     introduce(&mesh.a, &mailbox).await?;

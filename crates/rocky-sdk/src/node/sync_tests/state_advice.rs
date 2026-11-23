@@ -16,12 +16,7 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
                 &root.path().join("c"),
                 &hub,
                 "c",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             c.replica
@@ -82,9 +77,7 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
             }
             a.seal_followed(a.domain().scope).await?;
             a.compact_tips(0).await?;
-            let profile = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let profile = crate::Access::Full;
             let b = enrolled(
                 &root.path().join("b"),
                 &hub,
@@ -224,12 +217,7 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
             )
             .await?;
             add(&a, 1).await?;
@@ -302,12 +290,7 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Reader {
-                        scopes: names.iter().cloned().collect(),
-                    },
-                )),
+                Some((&a, crate::Access::Read)),
                 &schema,
             )
             .await?;

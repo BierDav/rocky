@@ -1,9 +1,8 @@
 use super::{Device, Failure};
 use crate::common;
 use crate::support::snapshot as snap;
-use rocky_sdk::{
-    Database, Network, Open, SecretStore, credentials::testing::MemoryKeys, transport::memory::Hub,
-};
+use rocky_credentials::testing::MemoryKeys;
+use rocky_sdk::{Database, Network, Open, SecretStore, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -11,11 +10,14 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-pub(crate) const SCHEMA: &str = r#"{"application":"revocation","version":1,"format":6,"tables":[
+pub(crate) const SCHEMA: &str = r#"{"application":"revocation","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
- {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
+ {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}],
+ "roles":[
+  {"name":"item_writer","tables":[{"table":"items","access":"write"},{"table":"parts","access":"read"},{"table":"labels","access":"read"}],"per_partition":["list"]},
+  {"name":"lister","tables":[{"table":"parts","access":"read"},{"table":"labels","access":"read"}],"per_partition":["list"]}]}"#;
 
 static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
 
@@ -59,9 +61,9 @@ pub(crate) async fn join(
     hub: &Arc<Hub>,
     name: &str,
     issuer: &Device,
-    profile: Value,
+    access: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
-    let invite = issuer.invite_as(profile).await;
+    let invite = issuer.invite_as(access).await;
     let device = Device::new(Database::join(open(&root.join(name), hub, name), &invite)?)?;
     issuer.session.add_peer(&device.contact().await).await?;
     settle(&device).await;
@@ -101,16 +103,18 @@ pub(crate) async fn epoch(device: &Device, list: &str) -> Value {
             .collect::<Vec<_>>()
     )
 }
-pub(crate) async fn grant(device: &Device, list: &str) -> Value {
-    let address = snap::ok(
-        device
-            .session
-            .partition_address("parts", (values(list)).clone()),
-    )
+pub(crate) fn role(name: &'static str) -> rocky_sdk::Access {
+    rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(name))
+}
+pub(crate) async fn grant(issuer: &Device, identity: &str, list: &str) {
+    snap::ok(issuer.session.grant_partition(
+        identity.parse().expect("public key"),
+        rocky_sdk::PartitionTarget::Group {
+            group: "list".to_owned(),
+            values: values(list),
+        },
+    ))
     .await;
-    let part = &address["tuple"][0];
-    json!({"domain":address["scope"]["domain"],"table":address["scope"]["table"],
-        "selector":[[part[0],{"Only":[part[1]]}]],"rows":"All","rights":["Read"],"fields":[]})
 }
 pub(crate) struct Domain {
     pub(super) a: Device,
@@ -119,7 +123,8 @@ pub(crate) struct Domain {
 impl Domain {
     pub(super) async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
         let a = Device::new(Database::create(open(&root.join("a"), hub, "a"), None)?)?;
-        let b = join(root, hub, "b", &a, json!({"kind":"issuer"})).await?;
+        let b = join(root, hub, "b", &a, rocky_sdk::Access::Full).await?;
+        a.admit(&b).await;
         for list in ["L", "M"] {
             snap::ok(
                 a.session
@@ -136,7 +141,7 @@ impl Domain {
                         values: (values(list)).clone(),
                     },
                     serde_json::from_value::<
-                        std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                        std::collections::BTreeSet<rocky_credentials::PublicKey>,
                     >(json!([b.node().await]))
                     .expect("typed fixture"),
                     None,

@@ -48,6 +48,8 @@ pub use partition::{
 };
 mod permissions;
 pub use permissions::*;
+mod roles;
+pub use roles::*;
 
 mod row_identity;
 pub use row_identity::{

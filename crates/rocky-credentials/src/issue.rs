@@ -3,274 +3,37 @@ use crate::{
     MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PeerId, PrivateKey, PublicKey,
     Revocation, RevocationSet, SignedCapability, SignedRevocation, Signer, denied,
 };
-use rocky_core::{
-    AppId, Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right,
-    RowSelection,
-};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use rocky_core::{AppId, Commitment, PrincipalKind, ResourceGrant};
+use std::collections::BTreeSet;
 
-#[derive(Clone, Debug)]
-pub struct Resource {
-    pub name: String,
-    pub scope: ResourceScope,
-    pub columns: BTreeMap<String, Commitment>,
-}
-
-pub const MAX_GRANTS: usize = 64;
 pub const NEVER: u64 = u64::MAX;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Grant {
-    pub scope: String,
-    #[serde(with = "named_rights")]
-    pub rights: BTreeSet<Right>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub columns: Option<BTreeSet<String>>,
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Granted {
+    pub grants: Vec<ResourceGrant>,
+    pub partitions: Vec<PartitionGrant>,
+    pub whole: Option<crate::WholeAccess>,
+    pub role: Option<Commitment>,
 }
-impl Grant {
-    pub fn resolve(&self, resources: &[Resource]) -> Result<ResourceGrant, Error> {
-        let resource = resources
-            .iter()
-            .find(|resource| resource.name == self.scope)
-            .ok_or_else(|| denied("a grant names an unknown reader scope"))?;
-        self.resolve_resource(resource)
-    }
-    fn resolve_resource(&self, resource: &Resource) -> Result<ResourceGrant, Error> {
-        if self.rights.is_empty() || self.rights.contains(&Right::PublishSchema) {
-            return Err(denied(
-                "a grant names no right, or one that is not a collection's",
-            ));
-        }
-        let fields = match &self.columns {
-            None => FieldSelection::All,
-            Some(names) => FieldSelection::Only(
-                names
-                    .iter()
-                    .map(|name| {
-                        resource
-                            .columns
-                            .get(name)
-                            .copied()
-                            .ok_or_else(|| denied("a grant names an unknown column"))
-                    })
-                    .collect::<Result<_, _>>()?,
-            ),
-        };
-        Ok(ResourceGrant {
-            scope: resource.scope,
-            rows: RowSelection::All,
-            rights: self.rights.clone(),
-            fields,
-        })
-    }
-    pub fn resolve_all(
-        grants: &[Grant],
-        resources: &[Resource],
-    ) -> Result<Vec<ResourceGrant>, Error> {
-        if grants.is_empty() {
-            return Err(denied("a profile holds at least one grant"));
-        }
-        let by_name: BTreeMap<_, _> = resources
-            .iter()
-            .map(|resource| (resource.name.as_str(), resource))
-            .collect();
-        grants
-            .iter()
-            .map(|grant| {
-                let resource = by_name
-                    .get(grant.scope.as_str())
-                    .ok_or_else(|| denied("a grant names an unknown reader scope"))?;
-                grant.resolve_resource(resource)
-            })
-            .collect()
-    }
-    pub fn describe(grant: &ResourceGrant, resources: &[Resource]) -> Option<Self> {
-        let resource = resources
-            .iter()
-            .find(|resource| resource.scope == grant.scope)?;
-        if grant.rows != RowSelection::All {
-            return None;
-        }
-        let columns = match &grant.fields {
-            FieldSelection::All => None,
-            FieldSelection::Only(fields) => Some(
-                resource
-                    .columns
-                    .iter()
-                    .filter(|(_, field)| fields.contains(*field))
-                    .map(|(name, _)| name.clone())
-                    .collect(),
-            ),
-        };
-        let described = Self {
-            scope: resource.name.clone(),
-            rights: grant.rights.clone(),
-            columns,
-        };
-        (described.resolve(std::slice::from_ref(resource)).ok()? == *grant).then_some(described)
-    }
-}
-mod named_rights {
-    use rocky_core::Right;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
-    use std::collections::BTreeSet;
-    const NAMES: [(Right, &str); 6] = [
-        (Right::Read, "read"),
-        (Right::Update, "update"),
-        (Right::Insert, "insert"),
-        (Right::Delete, "delete"),
-        (Right::Custody, "custody"),
-        (Right::PublishSchema, "publish_schema"),
-    ];
-    pub fn serialize<S: Serializer>(rights: &BTreeSet<Right>, to: S) -> Result<S::Ok, S::Error> {
-        let names: Vec<&str> = rights
-            .iter()
-            .filter_map(|right| NAMES.iter().find(|(known, _)| known == right))
-            .map(|(_, name)| *name)
-            .collect();
-        names.serialize(to)
-    }
-    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<BTreeSet<Right>, D::Error> {
-        Vec::<String>::deserialize(from)?
-            .iter()
-            .map(|name| {
-                NAMES
-                    .iter()
-                    .find(|(_, known)| known == name)
-                    .map(|(right, _)| *right)
-                    .ok_or_else(|| D::Error::custom(format!("unknown right {name}")))
-            })
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", from = "ProfileRecord")]
-pub enum Profile {
-    Custody { scopes: BTreeSet<String> },
-    Reader { scopes: BTreeSet<String> },
-    Writer { scopes: BTreeSet<String> },
-    Issuer,
-    Grants { grants: Vec<Grant> },
-}
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum ProfileRecord {
-    Custody { scopes: BTreeSet<String> },
-    Reader { scopes: BTreeSet<String> },
-    Writer { scopes: BTreeSet<String> },
-    Issuer {},
-    Grants { grants: Vec<Grant> },
-}
-impl From<ProfileRecord> for Profile {
-    fn from(record: ProfileRecord) -> Self {
-        match record {
-            ProfileRecord::Custody { scopes } => Self::Custody { scopes },
-            ProfileRecord::Reader { scopes } => Self::Reader { scopes },
-            ProfileRecord::Writer { scopes } => Self::Writer { scopes },
-            ProfileRecord::Issuer {} => Self::Issuer,
-            ProfileRecord::Grants { grants } => Self::Grants { grants },
+impl Granted {
+    pub fn explicit(grants: Vec<ResourceGrant>) -> Self {
+        Self {
+            grants,
+            ..Self::default()
         }
     }
-}
-const READ: [Right; 2] = [Right::Read, Right::Custody];
-const WRITE: [Right; 5] = [
-    Right::Read,
-    Right::Insert,
-    Right::Update,
-    Right::Delete,
-    Right::Custody,
-];
-impl Profile {
-    pub fn issues(&self) -> bool {
-        matches!(self, Self::Issuer)
-    }
-    pub fn reads(&self, name: &str) -> bool {
-        match self {
-            Self::Reader { scopes } | Self::Writer { scopes } => scopes.contains(name),
-            Self::Issuer => true,
-            Self::Custody { .. } => false,
-            Self::Grants { grants } => grants
-                .iter()
-                .any(|grant| grant.scope == name && grant.rights.contains(&Right::Read)),
-        }
-    }
-    pub fn raw(&self, resources: &[Resource]) -> Result<Vec<Grant>, Error> {
-        let (names, rights): (Option<&BTreeSet<String>>, &[Right]) = match self {
-            Self::Custody { scopes } => (Some(scopes), &[Right::Custody]),
-            Self::Grants { grants } => return Ok(grants.clone()),
-            Self::Reader { scopes } => (Some(scopes), &READ),
-            Self::Writer { scopes } => (Some(scopes), &WRITE),
-            Self::Issuer => (None, &WRITE),
-        };
-        let known: BTreeSet<_> = resources
-            .iter()
-            .map(|resource| resource.name.as_str())
-            .collect();
-        if let Some(names) = names
-            && (names.is_empty() || names.iter().any(|name| !known.contains(name.as_str())))
-        {
-            return Err(denied("grant profile names no or unknown reader scopes"));
-        }
-        let ciphertext_only = matches!(self, Self::Custody { .. });
-        Ok(resources
-            .iter()
-            .filter(|resource| names.is_none_or(|names| names.contains(&resource.name)))
-            .map(|resource| Grant {
-                scope: resource.name.clone(),
-                rights: rights.iter().copied().collect(),
-                columns: ciphertext_only.then(BTreeSet::new),
-            })
-            .collect())
-    }
-    pub fn grants(&self, resources: &[Resource]) -> Result<Vec<ResourceGrant>, Error> {
-        Grant::resolve_all(&self.raw(resources)?, resources)
-    }
-    pub fn of(grants: &[ResourceGrant], resources: &[Resource]) -> Self {
-        let named = |right: Right| -> BTreeSet<String> {
-            resources
-                .iter()
-                .filter(|resource| {
-                    grants
-                        .iter()
-                        .any(|grant| grant.scope == resource.scope && grant.rights.contains(&right))
-                })
-                .map(|resource| resource.name.clone())
-                .collect()
-        };
-        let starter = [
-            Self::Reader {
-                scopes: named(Right::Read),
+    fn extended(self, origin: Option<crate::Origin>) -> (Vec<ResourceGrant>, Extended) {
+        (
+            self.grants,
+            Extended {
+                partitions: self.partitions,
+                whole: self.whole,
+                role: self.role,
+                origin,
+                ..Extended::default()
             },
-            Self::Writer {
-                scopes: named(Right::Insert),
-            },
-            Self::Custody {
-                scopes: named(Right::Custody),
-            },
-        ];
-        let same = |profile: &Self| {
-            profile
-                .grants(resources)
-                .is_ok_and(|expected| same_set(&expected, grants))
-        };
-        if let Some(profile) = starter.into_iter().find(same) {
-            return profile;
-        }
-        Self::Grants {
-            grants: grants
-                .iter()
-                .filter_map(|grant| Grant::describe(grant, resources))
-                .collect(),
-        }
+        )
     }
-}
-fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
-    left.len() == right.len()
-        && left.iter().all(|grant| right.contains(grant))
-        && right.iter().all(|grant| left.contains(grant))
 }
 
 pub struct Authority<'a> {
@@ -330,61 +93,16 @@ impl<'a> Authority<'a> {
         grants: Vec<ResourceGrant>,
         validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
-        self.issue_delegable(subject, grants, 1, validity)
+        self.issue_person(subject, Granted::explicit(grants), validity)
     }
-    pub fn issue_delegable(
+    pub fn issue_person(
         &self,
         subject: PublicKey,
-        grants: Vec<ResourceGrant>,
-        delegations: u8,
+        granted: Granted,
         validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
-        self.issue_terms(
-            subject,
-            grants,
-            crate::DelegationTerms { delegations },
-            validity,
-        )
-    }
-    pub fn issue_terms(
-        &self,
-        subject: PublicKey,
-        grants: Vec<ResourceGrant>,
-        crate::DelegationTerms { delegations }: crate::DelegationTerms,
-        validity: crate::Validity,
-    ) -> Result<SignedCapability, Error> {
-        self.sign_link(
-            subject,
-            grants,
-            Extended {
-                origin: self.origin()?,
-                ..Extended::default()
-            },
-            delegations,
-            validity,
-        )
-    }
-    pub fn issue_issuer(
-        &self,
-        subject: PublicKey,
-        validity: crate::Validity,
-    ) -> Result<SignedCapability, Error> {
-        let delegations = self
-            .delegations()?
-            .checked_sub(1)
-            .filter(|delegations| *delegations > 1)
-            .ok_or_else(|| denied("issuers nest too deep"))?;
-        self.sign_link(
-            subject,
-            Vec::new(),
-            Extended {
-                issues: true,
-                origin: self.origin()?,
-                ..Extended::default()
-            },
-            delegations,
-            validity,
-        )
+        let (grants, extended) = granted.extended(self.origin()?);
+        self.sign_link(subject, grants, extended, 1, validity)
     }
     pub fn issue_trusted(
         &self,
@@ -418,26 +136,8 @@ impl<'a> Authority<'a> {
     }
     pub fn hold(
         &self,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
+        granted: Granted,
         validity: crate::Validity,
-    ) -> Result<SignedCapability, Error> {
-        self.hold_terms(grants, partitions, validity, false)
-    }
-    pub fn hold_families(
-        &self,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        validity: crate::Validity,
-    ) -> Result<SignedCapability, Error> {
-        self.hold_terms(grants, partitions, validity, true)
-    }
-    fn hold_terms(
-        &self,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        validity: crate::Validity,
-        families: bool,
     ) -> Result<SignedCapability, Error> {
         let crate::Validity {
             issued_at: time,
@@ -466,8 +166,9 @@ impl<'a> Authority<'a> {
                 .min(expires),
         };
         if not_before >= expires {
-            return Err(denied("delegation outlives its parent"));
+            return Err(denied("a held link outlives its parent"));
         }
+        let (grants, extension) = granted.extended(self.origin()?);
         SignedCapability::sign(
             Capability {
                 subject: self.identity()?,
@@ -476,12 +177,7 @@ impl<'a> Authority<'a> {
                 not_before,
                 expires,
                 delegations: 1,
-                extension: Extension::new(Extended {
-                    partitions,
-                    families,
-                    origin: self.origin()?,
-                    ..Extended::default()
-                })?,
+                extension: Extension::new(extension)?,
             },
             self.signer.clone(),
         )
@@ -499,10 +195,10 @@ impl<'a> Authority<'a> {
             None => extended.origin,
         })
     }
-    fn delegations(&self) -> Result<u8, Error> {
+    pub(crate) fn delegations(&self) -> u8 {
         match self.chain.0.last() {
-            None => Ok(MAX_CREDENTIAL_DEPTH as u8),
-            Some(last) => Ok(last.capability.delegations),
+            None => MAX_CREDENTIAL_DEPTH as u8,
+            Some(last) => last.capability.delegations,
         }
     }
     pub(crate) fn sign_link(
@@ -562,7 +258,7 @@ impl<'a> Authority<'a> {
                 || delegations >= parent.delegations
                 || self.chain.0.len() + usize::from(delegations) >= MAX_CREDENTIAL_DEPTH
             {
-                return Err(denied("delegation expands authority"));
+                return Err(denied("a link expands its issuer's authority"));
             }
             not_before = not_before.max(parent.not_before);
             expires = expires.min(parent.expires);
@@ -599,7 +295,7 @@ impl<'a> Authority<'a> {
         {
             return Err(denied("invalid or revoked credential"));
         }
-        if prior.delegations >= self.delegations()? {
+        if prior.delegations >= self.delegations() {
             return Err(denied("an issuer above this one renews the credential"));
         }
         if extended.trusted.is_some() {
@@ -610,7 +306,8 @@ impl<'a> Authority<'a> {
             prior.grants.clone(),
             Extended {
                 partitions: extended.partitions,
-                families: extended.families,
+                whole: extended.whole,
+                role: extended.role,
                 issues: extended.issues,
                 trusted: None,
                 origin: extended.origin,
@@ -731,85 +428,6 @@ impl CredentialChain {
             &self.capabilities().with_certificate(certificate.clone()),
         )
     }
-    pub fn delegate<'s>(
-        &self,
-        holder: impl Into<Signer<'s>>,
-        request: crate::Delegation,
-    ) -> Result<Self, Error> {
-        self.delegate_with_families(holder, request, &crate::GrantFamilies::default())
-    }
-    pub fn delegate_with_families<'s>(
-        &self,
-        holder: impl Into<Signer<'s>>,
-        request: crate::Delegation,
-        families: &crate::GrantFamilies,
-    ) -> Result<Self, Error> {
-        let crate::Delegation {
-            subject,
-            kind,
-            grants,
-            partitions,
-            terms,
-            validity,
-        } = request;
-        let crate::DelegationTerms { delegations } = terms;
-        let crate::Validity {
-            issued_at: time,
-            lifetime,
-            clock_skew,
-        } = validity;
-        let ttl = lifetime.as_secs();
-        let skew = clock_skew.as_secs();
-        let holder = holder.into();
-        let parent = self.holder_key(holder.principal()?)?;
-        let held = parent.extended()?;
-        let parent_families = families.enabled(held.families);
-        if held.issues {
-            return Err(denied("an issuer grants through its authority"));
-        }
-        if !matches!(kind, PrincipalKind::User | PrincipalKind::Deployment)
-            || delegations == 0
-            || delegations >= parent.delegations
-            || self.0.len() + usize::from(delegations) >= crate::MAX_CREDENTIAL_DEPTH
-            || (parent.kind == PrincipalKind::Deployment && kind == PrincipalKind::User)
-            || (grants.is_empty() && partitions.is_empty())
-            || families.resources(&grants).iter().any(|grant| {
-                !parent_families
-                    .resources(&parent.grants)
-                    .iter()
-                    .any(|held| held.includes(grant))
-            })
-            || families.partitions(&partitions).iter().any(|grant| {
-                !parent_families
-                    .partitions(&held.partitions)
-                    .iter()
-                    .any(|held| held.includes(grant))
-            })
-        {
-            return Err(denied("delegation expands authority"));
-        }
-        let link = Capability {
-            subject,
-            kind,
-            grants,
-            not_before: time.saturating_sub(skew).max(parent.not_before),
-            expires: time.saturating_add(ttl).min(parent.expires),
-            delegations,
-            extension: Extension::new(Extended {
-                partitions,
-                origin: held.origin,
-                families: families.authenticated(),
-                ..Extended::default()
-            })?,
-        };
-        if link.not_before >= link.expires {
-            return Err(denied("delegation outlives its parent"));
-        }
-        let mut chain = self.clone();
-        chain.0.push(SignedCapability::sign(link, holder)?);
-        chain.links_with_families(chain.0[0].issuer, None, families)?;
-        Ok(chain)
-    }
     pub(crate) fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {
         self.holder_key(holder.public_key()?)
     }
@@ -823,11 +441,11 @@ impl CredentialChain {
                 Ok(&last.capability)
             }
             _ => Err(denied(
-                "the chain does not end at a capability this key may delegate",
+                "the chain does not end at a capability this key certifies nodes for",
             )),
         }
     }
-    pub fn delegable(&self) -> Self {
+    pub fn without_certificate(&self) -> Self {
         let mut prefix = self.clone();
         if prefix
             .0

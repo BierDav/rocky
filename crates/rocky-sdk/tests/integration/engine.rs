@@ -1,7 +1,5 @@
-use rocky_sdk::{
-    Database, Network, NetworkService, Open, Opened, Session, credentials::testing::MemoryKeys,
-    transport::memory::Hub,
-};
+use rocky_credentials::testing::MemoryKeys;
+use rocky_sdk::{Database, Network, NetworkService, Open, Opened, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::snapshot as snap;
@@ -10,7 +8,7 @@ use crate::support;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":false}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":false}],"primary_key":["key"]}]}"#;
 
 fn iroh() -> rocky_iroh::Options {
     iroh_at(0)
@@ -125,12 +123,11 @@ impl Db {
         Self::open(directory, OpenMode::Resume, transport)
     }
     async fn invite(&self) -> String {
-        snap::ok(self.engine.session().provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: ["items".to_owned()].into_iter().collect(),
-            },
-            None,
-        ))
+        snap::ok(
+            self.engine
+                .session()
+                .provision(rocky_sdk::Access::Full, None),
+        )
         .await["uri"]
             .as_str()
             .unwrap_or_default()

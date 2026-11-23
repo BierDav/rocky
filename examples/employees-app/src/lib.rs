@@ -26,6 +26,7 @@ impl Employees {
             entities: vec![],
             fields: vec![],
             operations: vec![],
+            roles: vec![],
             domains: vec![DomainRule {
                 domain: self.domain,
                 author_log: AuthorLogScope::Domain,

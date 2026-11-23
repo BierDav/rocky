@@ -127,7 +127,7 @@ pub struct AuthorityStatus {
     pub logged_out: bool,
     pub verified_revocation: Option<VerifiedRevocation>,
     pub revocations: RevocationStatus,
-    pub profile: crate::GrantProfile,
+    pub access: crate::Access,
     pub renewal_routes: Vec<RenewalRoute>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

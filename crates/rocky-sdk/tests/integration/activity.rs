@@ -1,6 +1,6 @@
 use rocky_sdk::{
-    ActivityKind, Affinity, Column, Configuration, Failure, GrantProfile, GrantTerms, IdentityKey,
-    NodeKeys, ReplicaRoleConfig, Schema, ServiceError, Table,
+    ActivityKind, Affinity, Column, Configuration, Failure, ReplicaRoleConfig, Schema,
+    ServiceError, Table,
 };
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -18,19 +18,7 @@ async fn closing_an_activity_waiter_preserves_the_writer_and_binary_identity_lab
     let observer = database.session();
     assert_eq!(writer.domain().await?.scope, database.scope());
     let identity = writer.info().await?.principal;
-    let labeled = NodeKeys {
-        identity: IdentityKey::generate().public_key(),
-        node: rocky_sdk::credentials::PrivateKey::new().public_key(),
-    };
-    writer
-        .grant(
-            labeled,
-            GrantProfile::Reader {
-                scopes: ["notes".into()].into(),
-            },
-            GrantTerms::default(),
-        )
-        .await?;
+    let labeled = writer.provision(rocky_sdk::Access::Read, None).await?;
     let label = vec![0, 255, b'a', 0];
     writer
         .set_identity_label(labeled.identity, label.clone())

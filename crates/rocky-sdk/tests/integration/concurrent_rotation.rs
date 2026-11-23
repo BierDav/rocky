@@ -2,10 +2,11 @@ use crate::common;
 use crate::registry_revocation::fixture;
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{Database, Network, Open, credentials::PrivateKey, transport::memory::Hub};
-use serde_json::{Value, json};
+use rocky_credentials::PrivateKey;
+use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use serde_json::Value;
 use std::{path::Path, sync::Arc};
-const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":6,"tables":[
+const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
@@ -24,16 +25,27 @@ async fn join(
     hub: &Arc<Hub>,
     name: &str,
     a: &Device,
-    profile: Value,
+    access: rocky_sdk::Access,
     schema: &'static str,
 ) -> Result<Device, Failure> {
-    let invitation = a.invite_as(profile).await;
+    let invitation = a.invite_as(access).await;
     let directory = root.join(name);
     let mut options = open(&directory, hub, name);
     options.schema = crate::support::snapshot::schema(schema);
     let device = Device::new(Database::join(options, &invitation)?)?;
     a.session.add_peer(&device.contact().await).await?;
     fixture::settle(&device).await;
+    Ok(device)
+}
+async fn join_admin(
+    root: &Path,
+    hub: &Arc<Hub>,
+    name: &str,
+    a: &Device,
+    schema: &'static str,
+) -> Result<Device, Failure> {
+    let device = join(root, hub, name, a, rocky_sdk::Access::Full, schema).await?;
+    a.admit(&device).await;
     Ok(device)
 }
 fn identity(root: &Path, name: &str) -> Value {
@@ -135,7 +147,7 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = Device::new(Database::create(open(&root.join("a"), &hub, "a"), None)?)?;
-    let b = join(root, &hub, "b", &a, json!({"kind":"issuer"}), SCHEMA).await?;
+    let b = join_admin(root, &hub, "b", &a, SCHEMA).await?;
     let ea = create_partition(&a).await["epoch"].clone();
     let eb = create_partition(&b).await["epoch"].clone();
     assert_ne!(ea, eb);
@@ -177,21 +189,13 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     let mut options = open(&directory, &hub, "a");
     options.schema = crate::support::snapshot::schema(common::SCHEMA);
     let a = Device::new(Database::create(options, None)?)?;
-    let b = join(
-        root,
-        &hub,
-        "b",
-        &a,
-        json!({"kind":"issuer"}),
-        common::SCHEMA,
-    )
-    .await?;
+    let b = join_admin(root, &hub, "b", &a, common::SCHEMA).await?;
     let offline = join(
         root,
         &hub,
         "offline",
         &a,
-        json!({"kind":"writer","scopes":["items"]}),
+        rocky_sdk::Access::Full,
         common::SCHEMA,
     )
     .await?;
@@ -245,7 +249,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
 #[tokio::test]
 async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_superseding_rows()
 -> Result<(), Failure> {
-    const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":6,"tables":[{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
+    const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":7,"tables":[{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
     async fn write(device: &Device, key: &str) {
         let mut tx = device.database.transaction().await.expect("begin");
         let id = tx.next_id("parts", values()).await.expect("id");
@@ -266,8 +270,8 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     let a = Device::new(Database::create(options, None)?)?;
     create_partition(&a).await;
     write(&a, "before").await;
-    let b = join(root, &hub, "b", &a, json!({"kind":"issuer"}), LIST_SCHEMA).await?;
-    let reader = json!({"kind":"reader","scopes":["parts"]});
+    let b = join_admin(root, &hub, "b", &a, LIST_SCHEMA).await?;
+    let reader = rocky_sdk::Access::Read;
     let carol = join(root, &hub, "carol", &a, reader.clone(), LIST_SCHEMA).await?;
     let dave = join(root, &hub, "dave", &b, reader, LIST_SCHEMA).await?;
     a.sync()

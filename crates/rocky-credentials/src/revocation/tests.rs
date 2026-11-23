@@ -32,13 +32,14 @@ fn issuer_at(publisher: &PrivateKey, time: u64) -> (PrivateKey, CredentialChain)
         },
     )
     .unwrap()
-    .issue_issuer(
+    .issue_trusted(
         key.public_key(),
-        crate::Validity {
-            issued_at: time - 5 * DAY,
-            lifetime: std::time::Duration::from_secs(300 * DAY),
-            clock_skew: std::time::Duration::from_secs(DAY),
+        rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: APP,
+            domain: rocky_core::DomainId([3; 16]),
         },
+        time - 5 * DAY,
     )
     .unwrap();
     (key, CredentialChain(vec![link]))
@@ -271,7 +272,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     let member_without_issuer_authority = {
         let key = PrivateKey::new();
         let link = Authority::owner(&publisher)
-            .issue_terms(
+            .issue(
                 key.public_key(),
                 vec![rocky_core::ResourceGrant {
                     scope: rocky_core::ResourceScope {
@@ -287,7 +288,6 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
                     rights: [rocky_core::Right::Read].into(),
                     fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
                 }],
-                crate::DelegationTerms { delegations: 2 },
                 crate::Validity {
                     issued_at: NOW,
                     lifetime: std::time::Duration::from_secs(DAY),
@@ -300,10 +300,6 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
             &(key, CredentialChain(vec![link])),
         )
     };
-    let expired = signed(
-        statement(issuer, NOW + 400 * DAY, PrivateKey::new().public_key()),
-        &issuing,
-    );
     let mut owner_revoked = statement(issuer, NOW, node);
     owner_revoked.identities.insert(publisher.public_key());
     let owner_revoked = signed(owner_revoked, &issuing);
@@ -316,7 +312,6 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         other_app,
         other_publisher,
         member_without_issuer_authority,
-        expired,
         owner_revoked,
     ] {
         if let Ok(incoming) = RevocationSet::try_from(vec![fresh.clone(), bad]) {
@@ -367,7 +362,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
+fn only_the_root_ends_the_links_it_signed() {
     let publisher = PrivateKey::new();
     let revoke = |by: &(PrivateKey, CredentialChain), target: &PrivateKey| {
         let mut body = statement(&by.0, NOW, PrivateKey::new().public_key());
@@ -388,35 +383,6 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
         b.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_ok()
     );
-    let below = |parent: &(PrivateKey, CredentialChain)| {
-        let key = PrivateKey::new();
-        let link = crate::testing::authority(&parent.0, &parent.1)
-            .issue_issuer(
-                key.public_key(),
-                crate::Validity {
-                    issued_at: NOW - 5 * DAY,
-                    lifetime: std::time::Duration::from_secs(300 * DAY),
-                    clock_skew: std::time::Duration::from_secs(DAY),
-                },
-            )
-            .unwrap();
-        let mut chain = parent.1.clone();
-        chain.0.push(link);
-        (key, chain)
-    };
-    let (c, d) = (below(&a), below(&a));
-    let mut set = single(&revoke(&c, &d.0));
-    set.merge(&single(&revoke(&d, &c.0)), publisher.public_key(), APP, NOW)
-        .unwrap();
-    assert!(
-        c.1.issuer(publisher.public_key(), Some((&set, NOW)))
-            .is_err(),
-        "below a, two issuers end each other's chains"
-    );
-    assert!(
-        d.1.issuer(publisher.public_key(), Some((&set, NOW)))
-            .is_err()
-    );
     let root = SignedRevocation::sign(
         Revocation {
             identities: [a.0.public_key()].into(),
@@ -430,11 +396,7 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
     assert!(
         a.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_err(),
-        "the root ends a, and with it every chain below"
-    );
-    assert!(
-        c.1.issuer(publisher.public_key(), Some((&set, NOW)))
-            .is_err()
+        "the root ends a"
     );
     assert!(
         b.1.issuer(publisher.public_key(), Some((&set, NOW)))

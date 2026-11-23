@@ -58,11 +58,18 @@ pub fn schema() -> Result<Schema, Failure> {
         .column(Column::new("name", Affinity::Text).required())
         .check("role IN ('trusted', 'full', 'partial')")
         .index(unique("devices_node", ["node"]));
-    Schema::builder(APPLICATION, 1)
+    Ok(Schema::builder(APPLICATION, 1)
         .table(lists)
         .table(todos)
         .table(devices)
-        .build()
+        .role(
+            rocky_sdk::Role::new(roles::PARTIAL)
+                .write(LISTS)
+                .write(TODOS)
+                .write(DEVICES)
+                .per_partition(LIST_GROUP),
+        )
+        .build()?)
 }
 fn grouped(table: Table) -> TableDefinition {
     let mut table = table.definition();
@@ -128,6 +135,7 @@ pub struct Created {
 pub enum TodoError {
     InvalidTitle,
     UnknownRole,
+    NotInvitable,
 }
 impl std::fmt::Display for TodoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -136,6 +144,10 @@ impl std::fmt::Display for TodoError {
                 write!(f, "a title needs text and at most {MAX_TITLE_BYTES} bytes")
             }
             Self::UnknownRole => write!(f, "the device has an unknown role"),
+            Self::NotInvitable => write!(
+                f,
+                "only the device that created the lists administers them; invite full or partial devices"
+            ),
         }
     }
 }
@@ -189,12 +201,17 @@ impl Todos {
             .await
     }
     pub async fn lists(&self) -> Result<Vec<List>, Failure> {
-        let rows = self
+        let query = self
             .database
             .query("SELECT id,title FROM lists ORDER BY title,id", params![])
-            .await?
-            .collect()
-            .await?;
+            .await;
+        let partial =
+            self.database.session().info().await?.access == rocky_sdk::Access::Role(roles::PARTIAL);
+        let rows = match query {
+            Ok(rows) => rows.collect().await?,
+            Err(_) if partial => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
         rows.iter()
             .map(|row| {
                 Ok(List {

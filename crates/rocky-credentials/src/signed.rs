@@ -47,7 +47,8 @@ fn check_node(capability: &Capability, identity: PublicKey) -> Result<(), Error>
         || !extended.partitions.is_empty()
         || extended.node != Some(crate::PeerId::of(capability.subject))
         || extended.issues
-        || extended.families
+        || extended.whole.is_some()
+        || extended.role.is_some()
         || extended.trusted.is_some()
         || extended.origin.is_some()
         || extended.database.is_none()
@@ -543,7 +544,8 @@ pub struct CredentialChain(pub Vec<SignedCapability>);
 pub struct VerifiedChain {
     pub(crate) leaf: Capability,
     pub(crate) held: Capability,
-    families: crate::GrantFamilies,
+    whole: Option<crate::WholeAccess>,
+    tables: crate::WholeTables,
     revocations: Commitment,
     not_before: u64,
     expires: u64,
@@ -578,8 +580,9 @@ impl VerifiedChain {
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
         self.valid_node(subject, revocations, time)?;
         Ok((
-            self.families.resources(&self.held.grants),
-            self.families.partitions(&self.held.extended()?.partitions),
+            self.tables.resources(self.whole, &self.held.grants),
+            self.tables
+                .partitions(self.whole, &self.held.extended()?.partitions),
         ))
     }
     pub(crate) fn valid_node(
@@ -606,15 +609,11 @@ impl VerifiedChain {
         &self,
         table: Commitment,
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
-        let database = self
-            .leaf
-            .extended()?
-            .database
-            .ok_or_else(|| denied("node requires a database context"))?;
         Ok((
-            self.families.resources_for_table(&self.held.grants, table),
-            self.families
-                .partitions_for(&self.held.extended()?.partitions, database.scope, table),
+            self.tables
+                .resources_for_table(self.whole, &self.held.grants, table),
+            self.tables
+                .partitions_for(self.whole, &self.held.extended()?.partitions, table),
         ))
     }
     pub fn author(
@@ -645,27 +644,14 @@ impl CredentialChain {
         publisher: PublicKey,
         revocations: &RevocationSet,
         time: u64,
+        tables: &crate::WholeTables,
     ) -> Result<VerifiedChain, Error> {
-        self.verified_with_families(
-            publisher,
-            revocations,
-            time,
-            &crate::GrantFamilies::default(),
-        )
-    }
-    pub fn verified_with_families(
-        &self,
-        publisher: PublicKey,
-        revocations: &RevocationSet,
-        time: u64,
-        families: &crate::GrantFamilies,
-    ) -> Result<VerifiedChain, Error> {
-        let (leaf, held) =
-            self.node_with_families(publisher, Some((revocations, time)), families)?;
+        let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
         Ok(VerifiedChain {
             leaf: leaf.clone(),
             held: held.clone(),
-            families: families.for_capability(held)?,
+            whole: held.extended()?.whole,
+            tables: tables.clone(),
             revocations: revocations.fingerprint()?,
             not_before: self
                 .0
@@ -708,20 +694,6 @@ impl CredentialChain {
         subject: PublicKey,
     ) -> Result<&Capability, Error> {
         self.check(publisher, subject, None)?;
-        self.identity_index()
-            .map(|index| &self.0[index].capability)
-            .ok_or_else(|| denied("credential depth"))
-    }
-    pub fn historic_provenance_with_families(
-        &self,
-        publisher: PublicKey,
-        subject: PublicKey,
-        families: &crate::GrantFamilies,
-    ) -> Result<&Capability, Error> {
-        let (leaf, _) = self.node_with_families(publisher, None, families)?;
-        if leaf.subject != subject {
-            return Err(denied("operation/session requires a node credential"));
-        }
         self.identity_index()
             .map(|index| &self.0[index].capability)
             .ok_or_else(|| denied("credential depth"))
@@ -798,15 +770,7 @@ impl CredentialChain {
         publisher: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<(&Capability, &Capability), Error> {
-        self.node_with_families(publisher, current, &crate::GrantFamilies::default())
-    }
-    fn node_with_families(
-        &self,
-        publisher: PublicKey,
-        current: Option<(&RevocationSet, u64)>,
-        families: &crate::GrantFamilies,
-    ) -> Result<(&Capability, &Capability), Error> {
-        let leaf = self.links_with_families(publisher, current, families)?;
+        let leaf = self.links(publisher, current)?;
         if leaf.kind != PrincipalKind::Node {
             return Err(denied("operation/session requires a node credential"));
         }
@@ -879,14 +843,6 @@ impl CredentialChain {
         publisher: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<&Capability, Error> {
-        self.links_with_families(publisher, current, &crate::GrantFamilies::default())
-    }
-    pub(crate) fn links_with_families(
-        &self,
-        publisher: PublicKey,
-        current: Option<(&RevocationSet, u64)>,
-        families: &crate::GrantFamilies,
-    ) -> Result<&Capability, Error> {
         if self.0.is_empty() || self.0.len() > MAX_CREDENTIAL_DEPTH {
             return Err(denied("credential depth"));
         }
@@ -896,9 +852,6 @@ impl CredentialChain {
         for (index, signed) in self.0.iter().enumerate() {
             let capability = &signed.capability;
             let extended = capability.extended()?;
-            if extended.families && !families.authenticated() {
-                return Err(denied("grant families require an authenticated schema"));
-            }
             let node = capability.kind == PrincipalKind::Node;
             if capability
                 .grants
@@ -952,7 +905,12 @@ impl CredentialChain {
                 || capability.not_before >= capability.expires
                 || lifetime > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || (held == 0 && !node && !extended.issues && extended.trusted.is_none())
+                || (held == 0
+                    && !node
+                    && extended.whole.is_none()
+                    && extended.role.is_none()
+                    && !extended.issues
+                    && extended.trusted.is_none())
                 || held > crate::MAX_GRANTS
                 || signed.verify_signature().is_err()
             {
@@ -964,20 +922,6 @@ impl CredentialChain {
             Self::shape(capability, &extended, signed.issuer)?;
             if let Some((parent, parent_extended)) = &parent {
                 let authority = parent_extended.issues;
-                let narrows_grants = !authority && !node;
-                let parent_families = families.enabled(narrows_grants && parent_extended.families);
-                let child_families = families.enabled(narrows_grants && extended.families);
-                let (allowed, allowed_partitions, requested, requested_partitions) =
-                    if narrows_grants {
-                        (
-                            parent_families.resources(&parent.grants),
-                            parent_families.partitions(&parent_extended.partitions),
-                            child_families.resources(&capability.grants),
-                            child_families.partitions(&extended.partitions),
-                        )
-                    } else {
-                        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-                    };
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
@@ -988,16 +932,7 @@ impl CredentialChain {
                         && capability.kind == PrincipalKind::User)
                     || extended.trusted.is_some()
                     || (extended.issues && !authority)
-                    || (!authority
-                        && requested
-                            .iter()
-                            .any(|grant| !allowed.iter().any(|allowed| allowed.includes(grant))))
-                    || (!authority
-                        && requested_partitions.iter().any(|grant| {
-                            !allowed_partitions
-                                .iter()
-                                .any(|allowed| allowed.includes(grant))
-                        }))
+                    || (!authority && !node)
                 {
                     return Err(denied("delegation expands authority"));
                 }
@@ -1052,8 +987,12 @@ impl CredentialChain {
             .is_some_and(|trusted| self.0[index].issuer == trusted))
     }
     fn shape(capability: &Capability, extended: &Extended, issuer: PublicKey) -> Result<(), Error> {
-        if extended.families && (extended.issues || extended.trusted.is_some()) {
-            return Err(denied("grant families apply only to collection authority"));
+        if (extended.whole.is_some() || extended.role.is_some())
+            && (extended.issues || extended.trusted.is_some())
+        {
+            return Err(denied(
+                "whole access and roles apply only to collection authority",
+            ));
         }
         let valid = match capability.kind {
             PrincipalKind::Node => check_node(capability, issuer).is_ok(),
@@ -1134,11 +1073,11 @@ impl CredentialChain {
     pub fn capabilities(&self) -> Self {
         match self.identity_index() {
             Some(index) => Self(self.0[..=index].to_vec()),
-            None => self.delegable(),
+            None => self.without_certificate(),
         }
     }
     pub fn with_certificate(&self, certificate: SignedCapability) -> Self {
-        let mut chain = self.delegable();
+        let mut chain = self.without_certificate();
         chain.0.push(certificate);
         chain
     }
@@ -1169,7 +1108,7 @@ impl Credentials {
         Self {
             publisher,
             revocations,
-            capabilities: chain.delegable(),
+            capabilities: chain.without_certificate(),
             certificate: chain.certificate().cloned(),
         }
     }

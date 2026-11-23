@@ -11,8 +11,7 @@ async fn main() -> Result<(), rocky_sdk::Failure> {
 mod native {
     use iroh_relay::server::{RelayConfig, Server, ServerConfig};
     use rocky_sdk::{
-        Affinity, Column, Configuration, Database, Failure, GrantProfile, Network, Schema, Table,
-        params,
+        Access, Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, params,
     };
     use serde_json::json;
     use std::{net::Ipv4Addr, sync::Arc};
@@ -50,15 +49,7 @@ mod native {
         )
         .await?;
         tx.commit().await?;
-        let invitation = db
-            .session()
-            .provision(
-                GrantProfile::Writer {
-                    scopes: ["notes".into()].into(),
-                },
-                None,
-            )
-            .await?;
+        let invitation = db.session().provision(Access::Full, None).await?;
         println!("{}", json!({ "relay": url, "invitation": invitation.uri }));
 
         tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;

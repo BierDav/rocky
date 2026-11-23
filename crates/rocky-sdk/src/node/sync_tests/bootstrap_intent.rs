@@ -40,9 +40,7 @@ async fn a_reimport_requested_by_a_revocation_while_an_import_step_records_progr
                 "c",
                 Some((
                     &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
+                    crate::Access::Full,
                 )),
             )
             .await?;

@@ -129,11 +129,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .config
             .credentials
-            .historic_provenance_with_families(
-                inner.config.publisher,
-                key.public_key(),
-                inner.grant_families(),
-            )
+            .historic_provenance(inner.config.publisher, key.public_key())
             .map_err(credential)?;
         inner.credential_signer = Some(key);
         Ok(())

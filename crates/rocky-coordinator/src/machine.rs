@@ -554,15 +554,19 @@ impl Metadata {
         {
             return false;
         }
+        let writing =
+            |right: &Right| matches!(right, Right::Insert | Right::Update | Right::Delete);
         chain
             .node_holder(publisher, request.key, &domain.revocations, time)
             .is_ok_and(|person| {
                 !writes
+                    || person.extended().is_ok_and(|extended| {
+                        extended
+                            .whole
+                            .is_some_and(|whole| whole.rights().iter().any(writing))
+                    })
                     || person.grants.iter().any(|grant| {
-                        grant.scope.domain == control.scope
-                            && grant.rights.iter().any(|right| {
-                                matches!(right, Right::Insert | Right::Update | Right::Delete)
-                            })
+                        grant.scope.domain == control.scope && grant.rights.iter().any(writing)
                     })
             })
     }

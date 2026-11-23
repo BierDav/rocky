@@ -356,7 +356,7 @@ mod tests {
             },
             tables: vec![LogicalTable {
                 sql_name: "items".into(),
-            granted_like: None,
+            explicit_access_only: false,
                 class: TableClass::Replayed,
                 create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id BLOB NOT NULL)".into(),
                 auto_generate: false,
@@ -374,6 +374,7 @@ mod tests {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         };
         TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap()
     }
@@ -439,7 +440,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_values_bind_a_row_to_its_scope() {
-        let definition = serde_json::json!({"format":6,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let definition = serde_json::json!({"format":7,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         let schema = crate::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()

@@ -3,7 +3,7 @@ use crate::{AppId, Commitment, DomainId, EngineIdentity, commitment};
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 32_768;
 pub const MAX_MANIFEST_DOMAINS: usize = 4096;
-const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v3";
+const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v4";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationManifest {
@@ -16,6 +16,7 @@ pub struct ApplicationManifest {
     pub entities: Vec<DefinitionItem>,
     pub fields: Vec<DefinitionItem>,
     pub operations: Vec<DefinitionItem>,
+    pub roles: Vec<DefinitionItem>,
     pub domains: Vec<DomainRule>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +62,7 @@ impl ApplicationManifest {
             ("entity", &self.entities),
             ("field", &self.fields),
             ("operation", &self.operations),
+            ("role", &self.roles),
         ] {
             if items.len() > MAX_MANIFEST_ITEMS {
                 return Err(crate::ProtocolError::InvalidManifest);
@@ -97,7 +99,7 @@ impl ApplicationManifest {
             bytes.extend(version.to_le_bytes());
         }
         bytes.extend(self.engine.0);
-        for items in [&self.entities, &self.fields, &self.operations] {
+        for items in [&self.entities, &self.fields, &self.operations, &self.roles] {
             let mut items: Vec<_> = items.iter().collect();
             items.sort_by_key(|item| item.id);
             bytes.extend((items.len() as u32).to_le_bytes());
@@ -133,7 +135,7 @@ impl ApplicationManifest {
         let projection = body.number()?;
         let engine = EngineIdentity(body.array()?);
         let mut groups = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let count = body.number()?;
             if count as usize > MAX_MANIFEST_ITEMS {
                 return Err(invalid());
@@ -175,6 +177,7 @@ impl ApplicationManifest {
             entities: groups.next().ok_or_else(invalid)?,
             fields: groups.next().ok_or_else(invalid)?,
             operations: groups.next().ok_or_else(invalid)?,
+            roles: groups.next().ok_or_else(invalid)?,
             domains,
         };
         manifest.validate()?;

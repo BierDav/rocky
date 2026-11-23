@@ -10,6 +10,7 @@ fn schema() -> Result<Schema, Failure> {
                 .column(Column::new("optional", Affinity::Text)),
         )
         .build()
+        .map_err(Into::into)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -171,7 +172,7 @@ fn invalid_schema_is_refused_before_installation() {
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), Failure> {
-    use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
+    use rocky_sdk::{Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
     let issuer_directory = Scratch::new().await;
@@ -182,14 +183,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .await?
         .database;
     let session = issuer.session();
-    let invitation = session
-        .provision(
-            GrantProfile::Writer {
-                scopes: ["notes".into()].into(),
-            },
-            None,
-        )
-        .await?;
+    let invitation = session.provision(rocky_sdk::Access::Full, None).await?;
     assert!(!invitation.uri.is_empty());
     let member_configuration = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")));
@@ -282,6 +276,7 @@ fn outbox_schema() -> Result<Schema, Failure> {
                 .column(Column::new("txn", Affinity::Blob).required()),
         )
         .build()
+        .map_err(Into::into)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -402,7 +397,7 @@ async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Fai
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure> {
-    use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
+    use rocky_sdk::{Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
     let issuer_directory = Scratch::new().await;
@@ -412,9 +407,7 @@ async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure
         .create()
         .await?
         .database;
-    let profile = GrantProfile::Writer {
-        scopes: ["notes".into()].into(),
-    };
+    let profile = rocky_sdk::Access::Full;
     let refused = issuer
         .session()
         .provision(profile.clone(), Some(vec![b'x'; 257]))

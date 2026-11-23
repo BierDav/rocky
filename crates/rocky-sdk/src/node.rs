@@ -29,7 +29,7 @@ use crate::{
     Failure,
     bootstrap_intent::{BootstrapIntent, BootstrapIntentFile, Finished, Imports},
     domain::Domain,
-    enrollment::{Contact, Settings, Terms, exchange, now},
+    enrollment::{Contact, Settings, exchange, now},
     peer::{PeerReply, PeerRequest},
     request::{Kind as RequestKind, Lifecycle},
     secrets::Vault,
@@ -40,7 +40,7 @@ use crate::{
 use data_encoding::HEXLOWER;
 use futures_util::{StreamExt, stream};
 use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
-use rocky_credentials::{IdentityEnrollment, IdentityReply, Profile};
+use rocky_credentials::{IdentityEnrollment, IdentityReply};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
     SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
@@ -700,7 +700,7 @@ impl Node {
 
     async fn provision(
         &self,
-        profile: Profile,
+        access: crate::Access,
         label: Option<Vec<u8>>,
     ) -> Result<crate::Provisioning, Failure> {
         if label
@@ -719,25 +719,26 @@ impl Node {
             draft.learn_revocations(&held)?;
             draft.bootstrap = Some(bootstrap);
             let provisioned = draft
-                .provision(&self.vault, routes, (profile.clone(), label), &registry)
+                .provision(&self.vault, routes, (access.clone(), label), &registry)
                 .map_err(named)?;
             draft.bootstrap = None;
             settings.commit(draft, &self.replica).await?;
             provisioned
         };
         self.commit(changes).await?;
+        self.see(identity, node).await?;
         let sequence = self
             .activity
             .record(crate::ActivityKind::DeviceProvisioned {
                 node,
                 identity,
-                profile: profile.clone(),
+                access: access.clone(),
             });
         Ok(crate::Provisioning {
             uri,
             node,
             identity,
-            profile,
+            access,
             sequence,
         })
     }
@@ -859,54 +860,6 @@ impl Node {
         self.observations.touch();
         Ok(result)
     }
-    async fn grant(
-        &self,
-        device: crate::NodeKeys,
-        profile: Profile,
-        terms: Terms,
-        delegate: bool,
-    ) -> Result<crate::Supplied, Failure> {
-        let contact = match self.current() {
-            Some(link) if !delegate => {
-                let settings = self.settings.lock().await.clone();
-                Some(settings.contact(&self.vault, &*link.transport).await?.0)
-            }
-            _ => None,
-        };
-        Box::pin(self.answer_grant(device, (profile, terms), delegate, contact)).await
-    }
-
-    async fn install_supplied(&self, supplied: crate::Supplied) -> Result<(), Failure> {
-        let current = self.settings.lock().await.clone();
-        let renewed = current
-            .supplied_renewal(&self.vault, &supplied)
-            .map_err(refused)?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let mut settings = self.settings.lock().await;
-        let (mut keys, _) = settings.adopt(&self.replica, &self.vault, &renewed).await?;
-        if settings.begin_exposure_rotation(&registry)? {
-            settings.save(&self.replica).await?;
-            keys.extend(
-                settings
-                    .rotate(&self.vault)?
-                    .ok_or("exposure rotation intent disappeared")?,
-            );
-            settings.save(&self.replica).await?;
-        }
-        let fresh = keys.len();
-        self.apply(&mut settings, keys).await?;
-        self.activity.record(crate::ActivityKind::Renewed {
-            revocations: settings.revocation_status()?,
-            expires: (settings.expires()) as u64,
-            keys: fresh,
-        });
-        self.hold_keys(&settings, &settings.partitions(&self.domain())?)
-            .await?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
-            settings.granted(&self.domain());
-        drop(settings);
-        Ok(())
-    }
     fn current(&self) -> Option<Arc<Link>> {
         self.current
             .lock()
@@ -956,7 +909,7 @@ impl Node {
             revocations: settings.revocation_status()?,
             expires: status.expires,
             issuer: settings.issuer(),
-            profile: settings.profile.clone(),
+            access: settings.access.clone(),
             transport: self.kind(),
             readable: status.readable.len(),
             writable: status.writable.len(),
@@ -1053,7 +1006,7 @@ impl Node {
         Ok(crate::DomainInfo {
             scope: self.domain().scope,
             issuer: settings.issuer(),
-            profile: settings.profile.clone(),
+            access: settings.access.clone(),
             collections: settings
                 .schema
                 .names()

@@ -2,10 +2,8 @@ use super::*;
 
 const OUTLASTS_A_LOADED_CI_HOST: Duration = Duration::from_secs(30);
 
-fn writer() -> Profile {
-    Profile::Writer {
-        scopes: ["items".into()].into(),
-    }
+fn writer() -> crate::Access {
+    crate::Access::Full
 }
 async fn pass(node: &Node) -> Result<Value, Failure> {
     let link = node.network.read().await;

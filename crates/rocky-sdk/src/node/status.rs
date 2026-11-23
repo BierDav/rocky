@@ -218,7 +218,7 @@ impl Node {
                     })
                     .transpose()?,
                 revocations: settings.revocation_status()?,
-                profile: settings.profile.clone(),
+                access: settings.access.clone(),
                 renewal_routes,
             },
             data: DataStatus {

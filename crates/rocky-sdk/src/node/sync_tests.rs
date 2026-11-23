@@ -10,7 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-const SCHEMA: &str = r#"{"application":"sync","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"sync","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn link_sessions(
     dialer: &Node,
@@ -94,7 +94,8 @@ async fn node_on(
     let replica = EncryptedReplica::open(
         root.join("rocky.sqlite"),
         domain.app.clone(),
-        rocky_secure::OpenConfig::from(settings.config(&vault, &domain)?)
+        settings
+            .open_config(&vault, &domain)?
             .with_manual_lease_clock(lease_clock),
     )
     .await?;
@@ -119,7 +120,7 @@ async fn enrolled(
     root: &std::path::Path,
     hub: &Arc<Hub>,
     name: &str,
-    issuer: Option<(&Arc<Node>, Profile)>,
+    issuer: Option<(&Arc<Node>, crate::Access)>,
 ) -> Result<Arc<Node>, Failure> {
     enrolled_schema(root, hub, name, issuer, &Schema::parse(SCHEMA)?).await
 }
@@ -127,7 +128,7 @@ async fn enrolled_schema(
     root: &std::path::Path,
     hub: &Arc<Hub>,
     name: &str,
-    issuer: Option<(&Arc<Node>, Profile)>,
+    issuer: Option<(&Arc<Node>, crate::Access)>,
     schema: &Schema,
 ) -> Result<Arc<Node>, Failure> {
     std::fs::create_dir_all(root)?;
@@ -203,12 +204,7 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             let contact = {
@@ -262,9 +258,7 @@ async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Fai
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let profile = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let profile = crate::Access::Full;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, profile))).await?;
             let contact = {
                 let link = b.network.read().await;
@@ -312,24 +306,14 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
                 &root.path().join("relay"),
                 &hub,
                 "relay",
-                Some((
-                    &a,
-                    Profile::Custody {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Store)),
             )
             .await?;
             let b = enrolled(
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             let contact = {
@@ -417,12 +401,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             let contact = {
@@ -476,7 +455,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
-        r#"{"format":6,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        r#"{"format":7,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));
@@ -659,12 +638,7 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             add(&a, 1).await?;

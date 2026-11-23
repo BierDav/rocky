@@ -241,7 +241,7 @@ mod tests {
             .collect();
         LogicalTable {
             sql_name: name.into(),
-            granted_like: None,
+            explicit_access_only: false,
             class: TableClass::Replayed,
             create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
             auto_generate: false,
@@ -267,6 +267,7 @@ mod tests {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         }
     }
     fn items(columns: &[(&str, bool)]) -> LogicalTable {

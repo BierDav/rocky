@@ -273,7 +273,6 @@ fn reads_group(
     let whole = |grant: &rocky_core::ResourceGrant| {
         grant.rows == RowSelection::All && grant.rights.contains(&Right::Read)
     };
-    let profile = record.profile().map(|profile| domain.effective(profile));
     let recorded: Vec<_> = record
         .grants
         .iter()
@@ -282,9 +281,9 @@ fn reads_group(
     let recorded = domain.effective_partitions(&recorded);
     !record.revoked
         && partition.members.iter().all(|member| {
-            profile
-                .as_ref()
-                .is_some_and(|profile| profile.reads(&member.table))
+            record
+                .access()
+                .is_some_and(|access| domain.reads_table(access, &member.table))
                 || recorded.iter().any(|grant| {
                     grant
                         .resolve(member.scope, &member.tuple)

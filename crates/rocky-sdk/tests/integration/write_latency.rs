@@ -1,6 +1,5 @@
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, SqlValue, transport::memory::Hub};
-use serde_json::json;
 use std::{
     path::Path,
     sync::Arc,
@@ -13,7 +12,7 @@ use tokio::{
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"counters","version":1,"format":6,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]},{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"counters","version":1,"format":7,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]},{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 const TABLES: [&str; 2] = ["counters", "items"];
 const WARM_UP: usize = 50;
 const SAMPLES: usize = 600;
@@ -134,9 +133,7 @@ async fn l2_interactive_writes_while_receiving_small_writes() -> Result<(), Fail
         None,
     )?)?;
     seed(&a.database, &["probe", "pressure"]).await?;
-    let invitation = a
-        .invite_as(json!({"kind": "writer", "scopes": TABLES}))
-        .await;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(Database::join(
         open(&root.path().join("b"), network("b")),
         &invitation,

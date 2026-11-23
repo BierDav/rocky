@@ -51,9 +51,7 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let creator = enrolled(&root.path().join("c"), &hub, "c", None).await?;
-            let writer = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let writer = crate::Access::Full;
             let a = enrolled(&root.path().join("a"), &hub, "a", Some((&creator, writer))).await?;
             creator.detach(None).await;
             let expires = a.settings.lock().await.expires();
@@ -92,24 +90,14 @@ async fn a_short_exchange_and_a_failed_peer_do_not_become_a_connection_verdict()
                 &root.path().join("b"),
                 &hub,
                 "b",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             let c = enrolled(
                 &root.path().join("c"),
                 &hub,
                 "c",
-                Some((
-                    &a,
-                    Profile::Writer {
-                        scopes: ["items".into()].into(),
-                    },
-                )),
+                Some((&a, crate::Access::Full)),
             )
             .await?;
             targets(&a, &[b.clone(), c.clone()]).await?;
@@ -152,9 +140,7 @@ async fn a_scope_the_peer_does_not_share_is_not_a_blocker() -> Result<(), Failur
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let profile = Profile::Writer {
-                scopes: ["items".into()].into(),
-            };
+            let profile = crate::Access::Full;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, profile))).await?;
             targets(&a, std::slice::from_ref(&b)).await?;
             let report: crate::ReconciliationReport =

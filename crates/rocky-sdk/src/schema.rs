@@ -1,6 +1,6 @@
-use crate::Failure;
+use rocky_core::{RoleDefinition, RoleTable, SchemaError, TableAccess};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +17,8 @@ pub struct Schema {
     pub restrictions: Vec<rocky_core::LogicalRestriction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<Migration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<RoleDefinition>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,23 +38,29 @@ fn identifier(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && name.as_bytes()[0].is_ascii_alphabetic()
 }
+fn invalid(reason: impl Into<String>) -> SchemaError {
+    SchemaError::Invalid(reason.into())
+}
+fn malformed(error: serde_json::Error) -> SchemaError {
+    invalid(error.to_string())
+}
 impl Schema {
-    pub fn parse(json: &str) -> Result<Self, Failure> {
+    pub fn parse(json: &str) -> Result<Self, SchemaError> {
         if json.len() > rocky_core::MAX_DEFINITION_BYTES {
-            return Err("schema quota".into());
+            return Err(invalid("schema quota"));
         }
         #[derive(Deserialize)]
         struct Format {
             format: u32,
         }
-        let version: Format = serde_json::from_str(json)?;
+        let version: Format = serde_json::from_str(json).map_err(malformed)?;
         if version.format != rocky_core::DEFINITION_FORMAT {
-            return Err("unsupported schema definition format".into());
+            return Err(invalid("unsupported schema definition format"));
         }
-        let schema: Self = serde_json::from_str(json)?;
+        let schema: Self = serde_json::from_str(json).map_err(malformed)?;
         schema.validated()
     }
-    pub(crate) fn validated(&self) -> Result<Self, Failure> {
+    pub(crate) fn validated(&self) -> Result<Self, SchemaError> {
         let mut schema = self.clone();
         schema.validate()?;
         {
@@ -64,15 +72,15 @@ impl Schema {
         }
         Ok(schema)
     }
-    fn validate(&self) -> Result<(), Failure> {
-        if serde_json::to_vec(self)?.len() > rocky_core::MAX_DEFINITION_BYTES {
-            return Err("schema quota".into());
+    fn validate(&self) -> Result<(), SchemaError> {
+        if serde_json::to_vec(self).map_err(malformed)?.len() > rocky_core::MAX_DEFINITION_BYTES {
+            return Err(invalid("schema quota"));
         }
         if !identifier(&self.application) || self.version == 0 {
-            return Err("invalid application schema".into());
+            return Err(invalid("invalid application schema"));
         }
         if self.format != rocky_core::DEFINITION_FORMAT {
-            return Err("unsupported schema definition format".into());
+            return Err(invalid("unsupported schema definition format"));
         }
         {
             let tables = &self.tables;
@@ -81,22 +89,26 @@ impl Schema {
                     .iter()
                     .any(|table| table.columns.is_empty() || table.columns.len() > 128)
             {
-                return Err("definition table or column quota".into());
+                return Err(invalid("definition table or column quota"));
             }
             if tables
                 .iter()
                 .any(|table| table.name.eq_ignore_ascii_case(crate::domain::REGISTRY))
             {
-                return Err(format!(
+                return Err(invalid(format!(
                     "{} is reserved for the SDK's issuer registry",
                     crate::domain::REGISTRY
-                )
-                .into());
+                )));
             }
-            self.definition([0; 32])?
+            if let Some(table) = tables.iter().find(|table| table.explicit_access_only) {
+                return Err(invalid(format!(
+                    "{} is granted only explicitly, which only the SDK's issuer registry is",
+                    table.name
+                )));
+            }
+            self.definition([0; 32])
                 .build()?
                 .supported_on(rocky_core::Profile::Secure)?;
-            self.validate_granted_like()?;
             if let Some(table) = self
                 .migrations
                 .iter()
@@ -112,10 +124,9 @@ impl Schema {
                     _ => None,
                 })
             {
-                return Err(format!(
+                return Err(invalid(format!(
                     "a migration inserts into {table}, which is no replayed table"
-                )
-                .into());
+                )));
             }
             if self.migrations.len() > 64
                 || self
@@ -129,46 +140,16 @@ impl Schema {
                         || migration.statements.len() > 64
                 })
             {
-                return Err(
-                    "migrations name ascending versions up to the schema's, each with 1 to 64 statements"
-                        .into(),
-                );
+                return Err(invalid(
+                    "migrations name ascending versions up to the schema's, each with 1 to 64 statements",
+                ));
             }
             Ok(())
         }
     }
 
-    pub(crate) fn granted_like(&self) -> BTreeMap<String, String> {
-        self.tables
-            .iter()
-            .filter_map(|table| {
-                table
-                    .granted_like
-                    .as_ref()
-                    .map(|like| (table.name.clone(), like.clone()))
-            })
-            .collect()
-    }
-    fn validate_granted_like(&self) -> Result<(), Failure> {
-        let replayed = |name: &str| {
-            self.tables
-                .iter()
-                .any(|table| table.name == name && table.class == rocky_core::TableClass::Replayed)
-        };
-        let followers = self.granted_like();
-        for (table, like) in &followers {
-            if table == like || !replayed(table) || !replayed(like) || followers.contains_key(like)
-            {
-                return Err(format!(
-                    "{table} cannot be granted like {like}: both must be distinct replayed tables, and {like} granted like none"
-                )
-                .into());
-            }
-        }
-        Ok(())
-    }
-    pub fn definition(&self, publisher: [u8; 32]) -> Result<rocky_core::SchemaDefinition, Failure> {
-        Ok(rocky_core::SchemaDefinition {
+    pub fn definition(&self, publisher: [u8; 32]) -> rocky_core::SchemaDefinition {
+        rocky_core::SchemaDefinition {
             format: self.format,
             publisher: data_encoding::HEXLOWER.encode(&publisher),
             application: self.application.clone(),
@@ -176,7 +157,8 @@ impl Schema {
             assertions: self.assertions.clone(),
             restrictions: self.restrictions.clone(),
             tables: self.tables.clone(),
-        })
+            roles: self.roles.clone(),
+        }
     }
     pub(crate) fn names(&self) -> Vec<&str> {
         self.tables
@@ -198,6 +180,7 @@ impl Schema {
             assertions: Vec::new(),
             restrictions: Vec::new(),
             migrations: Vec::new(),
+            roles: Vec::new(),
         })
     }
 }
@@ -222,8 +205,102 @@ impl SchemaBuilder {
         self.0.restrictions.push(restriction);
         self
     }
-    pub fn build(self) -> Result<Schema, Failure> {
-        Schema::parse(&serde_json::to_string(&self.0)?)
+    #[must_use]
+    pub fn role(mut self, role: Role) -> Self {
+        self.0.roles.push(role.0);
+        self
+    }
+    pub fn build(self) -> Result<Schema, SchemaError> {
+        Schema::parse(&serde_json::to_string(&self.0).map_err(malformed)?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RoleName(Cow<'static, str>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidName(pub String);
+impl std::fmt::Display for InvalidName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} is no role name: use an identifier other than admin, full, read or store",
+            self.0
+        )
+    }
+}
+impl std::error::Error for InvalidName {}
+impl RoleName {
+    pub const fn from_static(name: &'static str) -> Self {
+        Self(Cow::Borrowed(name))
+    }
+    pub fn new(name: impl Into<String>) -> Result<Self, InvalidName> {
+        let name = name.into();
+        if !rocky_core::role_name_is_valid(&name) || rocky_core::role_name_is_reserved(&name) {
+            return Err(InvalidName(name));
+        }
+        Ok(Self(Cow::Owned(name)))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Display for RoleName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl Serialize for RoleName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_str().serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for RoleName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct Role(RoleDefinition);
+impl Role {
+    pub fn new(name: RoleName) -> Self {
+        Self(RoleDefinition {
+            name: name.as_str().to_owned(),
+            tables: Vec::new(),
+            per_partition: Vec::new(),
+        })
+    }
+    fn grant(mut self, table: impl Into<String>, access: TableAccess) -> Self {
+        self.0.tables.push(RoleTable {
+            table: table.into(),
+            access,
+        });
+        self
+    }
+    #[must_use]
+    pub fn read(self, table: impl Into<String>) -> Self {
+        self.grant(table, TableAccess::Read)
+    }
+    #[must_use]
+    pub fn write(self, table: impl Into<String>) -> Self {
+        self.grant(table, TableAccess::Write)
+    }
+    #[must_use]
+    pub fn append(self, table: impl Into<String>) -> Self {
+        self.grant(table, TableAccess::Append)
+    }
+    #[must_use]
+    pub fn update_columns(
+        self,
+        table: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let columns = columns.into_iter().map(Into::into).collect();
+        self.grant(table, TableAccess::UpdateColumns(columns))
+    }
+    #[must_use]
+    pub fn per_partition(mut self, group: impl Into<String>) -> Self {
+        self.0.per_partition.push(group.into());
+        self
     }
 }
 
@@ -235,7 +312,7 @@ impl Table {
     fn of(name: impl Into<String>, class: rocky_core::TableClass) -> Self {
         Self(rocky_core::TableDefinition {
             name: name.into(),
-            granted_like: None,
+            explicit_access_only: false,
             class,
             columns: Vec::new(),
             checks: Vec::new(),
@@ -259,6 +336,11 @@ impl Table {
     #[must_use]
     pub fn partition_by(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.0.partition_by = columns.into_iter().map(Into::into).collect();
+        self
+    }
+    #[must_use]
+    pub fn partition_group(mut self, group: impl Into<String>) -> Self {
+        self.0.partition_group = Some(group.into());
         self
     }
     #[must_use]

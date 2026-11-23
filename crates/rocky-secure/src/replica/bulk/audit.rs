@@ -72,11 +72,7 @@ impl<A: RowApplication> Inner<A> {
                         let node = PublicKey::from_bytes(&s.writer)
                             .map_err(|_| denied("migration writer key"))?;
                         chain
-                            .historic_provenance_with_families(
-                                self.config.publisher,
-                                node,
-                                self.grant_families(),
-                            )
+                            .historic_provenance(self.config.publisher, node)
                             .map_err(credential)?;
                         if stage.target != s.tip
                             || stage.publication != s.publication

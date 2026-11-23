@@ -60,9 +60,6 @@ impl Node {
                 let result = tokio::select! { result = self.next_activity(&client, a) => result, () = reply.closed() => return, };
                 let _ = reply.send(result);
             }
-            Request::IssuePartitions(a, b, c, d, reply) => {
-                let _ = reply.send(self.issue_partitions(a, b, c, d).await);
-            }
             Request::PartitionAddress(a, b, reply) => {
                 let _ = reply.send(self.partition_address(&a, b).await);
             }
@@ -158,11 +155,11 @@ impl Node {
             Request::Trust(identity, root, reply) => {
                 let _ = reply.send(self.trust_identity(identity, &root).await);
             }
-            Request::Provision(profile, label, reply) => {
-                let _ = reply.send(self.provision(profile, label).await);
+            Request::Provision(access, label, reply) => {
+                let _ = reply.send(self.provision(access, label).await);
             }
-            Request::Invite(identity, profile, terms, reply) => {
-                let _ = reply.send(self.invite(identity, profile, terms).await);
+            Request::Invite(identity, access, terms, reply) => {
+                let _ = reply.send(self.invite(identity, access, terms).await);
             }
             Request::WithdrawInvitation(id, reply) => {
                 let _ = reply.send(self.withdraw_invitation(id).await);
@@ -206,12 +203,6 @@ impl Node {
             Request::Info(reply) => {
                 let _ = reply.send(self.session_info().await);
             }
-            Request::Grant(device, profile, terms, delegate, reply) => {
-                let _ = reply.send(self.grant(device, profile, terms, delegate).await);
-            }
-            Request::Install(supplied, reply) => {
-                let _ = reply.send(self.install_supplied(*supplied).await);
-            }
             Request::PartitionCustody(scope, policy, reply) => {
                 let result = self
                     .replica
@@ -229,6 +220,9 @@ impl Node {
             }
             Request::PartitionRecipients(target, reply) => {
                 let _ = reply.send(self.partition_recipients(&target).await);
+            }
+            Request::GrantPartition(identity, target, reply) => {
+                let _ = reply.send(self.grant_partition(identity, &target).await);
             }
             Request::SharePartition(target, recipients, epoch, reply) => {
                 let _ = reply.send(self.share_partition(&target, recipients, epoch).await);

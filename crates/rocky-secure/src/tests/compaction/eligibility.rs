@@ -1,5 +1,6 @@
 use super::*;
 use rocky_credentials::Authority;
+use rocky_credentials::testing::UntrustedIssuer as _;
 
 fn configured_revocations(lineage: &Lineage, issuer: &PrivateKey) -> RevocationSet {
     crate::tests::revoking(
@@ -28,7 +29,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
             },
         )
         .unwrap()
-        .issue_issuer(
+        .issue_untrusted_issuer(
             signer.public_key(),
             rocky_credentials::Validity {
                 issued_at: 0,
@@ -98,7 +99,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), crate::tests::validity())
+        .issue_untrusted_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let sealed = SignedSeal::endorse(

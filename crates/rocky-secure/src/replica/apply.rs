@@ -283,8 +283,8 @@ impl<A: RowApplication> Inner<A> {
                                 table: scope.table,
                                 id: identity,
                                 ceiling: &ceiling,
-                                families: self
-                                    .families_at(self.manifest_of_tip(extension.tip)?)?
+                                whole_tables: self
+                                    .whole_tables_at(self.manifest_of_tip(extension.tip)?)?
                                     .as_ref(),
                             },
                             Some(&mut bindings),

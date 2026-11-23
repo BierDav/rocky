@@ -3,8 +3,7 @@ use rocky_core::{
     ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
     RowApplication, Scope, TypedRows,
 };
-use rocky_credentials::{Grant, Profile, Resource};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) const REGISTRY: &str = "issuer_registry";
 
@@ -12,8 +11,7 @@ pub(crate) struct Domain {
     pub app: TypedRows,
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
-    granted_like: BTreeMap<String, String>,
-    pub families: rocky_credentials::GrantFamilies,
+    pub whole_tables: rocky_credentials::WholeTables,
 }
 impl Domain {
     pub fn new(
@@ -98,33 +96,23 @@ impl Domain {
         let app = TypedRows::new(logical, vec![domain])?
             .at_generation(generation)?
             .on_engine(engine);
-        let families = rocky_credentials::GrantFamilies::new(
+        let whole_tables = rocky_credentials::WholeTables::new(
             &app.manifest(),
             &tables.values().copied().collect::<Vec<_>>(),
         )?;
         Ok(Self {
             app,
-            families,
+            whole_tables,
             scope,
             tables,
-            granted_like: schema.granted_like(),
         })
-    }
-    fn removed(&self, name: &str) -> bool {
-        match name.split_once('.') {
-            Some((table, column)) => self
-                .logical()
-                .table(table)
-                .is_none_or(|table| table.column(column).is_none()),
-            None => self.logical().table(name).is_none(),
-        }
     }
     pub fn effective_partitions(
         &self,
         grants: &[rocky_credentials::PartitionGrant],
     ) -> Vec<rocky_credentials::PartitionGrant> {
         let logical = self.logical();
-        let grants_on_current_tables: Vec<_> = grants
+        grants
             .iter()
             .filter(|grant| {
                 logical
@@ -133,8 +121,7 @@ impl Domain {
                     .any(|table| logical.table_id(table) == grant.table)
             })
             .cloned()
-            .collect();
-        self.families.partitions(&grants_on_current_tables)
+            .collect()
     }
     pub fn verified(
         &self,
@@ -143,93 +130,9 @@ impl Domain {
         revocations: &rocky_credentials::RevocationSet,
         time: u64,
     ) -> Result<rocky_credentials::VerifiedChain, rocky_credentials::Error> {
-        chain.verified_with_families(publisher, revocations, time, &self.families)
+        chain.verified(publisher, revocations, time, &self.whole_tables)
     }
 
-    pub fn effective(&self, profile: &Profile) -> Profile {
-        let profile = &self.current(profile);
-        let follow = |scopes: &std::collections::BTreeSet<String>| {
-            let mut scopes = scopes.clone();
-            for (table, like) in &self.granted_like {
-                if scopes.contains(like) {
-                    scopes.insert(table.clone());
-                }
-            }
-            scopes
-        };
-        match profile {
-            Profile::Issuer => Profile::Issuer,
-            Profile::Custody { scopes } => Profile::Custody {
-                scopes: follow(scopes),
-            },
-            Profile::Reader { scopes } => Profile::Reader {
-                scopes: follow(scopes),
-            },
-            Profile::Writer { scopes } => Profile::Writer {
-                scopes: follow(scopes),
-            },
-            Profile::Grants { grants } => {
-                let mut all = grants.clone();
-                for (table, like) in &self.granted_like {
-                    if grants.iter().any(|grant| grant.scope == *table) {
-                        continue;
-                    }
-                    all.extend(
-                        grants
-                            .iter()
-                            .filter(|grant| {
-                                grant.scope == *like
-                                    && grant
-                                        .columns
-                                        .as_ref()
-                                        .is_none_or(|columns| columns.is_empty())
-                            })
-                            .map(|grant| Grant {
-                                scope: table.clone(),
-                                rights: grant.rights.clone(),
-                                columns: grant.columns.clone(),
-                            }),
-                    );
-                }
-                Profile::Grants { grants: all }
-            }
-        }
-    }
-    fn current(&self, profile: &Profile) -> Profile {
-        let named = |scopes: &BTreeSet<String>| -> BTreeSet<String> {
-            scopes
-                .iter()
-                .filter(|name| !self.removed(name))
-                .cloned()
-                .collect()
-        };
-        match profile {
-            Profile::Issuer => Profile::Issuer,
-            Profile::Custody { scopes } => Profile::Custody {
-                scopes: named(scopes),
-            },
-            Profile::Reader { scopes } => Profile::Reader {
-                scopes: named(scopes),
-            },
-            Profile::Writer { scopes } => Profile::Writer {
-                scopes: named(scopes),
-            },
-            Profile::Grants { grants } => Profile::Grants {
-                grants: grants
-                    .iter()
-                    .filter(|grant| !self.removed(&grant.scope))
-                    .cloned()
-                    .map(|mut grant| {
-                        if let Some(columns) = &mut grant.columns {
-                            columns
-                                .retain(|name| !self.removed(&format!("{}.{name}", grant.scope)));
-                        }
-                        grant
-                    })
-                    .collect(),
-            },
-        }
-    }
     pub fn logical(&self) -> &LogicalSchema {
         self.app.schema()
     }
@@ -260,43 +163,19 @@ impl Domain {
         self.tables[REGISTRY]
     }
 
-    pub fn resources(&self) -> Vec<Resource> {
-        self.all_resources()
-            .into_iter()
-            .filter(|resource| resource.name != REGISTRY)
-            .collect()
-    }
-    pub fn registry_resource(&self) -> Vec<Resource> {
-        self.all_resources()
-            .into_iter()
-            .filter(|resource| resource.name == REGISTRY)
-            .collect()
-    }
-    fn all_resources(&self) -> Vec<Resource> {
-        let logical = self.logical();
-        logical
-            .tables
-            .iter()
-            .map(|table| Resource {
-                name: table.sql_name.clone(),
-                scope: self.tables[&table.sql_name],
-                columns: table
-                    .columns
-                    .iter()
-                    .map(|column| (column.sql_name.clone(), logical.field_id(table, column)))
-                    .collect(),
-            })
-            .collect()
+    pub fn scope_of(&self, table: &str) -> Option<ResourceScope> {
+        self.tables.get(table).copied()
     }
 }
 pub(crate) fn logical(schema: &Schema, publisher: [u8; 32]) -> Result<LogicalSchema, Failure> {
-    let mut definition = schema.definition(publisher)?;
+    let mut definition = schema.definition(publisher);
     definition.tables.push(registry_table()?);
     Ok(definition.build()?)
 }
 pub(crate) fn registry_table() -> Result<rocky_core::TableDefinition, Failure> {
     Ok(serde_json::from_value(serde_json::json!({
         "name": REGISTRY,
+        "explicit_access_only": true,
         "class": "replayed",
         "columns": [
             {"name": "identity", "type": "text", "not_null": true},
@@ -313,10 +192,10 @@ mod tests {
     use rocky_core::Affinity;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
-        let json = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
-        let mut definition = Schema::parse(json).unwrap().definition([1; 32]).unwrap();
+        let json = r#"{"format":7,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
+        let mut definition = Schema::parse(json).unwrap().definition([1; 32]);
         let descriptor = definition.build().unwrap();
-        for format in [0, 1, 2, 3, 4, 5, 7] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
             definition.format = format;
             assert!(
                 definition
@@ -325,7 +204,7 @@ mod tests {
                     .to_string()
                     .contains("unsupported schema definition format")
             );
-            let input = json.replace("\"format\":6", &format!("\"format\":{format}"));
+            let input = json.replace("\"format\":7", &format!("\"format\":{format}"));
             let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
@@ -345,7 +224,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":6,"application":"measurements","version":1,"tables":[{
+            r#"{"format":7,"application":"measurements","version":1,"tables":[{
             "name":"samples","class":"replayed",
             "columns":[{"name":"sensor","type":"text","not_null":true},
                        {"name":"sequence","type":"integer","not_null":true},
@@ -379,7 +258,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":6,"application":"references","version":1,"tables":[
+            r#"{"format":7,"application":"references","version":1,"tables":[
             {"name":"parents","class":"replayed","columns":[{"name":"next","type":"blob"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
             {"name":"children","class":"replayed","columns":[{"name":"parent","type":"blob"}],"primary_key":["id"],
@@ -412,7 +291,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_command_definitions_are_refused() {
-        let json = r#"{"format":6,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
+        let json = r#"{"format":7,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         assert!(Schema::parse(json).is_err());
         let confirmed = json.replace("command_controlled", "confirmed_read_only");
         assert!(Schema::parse(&confirmed).is_err());

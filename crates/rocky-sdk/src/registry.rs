@@ -1,7 +1,7 @@
 use crate::{Failure, domain::REGISTRY};
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, SqlValue, TypedRows};
-use rocky_credentials::{PartitionGrant, Profile};
+use rocky_credentials::PartitionGrant;
 use rocky_secure::{EncryptedReplica, PublicKey, SecureSql, SqlOptions};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
@@ -28,9 +28,6 @@ impl std::error::Error for RegistryFull {}
 pub enum Kind {
     Created,
     Paired,
-    Granted,
-    Delegated,
-    Partition,
     Renewed,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,7 +35,7 @@ pub enum Kind {
 pub struct Admitted {
     pub kind: Kind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<Profile>,
+    pub access: Option<crate::Access>,
     pub issuer: PublicKey,
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
@@ -56,7 +53,6 @@ pub struct Capability {
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub grant: PartitionGrant,
-    pub delegations: u8,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,10 +84,10 @@ impl IdentityRecord {
             .max_by_key(|capability| (capability.expires, capability.id))
             .copied()
     }
-    pub fn profile(&self) -> Option<&Profile> {
+    pub fn access(&self) -> Option<&crate::Access> {
         self.admitted
             .as_ref()
-            .and_then(|admitted| admitted.profile.as_ref())
+            .and_then(|admitted| admitted.access.as_ref())
     }
 }
 

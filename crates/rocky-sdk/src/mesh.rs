@@ -489,9 +489,10 @@ pub(crate) async fn exchange(
 mod tests {
     use super::*;
     use crate::{FileSecretStore, SecretStore, schema::Schema};
+    use rocky_credentials::testing::UntrustedIssuer as _;
     use rocky_credentials::{Revocation, SignedRevocation};
     use std::{collections::BTreeSet, sync::Arc};
-    const SCHEMA: &str = r#"{"application":"contacts","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+    const SCHEMA: &str = r#"{"application":"contacts","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn equal_sets_derive_equal_topics_missing_values_differ_and_substitution_is_refused()
     -> Result<(), Failure> {
@@ -673,7 +674,7 @@ mod tests {
             let owner =
                 rocky_credentials::Authority::issuer(&self.member, &self.settings.credentials)?;
             let credentials = owner
-                .chain_of(owner.issue_issuer(
+                .chain_of(owner.issue_untrusted_issuer(
                     delegate.public_key(),
                     rocky_credentials::Validity {
                         issued_at,

@@ -29,12 +29,6 @@ impl Fixture {
             Self::Relational => super::relational::SCHEMA,
         }
     }
-    pub(super) fn scopes(self) -> [&'static str; 2] {
-        match self {
-            Self::Items => ["items", "parts"],
-            Self::Relational => ["boards", "cards"],
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

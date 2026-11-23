@@ -39,7 +39,7 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
                     &root.path().join("b"),
                     &hub,
                     "b",
-                    Some((&a, Profile::Issuer)),
+                    Some((&a, crate::Access::Full)),
                 )
                 .await?;
                 targets(&a, std::slice::from_ref(&b)).await?;

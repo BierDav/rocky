@@ -740,7 +740,7 @@ mod tests {
     fn table(name: &str, sql: &str, columns: Vec<LogicalColumn>, key: &[&str]) -> LogicalTable {
         LogicalTable {
             sql_name: name.into(),
-            granted_like: None,
+            explicit_access_only: false,
             class: TableClass::Replayed,
             create_sql: sql.into(),
             auto_generate: false,
@@ -805,6 +805,7 @@ mod tests {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         };
         let statements = [PLAIN, KEYED, CHILD, LOCAL];
         for sql in statements.iter().chain(&[

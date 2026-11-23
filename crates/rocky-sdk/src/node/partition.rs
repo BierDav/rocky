@@ -1,7 +1,7 @@
 use super::*;
 use crate::groups::{GroupPartition, record_key, secret_role};
 use rocky_core::TableClass;
-use rocky_credentials::{GroupSecretEnvelope, PartitionGrant};
+use rocky_credentials::GroupSecretEnvelope;
 use std::collections::BTreeSet;
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Naming {
@@ -129,7 +129,11 @@ impl Node {
             name: partition.record.name,
         })
     }
-    fn reads_group(&self, settings: &Settings, partition: &GroupPartition) -> Result<(), Failure> {
+    pub(super) fn reads_group(
+        &self,
+        settings: &Settings,
+        partition: &GroupPartition,
+    ) -> Result<(), Failure> {
         let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let time = now()?;
         let domain = self.domain();
@@ -196,88 +200,6 @@ impl Node {
             Ok(())
         })
         .await
-    }
-    pub(super) async fn issue_partitions(
-        &self,
-        device: crate::NodeKeys,
-        grants: Vec<PartitionGrant>,
-        delegations: u8,
-        delegate: bool,
-    ) -> Result<crate::Supplied, Failure> {
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let settings = self.settings.lock().await.clone();
-        let validity = rocky_credentials::Validity {
-            issued_at: now()?,
-            lifetime: std::time::Duration::from_secs(settings.ttl),
-            clock_skew: std::time::Duration::from_secs(300),
-        };
-        let grants = self.domain().families.compact_partitions(&grants);
-        if settings.revoked_node(&device, &registry) {
-            return Err(refused("the device was revoked"));
-        }
-        if settings.issuer() {
-            settings.holder_changes(&device, &grants, delegations, &registry)?;
-        }
-        let chain = self
-            .configure(|settings| {
-                if !delegate && !settings.issuer() {
-                    return Err("partition grant requires an issuer".into());
-                }
-                let terms = rocky_credentials::DelegationTerms { delegations };
-                let node = Settings::node_key(&self.vault)?;
-                if delegate && !settings.issuer() {
-                    let families = if self.domain().families.is_empty() {
-                        rocky_credentials::GrantFamilies::default()
-                    } else {
-                        self.domain().families.clone()
-                    };
-                    Ok(settings.credentials.delegable().delegate_with_families(
-                        rocky_credentials::Signer::node(&node, &settings.credentials)?,
-                        rocky_credentials::Delegation {
-                            subject: device.identity,
-                            kind: rocky_core::PrincipalKind::User,
-                            grants: vec![],
-                            partitions: grants.clone(),
-                            terms,
-                            validity,
-                        },
-                        &families,
-                    )?)
-                } else {
-                    let authority = settings.authority(&node)?;
-                    let issue = if self.domain().families.is_empty() {
-                        rocky_credentials::Authority::issue_partition_terms
-                    } else {
-                        rocky_credentials::Authority::issue_family_terms
-                    };
-                    Ok(authority.chain_of(issue(
-                        &authority,
-                        device.identity,
-                        vec![],
-                        grants.clone(),
-                        terms,
-                        validity,
-                    )?))
-                }
-            })
-            .await?;
-        if settings.issuer() {
-            Box::pin(self.record_holder(&device, &grants, delegations, &chain)).await?;
-        }
-        let supplied = crate::Supplied {
-            epoch_statements: BTreeMap::new(),
-            mesh: settings.mesh,
-            domain: settings.domain,
-            manifest: settings.manifest()?,
-            credentials: rocky_credentials::Credentials::of(
-                settings.publisher,
-                settings.revocations.clone(),
-                &chain,
-            ),
-            keys: vec![],
-            issuers: vec![],
-        };
-        Ok(supplied)
     }
     async fn create_group(
         &self,
@@ -447,6 +369,15 @@ impl Node {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
+        if !settings.issuer()
+            && !recipients
+                .iter()
+                .all(|recipient| settings.known_issuer(recipient))
+        {
+            return Err(refused(
+                "only an admin shares a group secret with a member; a member shares only with admins",
+            ));
+        }
         self.reads_group(&settings, &partition)?;
         if settings
             .authority
@@ -681,6 +612,96 @@ impl Node {
     ) -> Result<crate::PartitionShare, Failure> {
         let partition = self.group_partition(target, Naming::Known).await?;
         let shared = self.share(partition, recipients, epoch).await?;
+        self.activity.record(crate::ActivityKind::PartitionShared {
+            target: target.clone(),
+            recipients: shared.recipients.len(),
+        });
+        self.wake_sync();
+        Ok(shared)
+    }
+    pub(super) async fn identity_nodes(
+        &self,
+        identity: PublicKey,
+    ) -> Result<BTreeSet<PublicKey>, Failure> {
+        let mut nodes: BTreeSet<_> = self
+            .membership()
+            .await?
+            .nodes(&identity)
+            .map(|linked| linked.node)
+            .collect();
+        if let Some(issuing) = self.settings.lock().await.authority.as_ref() {
+            nodes.extend(
+                issuing
+                    .seen
+                    .iter()
+                    .filter(|(_, seen)| seen.identity == identity)
+                    .map(|(node, _)| *node),
+            );
+        }
+        Ok(nodes)
+    }
+    pub(super) async fn grant_partition(
+        &self,
+        identity: PublicKey,
+        target: &crate::PartitionTarget,
+    ) -> Result<crate::PartitionShare, Failure> {
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an admin grants a partition"));
+        }
+        let partition = self.group_partition(target, Naming::Known).await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
+        let record = registry
+            .get(&identity)
+            .ok_or_else(|| refused("the identity is not recorded in this database"))?;
+        if record.revoked {
+            return Err(refused("the identity was revoked"));
+        }
+        let access = record
+            .access()
+            .ok_or_else(|| refused("the identity holds no recorded access"))?;
+        let domain = self.domain();
+        let recorded: Vec<_> = record
+            .grants
+            .iter()
+            .map(|grant| grant.grant.clone())
+            .collect();
+        let fresh = crate::access::HeldPartition {
+            group: partition.record.group.clone(),
+            values: partition.record.values.clone(),
+        };
+        let mut held = domain.held_partitions(&recorded);
+        held.insert(fresh.clone());
+        domain.compile(access, &held).map_err(refused)?;
+        let granted = domain
+            .compile(access, &BTreeSet::from([fresh.clone()]))
+            .map_err(refused)?;
+        let reads_every_member = partition.members.iter().all(|member| {
+            granted.partitions.iter().any(|grant| {
+                grant.table == member.scope.table && grant.rights.contains(&rocky_core::Right::Read)
+            })
+        });
+        if !reads_every_member {
+            return Err(refused(
+                "the identity's role does not read every table of this partition group",
+            ));
+        }
+        let mut changes = crate::registry::Changes::default();
+        for grant in granted.partitions.iter().filter(|grant| {
+            domain
+                .held_partitions(std::slice::from_ref(*grant))
+                .contains(&fresh)
+        }) {
+            changes.grant(
+                &identity,
+                &crate::registry::Grant {
+                    grant: grant.clone(),
+                },
+                Some(record),
+            )?;
+        }
+        self.commit(changes).await?;
+        let nodes = self.identity_nodes(identity).await?;
+        let shared = self.share(partition, nodes, None).await?;
         self.activity.record(crate::ActivityKind::PartitionShared {
             target: target.clone(),
             recipients: shared.recipients.len(),

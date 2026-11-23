@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 6;
+pub const DEFINITION_FORMAT: u32 = 7;
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -22,13 +22,15 @@ pub struct SchemaDefinition {
     pub assertions: Vec<LogicalAssertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restrictions: Vec<LogicalRestriction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<crate::RoleDefinition>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableDefinition {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub granted_like: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_access_only: bool,
     pub class: TableClass,
     pub columns: Vec<ColumnDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -220,6 +222,7 @@ impl SchemaDefinition {
             views: self.views.clone(),
             assertions: self.assertions.clone(),
             restrictions: self.restrictions.clone(),
+            roles: self.roles.clone(),
         };
         schema.validate()?;
         Ok(schema)
@@ -391,7 +394,7 @@ impl TableDefinition {
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(LogicalTable {
             sql_name: name.clone(),
-            granted_like: self.granted_like.clone(),
+            explicit_access_only: self.explicit_access_only,
             class: self.class,
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
             auto_generate: false,
@@ -411,7 +414,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":6,
+        "format":7,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -474,7 +477,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 3, 4, 5, 7] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -573,7 +576,7 @@ mod identity_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -622,7 +625,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -645,7 +648,7 @@ mod partition_tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
-        let json = r#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
+        let json = r#"{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -667,7 +670,7 @@ mod partition_tests {
     fn removed_table_classes_are_refused() {
         let json = |class: &str| {
             format!(
-                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
+                r#"{{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
             )
         };
         SchemaDefinition::parse(json("replayed").as_bytes()).unwrap();
@@ -704,7 +707,7 @@ mod replayed_tests {
 
     fn definition(extra: serde_json::Value) -> SchemaDefinition {
         let mut json = serde_json::json!({
-            "format": 6,
+            "format": 7,
             "publisher": "1111111111111111111111111111111111111111111111111111111111111111",
             "application": "replayed",
             "tables": [
@@ -816,7 +819,7 @@ mod replayed_tests {
     fn replayed_tables_declare_generated_columns_and_index_terms() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 6, "publisher": "00".repeat(32), "application": "terms",
+                "format": 7, "publisher": "00".repeat(32), "application": "terms",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true},
                                 {"name": "cap", "type": "integer", "not_null": true},
@@ -904,7 +907,7 @@ mod replayed_tests {
     fn conflict_policies_existence_logs_and_update_policies_are_refused() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 6, "publisher": "00".repeat(32), "application": "removed",
+                "format": 7, "publisher": "00".repeat(32), "application": "removed",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true}],
                     "indexes": [{"name": "by_name", "unique": true,

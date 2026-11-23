@@ -347,11 +347,7 @@ impl Node {
         current
             .identity_links()
             .with_certificate(certificate.clone())
-            .historic_provenance_with_families(
-                current.publisher,
-                certificate.capability.subject,
-                &self.domain().families,
-            )?;
+            .historic_provenance(current.publisher, certificate.capability.subject)?;
         if current.single_use || certificate.issuer != current.identity {
             return Err(refused("only this identity links its nodes"));
         }

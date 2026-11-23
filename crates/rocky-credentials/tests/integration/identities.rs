@@ -31,6 +31,7 @@ impl Domain {
                 entities: Vec::new(),
                 fields: Vec::new(),
                 operations: Vec::new(),
+                roles: Vec::new(),
                 domains: vec![DomainRule {
                     domain: DomainId([2; 16]),
                     author_log: AuthorLogScope::Domain,
@@ -69,7 +70,11 @@ impl Domain {
             },
         )
         .unwrap()
-        .issue_issuer(identity.key(), VALIDITY)
+        .issue_trusted(
+            identity.key(),
+            self.grant().scope.domain,
+            VALIDITY.issued_at,
+        )
         .expect("issuer");
         (identity, CredentialChain(vec![link]))
     }
@@ -159,12 +164,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     let member = FileIdentity::new().await;
     let link = authority
-        .issue_terms(
-            member.key(),
-            vec![domain.grant()],
-            rocky_credentials::DelegationTerms { delegations: 1 },
-            VALIDITY,
-        )
+        .issue(member.key(), vec![domain.grant()], VALIDITY)
         .expect("granted");
     let identity_chain = authority.chain_of(link);
     assert_eq!(
@@ -234,12 +234,7 @@ async fn links_from_different_issuers_never_collide_because_a_node_authors_under
         let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
         let member = FileIdentity::new().await;
         let link = authority
-            .issue_terms(
-                member.key(),
-                vec![domain.grant()],
-                rocky_credentials::DelegationTerms { delegations: 1 },
-                VALIDITY,
-            )
+            .issue(member.key(), vec![domain.grant()], VALIDITY)
             .expect("granted");
         let identity_chain = authority.chain_of(link);
         let (own, own_chain) = node(&member.provider, &identity_chain, None);
@@ -272,12 +267,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
     let domain = Domain::new();
     let member = FileIdentity::new().await;
     let link = Authority::owner(&domain.owner)
-        .issue_terms(
-            member.key(),
-            vec![domain.grant()],
-            rocky_credentials::DelegationTerms { delegations: 1 },
-            VALIDITY,
-        )
+        .issue(member.key(), vec![domain.grant()], VALIDITY)
         .expect("granted");
     let chain = CredentialChain(vec![link]);
     let first = node(&member.provider, &chain, None);

@@ -5,9 +5,9 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SHELVED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"blob"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const NOTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SHELVED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"blob"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const NOTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
@@ -79,8 +79,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
-        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
-            .await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
     introduce(&a, &b).await;
     create(&a, 1, "shelves", json!({"label": "pantry"})).await;
@@ -178,7 +177,8 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
             invitation,
         )?)
     };
-    let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
+    let c = join("c", &a.invite_as(rocky_sdk::Access::Full).await)?;
+    a.admit(&c).await;
     let d = join("d", &a.invite().await)?;
     let e = join("e", &a.invite().await)?;
     for member in [&c, &d, &e] {
@@ -278,8 +278,7 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
-        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
-            .await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
     introduce(&a, &b).await;
     create(
@@ -484,8 +483,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
-        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
-            .await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
     b.close().await;
     let b = Device::new(Database::open_confirmed(
@@ -529,8 +527,7 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let peer_dir = root.path().join("peer");
     let peer = Device::new(Database::join(
         open(&peer_dir, SHELVED, network("peer")),
-        &a.invite_as(json!({"kind":"writer", "scopes":["items", "shelves"]}))
-            .await,
+        &a.invite_as(rocky_sdk::Access::Full).await,
     )?)?;
     introduce(&a, &peer).await;
     create(

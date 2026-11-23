@@ -3,26 +3,11 @@ use crate::{
     Database, Network, NetworkService, Open, Opened, Schema, Session, enrollment::Settings,
     transport::memory::Hub,
 };
-use rocky_credentials::{Authority, CredentialChain, PrivateKey, Profile};
+use rocky_credentials::CredentialChain;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 type Failure = crate::Failure;
 
-fn external_identity(directory: &Path) -> Arc<dyn crate::IdentityProvider> {
-    Arc::new(crate::IdentityKey::from_secret(rocky_core::commitment(
-        "fixture.wide.identity",
-        directory.to_string_lossy().as_bytes(),
-    )))
-}
-fn prepared_identity(directory: &Path) -> Option<Arc<dyn crate::IdentityProvider>> {
-    directory
-        .join("identity.install.json")
-        .exists()
-        .then(|| external_identity(directory))
-}
-fn node_keys(directory: &Path) -> Result<crate::NodeKeys, Failure> {
-    Database::node_keys_of(directory, None, Some(external_identity(directory)))
-}
 struct Device {
     database: Arc<Database>,
     _network: Option<NetworkService>,
@@ -39,10 +24,6 @@ impl Device {
             _network: opened.network,
             identity: None,
         })
-    }
-    fn with_identity(mut self, identity: Arc<dyn crate::IdentityProvider>) -> Self {
-        self.identity = Some(identity);
-        self
     }
 
     async fn contact(&self) -> String {
@@ -72,17 +53,13 @@ impl Device {
 fn schema(count: usize) -> String {
     let tables: Vec<_> = (0..count)
         .map(|i| {
-            let mut table = json!({"name":format!("table_{i:03}"),"class":"replayed",
+            json!({"name":format!("table_{i:03}"),"class":"replayed",
             "columns":[{"name":"book","type":"text","not_null":true},
                 {"name":"title","type":"text","not_null":true}],
-            "primary_key":["book","id"],"partition_by":["book"],"partition_group":"book"});
-            if i != 0 {
-                table["granted_like"] = json!("table_000");
-            }
-            table
+            "primary_key":["book","id"],"partition_by":["book"],"partition_group":"book"})
         })
         .collect();
-    json!({"format":6,"application":"wide_grants","version":1,"tables":tables}).to_string()
+    json!({"format":7,"application":"wide_grants","version":1,"tables":tables}).to_string()
 }
 fn open<'a>(
     directory: &'a Path,
@@ -93,7 +70,7 @@ fn open<'a>(
     Open {
         directory,
         schema,
-        identity: prepared_identity(directory),
+        identity: None,
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
     }
@@ -141,95 +118,43 @@ async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
         assert_eq!(epochs, expected, "{table}");
     }
 }
-async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
+async fn exercise(count: usize) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(&schema(count))?;
     assert_eq!(schema.tables.len(), count);
     let hub = Arc::new(Hub::default());
     let owner_dir = root.path().join("owner");
-    let mut owner = Device::new(Database::create(
+    let owner = Device::new(Database::create(
         open(&owner_dir, &schema, &hub, "owner"),
         None,
     )?)?;
-    if legacy {
-        owner.database.close().await?;
-        let mut held = settings(&owner_dir);
-        let store: Arc<dyn crate::SecretStore> =
-            Arc::new(crate::FileSecretStore::new(owner_dir.join("secrets")));
-        let node = PrivateKey::from_bytes(&held.vault(&store).get("node")?);
-        let domain = held.domain()?;
-        let grants = crate::enrollment::grants_of(&Profile::Issuer, &domain)?;
-        let partitions = crate::enrollment::whole_partitions(&domain, &grants);
-        let certificate = held.credentials.certificate().unwrap().clone();
-        let mut links = held.issuer_links();
-        let certified = links.with_certificate(certificate.clone());
-        let authority = Authority::issuer(&node, &certified)?;
-        let capability = authority.hold(
-            grants,
-            partitions,
-            rocky_credentials::Validity {
-                issued_at: crate::enrollment::now()?,
-                lifetime: std::time::Duration::from_secs(held.ttl),
-                clock_skew: std::time::Duration::from_secs(300),
-            },
-        )?;
-        links.0.extend([capability, certificate]);
-        links.verify_selectors(
-            held.publisher,
-            node.public_key(),
-            &held.revocations,
-            crate::enrollment::now()?,
-        )?;
-        held.credentials = links;
-        held.save(&owner_dir.join("rocky.sqlite")).await?;
-        owner = Device::new(Database::open(open(&owner_dir, &schema, &hub, "owner"))?)?;
-    }
-    let label = format!(
-        "{count} tables{}",
-        if legacy { " per-table" } else { " family" }
-    );
+    let label = format!("{count} tables");
     let before = metric(&format!("{label} owner"), &settings(&owner_dir).credentials);
     assert_eq!(
         grant_count(&settings(&owner_dir).credentials),
-        if legacy { 63 } else { 3 }
+        1,
+        "an admin holds full access as one flag plus the registry"
     );
     let contact = owner.contact().await;
     let mut members = Vec::new();
     for (kind, profile) in [
-        (
-            "writer",
-            crate::GrantProfile::Writer {
-                scopes: ["table_000".into()].into(),
-            },
-        ),
-        (
-            "reader",
-            crate::GrantProfile::Reader {
-                scopes: ["table_000".into()].into(),
-            },
-        ),
+        ("writer", crate::Access::Full),
+        ("reader", crate::Access::Read),
     ] {
         let dir = root.path().join(kind);
-        let keys = node_keys(&dir)?;
-        let supplied = snap::ok(owner.session.grant(
-            keys,
-            profile,
-            rocky_sdk::GrantTerms {
-                ttl: None,
-                delegations: Some(2),
-            },
-        ))
-        .await["supplied"]
-            .clone();
-        let device = Device::new(Database::install(
+        let provisioned = owner.session.provision(profile, None).await?;
+        let device = Device::new(Database::join(
             open(&dir, &schema, &hub, kind),
-            serde_json::from_value(supplied)?,
-        )?)?
-        .with_identity(external_identity(&dir));
+            &provisioned.uri,
+        )?)?;
         device.add_peer(&contact).await.map_err(|e| e.to_string())?;
         metric(&format!("{label} {kind}"), &settings(&dir).credentials);
-        assert_eq!(grant_count(&settings(&dir).credentials), 2);
-        members.push((device, keys, dir));
+        assert_eq!(
+            grant_count(&settings(&dir).credentials),
+            0,
+            "whole access names no table"
+        );
+        members.push((device, provisioned, dir));
     }
     snap::ok(
         owner
@@ -240,7 +165,20 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
             }),
     )
     .await;
-    snap::ok(owner.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "book".to_owned(), values: vec![rocky_sdk::SqlValue::Text("A".to_owned())] }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([members[0].1.node,members[1].1.node])).expect("typed fixture"), None)).await;
+    snap::ok(
+        owner.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "book".to_owned(),
+                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([members[0].1.node, members[1].1.node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await;
     let saved = settings(&owner_dir);
     let delivery = saved
         .deliveries
@@ -255,28 +193,6 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
     );
     assert!(delivery.payload_len() <= rocky_credentials::MAX_DELIVERY_PAYLOAD);
     assert!(delivery.to_bytes()?.len() < rocky_secure::MAX_SECURE_FRAME);
-    if legacy {
-        let record = saved.groups.values().next().unwrap();
-        let wrapper = crate::delivery::Contents::seal(
-            members[1].1.node,
-            crate::delivery::Reason::Share,
-            record,
-            vec![0; 4096],
-            Some(saved.credentials.clone()),
-        )?;
-        assert!(wrapper.payload_len() > 28 * 1024);
-        assert!(wrapper.payload_len() <= rocky_credentials::MAX_DELIVERY_PAYLOAD);
-        assert!(
-            crate::delivery::Contents::seal(
-                members[1].1.node,
-                crate::delivery::Reason::Share,
-                record,
-                vec![0; 4097],
-                Some(saved.credentials.clone())
-            )
-            .is_err()
-        );
-    }
     for (device, _, _) in &members {
         device.sync().await.map_err(|e| e.to_string())?;
         assert_epochs(device, count, &[1]).await;
@@ -351,11 +267,7 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
         &format!("{label} owner after rotation"),
         &settings(&owner_dir).credentials,
     );
-    if legacy {
-        assert!(after < before);
-    } else {
-        assert_eq!(after, before);
-    }
+    assert_eq!(after, before);
     for (device, _, _) in members {
         device.database.close().await?;
     }
@@ -364,18 +276,13 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
 }
 
 #[tokio::test]
-async fn a_hundred_tables_share_and_rotate_one_grant_family() -> Result<(), Failure> {
-    exercise(100, false).await
+async fn a_hundred_tables_share_and_rotate_under_full_access() -> Result<(), Failure> {
+    exercise(100).await
 }
 
 #[tokio::test]
-async fn thirty_one_tables_use_the_same_credential_budget() -> Result<(), Failure> {
-    exercise(31, false).await
-}
-
-#[tokio::test]
-async fn per_table_credentials_reopen_share_and_renew_into_families() -> Result<(), Failure> {
-    exercise(31, true).await
+async fn a_wide_schema_under_full_access_stays_within_the_grant_budget() -> Result<(), Failure> {
+    exercise(rocky_credentials::MAX_GRANTS + 1).await
 }
 
 #[tokio::test]

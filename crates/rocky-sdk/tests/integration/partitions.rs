@@ -3,7 +3,7 @@ use crate::support::snapshot as snap;
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
-const SCHEMA: &str = r#"{"format":6,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}]}"#;
+const SCHEMA: &str = r#"{"format":7,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}],"roles":[{"name":"reader","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#;
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
@@ -24,7 +24,6 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let path = root.path().join("writer");
     let hub = Arc::new(Hub::default());
     let db = Database::create(open(&path, &hub), None).unwrap().database;
-    let scope: Value = serde_json::to_value(db.scope()).unwrap();
     let session = db.session();
     for name in ["A", "B"] {
         snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
@@ -93,20 +92,26 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     ))
     .await;
     assert_eq!(data["rows"][0][0]["value"], "30");
-    let address = snap::ok(session.partition_address("items", (values("A")).clone())).await;
-    let parts = address["tuple"].as_array().unwrap();
-    let selector = json!([[parts[0][0],{"Only":[parts[0][1]]}]]);
     let reader_path = root.path().join("reader");
-    let device = common::node_keys(&reader_path, None).unwrap();
-    let supplied=snap::ok(session.grant_partitions(device, serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}])).expect("typed fixture"), 1)).await;
-    let reader = Database::install(
-        open(&reader_path, &hub),
-        serde_json::from_value(supplied["supplied"].clone()).unwrap(),
-    )
-    .unwrap()
-    .database;
+    let provisioned = session
+        .provision(
+            rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("reader")),
+            None,
+        )
+        .await
+        .unwrap();
+    let reader = Database::join(open(&reader_path, &hub), &provisioned.uri)
+        .unwrap()
+        .database;
     let reader_session = reader.session();
-    snap::ok(session.share_partition(rocky_sdk::PartitionTarget::Table { table: "items".to_owned(), values: (values("A")).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([device.node])).expect("typed fixture"), None)).await;
+    snap::ok(session.grant_partition(
+        provisioned.identity,
+        rocky_sdk::PartitionTarget::Table {
+            table: "items".to_owned(),
+            values: values("A"),
+        },
+    ))
+    .await;
     let contact = snap::ok(session.contact_info()).await;
     snap::ok(async {
         let value = reader_session
@@ -156,12 +161,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
             .unwrap()
     );
     snap::ok(async {
-        reader_session
-            .install_credentials(
-                serde_json::from_value::<rocky_sdk::Supplied>(json!(supplied["supplied"]))
-                    .expect("typed fixture"),
-            )
-            .await?;
+        reader_session.renew().await?;
         reader_session.info().await
     })
     .await;
@@ -189,7 +189,8 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     }))
     .await;
     let revoked =
-        snap::ok(session.revoke_identity(snap::public_key(&(device.identity.to_string())))).await;
+        snap::ok(session.revoke_identity(snap::public_key(&(provisioned.identity.to_string()))))
+            .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();
@@ -212,7 +213,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
 #[tokio::test]
 async fn own_id_partitions_continue_the_table_log() {
     let root = tempfile::tempdir().unwrap();
-    let schema = r#"{"format":6,"application":"ownid","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
+    let schema = r#"{"format":7,"application":"ownid","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
     let options = || Open {
         identity: None,
         directory: root.path(),

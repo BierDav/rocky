@@ -44,8 +44,20 @@ for an enrollment that node signs. Such an invitation is single use and expires 
 minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
 unused one with `Session::withdraw_invitation`. Supply the identity for
 later linking; opening and renewal use the node key alone.
+`Session::provision` and `Session::invite` take an `Access`: `Full`,
+`Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
+A role reads, writes, appends to or updates named columns of the tables it
+lists; column lists restrict writes only. A role declared `per_partition`
+holds no partition of that group until a trusted identity calls
+`Session::grant_partition`; the person's next renewal, which the delivered
+group secret starts, carries the grant. `Full` and `Read` reach every
+partition. Only trusted identities grant partitions or share group secrets
+with members; a member hands the secret of a partition it created only to
+trusted nodes, and no access delegates further. A trusted identity becomes an
+administrator by provisioning it, granting `Session::trust` with the root key
+and calling `Session::install_trust` on its node.
 A relay is an ordinary identity invited with store-only access
-(`GrantProfile::Custody`): it holds and forwards encrypted frames and
+(`Access::Store`): it holds and forwards encrypted frames and
 partition-key mailboxes for devices that are never online together, but never
 receives a data key. `Configuration::store_only` opens such a database without
 the application's schema, so one process can relay for many tenants

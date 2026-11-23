@@ -15,10 +15,7 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
         status.network.attachment,
         rocky_sdk::AttachmentState::Detached
     );
-    assert!(matches!(
-        status.authority.profile,
-        rocky_sdk::GrantProfile::Issuer
-    ));
+    assert!(matches!(status.authority.access, rocky_sdk::Access::Full));
     device.add(1, "apples").await;
     let next = session.status_after(status.token.clone()).await?;
     assert_ne!(

@@ -24,7 +24,7 @@ impl Fixture {
             members.push(serde_json::json!({"name":name,"class":"replayed","columns":[{"name":"customer","type":"integer","not_null":true},{"name":"parent","type":"blob","not_null":true},{"name":"title","type":"text"}],"primary_key":["customer","id"],"partition_by":["customer"],"partition_group":"erp","foreign_keys":[{"columns":["customer","parent"],"table":parent,"on_delete":"cascade"}]}));
         }
         members.push(serde_json::json!({"name":"products","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}));
-        let definition = serde_json::json!({"format":6,"publisher":publisher.public_key().to_string(),"application":"erp-measurement","tables":members});
+        let definition = serde_json::json!({"format":7,"publisher":publisher.public_key().to_string(),"application":"erp-measurement","tables":members});
         let schema = SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()
@@ -152,11 +152,13 @@ impl Fixture {
             })
             .collect();
         let root = Authority::owner(&self.publisher)
-            .issue_partition_terms(
+            .issue_person(
                 user.public_key(),
-                raw.clone(),
-                grants.clone(),
-                rocky_credentials::DelegationTerms { delegations: 1 },
+                rocky_credentials::Granted {
+                    grants: raw.clone(),
+                    partitions: grants.clone(),
+                    ..Default::default()
+                },
                 rocky_credentials::Validity {
                     issued_at: time,
                     lifetime: std::time::Duration::from_secs(rocky_credentials::DAY),

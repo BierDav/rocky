@@ -3,6 +3,32 @@ use crate::{
     SignedCapability, Signer,
 };
 
+pub trait UntrustedIssuer {
+    fn issue_untrusted_issuer(
+        &self,
+        subject: crate::PublicKey,
+        validity: crate::Validity,
+    ) -> Result<SignedCapability, crate::Error>;
+}
+impl UntrustedIssuer for Authority<'_> {
+    fn issue_untrusted_issuer(
+        &self,
+        subject: crate::PublicKey,
+        validity: crate::Validity,
+    ) -> Result<SignedCapability, crate::Error> {
+        self.sign_link(
+            subject,
+            Vec::new(),
+            Extended {
+                issues: true,
+                origin: self.origin()?,
+                ..Extended::default()
+            },
+            self.delegations().saturating_sub(1),
+            validity,
+        )
+    }
+}
 pub fn node(
     identity: &dyn IdentityProvider,
     chain: &CredentialChain,

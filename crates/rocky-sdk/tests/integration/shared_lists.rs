@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc};
 use support::secrets;
 use support::snapshot as snap;
 
-const SCHEMA: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
+const SCHEMA: &str = r#"{"format":7,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -18,8 +18,7 @@ const SCHEMA: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
 ]}"#;
-const TABLES: [&str; 3] = ["lists", "categories", "items"];
-const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
+const ORDERED: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -32,7 +31,7 @@ const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]},
- {"name":"item_categories","granted_like":"items","class":"replayed","columns":[
+ {"name":"item_categories","class":"replayed","columns":[
    {"name":"list","type":"blob","not_null":true},{"name":"item","type":"blob","not_null":true},{"name":"category","type":"blob","not_null":true}],
   "primary_key":["list","item","category"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"},
@@ -147,25 +146,27 @@ async fn checkpoint_writer(
         .await?;
     snap::value(issuer.session.seal()).await?;
     snap::value(issuer.session.compact(0)).await?;
-    let invite = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?;
+    let invite = snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?;
     let writer_path = root.join("writer");
     let mut options = open(&writer_path, hub, "writer");
     options.schema = crate::support::snapshot::schema(schema);
     let writer =
         Peer::new(Database::join(options, invite["uri"].as_str().ok_or("uri")?)?.database)?;
     let writer_node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&base)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([writer_node])).expect("typed fixture"), None)).await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&base)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([writer_node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     assert_eq!(
         writer.column("SELECT title FROM lists").await?,
@@ -200,18 +201,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    let invite = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?;
+    let invite = snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?;
     let writer = Peer::new(
         Database::join(
             at(&root.path().join("writer"), &hub, "writer", ORDERED),
@@ -220,7 +210,20 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         .database,
     )?;
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&base)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None)).await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&base)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     let prepared = snap::value(writer.session.next_partition("lists")).await?;
     snap::value(issuer.session.seal()).await?;
@@ -339,7 +342,20 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         "a prepared partition survives a restart before its first row commits"
     );
     let issuer_node = snap::value(issuer.session.info()).await?["node"].clone();
-    snap::value(writer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([issuer_node])).expect("typed fixture"), None)).await?;
+    snap::value(
+        writer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([issuer_node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     snap::value(issuer.sync_once()).await?;
     assert_eq!(
@@ -348,18 +364,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
             .await?,
         [json!("Base list"), json!("Member list")]
     );
-    let read_invite = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Reader {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?;
+    let read_invite = snap::value(issuer.session.provision(rocky_sdk::Access::Read, None)).await?;
     let reader = Peer::new(
         Database::join(
             open(&root.path().join("reader"), &hub, "reader"),
@@ -384,21 +389,11 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     only_explicit_syncs(&[&issuer, &writer]).await?;
@@ -430,8 +425,20 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .await?;
 
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await.map_err(|error| {
         format!("one sync delivers the envelope and the list's checkpoint: {error}")
     })?;
@@ -501,21 +508,11 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     snap::value(writer.sync_once()).await?;
@@ -530,8 +527,20 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let node = snap::value(writer.session.info()).await?["node"].clone();
     snap::value(issuer.session.seal()).await?;
     snap::value(issuer.session.compact(0)).await?;
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     writer
         .insert(
@@ -613,21 +622,11 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     snap::value(writer.sync_once()).await?;
@@ -646,8 +645,20 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
         )
         .await?;
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     for title in ["Milk", "Eggs", "Flour"] {
         issuer
             .insert(
@@ -730,21 +741,11 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Writer {
-                scopes: (TABLES)
-                    .into_iter()
-                    .map(|scope| scope.to_string())
-                    .collect(),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     snap::value(issuer.session.next_partition("lists")).await?;
@@ -763,8 +764,20 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         )
         .await?;
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     writer
         .insert(
@@ -822,8 +835,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             "INSERT INTO lists(id,title) VALUES(?,'Own list')",
         )
         .await?;
-    let invitation = snap::value(a.session.provision(rocky_sdk::GrantProfile::Issuer, None))
-        .await?["uri"]
+    let invitation = snap::value(a.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
@@ -835,7 +847,19 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         [json!("Own list")]
     );
     let node = snap::value(a.session.info()).await?["node"].clone();
-    snap::value(b.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
+    snap::value(
+        b.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
     .await?;
     snap::value(a.sync_once()).await?;
     let activity = snap::value(a.session.activity(0)).await?;
@@ -864,14 +888,20 @@ async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Fail
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
-    let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(a.session.provision(rocky_sdk::GrantProfile::Issuer, None))
-        .await?["uri"]
+    let created = Database::create(open(&root.path().join("a"), &hub, "a"), None)?;
+    let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.root.ok_or("root")?);
+    let a = Peer::new(created.database)?;
+    let invitation = snap::value(a.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let b =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    let trusted = a
+        .session
+        .trust(b.session.info().await?.principal, owner)
+        .await?;
+    b.session.install_trust(&trusted.grant).await?;
     let mut lists = Vec::new();
     for (peer, title) in [(&a, "From a"), (&b, "From b")] {
         snap::value(peer.session.next_partition("lists")).await?;
@@ -887,9 +917,9 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
                     group: "list".to_owned(),
                     values: (values(list)).clone(),
                 },
-                serde_json::from_value::<
-                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
-                >(json!([node]))
+                serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                    json!([node]),
+                )
                 .expect("typed fixture"),
                 None,
             ),
@@ -922,25 +952,11 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    let grants_naming_every_table: Vec<Value> = TABLES
-        .iter()
-        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
-        .collect();
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Grants {
-                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
-                    grants_naming_every_table
-                ))
-                .expect("typed fixture"),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
     snap::value(
@@ -978,8 +994,20 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             .await?;
     }
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
@@ -1054,25 +1082,11 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    let grants_naming_every_table: Vec<Value> = TABLES
-        .iter()
-        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
-        .collect();
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Grants {
-                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
-                    grants_naming_every_table
-                ))
-                .expect("typed fixture"),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer =
         Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
     snap::value(issuer.session.next_partition("lists")).await?;
@@ -1103,8 +1117,20 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             .await?;
     }
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
-        .await?;
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
+    .await?;
     snap::value(writer.sync_once()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
@@ -1174,7 +1200,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
 
 #[tokio::test]
 async fn an_invited_writer_without_identity_writes_after_the_migration() -> Result<(), Failure> {
-    const POSITIONED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
+    const POSITIONED: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -1195,16 +1221,11 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    let invitation = snap::value(issuer.session.provision(
-        rocky_sdk::GrantProfile::Writer {
-            scopes: TABLES.map(String::from).into(),
-        },
-        None,
-    ))
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let writer = Peer::new(
         Database::join(at_without_identity(&b, &hub, "b", SCHEMA), &invitation)?.database,
     )?;
@@ -1236,17 +1257,19 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             .await?;
     }
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(
-        rocky_sdk::PartitionTarget::Group {
-            group: "list".to_owned(),
-            values: (values(&list)).clone(),
-        },
-        serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(
-            json!([node]),
-        )
-        .expect("typed fixture"),
-        None,
-    ))
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
     .await?;
     snap::value(writer.sync_once()).await?;
     writer
@@ -1328,25 +1351,11 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    let grants_naming_every_table: Vec<Value> = TABLES
-        .iter()
-        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
-        .collect();
-    let invitation = snap::value(
-        issuer.session.provision(
-            rocky_sdk::GrantProfile::Grants {
-                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
-                    grants_naming_every_table
-                ))
-                .expect("typed fixture"),
-            },
-            None,
-        ),
-    )
-    .await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation =
+        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+            .as_str()
+            .ok_or("uri")?
+            .to_owned();
     let member = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
     snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
@@ -1375,17 +1384,19 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         transaction.commit().await?;
     }
     let node = snap::value(member.session.info()).await?["node"].clone();
-    snap::value(issuer.session.share_partition(
-        rocky_sdk::PartitionTarget::Group {
-            group: "list".to_owned(),
-            values: (values(&list)).clone(),
-        },
-        serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(
-            json!([node]),
-        )
-        .expect("typed fixture"),
-        None,
-    ))
+    snap::value(
+        issuer.session.share_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(&list)).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
+                json!([node]),
+            )
+            .expect("typed fixture"),
+            None,
+        ),
+    )
     .await?;
     snap::value(member.sync_once()).await?;
     for peer in [member, issuer] {

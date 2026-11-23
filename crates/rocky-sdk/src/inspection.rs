@@ -6,7 +6,7 @@ use rocky_credentials::PublicKey;
 pub struct DomainInfo {
     pub scope: crate::Scope,
     pub issuer: bool,
-    pub profile: crate::GrantProfile,
+    pub access: crate::Access,
     pub collections: Vec<String>,
     pub transport: String,
 }
@@ -21,7 +21,7 @@ pub struct IdentityInfo {
     pub single_use: bool,
     pub own: bool,
     pub revoked: bool,
-    pub profile: Option<crate::GrantProfile>,
+    pub access: Option<crate::Access>,
     pub capability: Option<Commitment>,
     pub expires: Option<u64>,
     pub label: Option<Vec<u8>>,

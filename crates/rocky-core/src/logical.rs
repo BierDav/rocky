@@ -172,8 +172,8 @@ impl LogicalRestriction {
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
     pub sql_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub granted_like: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_access_only: bool,
     pub class: TableClass,
     pub create_sql: String,
     pub auto_generate: bool,
@@ -198,6 +198,8 @@ pub struct LogicalSchema {
     pub assertions: Vec<LogicalAssertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restrictions: Vec<LogicalRestriction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<crate::RoleDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +229,7 @@ const TWO_POW_63: f64 = -(i64::MIN as f64);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemaError {
     Invalid(String),
+    Role(crate::RoleError),
     Incompatible {
         table: String,
         reason: Incompatibility,
@@ -236,6 +239,7 @@ impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(reason) => write!(f, "invalid logical schema: {reason}"),
+            Self::Role(error) => write!(f, "invalid logical schema: {error}"),
             Self::Incompatible { table, reason } => {
                 write!(f, "{table} cannot be installed: {reason:?}")
             }
@@ -718,7 +722,8 @@ struct ReplicatedReference<'a> {
 struct ReplicatedTable<'a> {
     class: TableClass,
     name: &'a str,
-    granted_like: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    explicit_access_only: bool,
     key: Vec<ReplicatedColumn<'a>>,
     fields: Vec<ReplicatedColumn<'a>>,
     references: Vec<ReplicatedReference<'a>>,
@@ -779,7 +784,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
     ReplicatedTable {
         class: table.class,
         name: &table.sql_name,
-        granted_like: table.granted_like.as_deref(),
+        explicit_access_only: table.explicit_access_only,
         key: table.key().map(replicated_column).collect(),
         fields,
         references,
@@ -859,6 +864,7 @@ impl LogicalSchema {
             return invalid("tables are not sorted by unique name");
         }
         self.partition_groups()?;
+        self.validate_roles()?;
         let mut names = BTreeSet::new();
         for table in &self.tables {
             table.validate()?;
@@ -884,15 +890,6 @@ impl LogicalSchema {
                         parent.sql_name
                     ));
                 }
-            }
-            if let Some(like) = &table.granted_like
-                && (!table.class.typed()
-                    || like == &table.sql_name
-                    || self.table(like).is_none_or(|parent| {
-                        !parent.class.typed() || parent.granted_like.is_some()
-                    }))
-            {
-                return invalid(format!("{}: invalid granted_like {like}", table.sql_name));
             }
             let mut partitions = BTreeSet::new();
             if table.partition_by.len() > 16
@@ -1138,14 +1135,10 @@ impl LogicalSchema {
                 None => return refused(&format!("{name} is not a table")),
             }
         }
-        fn group(table: &LogicalTable) -> Option<&str> {
-            (!table.partition_by.is_empty())
-                .then(|| table.partition_group.as_deref().unwrap_or(&table.sql_name))
-        }
         let Some(first) = tables.first() else {
             return refused("reads no table");
         };
-        if tables.iter().any(|table| group(table) != group(first)) {
+        if tables.iter().any(|table| table.group() != first.group()) {
             return refused("tables must share one partition group");
         }
         Ok(())
@@ -1255,6 +1248,11 @@ impl LogicalSchema {
                 .into_iter()
                 .map(|name| item("operation", name.to_string(), shape.clone()))
                 .collect(),
+            roles: self
+                .roles
+                .iter()
+                .map(|role| item("role", role.name.clone(), json(role)))
+                .collect(),
             domains: domains
                 .iter()
                 .map(|domain| DomainRule {
@@ -1293,7 +1291,7 @@ mod tests {
             },
             tables: vec![LogicalTable {
                 sql_name: "items".into(),
-            granted_like: None,
+            explicit_access_only: false,
                 class: TableClass::Replayed,
                 create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` BLOB NOT NULL, PRIMARY KEY(`key`))".into(),
                 auto_generate: false,
@@ -1308,6 +1306,7 @@ mod tests {
             views: Vec::new(),
             assertions: Vec::new(),
             restrictions: Vec::new(),
+            roles: Vec::new(),
         }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

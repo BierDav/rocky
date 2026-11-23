@@ -315,11 +315,11 @@ fn is_database_file(path: &Path) -> bool {
 
 fn identity_without_signed_authority(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
     let mut settings: Value = serde_json::from_slice(bytes)?;
-    let chain: rocky_sdk::credentials::CredentialChain =
+    let chain: rocky_credentials::CredentialChain =
         serde_json::from_value(settings["credentials"].clone())?;
     let database =
         chain.database_context(serde_json::from_value(settings["publisher"].clone())?)?;
-    let authority: rocky_sdk::credentials::RevocationSet =
+    let authority: rocky_credentials::RevocationSet =
         serde_json::from_value(settings["revocations"].clone())?;
     authority.verify_in(database)?;
     settings["revocations"]
@@ -405,8 +405,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 41);
-    for version in (0..41).chain([42, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 42);
+    for version in (0..42).chain([43, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

@@ -52,7 +52,7 @@ pub(super) struct Cache {
     #[cfg(test)]
     pub(super) opens: AtomicU64,
     chains: std::sync::Mutex<VerifiedChains>,
-    families: std::sync::Mutex<BTreeMap<Commitment, Arc<rocky_credentials::GrantFamilies>>>,
+    whole_tables: std::sync::Mutex<BTreeMap<Commitment, Arc<rocky_credentials::WholeTables>>>,
     #[cfg(test)]
     verifications: std::sync::Mutex<BTreeMap<Commitment, u64>>,
 }
@@ -76,34 +76,34 @@ struct CreationHeaders {
     bytes: usize,
 }
 impl<A: RowApplication> Inner<A> {
-    pub(super) fn families_at(
+    pub(super) fn whole_tables_at(
         &self,
         manifest: Commitment,
-    ) -> Result<Arc<rocky_credentials::GrantFamilies>, Error> {
+    ) -> Result<Arc<rocky_credentials::WholeTables>, Error> {
         let mut cache = self
             .crypto
-            .families
+            .whole_tables
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(families) = cache.get(&manifest) {
-            return Ok(families.clone());
+        if let Some(tables) = cache.get(&manifest) {
+            return Ok(tables.clone());
         }
         let definition = self
             .definition_at(&manifest)
-            .ok_or_else(|| denied("grant family schema unavailable"))?;
-        let families =
-            Arc::new(rocky_credentials::GrantFamilies::new(definition, &[]).map_err(credential)?);
+            .ok_or_else(|| denied("the schema of a whole-access grant is unavailable"))?;
+        let tables =
+            Arc::new(rocky_credentials::WholeTables::new(definition, &[]).map_err(credential)?);
         if cache.len() >= 256 {
             cache.clear();
         }
-        cache.insert(manifest, families.clone());
-        Ok(families)
+        cache.insert(manifest, tables.clone());
+        Ok(tables)
     }
-    pub(crate) fn grant_families(&self) -> &rocky_credentials::GrantFamilies {
+    pub(crate) fn whole_tables(&self) -> &rocky_credentials::WholeTables {
         self.workspace
             .typed
             .as_ref()
-            .map_or(&self.families, |typed| &typed.families)
+            .map_or(&self.whole_tables, |typed| &typed.whole_tables)
     }
     pub(super) fn verified_chain(
         &self,
@@ -124,7 +124,7 @@ impl<A: RowApplication> Inner<A> {
             self.config.publisher,
             revocations,
             time,
-            Some(self.grant_families()),
+            Some(self.whole_tables()),
         )
     }
 }
@@ -167,25 +167,25 @@ impl Cache {
         publisher: PublicKey,
         revocations: &RevocationSet,
         time: u64,
-        families: Option<&rocky_credentials::GrantFamilies>,
+        tables: Option<&rocky_credentials::WholeTables>,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
-        let default_families = rocky_credentials::GrantFamilies::default();
-        let needs_schema_families = chain.0.iter().any(|link| {
+        let no_tables = rocky_credentials::WholeTables::default();
+        let holds_whole_access = chain.0.iter().any(|link| {
             link.capability
                 .extended()
-                .is_ok_and(|extended| extended.families)
+                .is_ok_and(|extended| extended.whole.is_some())
         });
-        let families = if needs_schema_families {
-            families.unwrap_or(&default_families)
+        let tables = if holds_whole_access {
+            tables.unwrap_or(&no_tables)
         } else {
-            &default_families
+            &no_tables
         };
         let digest = rocky_core::commitment("rocky.credential-chain.v1", &encode(chain)?);
         let key = (
             digest,
             publisher,
             revocations.fingerprint().map_err(credential)?,
-            families.digest(),
+            tables.digest(),
         );
         let mut cache = self
             .chains
@@ -195,7 +195,7 @@ impl Cache {
             return Ok(verified.clone());
         }
         let verified = chain
-            .verified_with_families(publisher, revocations, time, families)
+            .verified(publisher, revocations, time, tables)
             .map_err(credential)?;
         #[cfg(test)]
         {

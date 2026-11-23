@@ -19,26 +19,10 @@ fn trusted(root: &RootKey) -> (PrivateKey, CredentialChain) {
         .unwrap();
     (key, CredentialChain(vec![grant]))
 }
-fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
-    let key = PrivateKey::new();
-    let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
-        .issue_issuer(
-            key.public_key(),
-            rocky_credentials::Validity {
-                issued_at: NOW,
-                lifetime: std::time::Duration::from_secs(30 * DAY),
-                clock_skew: std::time::Duration::from_secs(0),
-            },
-        )
-        .unwrap();
-    let mut chain = parent.1.clone();
-    chain.0.push(link);
-    (key, chain)
-}
 fn member(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, PrivateKey, CredentialChain) {
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
-        .issue_terms(
+        .issue(
             user.public_key(),
             vec![rocky_core::ResourceGrant {
                 scope: rocky_core::ResourceScope {
@@ -50,7 +34,6 @@ fn member(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, PrivateKey, Cr
                 fields: rocky_core::FieldSelection::All,
                 rights: [rocky_core::Right::Read].into(),
             }],
-            rocky_credentials::DelegationTerms { delegations: 1 },
             rocky_credentials::Validity {
                 issued_at: NOW,
                 lifetime: std::time::Duration::from_secs(30 * DAY),
@@ -214,13 +197,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
         Some(hijacked.0.public_key()),
         "the honest trusted node's renewal keeps the origin"
     );
-    let below = issuer(&hijacked);
-    let (_, below_node, below_member) = member(&below);
-    assert_eq!(
-        origin(&below_member),
-        Some(hijacked.0.public_key()),
-        "an issuer the hijacked node enrolled hands its origin on"
-    );
     let (_, own_node, own) = member(&honest);
 
     let lost_statement = Authority::owner(&root)
@@ -264,7 +240,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     };
     assert!(verify(&enrolled, &node).is_err());
     assert!(verify(&renewed_chain, &node).is_err());
-    assert!(verify(&below_member, &below_node).is_err());
     assert!(verify(&own, &own_node).is_ok());
     assert!(
         rocky_credentials::testing::authority(&honest.0, &honest.1)

@@ -9,9 +9,7 @@ use crate::{
 };
 use data_encoding::HEXLOWER;
 use rocky_core::{Commitment, DomainId, MeshId};
-use rocky_credentials::{
-    IdentityAnswer, IdentityProvider, IdentityReply, IdentityRequest, Profile,
-};
+use rocky_credentials::{IdentityAnswer, IdentityProvider, IdentityReply, IdentityRequest};
 use rocky_secure::{CredentialChain, PrivateKey, RevocationSet};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -29,7 +27,7 @@ struct Bundle {
     bootstrap: crate::tip_schemas::Bootstrap,
     revocations: RevocationSet,
     links: CredentialChain,
-    profile: Profile,
+    access: crate::Access,
     ttl: u64,
     keys: BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
@@ -119,7 +117,7 @@ impl Settings {
             .held()
             .ok_or("missing identity capability")?;
         let bundle = Bundle {
-            format: 6,
+            format: 7,
             mesh: self.mesh,
             domain: self.domain,
             record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
@@ -133,13 +131,13 @@ impl Settings {
                 known
             },
             links: self.identity_links(),
-            profile: self.profile.clone(),
+            access: self.access.clone(),
             ttl: self.ttl,
             keys,
             epoch_statements: self.epoch_statements.clone(),
             groups: self.groups_for(vault, request.node, leaf, true)?,
             naming: if self.issuer() {
-                crate::enrollment::naming_for(vault, &Profile::Issuer)?
+                crate::enrollment::naming_for(vault, true)?
             } else {
                 None
             },
@@ -248,7 +246,7 @@ impl Settings {
         let secret = &linking.secret;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(request, secret)?)?;
-        if bundle.format != 6 {
+        if bundle.format != 7 {
             return Err("unsupported identity enrollment format".into());
         }
         bundle.record.bytes()?;
@@ -289,7 +287,7 @@ impl Settings {
             .map(|link| link.capability.extended())
             .transpose()?
             .is_some_and(|extended| extended.issues);
-        settings.profile = bundle.profile;
+        settings.access = bundle.access;
         settings.credentials = crate::identities::with_identity(provider, || {
             settings.certify(&vault, bundle.links, &domain)
         })?;
@@ -358,7 +356,7 @@ impl Settings {
 mod tests {
     use super::*;
     use crate::{FileSecretStore, IdentityKey, RootKey, Schema, SecretStore};
-    const SCHEMA: &str = r#"{"format":6,"application":"scoped_enrollment","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    const SCHEMA: &str = r#"{"format":7,"application":"scoped_enrollment","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
     #[test]
     fn foreign_identity_answers_are_refused_before_installation() -> Result<(), Failure> {

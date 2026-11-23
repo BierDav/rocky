@@ -459,11 +459,11 @@ impl NativeSession {
             RowMessage::MigrationQuery { publication } => {
                 let inner = replica.inner.lock(crate::replica::Class::Background).await;
                 self.credentials
-                    .verified_with_families(
+                    .verified(
                         inner.config.publisher,
                         &inner.config.revocations,
                         now()?,
-                        inner.grant_families(),
+                        inner.whole_tables(),
                     )
                     .map_err(credential)?
                     .selectors(self.peer, &inner.config.revocations, now()?)

@@ -1,4 +1,5 @@
-use rocky_sdk::{SecretStore, credentials::testing::MemoryKeys};
+use rocky_credentials::testing::MemoryKeys;
+use rocky_sdk::SecretStore;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

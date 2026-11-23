@@ -10,6 +10,7 @@ fn manifest() -> ApplicationManifest {
         entities: Vec::new(),
         fields: Vec::new(),
         operations: Vec::new(),
+        roles: Vec::new(),
         domains: vec![DomainRule {
             domain: DomainId([2; 16]),
             author_log: AuthorLogScope::Domain,
@@ -46,6 +47,21 @@ fn canonical_definitions_are_bounded_and_publisher_bound() {
     let mut duplicate = manifest.clone();
     duplicate.entities.push(duplicate.entities[0].clone());
     assert!(duplicate.validate().is_err());
+    let mut with_role = manifest.clone();
+    with_role.roles.push(DefinitionItem {
+        id: with_role.item_id("role", "scanner"),
+        name: "scanner".into(),
+        shape: "role".into(),
+    });
+    assert_ne!(
+        with_role.hash(),
+        manifest.hash(),
+        "a role change is a new schema version"
+    );
+    assert_eq!(
+        ApplicationManifest::from_body(&with_role.canonical_body()).unwrap(),
+        with_role
+    );
     let mut upgraded = manifest;
     upgraded.projection = 4;
     assert_ne!(upgraded.hash(), decoded.hash());

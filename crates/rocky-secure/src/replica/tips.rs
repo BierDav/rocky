@@ -834,8 +834,6 @@ impl<A: RowApplication> Inner<A> {
         for query in [
             "SELECT seal FROM secure_finalized",
             "SELECT seal FROM secure_compaction_lost",
-            "SELECT seal FROM secure_served",
-            "SELECT seal FROM secure_kept_marks",
             "SELECT seal FROM secure_replayed_seals",
             "SELECT seal FROM secure_pulled",
             "SELECT seal FROM secure_wanted_seals",
@@ -1059,7 +1057,7 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(None);
         }
-        let Some(start) = history::bookmark_seal(graph, target)? else {
+        let Some(start) = held_seals::bookmark_seal(graph, target)? else {
             return Ok(None);
         };
         let path = compaction::tip_path_seals(graph, target)?
@@ -1308,9 +1306,6 @@ impl<A: RowApplication> Inner<A> {
         if lost {
             self.replace_compacted_bases_off_path(domain, &path).await?;
         }
-        let rewind = self.rewind_seal(domain).await?;
-        #[cfg(test)]
-        let rewind = rewind.filter(|_| !self.rebuild_switches);
         let sideways = match self.schema_switch_intent().await? {
             Some((scope, _, source, target)) => {
                 source != target && !Self::line_continues(self.graph_for(scope)?, source, target)?
@@ -1326,19 +1321,6 @@ impl<A: RowApplication> Inner<A> {
             if self.replayed_scope(scope) {
                 replay |= !self.replayed_on_path(id).await?;
                 replayed.push((scope, id));
-                continue;
-            }
-            if let Some(rewind) = &rewind
-                && let Some(at) = rewind.at(id)
-                && self.rewinds(scope, id).await?
-                && let Some(ledger) = self.prefix_identity_ledger(scope, id, at.1).await?
-            {
-                #[cfg(test)]
-                {
-                    self.rewound += 1;
-                }
-                self.rewind_rows(scope, id, at, i64::MAX, true, ledger)
-                    .await?;
                 continue;
             }
             let kept = self
@@ -1357,7 +1339,7 @@ impl<A: RowApplication> Inner<A> {
                 };
             if !kept && self.has_pruned_prefix(scope).await? {
                 if let Some(seal) =
-                    history::bookmark_seal(self.graph_for(domain)?, self.workspace.tip)?
+                    held_seals::bookmark_seal(self.graph_for(domain)?, self.workspace.tip)?
                 {
                     self.conn
                         .execute(
@@ -1394,17 +1376,7 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if replay {
-            let mut kept = rewind.as_ref();
-            for (scope, id) in &replayed {
-                if kept.is_some() && !self.rewinds(*scope, *id).await? {
-                    kept = None;
-                }
-            }
-            #[cfg(test)]
-            if kept.is_some() {
-                self.rewound += replayed.len();
-            }
-            self.replay_from(now()?, kept)
+            self.replay_from_frames(now()?)
                 .await?
                 .map_err(|broken| broken.refuses(Rebuilding::TipSwitch))?;
         }
@@ -1764,7 +1736,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if let Some((scope, _)) = old_followed.clone() {
                 if !inner.seal_rebootstraps(scope).await?.is_empty()
                     && let Some(seal) =
-                        history::bookmark_seal(inner.graph_for(scope)?, inner.workspace.tip)?
+                        held_seals::bookmark_seal(inner.graph_for(scope)?, inner.workspace.tip)?
                 {
                     inner
                         .conn
@@ -1775,7 +1747,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .await?;
                 }
                 inner.revalidate_finalized(scope, true).await?;
-                inner.retain_kept(scope).await?;
             }
             for domain in graphs.keys() {
                 inner.reseed_domain_ledgers(*domain).await?;

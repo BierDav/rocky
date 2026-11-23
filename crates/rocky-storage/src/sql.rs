@@ -46,7 +46,6 @@ pub enum Unavailable {
     KeyMissing,
     Incomplete,
     Revoked,
-    Released,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbortReason {

@@ -247,7 +247,6 @@ impl<A: RowApplication> Inner<A> {
                 .install_projection(
                     &installed,
                     &record.schema,
-                    previous.as_deref(),
                     &projected,
                     fields_on_switch_path.as_ref(),
                 )
@@ -265,7 +264,6 @@ impl<A: RowApplication> Inner<A> {
             inner.finish_switch(&record).await
         });
         if let Err(error) = switched {
-            self.abandon_switch_history();
             self.workspace.typed = previous;
             return match broken {
                 Some(refused) => Ok(Err(refused)),
@@ -290,14 +288,9 @@ impl<A: RowApplication> Inner<A> {
         &self,
         installed: &LogicalSchema,
         schema: &LogicalSchema,
-        previous: Option<&Typed>,
         projected: &Typed,
         carried: Option<&super::schemas::PathFields>,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        let switching = match previous {
-            Some(old) => self.begin_switch_history(old, projected).await?,
-            None => None,
-        };
         let removed = removed_replayed(installed, schema).next().is_some();
         for table in removed_replayed(installed, schema) {
             self.touch(&table.sql_name);
@@ -330,8 +323,6 @@ impl<A: RowApplication> Inner<A> {
         if removed {
             self.redo_removed_writes(now()?).await?;
         }
-        self.install_history().await?;
-        self.end_switch_history(projected, switching).await?;
         Ok(Ok(()))
     }
     pub(super) async fn store_typed(

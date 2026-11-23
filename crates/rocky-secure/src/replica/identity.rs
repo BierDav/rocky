@@ -953,72 +953,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(Vec::new()),
         }
     }
-    pub(super) async fn prefix_identity_ledger(
-        &self,
-        scope: ResourceScope,
-        id: i64,
-        through: i64,
-    ) -> Result<Option<IdentityLedger>, Error> {
-        let base = self
-            .checkpoint_record(id, true)
-            .await?
-            .filter(|record| record.position <= through);
-        let (mut after, mut ledger) = match base {
-            Some(record) => {
-                let signed = self.verify_record(scope, &record)?;
-                (
-                    record.position,
-                    IdentityLedger::based(&signed.statement.identities)?,
-                )
-            }
-            None if self.has_pruned_prefix(scope).await? => return Ok(None),
-            None => (0, IdentityLedger::default()),
-        };
-        loop {
-            let records = collect_rows(
-                self.conn
-                    .query(
-                        "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT 256",
-                        [id, after, through],
-                    )
-                    .await?,
-            )
-            .await?;
-            for record in &records {
-                let (position, header, body, status) = match record.as_slice() {
-                    [
-                        SqlValue::Integer(position),
-                        SqlValue::Blob(header),
-                        SqlValue::Blob(body),
-                        SqlValue::Text(status),
-                    ] => (*position, header, body, status),
-                    [
-                        SqlValue::Integer(_),
-                        SqlValue::Null,
-                        SqlValue::Null,
-                        SqlValue::Null,
-                    ] => return Ok(None),
-                    _ => return Err(Error::Corrupt("covered operation".into())),
-                };
-                after = position;
-                let frame = self.chained_frame(header.clone(), body.clone()).await?;
-                if !self.replay_eligible(status, frame.operation_ref()?, true)? {
-                    continue;
-                }
-                for birth in self.birth_marks(&frame)? {
-                    if !birth.carried {
-                        ledger.merge(birth.mark)?;
-                    }
-                }
-                for mark in self.replayed_births(frame.id()?).await? {
-                    ledger.merge(mark)?;
-                }
-            }
-            if records.len() < 256 {
-                return Ok(Some(ledger));
-            }
-        }
-    }
     pub(super) async fn check_covered_identities(
         &self,
         rows: &str,
@@ -1060,31 +994,6 @@ impl<A: RowApplication> Inner<A> {
         }
     }
 }
-
-impl<A: RowApplication> EncryptedReplica<A> {
-    #[cfg(test)]
-    pub(crate) async fn kept_prefix_marks(
-        &self,
-        scope: ResourceScope,
-        seal: Commitment,
-    ) -> Option<Vec<(WriterId, u64)>> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let id = inner.find_scope_id(scope).await.unwrap()?;
-        let (_, bound) = inner.kept_rewind(seal).await.unwrap()?.at(id)?;
-        inner
-            .prefix_identity_ledger(scope, id, bound)
-            .await
-            .unwrap()
-            .map(|ledger| {
-                ledger
-                    .into_marks()
-                    .into_iter()
-                    .map(|mark| (mark.author, mark.sequence))
-                    .collect()
-            })
-    }
-}
-
 pub(super) fn key_digest(key: &[u8]) -> Vec<u8> {
     key[..key.len().min(16)].to_vec()
 }

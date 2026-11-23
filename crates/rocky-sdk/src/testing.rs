@@ -147,7 +147,6 @@ pub struct Bookmark {
 pub struct TipNode {
     pub node: String,
     pub followed_tip: Option<String>,
-    pub kept_tips: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipInspection {
@@ -207,7 +206,6 @@ mod tests {
             );
         }
         for (held, name) in [
-            (HeldSeal::Kept, "kept"),
             (HeldSeal::Checkpoint, "checkpoint"),
             (HeldSeal::Live, "live"),
         ] {

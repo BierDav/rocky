@@ -6,7 +6,6 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         seal: &SignedSeal,
         scopes: &[(ResourceScope, Option<i64>)],
-        keep: bool,
     ) -> Result<(), Error> {
         #[cfg(test)]
         let expected = if self.compare_finalization {
@@ -16,8 +15,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             let state = self.take_oracle_state();
             let result = async {
-                self.finalize_seal_impl(domain, seal, scopes, keep, false)
-                    .await?;
+                self.finalize_seal_impl(domain, seal, scopes, false).await?;
                 self.finalization_snapshot().await
             }
             .await;
@@ -34,8 +32,7 @@ impl<A: RowApplication> Inner<A> {
         };
         #[cfg(test)]
         let started = web_time::Instant::now();
-        self.finalize_seal_impl(domain, seal, scopes, keep, true)
-            .await?;
+        self.finalize_seal_impl(domain, seal, scopes, true).await?;
         #[cfg(test)]
         if self.fail_before_commit > 0 {
             self.fail_before_commit -= 1;

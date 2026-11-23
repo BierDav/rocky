@@ -524,32 +524,19 @@ impl<A: RowApplication> Inner<A> {
         &self,
         time: u64,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_from(time, None).await
+        self.replay_unchecked(time, true).await?;
+        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
     }
 
     pub(in crate::replica) async fn replay_for_audit(
         &self,
         time: u64,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_unchecked(time, None, false).await?;
+        self.replay_unchecked(time, false).await?;
         Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
     }
 
-    pub(in crate::replica) async fn replay_from(
-        &self,
-        time: u64,
-        kept: Option<&history::Rewind>,
-    ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_unchecked(time, kept, true).await?;
-        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
-    }
-
-    async fn replay_unchecked(
-        &self,
-        time: u64,
-        kept: Option<&history::Rewind>,
-        publish_outcomes: bool,
-    ) -> Result<(), Error> {
+    async fn replay_unchecked(&self, time: u64, publish_outcomes: bool) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("replayed history".into());
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(());
@@ -573,18 +560,7 @@ impl<A: RowApplication> Inner<A> {
         let mut covered_members = BTreeMap::new();
         let mut based = BTreeMap::new();
         for (id, scope) in &scopes {
-            let mut start = match kept {
-                Some(kept) => Start {
-                    floor: kept.at(*id).map_or(0, |(_, bound)| bound),
-                    based: self
-                        .path_base(*id, &path)
-                        .await?
-                        .map(|(_, signed)| signed.statement.identities)
-                        .unwrap_or_default(),
-                    ..Start::default()
-                },
-                None => self.replay_start(*id, &path).await?,
-            };
+            let mut start = self.replay_start(*id, &path).await?;
             let mut covered: Vec<(i64, i64)> = Vec::new();
             for record in collect_rows(
                 self.conn
@@ -640,10 +616,7 @@ impl<A: RowApplication> Inner<A> {
                 bounds.insert(*id, *bound);
             }
         }
-        if let Some(kept) = kept {
-            self.rewind_live(kept.mark()).await?;
-        }
-        for table in typed.tables.iter().filter(|_| kept.is_none()) {
+        for table in &typed.tables {
             if typed
                 .rows
                 .schema()

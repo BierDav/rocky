@@ -489,11 +489,6 @@ pub struct Touched {
 }
 const HOOK_IMAGE_COLUMNS: &str =
     "SELECT name FROM pragma_table_xinfo(?) WHERE hidden<>1 ORDER BY cid";
-fn is_history_table(table: &str) -> bool {
-    table
-        .get(..crate::sqlite::HISTORY_TABLES.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(crate::sqlite::HISTORY_TABLES))
-}
 #[derive(Default)]
 pub struct Sink {
     mode: Mode,
@@ -577,9 +572,6 @@ impl Sink {
             return false;
         };
         let target = plan.table(table).filter(|_| main);
-        if main && target.is_none() && is_history_table(table) {
-            return false;
-        }
         if self.mode == Mode::Reconcile {
             return target.is_some_and(|index| plan.tables[index].captured());
         }

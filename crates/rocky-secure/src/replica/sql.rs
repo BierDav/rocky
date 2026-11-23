@@ -81,7 +81,6 @@ pub struct SecureSql<A: RowApplication> {
     lease: Arc<tokio::sync::Mutex<Lease<A>>>,
     cancelled: Arc<AtomicBool>,
     pub(super) cursors: Arc<std::sync::atomic::AtomicUsize>,
-    pub(super) seal: Option<Arc<super::SealViews>>,
     parents: BTreeMap<String, String>,
     migration: bool,
 }
@@ -163,7 +162,7 @@ impl<A: RowApplication> SecureSession<A> {
         for (index, table) in stage.parents.iter().enumerate() {
             sql.parents.insert(
                 format!("parent.{}", table.to_ascii_lowercase()),
-                history::migration_parent_name(publication, index),
+                super::staging::migration_parent_name(publication, index),
             );
         }
         Ok(sql)
@@ -221,7 +220,6 @@ impl<A: RowApplication> SecureSession<A> {
             })),
             cancelled: Arc::default(),
             cursors: Arc::default(),
-            seal: None,
             parents: BTreeMap::new(),
             migration: false,
         })
@@ -424,11 +422,6 @@ impl<A: RowApplication> SecureSql<A> {
         params: Vec<SqlValue>,
         target: Target,
     ) -> Result<SecureRows, Error> {
-        if self.seal.is_some() {
-            return Err(Error::Sql(SqlError::Unsupported(
-                "a connection bound to a seal only reads".into(),
-            )));
-        }
         let control = classify(sql).map_err(Error::Sql)?;
         let mut lease = self.lease.lock().await;
         if lease.held.as_ref().is_some_and(|held| held.expiry.passed()) {

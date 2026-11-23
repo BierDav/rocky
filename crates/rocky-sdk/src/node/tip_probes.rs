@@ -225,9 +225,6 @@ impl Node {
             .map(|node| TipNode {
                 node: node.node.to_hex(),
                 followed_tip: node.followed_tip.map(|tip| hex(&tip.0)),
-                kept_tips: node
-                    .kept_tips
-                    .map(|tips| tips.iter().map(|tip| hex(&tip.0)).collect()),
             })
             .collect();
         Ok(TipInspection {

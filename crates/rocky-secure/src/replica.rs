@@ -46,8 +46,8 @@ pub use schemas::{
 pub(super) mod group;
 pub(crate) mod headers;
 mod held;
-mod history;
-pub use history::{HeldSeal, KeptSeals, SealViews};
+mod held_seals;
+pub use held_seals::HeldSeal;
 mod author_sets;
 mod holdings;
 mod identity;
@@ -519,10 +519,6 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) unchecked_replayed_admission: bool,
     #[cfg(test)]
-    pub(super) rebuild_switches: bool,
-    #[cfg(test)]
-    pub(super) rewound: usize,
-    #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
     pub(super) group_fault: Option<group::GroupFault>,
@@ -716,7 +712,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         held::SCHEMA,
         revoked_heads::SCHEMA,
         placements::SCHEMA,
-        history::SCHEMA,
         bundle::SCHEMA,
         replay::SCHEMA,
         replay::BASE_SCHEMA,
@@ -731,7 +726,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         checkpoint::SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
         checkpoint::PULLED_SCHEMA,
-        checkpoint::SERVED_SCHEMA,
         checkpoint::FAILURE_SCHEMA,
         compaction::SCHEMA,
         compaction::TRANSITION_SCHEMA,
@@ -1147,10 +1141,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             fail_sql_commit: false,
             #[cfg(test)]
             unchecked_replayed_admission: false,
-            #[cfg(test)]
-            rebuild_switches: false,
-            #[cfg(test)]
-            rewound: 0,
             #[cfg(test)]
             retry_before_commit: 0,
             #[cfg(test)]

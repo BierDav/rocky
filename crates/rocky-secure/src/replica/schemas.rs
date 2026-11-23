@@ -414,12 +414,11 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         requirements.visit(HeaderSource::HeldFrame, frames)?;
-        self.finish_requirements(requirements, true).await
+        self.finish_requirements(requirements).await
     }
     async fn finish_requirements(
         &self,
         requirements: Requirements,
-        historical: bool,
     ) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
         let Requirements {
             domain,
@@ -446,17 +445,6 @@ impl<A: RowApplication> Inner<A> {
         if genesis_base {
             retained.insert(graph.genesis());
         }
-        for (seal, _) in self.kept_marks().await? {
-            if let Ok(seal) = graph.seal_by_id(seal) {
-                retained.insert(seal.statement.tip);
-                if historical {
-                    required.insert((
-                        seal.statement.tip,
-                        graph.schema_any(seal.statement.tip).map_err(credential)?,
-                    ));
-                }
-            }
-        }
         let oldest = path
             .iter()
             .rposition(|tip| retained.contains(tip))
@@ -482,7 +470,7 @@ impl<A: RowApplication> Inner<A> {
             let headers = self.domain_headers(requirements.domain).await?;
             requirements.visit(HeaderSource::Retained, headers)?;
         }
-        Ok(self.missing_of(self.finish_requirements(requirements, false).await?))
+        Ok(self.missing_of(self.finish_requirements(requirements).await?))
     }
     fn missing_of(&self, required: BTreeSet<(TipId, Commitment)>) -> BTreeSet<Commitment> {
         required
@@ -563,9 +551,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             },
             async |inner, requirements| {
                 let required = match requirements {
-                    Some(requirements) => {
-                        inner.finish_requirements(requirements, historical).await?
-                    }
+                    Some(requirements) => inner.finish_requirements(requirements).await?,
                     None => BTreeSet::new(),
                 };
                 act(inner, required).await
@@ -1218,12 +1204,10 @@ impl<A: RowApplication> Inner<A> {
             inner
                 .rebind_node_tips(stage.scope, stage.target, stage.source)
                 .await?;
-            if let Some((_, staged)) = &reinstalled
+            if reinstalled.is_some()
                 && let Some((schema, domain, readers)) = &config.tables
             {
-                inner
-                    .reinstall_projection(staged.as_deref(), schema, *domain, readers)
-                    .await?;
+                inner.reinstall_projection(schema, *domain, readers).await?;
             }
             inner.forget_undeclared_scopes(stage.scope).await?;
             inner.restore_source(stage.scope, &stage.bookmark).await?;
@@ -1232,7 +1216,6 @@ impl<A: RowApplication> Inner<A> {
         match (restored, reinstalled) {
             (Ok(()), reinstalled) => Ok(reinstalled.is_some()),
             (Err(error), Some((mut definition, staged))) => {
-                self.abandon_switch_history();
                 reinstall_switch_source(self, &mut definition, staged).await?;
                 Err(error)
             }
@@ -1255,7 +1238,6 @@ impl<A: RowApplication> Inner<A> {
     }
     async fn reinstall_projection(
         &mut self,
-        staged: Option<&typed::Typed>,
         schema: &rocky_core::LogicalSchema,
         domain: Scope,
         readers: &BTreeMap<String, Commitment>,
@@ -1270,18 +1252,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?,
         );
         self.workspace.typed = Some(projected.clone());
-        self.install_projection(
-            &installed,
-            schema,
-            staged,
-            &projected,
-            Some(&PathFields::empty()),
-        )
-        .await?
-        .map_err(|broken| broken.refuses(Rebuilding::SchemaProjection))?;
-        if let Some(staged) = staged {
-            self.drop_unprojected_history(staged, &projected).await?;
-        }
+        self.install_projection(&installed, schema, &projected, Some(&PathFields::empty()))
+            .await?
+            .map_err(|broken| broken.refuses(Rebuilding::SchemaProjection))?;
         self.store_typed(schema, domain, readers).await?;
         self.cause(crate::observe::Cause::Rebuild);
         Ok(())

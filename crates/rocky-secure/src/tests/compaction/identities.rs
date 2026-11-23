@@ -1,5 +1,4 @@
 use super::*;
-use crate::KeptSeals;
 
 async fn own_mark(replica: &Replica, scope: ResourceScope) -> (crate::writer::WriterId, u64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
@@ -221,92 +220,6 @@ async fn a_retired_covered_birth_cannot_be_reused_after_an_import() {
     assert_eq!(titles(&j).await, vec![vec![text("x"), text("kept")]]);
 }
 
-async fn import_kept(
-    lineage: &Lineage,
-    source: &Replica,
-    target: &Replica,
-    key: &PrivateKey,
-    scope: ResourceScope,
-    sealed: Commitment,
-) -> (crate::SignedCheckpoint, crate::RebootstrapReport) {
-    let credentials = lineage.credentials(3, key);
-    source
-        .admit_peer(key.public_key(), &credentials, target.followed_tip().await)
-        .await
-        .unwrap();
-    let offered = source
-        .seal_checkpoint_offer(key.public_key(), &credentials, scope, sealed)
-        .await
-        .unwrap()
-        .expect("a kept checkpoint");
-    assert_eq!(offered.statement.seal, Some(sealed));
-    let checkpoint = offered.id().unwrap();
-    target.begin_rebootstrap(offered.clone()).await.unwrap();
-    let mut after = None;
-    loop {
-        let page = source
-            .checkpoint_page(
-                key.public_key(),
-                &credentials,
-                scope,
-                checkpoint,
-                after,
-                64 * 1024,
-            )
-            .await
-            .unwrap();
-        after = page.next;
-        target.stage_checkpoint_page(page).await.unwrap();
-        if after.is_none() {
-            break;
-        }
-    }
-    let report = target.finish_rebootstrap(scope).await.unwrap();
-    (offered, report)
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let keys = [PrivateKey::new(), PrivateKey::new()];
-    let scope = lineage.scope("items");
-    let a = open(&lineage, &dir, "a", &keys[0]).await;
-    follow_main(&lineage, &a).await;
-    a.keep_seals(KeptSeals {
-        every: true,
-        ..KeptSeals::default()
-    })
-    .await
-    .unwrap();
-    insert(&a, "x", "kept").await;
-    let (author, covered) = own_mark(&a, scope).await;
-    let sealed = seal(&lineage, &a).await.id().unwrap();
-    insert(&a, "y", "later").await;
-    a.flush().await.unwrap();
-    assert!(a.maintain().await);
-    assert_eq!(own_mark(&a, scope).await, (author, covered + 1));
-    let b = open(&lineage, &dir, "b", &keys[1]).await;
-    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
-    b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    import_kept(&lineage, &a, &b, &keys[1], lineage.scope("tags"), sealed).await;
-    let (offered, report) = import_kept(&lineage, &a, &b, &keys[1], scope, sealed).await;
-    assert_eq!(
-        marks(&offered),
-        vec![(author, covered)],
-        "births after the seal raise the live mark, not the kept seal's"
-    );
-    assert!(report.rejected.is_empty(), "{report:?}");
-    sync(&lineage, &a, &b, &keys[1]).await;
-    assert_eq!(
-        titles(&b).await,
-        titles(&a).await,
-        "the importer takes the kept base and applies y beyond it"
-    );
-    assert_eq!(titles(&b).await.len(), 2);
-    assert_eq!(own_mark(&b, scope).await, (author, covered + 1));
-}
-
 async fn identified(replica: &Replica) -> Vec<Vec<SqlValue>> {
     super::super::generations::select(replica, "SELECT key,id,title FROM items ORDER BY key").await
 }
@@ -439,48 +352,4 @@ async fn a_signed_empty_base_carries_its_retired_marks() {
     j.rebuild_projection(scope).await.unwrap();
     assert!(titles(&j).await.is_empty());
     j.audit(scope).await.unwrap();
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_kept_prefix_seed_counts_retired_births_and_is_unavailable_once_pruned() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let key = PrivateKey::new();
-    let scope = lineage.scope("items");
-    let a = open(&lineage, &dir, "a", &key).await;
-    follow_main(&lineage, &a).await;
-    a.keep_seals(KeptSeals {
-        every: true,
-        ..KeptSeals::default()
-    })
-    .await
-    .unwrap();
-    insert(&a, "x", "kept").await;
-    insert(&a, "y", "retired").await;
-    let (author, retired) = own_mark(&a, scope).await;
-    delete(&a, "y").await;
-    let sealed = seal(&lineage, &a).await.id().unwrap();
-    a.finalize_path(lineage.domain).await.unwrap();
-    insert(&a, "w", "later").await;
-    assert_eq!(
-        a.kept_prefix_marks(scope, sealed).await,
-        Some(vec![(author, retired)]),
-        "marks run through the kept bound: y's retired birth, not w's later one"
-    );
-    {
-        let inner = a.inner.lock(crate::replica::Class::Background).await;
-        inner
-            .conn
-            .execute(
-                "DELETE FROM secure_operations WHERE hash=(SELECT a.hash FROM secure_applied a JOIN secure_scope_state s ON s.id=a.scope WHERE s.scope=? ORDER BY a.position LIMIT 1)",
-                [encode(&scope).unwrap()],
-            )
-            .await
-            .unwrap();
-    }
-    assert_eq!(
-        a.kept_prefix_marks(scope, sealed).await,
-        None,
-        "with the prefix pruned and no base at or before the bound, the seed is unavailable, not empty"
-    );
 }

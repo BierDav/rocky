@@ -645,7 +645,6 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         seal: &SignedSeal,
         scopes: &[(ResourceScope, Option<i64>)],
-        keep: bool,
         incremental: bool,
     ) -> Result<(), Error> {
         let mut materialized = Vec::new();
@@ -806,41 +805,17 @@ impl<A: RowApplication> Inner<A> {
             .filter(|(_, id, rows)| whole.contains(id) && rows.is_empty())
             .map(|(_, id, _)| *id)
             .collect();
-        if keep || incremental {
+        if incremental {
             for (scope, id, rows) in &drops {
-                let blob = encode(scope)?;
                 for (row, fields) in rows {
-                    if incremental {
-                        self.conn
-                            .execute(
-                                "INSERT OR IGNORE INTO secure_finalization_rows VALUES(?,?)",
-                                bindings(vec![
-                                    SqlValue::Integer(*id),
-                                    SqlValue::Blob(row.to_vec()),
-                                ]),
-                            )
-                            .await?;
-                        self.replace_seal_row(*scope, *row, fields.as_deref())
-                            .await?;
-                        continue;
-                    }
-                    match fields {
-                        Some(fields) => self
-                            .conn
-                            .execute(
-                                "UPDATE secure_row_records SET fields=? WHERE scope=? AND row=?",
-                                [fields.clone(), blob.clone(), row.to_vec()],
-                            )
-                            .await?,
-                        None => {
-                            self.conn
-                                .execute(
-                                    "DELETE FROM secure_row_records WHERE scope=? AND row=?",
-                                    [blob.clone(), row.to_vec()],
-                                )
-                                .await?
-                        }
-                    };
+                    self.conn
+                        .execute(
+                            "INSERT OR IGNORE INTO secure_finalization_rows VALUES(?,?)",
+                            bindings(vec![SqlValue::Integer(*id), SqlValue::Blob(row.to_vec())]),
+                        )
+                        .await?;
+                    self.replace_seal_row(*scope, *row, fields.as_deref())
+                        .await?;
                 }
             }
         }
@@ -859,19 +834,8 @@ impl<A: RowApplication> Inner<A> {
             .filter(|change| change.replayed)
             .map(|change| (change.id, change.through))
             .collect();
-        let bounds: Vec<history::KeptBound> = changes
-            .iter()
-            .map(|change| (change.id, change.through))
-            .collect();
         let seal_id = seal.id().map_err(credential)?;
-        self.order_behind_seal(
-            domain,
-            &cuts,
-            depth,
-            now()?,
-            keep.then_some((seal_id, bounds.as_slice())),
-        )
-        .await?;
+        self.order_behind_seal(domain, &cuts, depth, now()?).await?;
         for change in &changes {
             self.conn
                 .execute(
@@ -1007,7 +971,7 @@ impl<A: RowApplication> Inner<A> {
                         return Ok((count, Some(reason)));
                     }
                     transaction!(self, |inner| inner
-                        .finalize_seal(domain, &seal, &unverified, false)
+                        .finalize_seal(domain, &seal, &unverified)
                         .await)?;
                     let verified_a_scope =
                         self.unverified_scopes(domain).await?.len() < unverified.len();
@@ -1029,13 +993,9 @@ impl<A: RowApplication> Inner<A> {
                 return Ok((count, Some(reason)));
             }
             self.cut_wal().await;
-            transaction!(self, |inner| {
-                let keep = inner
-                    .keeps_finalized(domain, seal.id().map_err(credential)?)
-                    .await?;
-                inner.finalize_seal(domain, &seal, &scopes, keep).await?;
-                inner.retain_kept(domain).await
-            })?;
+            transaction!(self, |inner| inner
+                .finalize_seal(domain, &seal, &scopes)
+                .await)?;
             count += 1;
         }
     }
@@ -1274,12 +1234,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Option<(Finalized, SignedSeal)>, Error> {
         self.graph_for(domain)?;
         let path = self.path_seals(domain)?;
-        let kept: BTreeSet<Commitment> = self
-            .kept_marks()
-            .await?
-            .into_iter()
-            .map(|(seal, _)| seal)
-            .collect();
         let finalized = self.finalized(domain).await?;
         let mut replayed = false;
         for (scope, _) in self.domain_scopes(domain).await? {
@@ -1291,14 +1245,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let mut target = None;
         for known in finalized {
-            if known.compacted {
-                let replay_base_stops_at_kept_seal = kept.contains(&known.seal);
-                if replay_base_stops_at_kept_seal {
-                    break;
-                }
-                continue;
-            }
-            if known.depth <= released && !kept.contains(&known.seal) {
+            if known.compacted || known.depth <= released {
                 continue;
             }
             let Some(index) = path
@@ -1307,15 +1254,10 @@ impl<A: RowApplication> Inner<A> {
             else {
                 break;
             };
-            if path.len() - 1 - index >= keep {
-                let stop = kept.contains(&known.seal);
-                target = Some((known, path[index].clone()));
-                if stop {
-                    break;
-                }
-            } else {
+            if path.len() - 1 - index < keep {
                 break;
             }
+            target = Some((known, path[index].clone()));
         }
         Ok(target)
     }
@@ -1726,9 +1668,7 @@ impl<A: RowApplication> Inner<A> {
         }
         sets.creations = 0;
         sets.creation_digest = checkpoint::LtHash16::new();
-        let base_creations = self
-            .index_page_headers(id, &checkpoint::Served::Base)
-            .await?;
+        let base_creations = self.index_page_headers(id).await?;
         for creation in base_creations.iter().copied() {
             let (_, clock) = self
                 .stub(creation)
@@ -1943,7 +1883,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .is_none()
             {
                 transaction!(inner, |inner| inner
-                    .finalize_seal_impl(domain, seal, &[(scope, id)], false, true,)
+                    .finalize_seal_impl(domain, seal, &[(scope, id)], true)
                     .await)?;
             }
         }

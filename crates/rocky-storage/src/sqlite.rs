@@ -406,8 +406,6 @@ pub struct Connection(
     std::sync::Arc<Mutex<crate::capture::Gate>>,
 );
 const WHOLE_TRANSACTIONS_RETRY_BUSY_FILES: std::time::Duration = std::time::Duration::ZERO;
-pub const HISTORY_TRIGGERS: &str = "secure_kept_";
-pub const HISTORY_TABLES: &str = "secure_history_";
 impl Connection {
     pub fn open(path: &Path) -> Result<Self> {
         Self::configure(crate::files::connect(path, rusqlite::OpenFlags::default())?)
@@ -578,12 +576,6 @@ impl Connection {
                 } => Access::Update(table_name, column_name),
                 _ => Access::Other,
             };
-            let fired_by_history_trigger = context
-                .accessor
-                .is_some_and(|trigger| trigger.starts_with(HISTORY_TRIGGERS));
-            if fired_by_history_trigger {
-                return Authorization::Allow;
-            }
             let outside_session_schema = context.database_name.is_some_and(|name| name != "main");
             let Ok(mut gate) = gate.lock() else {
                 return Authorization::Deny;

@@ -21,7 +21,7 @@ const OUTCOME_RECORDS: [&str; 3] = [
     "secure_outcome_divergence",
 ];
 
-const WRITTEN_SCOPE_RECORDS: [&str; 10] = [
+const WRITTEN_SCOPE_RECORDS: [&str; 9] = [
     "secure_identity_partitions",
     "secure_identity_ledger",
     "secure_identity_summary",
@@ -30,7 +30,6 @@ const WRITTEN_SCOPE_RECORDS: [&str; 10] = [
     "secure_position_sources",
     "secure_position_ranges",
     "secure_log_ranges",
-    "secure_stored_history",
     "secure_move_rows",
 ];
 

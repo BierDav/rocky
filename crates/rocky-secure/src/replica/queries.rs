@@ -39,7 +39,6 @@ pub(super) struct ReadAccess {
 struct ReadState {
     path: PathBuf,
     epoch: u64,
-    history: history::HistorySnapshot,
     views: Vec<rocky_core::LogicalView>,
     rules: BTreeMap<String, rocky_storage::partition_sql::TablePartitions>,
     unavailable: BTreeMap<String, Error>,
@@ -61,7 +60,6 @@ impl Clone for ReadState {
         Self {
             path: self.path.clone(),
             epoch: self.epoch,
-            history: self.history.clone(),
             views: self.views.clone(),
             rules: self.rules.clone(),
             unavailable: self
@@ -124,7 +122,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(ReadState {
             path: self.path().to_path_buf(),
             epoch,
-            history: self.history_snapshot().await?,
             views,
             rules: self.partition_rules(None, status).await?,
             unavailable,
@@ -353,14 +350,6 @@ impl<A: RowApplication> SecureSql<A> {
             |index| self.writable.contains(&index),
         )
     }
-    pub async fn bind_seal(&mut self, seal: Commitment) -> Result<(), Error> {
-        let views = self.session.replica.seal_views(seal).await?;
-        self.seal = Some(Arc::new(views));
-        Ok(())
-    }
-    pub fn bound_seal(&self) -> Option<Commitment> {
-        self.seal.as_ref().map(|views| views.seal)
-    }
     pub async fn cursor(
         &self,
         sql: &str,
@@ -412,11 +401,6 @@ impl<A: RowApplication> SecureSql<A> {
         let readiness = self.reads.snapshot()?;
         let checked = readiness.statement(sql, &params)?;
         let analyzed = self.read_statement(&checked.sql)?;
-        if analyzed.tables.iter().any(|name| name.contains('@')) {
-            return Err(Error::Sql(SqlError::Unsupported(
-                "name history in a statement of its own, outside a read transaction".into(),
-            )));
-        }
         readiness.available(&analyzed.tables)?;
         snapshot
             .run(analyzed.sql, checked.params, self.options.result_bytes)
@@ -444,23 +428,12 @@ impl<A: RowApplication> SecureSql<A> {
         let plan = {
             let authority = self.reads.current.clone();
             let (opened, expires) = (self.session.authority, self.session.status.expires);
-            let mut readable: Vec<String> = self
+            let readable: Vec<String> = self
                 .plan
                 .tables
                 .iter()
                 .map(|table| table.physical.clone())
                 .collect();
-            let views = match &self.seal {
-                Some(views) => Some(views.as_ref().clone()),
-                None => readiness.history.named_history::<A>(tables)?,
-            };
-            let (prelude, requires) = match views {
-                Some(views) => {
-                    readable.extend(views.readable.iter().cloned());
-                    (views.statements.clone(), Some(views.requires()))
-                }
-                None => (Vec::new(), None),
-            };
             CursorPlan {
                 path: readiness.path,
                 epoch: Some((
@@ -470,8 +443,6 @@ impl<A: RowApplication> SecureSql<A> {
                 sql,
                 params,
                 readable,
-                prelude,
-                requires,
                 revision: Some("SELECT revision FROM secure_metadata WHERE id=1".into()),
                 limits,
                 guard: Arc::new(move || {

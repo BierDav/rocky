@@ -1133,8 +1133,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await;
         }
         let (generation, key) = inner.scope_key(scope)?;
-        let (id, signed, served) = match inner.served_checkpoint(scope).await? {
-            Some((id, signed)) if signed.id()? == checkpoint => (id, signed, served::Served::Base),
+        let (id, signed) = match inner.served_checkpoint(scope).await? {
+            Some((id, signed)) if signed.id()? == checkpoint => (id, signed),
             offered => match inner.served_seal_checkpoint(scope, checkpoint).await? {
                 Some(found) => found,
                 None if offered.is_some() => {
@@ -1147,10 +1147,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 None => return Err(denied("no checkpoint to transfer")),
             },
         };
-        let table = match served {
-            served::Served::Base => "secure_checkpoints",
-            served::Served::Kept => "secure_served",
-        };
+        let table = "secure_checkpoints";
         let table = inner
             .conn
             .names()
@@ -1191,9 +1188,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let through = stored.as_ref().and_then(|(next, _)| *next);
         let replayed = inner.replayed_scope(scope);
-        let rows_sql = match (replayed, &served) {
-            (true, served::Served::Base) => "SELECT row,image FROM secure_replayed_base",
-            _ => &format!("SELECT row,fields FROM {}", served.rows()),
+        let rows_sql = match replayed {
+            true => "SELECT row,image FROM secure_replayed_base",
+            false => "SELECT row,fields FROM secure_checkpoint_rows",
         };
         let mut plain = PagePlain {
             checkpoint,
@@ -1232,9 +1229,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 break;
             }
             had_records = true;
-            let ordinals = match (replayed, &served) {
-                (true, served::Served::Base) => Some(inner.stored_field_ordinals().await?),
-                _ => None,
+            let ordinals = match replayed {
+                true => Some(inner.stored_field_ordinals().await?),
+                false => None,
             };
             for record in &records {
                 let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
@@ -1283,7 +1280,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                             entry.insert(inner.stored_creation_header(digest).await?);
                         }
                         if !named_headers.contains(&digest)
-                            && inner.page_header_needed(id, &served, digest, after).await?
+                            && inner.page_header_needed(id, digest, after).await?
                         {
                             Some((digest, header_bytes[&digest].clone()))
                         } else {
@@ -2335,26 +2332,25 @@ impl<A: RowApplication> Inner<A> {
         }
         let blob = encode(&scope)?;
         if rewrite {
-            self.in_rows_bulk(scope, async {
-                self.conn
-                    .execute("DELETE FROM secure_row_records WHERE scope=?", [blob.clone()])
-                    .await?;
-                self
-                    .conn
-                    .execute(
-                        match direct {
-                            true => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_checkpoint_rows WHERE scope=?",
-                            false => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
-                        },
-                        bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
-                    )
-                    .await?;
-                if direct {
-                    self.conn.execute(SHARE_BASE, [id]).await?;
-                }
-                Ok(())
-            })
-            .await?;
+            self.conn
+                .execute(
+                    "DELETE FROM secure_row_records WHERE scope=?",
+                    [blob.clone()],
+                )
+                .await?;
+            self
+                .conn
+                .execute(
+                    match direct {
+                        true => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_checkpoint_rows WHERE scope=?",
+                        false => "INSERT INTO secure_row_records SELECT ?,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
+                    },
+                    bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
+                )
+                .await?;
+            if direct {
+                self.conn.execute(SHARE_BASE, [id]).await?;
+            }
         }
         for mark in &statement.identities {
             self.put_identity_mark(
@@ -2386,7 +2382,7 @@ impl<A: RowApplication> Inner<A> {
                 self.conn.execute(sql, [id]).await?;
             }
         }
-        self.index_page_headers(id, &served::Served::Base).await?;
+        self.index_page_headers(id).await?;
         if rewrite {
             self.conn
                 .execute("DELETE FROM secure_stubs WHERE scope=?", [id])

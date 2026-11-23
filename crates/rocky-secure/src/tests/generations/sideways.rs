@@ -1,7 +1,6 @@
 use super::super::compaction::{bookmark, follow_main, scalar, seal, sync};
-use super::super::kept::at_seal;
 use super::*;
-use crate::{KeptSeals, TipStatement};
+use crate::TipStatement;
 use rocky_core::TipId;
 use rocky_credentials::{
     BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SealAction, SignedBookmarkMove, SignedSeal,
@@ -10,7 +9,6 @@ use rocky_credentials::{
 
 #[derive(Clone, Copy, Debug)]
 enum Rebuild {
-    Rewind,
     Base,
     Replay,
 }
@@ -84,33 +82,6 @@ pub(in crate::tests) fn open_dev(
     ]
 }
 
-async fn prepare(replica: &EncryptedReplica<TypedRows>, rebuild: Rebuild) {
-    match rebuild {
-        Rebuild::Rewind => replica
-            .keep_seals(KeptSeals {
-                every: true,
-                ..KeptSeals::default()
-            })
-            .await
-            .unwrap(),
-        Rebuild::Base => {}
-        Rebuild::Replay => {
-            replica
-                .inner
-                .lock(crate::replica::Class::Background)
-                .await
-                .rebuild_switches = true
-        }
-    }
-}
-async fn rewound(replica: &EncryptedReplica<TypedRows>) -> usize {
-    replica
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .rewound
-}
-
 const NOTES: &str = "SELECT key,title,note FROM items ORDER BY key";
 const TITLES: &str = "SELECT key,title FROM items ORDER BY key";
 
@@ -137,7 +108,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         .open(&dir.path().join("dave.db"), &dave_key, 3, None)
         .await
         .unwrap();
-    prepare(&alice, rebuild).await;
     follow_main(&lineage, &alice).await;
     crate::tests::exchange_graphs(&alice, &dave, lineage.domain).await;
     for (key, note) in [("0001", "'old'"), ("0002", "NULL")] {
@@ -172,14 +142,10 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         main_state,
         "a late write from the first tip walks the `continue` seal onto `main`"
     );
-    let kept = matches!(rebuild, Rebuild::Rewind).then(|| first);
     let at_first = vec![
         vec![text("0001"), text("title")],
         vec![text("0002"), text("title")],
     ];
-    if let Some(first) = kept {
-        assert_eq!(at_seal(&alice, first, TITLES).await, at_first);
-    }
 
     follow(
         &lineage,
@@ -192,9 +158,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     assert_eq!(select(&alice, TITLES).await, at_first);
     assert!(alice.held_changes().await.unwrap().is_empty());
     assert_eq!(scalar(&alice, "SELECT count(*) FROM secure_voids").await, 0);
-    if let Some(first) = kept {
-        assert_eq!(at_seal(&alice, first, TITLES).await, at_first);
-    }
     let branch_node = PrivateKey::new();
     alice
         .register_line_node(crate::LineNode {
@@ -216,13 +179,7 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         2
     );
     let journal = crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap();
-    let before = rewound(&alice).await;
     follow(&lineage, &alice, (&identity, &alice_key), "main", 3).await;
-    assert_eq!(
-        rewound(&alice).await > before,
-        matches!(rebuild, Rebuild::Rewind),
-        "only the kept seal's own schema restores unfiltered: {rebuild:?}"
-    );
     assert_eq!(select(&alice, NOTES).await, main_state);
     assert_eq!(
         scalar(&alice, "SELECT count(*) FROM secure_identity_ledger").await,
@@ -232,9 +189,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     assert_eq!(crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap(), journal);
     assert!(alice.held_changes().await.unwrap().is_empty());
     assert_eq!(scalar(&alice, "SELECT count(*) FROM secure_voids").await, 0);
-    if let Some(first) = kept {
-        assert_eq!(at_seal(&alice, first, TITLES).await, at_first);
-    }
     alice.audit(lineage.scope("items")).await.unwrap();
     dave.follow_bookmark(lineage.domain, "main")
         .await
@@ -245,11 +199,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         main_state,
         "the unsent `main` write was kept for `main` and is sent now"
     );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn following_back_restores_main_from_a_kept_seal() {
-    there_and_back(Rebuild::Rewind, 4).await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -264,7 +213,7 @@ async fn following_back_restores_main_by_replaying_every_frame() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn following_a_branch_of_the_same_schema_and_back_behaves_the_same() {
-    for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
+    for rebuild in [Rebuild::Base, Rebuild::Replay] {
         there_and_back(rebuild, 3).await;
     }
 }
@@ -277,7 +226,6 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
         .open_certified(&dir.path().join("alice.db"), (&identity, &key), 3, None)
         .await
         .unwrap();
-    prepare(&alice, rebuild).await;
     follow_main(&lineage, &alice).await;
     identity_insert(
         &session(&alice).await,
@@ -352,14 +300,14 @@ fn bookmark_move(lineage: &Lineage, from: TipId, to: TipId) -> TipStatement {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_owner_rollback_past_a_removal_restores_the_field_and_withdraws_unseen_writes() {
-    for rebuild in [Rebuild::Replay, Rebuild::Base, Rebuild::Rewind] {
+    for rebuild in [Rebuild::Replay, Rebuild::Base] {
         rolled_back(rebuild, true).await;
     }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_owner_rollback_within_one_schema_withdraws_the_same_writes() {
-    for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
+    for rebuild in [Rebuild::Base, Rebuild::Replay] {
         rolled_back(rebuild, false).await;
     }
 }
@@ -376,7 +324,6 @@ async fn identical_revert(rebuild: Rebuild) {
         .open(&dir.path().join("bob.db"), &bob_key, 3, None)
         .await
         .unwrap();
-    prepare(&alice, rebuild).await;
     follow_main(&lineage, &alice).await;
     crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
     identity_insert(
@@ -427,14 +374,13 @@ async fn identical_revert(rebuild: Rebuild) {
         .unwrap();
     follow(&lineage, &alice, (&identity, &key), "dev", 4).await;
     follow(&lineage, &alice, (&identity, &key), "main", 3).await;
-    assert_eq!(rewound(&alice).await, 0, "{rebuild:?}");
     assert_eq!(select(&alice, NOTES).await, erased, "{rebuild:?}");
     alice.audit(lineage.scope("items")).await.unwrap();
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_schema_identical_to_one_before_a_removal_never_restores_its_values() {
-    for rebuild in [Rebuild::Rewind, Rebuild::Base, Rebuild::Replay] {
+    for rebuild in [Rebuild::Base, Rebuild::Replay] {
         identical_revert(rebuild).await;
     }
 }
@@ -447,24 +393,9 @@ fn linked_children_first() -> Lineage {
     lineage.children_first = true;
     lineage
 }
-async fn item_id(replica: &EncryptedReplica<TypedRows>, key: &str) -> SqlValue {
-    select(replica, &format!("SELECT id FROM items WHERE key='{key}'"))
-        .await
-        .remove(0)
-        .remove(0)
-}
-async fn tag_parents(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
-    select(
-        replica,
-        "SELECT t.key,i.key,a.key FROM badges t LEFT JOIN items i ON i.id=t.item LEFT JOIN items a ON a.id=t.also ORDER BY t.key",
-    )
-    .await
-}
 async fn tagged_pair(
     lineage: &Lineage,
     dir: &Scratch,
-    rebuild: Rebuild,
-    badged: bool,
 ) -> (
     EncryptedReplica<TypedRows>,
     (PrivateKey, PrivateKey),
@@ -475,26 +406,12 @@ async fn tagged_pair(
         .open_certified(&dir.path().join("alice.db"), (&identity, &key), 3, None)
         .await
         .unwrap();
-    prepare(&replica, rebuild).await;
     follow_main(lineage, &replica).await;
     for key in ["0001", "0002"] {
         identity_insert(
             &session(&replica).await,
             &format!("INSERT INTO items VALUES('{key}','title',NULL,NULL)"),
             vec![],
-        )
-        .await
-        .unwrap();
-    }
-    if badged {
-        let (kept, nulled) = (
-            item_id(&replica, "0001").await,
-            item_id(&replica, "0002").await,
-        );
-        identity_insert(
-            &session(&replica).await,
-            "INSERT INTO badges(key,label,item,also) VALUES('t','l',?,?)",
-            vec![kept, nulled],
         )
         .await
         .unwrap();
@@ -508,7 +425,7 @@ async fn a_rebuild_renames_every_old_table_before_creating_a_new_one_so_a_child_
  {
     let lineage = linked_children_first();
     let dir = Scratch::new().await;
-    let (alice, (identity, key), first) = tagged_pair(&lineage, &dir, Rebuild::Base, false).await;
+    let (alice, (identity, key), first) = tagged_pair(&lineage, &dir).await;
     alice
         .publish_tip_statements(&open_dev(&lineage, first, 2))
         .await
@@ -525,45 +442,4 @@ async fn a_rebuild_renames_every_old_table_before_creating_a_new_one_so_a_child_
     .await
     .unwrap();
     assert_eq!(parents, vec![vec![text("items")]; 2]);
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_rewind_deletes_until_no_cascade_changes_a_row_so_a_child_set_null_earlier_is_restored() {
-    let lineage = linked_children_first();
-    let dir = Scratch::new().await;
-    let (alice, (identity, key), first) = tagged_pair(&lineage, &dir, Rebuild::Rewind, true).await;
-    alice
-        .publish_tip_statements(&open_dev(&lineage, first, 3))
-        .await
-        .unwrap();
-    follow(&lineage, &alice, (&identity, &key), "dev", 3).await;
-    let branch_node = PrivateKey::new();
-    alice
-        .register_line_node(crate::LineNode {
-            credentials: lineage.certified(3, &identity, &branch_node),
-            key: branch_node,
-        })
-        .await
-        .unwrap();
-    write(&alice, "UPDATE items SET title='dev' WHERE key='0002'").await;
-    alice.finalize_path(lineage.domain).await.unwrap();
-    assert_eq!(alice.kept_seals().await.unwrap(), [first]);
-    let before = rewound(&alice).await;
-    follow(&lineage, &alice, (&identity, &key), "main", 3).await;
-    assert!(
-        rewound(&alice).await > before,
-        "main restores from the kept seal"
-    );
-    assert_eq!(
-        tag_parents(&alice).await,
-        vec![vec![text("t"), text("0001"), text("0002")]],
-        "the badge whose also-column the rewound parent set to NULL is restored too"
-    );
-    assert_eq!(
-        select(&alice, TITLES).await,
-        vec![
-            vec![text("0001"), text("title")],
-            vec![text("0002"), text("title")]
-        ]
-    );
 }

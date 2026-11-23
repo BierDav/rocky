@@ -263,22 +263,6 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<(Commitment, Vec<u8>)>, Error> {
-        self.scanned_images(scope, None)
-            .await?
-            .ok_or_else(|| Error::Corrupt("replayed scope".into()))
-    }
-    pub(in crate::replica) async fn kept_images(
-        &self,
-        scope: ResourceScope,
-        kept: (Commitment, i64),
-    ) -> Result<Option<Vec<(Commitment, Vec<u8>)>>, Error> {
-        self.scanned_images(scope, Some(kept)).await
-    }
-    async fn scanned_images(
-        &self,
-        scope: ResourceScope,
-        kept: Option<(Commitment, i64)>,
-    ) -> Result<Option<Vec<(Commitment, Vec<u8>)>>, Error> {
         let corrupt = || Error::Corrupt("replayed scope".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
         let projected = typed.by_scope(scope).ok_or_else(corrupt)?;
@@ -288,26 +272,10 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .find(|table| table.name.eq_ignore_ascii_case(&projected.table.sql_name))
             .ok_or_else(corrupt)?;
-        let scan = match kept {
-            None => table.scan.clone(),
-            Some(kept) => {
-                let logical = typed
-                    .rows
-                    .schema()
-                    .table(&projected.table.sql_name)
-                    .ok_or_else(corrupt)?;
-                let columns: Vec<String> =
-                    logical.columns.iter().map(|c| c.sql_name.clone()).collect();
-                match self.kept_scan(kept, &logical.sql_name, &columns).await? {
-                    Some(scan) => scan,
-                    None => return Ok(None),
-                }
-            }
-        };
         let records = self
             .conn
             .connection()
-            .rows(&scan, Vec::new())
+            .rows(&table.scan, Vec::new())
             .map_err(Error::from)?;
         #[cfg(test)]
         crate::replica::held_at_once(records.len());
@@ -330,7 +298,7 @@ impl<A: RowApplication> Inner<A> {
             rows.push((row, fields_blob(&fields)));
         }
         rows.sort_unstable();
-        Ok(Some(rows))
+        Ok(rows)
     }
 
     pub(in crate::replica) async fn take_seal_rows(
@@ -646,7 +614,7 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn
                 .execute(
-                    format!("DELETE FROM {table} WHERE scope=?1 AND seal IN(SELECT seal FROM secure_finalized WHERE domain=?2 AND compacted=0 AND depth<=?3) AND seal NOT IN(SELECT seal FROM secure_replayed_base_source WHERE scope=?1) AND seal NOT IN(SELECT seal FROM secure_base_transition WHERE scope=?1) AND seal NOT IN(SELECT seal FROM secure_kept_marks)"),
+                    format!("DELETE FROM {table} WHERE scope=?1 AND seal IN(SELECT seal FROM secure_finalized WHERE domain=?2 AND compacted=0 AND depth<=?3) AND seal NOT IN(SELECT seal FROM secure_replayed_base_source WHERE scope=?1) AND seal NOT IN(SELECT seal FROM secure_base_transition WHERE scope=?1)"),
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(encode(&domain)?),

@@ -641,12 +641,6 @@ async fn dev_pull(resign: bool) -> DevPull {
     let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
     let domain = f.public.domain;
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
-    a.keep_seals(crate::KeptSeals {
-        every: true,
-        ..Default::default()
-    })
-    .await
-    .unwrap();
     let b_path = dir.path().join("b.db");
     let (b, b_credentials) = open(&f, &b_path, &keys[1]).await;
     a.author_buffered(handle(1), insert(&f, 1, "one"), vec![])

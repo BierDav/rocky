@@ -15,8 +15,6 @@ mod prune;
 pub(super) mod pulled;
 pub(crate) use pulled::SCHEMA as PULLED_SCHEMA;
 mod served;
-pub(crate) use served::SCHEMA as SERVED_SCHEMA;
-pub(super) use served::Served;
 mod transfer;
 use super::*;
 
@@ -71,7 +69,7 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL,direct INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_page_headers(scope INTEGER NOT NULL,view INTEGER NOT NULL,header BLOB NOT NULL,first_row BLOB NOT NULL,PRIMARY KEY(scope,view,header)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_page_headers(scope INTEGER NOT NULL,header BLOB NOT NULL,first_row BLOB NOT NULL,PRIMARY KEY(scope,header)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -700,23 +698,12 @@ pub(super) struct Log {
 pub(super) enum Overlay {
     Build,
     Scratch,
-    Rewind,
 }
 impl Overlay {
     pub(super) fn table(self) -> &'static str {
         match self {
             Self::Build => "secure_checkpoint_overlay",
-            Self::Scratch | Self::Rewind => "secure_checkpoint_scratch",
-        }
-    }
-    fn under(self) -> &'static str {
-        match self {
-            Self::Build | Self::Scratch => {
-                "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?"
-            }
-            Self::Rewind => {
-                "SELECT fields FROM secure_row_records WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?) AND row=?"
-            }
+            Self::Scratch => "secure_checkpoint_scratch",
         }
     }
 }
@@ -1308,8 +1295,9 @@ impl<A: RowApplication> Inner<A> {
             "SELECT fields FROM {} WHERE scope=? AND row=?",
             overlay.table()
         );
-        for (index, sql) in [over.as_str(), overlay.under()].into_iter().enumerate() {
-            if index == 1 && self.ignores_base() && !matches!(overlay, Overlay::Rewind) {
+        let under = "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?";
+        for (index, sql) in [over.as_str(), under].into_iter().enumerate() {
+            if index == 1 && self.ignores_base() {
                 continue;
             }
             let mut result = self

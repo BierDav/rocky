@@ -284,7 +284,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return self.run_plan().await;
         }
         inner.workspace.typed = Some(Arc::new(typed));
-        transaction!(inner, |inner| inner.install_history().await)?;
         inner.start_events();
         Ok(())
     }
@@ -412,7 +411,6 @@ impl<A: RowApplication> Inner<A> {
             typed = typed.restrict(&recorded);
         }
         self.workspace.typed = Some(Arc::new(typed));
-        transaction!(self, |inner| inner.install_history().await)?;
         self.start_events();
         Ok(())
     }

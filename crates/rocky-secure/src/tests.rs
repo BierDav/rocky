@@ -1637,7 +1637,6 @@ mod formats;
 mod generations;
 mod group;
 mod header_scans;
-mod kept;
 mod partitions;
 mod placements;
 mod recovery;

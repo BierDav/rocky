@@ -1,6 +1,5 @@
 use super::super::generations::{identity_insert, session};
 use super::*;
-use crate::KeptSeals;
 
 async fn install_keys_without_applying_pending(replica: &Replica, keys: Vec<crate::KeyMaterial>) {
     replica
@@ -221,82 +220,6 @@ async fn a_late_grant_never_signs_an_unchecked_empty_base() {
             .unwrap()
             .iter()
             .all(|record| record.table != lineage.scope("tags"))
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_kept_empty_scope_stays_empty_before_during_and_after_a_branch_switch() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let key = PrivateKey::new();
-    let a = open(&lineage, &dir, "a", &key).await;
-    follow_main(&lineage, &a).await;
-    a.keep_seals(KeptSeals {
-        every: true,
-        ..KeptSeals::default()
-    })
-    .await
-    .unwrap();
-    let sealed = seal(&lineage, &a).await.id().unwrap();
-    a.finalize_path(lineage.domain).await.unwrap();
-    let query = "SELECT key FROM tags";
-    assert!(
-        super::super::kept::at_seal(&a, sealed, query)
-            .await
-            .is_empty()
-    );
-    identity_insert(
-        &session(&a).await,
-        "INSERT INTO tags(key,label) VALUES('live','later')",
-        vec![],
-    )
-    .await
-    .unwrap();
-    assert!(
-        super::super::kept::at_seal(&a, sealed, query)
-            .await
-            .is_empty()
-    );
-    let opening = rocky_credentials::SignedTipOpening::sign(
-        rocky_credentials::TipOpeningStatement {
-            format: rocky_credentials::TIP_OPENING_FORMAT,
-            schema: lineage.definition(3).hash(),
-            scope: lineage.domain,
-            seal: sealed,
-        },
-        lineage.publisher(),
-    )
-    .unwrap();
-    let dev = opening.tip().unwrap();
-    let movement = rocky_credentials::SignedBookmarkMove::sign(
-        rocky_credentials::BookmarkMoveStatement {
-            format: rocky_credentials::BOOKMARK_MOVE_FORMAT,
-            scope: lineage.domain,
-            name: "dev".into(),
-            from: None,
-            to: Some(dev),
-        },
-        lineage.publisher(),
-    )
-    .unwrap();
-    a.publish_tip_statements(&[
-        TipStatement::Opening(opening),
-        TipStatement::Bookmark(movement),
-    ])
-    .await
-    .unwrap();
-    a.follow_bookmark(lineage.domain, "dev").await.unwrap();
-    assert!(
-        super::super::kept::at_seal(&a, sealed, query)
-            .await
-            .is_empty()
-    );
-    a.follow_bookmark(lineage.domain, "main").await.unwrap();
-    assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 1);
-    assert!(
-        super::super::kept::at_seal(&a, sealed, query)
-            .await
-            .is_empty()
     );
 }
 

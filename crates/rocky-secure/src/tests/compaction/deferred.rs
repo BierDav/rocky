@@ -1,5 +1,4 @@
 use super::*;
-use crate::KeptSeals;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_keyless_scope_without_covered_payload_has_a_truthful_zero_bound() {
@@ -48,100 +47,6 @@ async fn a_keyless_scope_without_covered_payload_has_a_truthful_zero_bound() {
         .unwrap()
         .unwrap();
     assert_empty_checkpoint(&empty, sealed);
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let keys = [PrivateKey::new(), PrivateKey::new()];
-    let a = open(&lineage, &dir, "a", &keys[0]).await;
-    let b = open(&lineage, &dir, "b", &keys[1]).await;
-    follow_main(&lineage, &a).await;
-    insert(&a, "one", "one").await;
-    let frames = crate::tests::stored_frames(&a, "SELECT header,body FROM secure_operations").await;
-    let sealed = seal(&lineage, &a).await.id().unwrap();
-    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
-    b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    b.keep_seals(KeptSeals {
-        every: true,
-        ..KeptSeals::default()
-    })
-    .await
-    .unwrap();
-    let held = std::mem::take(
-        &mut b
-            .inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .config
-            .keys,
-    );
-    for frame in frames {
-        b.receive(frame).await.unwrap();
-    }
-    b.finalize_path(lineage.domain).await.unwrap();
-    let opening = rocky_credentials::SignedTipOpening::sign(
-        rocky_credentials::TipOpeningStatement {
-            format: rocky_credentials::TIP_OPENING_FORMAT,
-            scope: lineage.domain,
-            seal: sealed,
-            schema: lineage.definition(3).hash(),
-        },
-        lineage.publisher(),
-    )
-    .unwrap();
-    let dev = opening.tip().unwrap();
-    b.publish_tip_statements(&[
-        TipStatement::Opening(opening),
-        TipStatement::Bookmark(
-            SignedBookmarkMove::sign(
-                BookmarkMoveStatement {
-                    format: BOOKMARK_MOVE_FORMAT,
-                    scope: lineage.domain,
-                    name: "dev".into(),
-                    from: None,
-                    to: Some(dev),
-                },
-                lineage.publisher(),
-            )
-            .unwrap(),
-        ),
-    ])
-    .await
-    .unwrap();
-    b.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .keys = held;
-    b.settle().await.unwrap();
-    assert_eq!(scalar(&b, "SELECT count(*) FROM items").await, 1);
-    b.admit_peer(
-        keys[0].public_key(),
-        &lineage.credentials(3, &keys[0]),
-        a.followed_tip().await,
-    )
-    .await
-    .unwrap();
-    assert!(
-        b.seal_checkpoint_offer(
-            keys[0].public_key(),
-            &lineage.credentials(3, &keys[0]),
-            lineage.scope("items"),
-            sealed
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
-    assert_ne!(
-        b.held_seal(lineage.domain, sealed).await.unwrap(),
-        Some(crate::HeldSeal::Kept)
-    );
-    assert!(b.seal_views(sealed).await.is_err());
-    b.follow_bookmark(lineage.domain, "dev").await.unwrap();
-    assert_eq!(scalar(&b, "SELECT count(*) FROM items").await, 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

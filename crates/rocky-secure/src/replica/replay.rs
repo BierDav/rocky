@@ -1090,12 +1090,7 @@ impl<A: RowApplication> Inner<A> {
         cuts: &[(i64, i64)],
         era: i64,
         time: u64,
-        kept: Option<(Commitment, &[history::KeptBound])>,
     ) -> Result<(), Error> {
-        let mark = async || match kept {
-            Some((seal, bounds)) => self.mark_seal(seal, bounds).await,
-            None => Ok(()),
-        };
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut starts = Vec::new();
         let mut moved = BTreeSet::new();
@@ -1180,7 +1175,7 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if starts.is_empty() {
-            return mark().await;
+            return Ok(());
         }
         let mut redo = self.rewind(starts).await?;
         for redo in &mut redo {
@@ -1196,11 +1191,7 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         redo.sort_by(|a, b| a.order.cmp(&b.order));
-        let behind = redo.partition_point(|redo| redo.order.0 < era);
-        let later = redo.split_off(behind);
-        self.redo(redo, time).await?;
-        mark().await?;
-        self.redo(later, time).await
+        self.redo(redo, time).await
     }
 
     async fn finalized_frontiers(

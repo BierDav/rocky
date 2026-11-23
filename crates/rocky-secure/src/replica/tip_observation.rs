@@ -24,8 +24,6 @@ pub struct TipObservation {
 pub struct TipNodeObservation {
     pub node: PeerId,
     pub followed_tip: Option<TipId>,
-    pub kept_tips: Option<Vec<TipId>>,
-    pub kept_seals: Option<Vec<Commitment>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -395,45 +393,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .await
     }
     pub async fn tip_nodes(&self, scope: Scope) -> Result<Vec<TipNodeObservation>, Error> {
-        self.fold_headers(
-            scope,
-            |inner| {
-                inner.scope_graph(scope)?;
-                Ok(BTreeSet::from([inner.workspace.tip]))
-            },
-            async |_, tips, headers| {
-                tips.extend(headers.into_iter().map(|header| header.tip));
-                Ok(())
-            },
-            async |inner, tips| {
-                let local = PeerId::of(inner.config.node.public_key());
-                let mut nodes = vec![TipNodeObservation {
-                    node: local,
-                    followed_tip: Some(inner.workspace.tip),
-                    kept_tips: Some(tips.into_iter().collect()),
-                    kept_seals: Some(
-                        inner
-                            .kept_marks()
-                            .await?
-                            .into_iter()
-                            .map(|(seal, _)| seal)
-                            .collect(),
-                    ),
-                }];
-                for device in inner.observed_devices(scope).await? {
-                    if device.node != local {
-                        nodes.push(TipNodeObservation {
-                            node: device.node,
-                            followed_tip: device.tip,
-                            kept_tips: None,
-                            kept_seals: None,
-                        });
-                    }
-                }
-                Ok(nodes)
-            },
-        )
-        .await
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        inner.scope_graph(scope)?;
+        let local = PeerId::of(inner.config.node.public_key());
+        let mut nodes = vec![TipNodeObservation {
+            node: local,
+            followed_tip: Some(inner.workspace.tip),
+        }];
+        for device in inner.observed_devices(scope).await? {
+            if device.node != local {
+                nodes.push(TipNodeObservation {
+                    node: device.node,
+                    followed_tip: device.tip,
+                });
+            }
+        }
+        Ok(nodes)
     }
     pub async fn line_node_needed(&self) -> bool {
         let inner = self.inner.lock(crate::replica::Class::Background).await;

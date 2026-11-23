@@ -1,3 +1,4 @@
+use super::typed::quoted;
 use super::*;
 use rocky_core::Scope;
 
@@ -20,7 +21,53 @@ pub struct SchemaStage {
     pub parents: Vec<String>,
 }
 
+pub(super) fn migration_parent_name(publication: Commitment, index: usize) -> String {
+    let hex: String = publication
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("secure_frozen_migration_{hex}_{index}")
+}
+
 impl<A: RowApplication> Inner<A> {
+    async fn freeze_migration_parents(&self, stage: &SchemaStage) -> Result<(), Error> {
+        let typed = self
+            .workspace
+            .typed
+            .as_ref()
+            .ok_or_else(|| denied("migration parents require typed tables"))?;
+        for (index, table) in stage.parents.iter().enumerate() {
+            let table = typed
+                .by_name(table)
+                .ok_or_else(|| denied("unknown migration parent table"))?;
+            let frozen = migration_parent_name(stage.publication, index);
+            self.conn
+                .execute(
+                    format!(
+                        "CREATE TABLE {} AS SELECT * FROM {}",
+                        quoted(&frozen),
+                        quoted(&table.table.sql_name)
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    async fn drop_migration_parents(&self, stage: &SchemaStage) -> Result<(), Error> {
+        for index in 0..stage.parents.len() {
+            self.conn
+                .execute(
+                    format!(
+                        "DROP TABLE IF EXISTS {}",
+                        quoted(&migration_parent_name(stage.publication, index))
+                    ),
+                    (),
+                )
+                .await?;
+        }
+        Ok(())
+    }
     pub(super) async fn check_schema_stage(&self, stage: &SchemaStage) -> Result<(), Error> {
         if stage.statements.len() > 3 || stage.statements.len() < 2 {
             return Err(denied("schema statement count"));

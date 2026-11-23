@@ -5,7 +5,6 @@ pub(crate) struct Workspace {
     pub(crate) tip: TipId,
     pub(super) typed: Option<Arc<typed::Typed>>,
     pub(crate) queries: queries::Queries,
-    pub(super) bulk: history::Bulk,
 }
 impl Workspace {
     pub(super) fn new(tip: TipId) -> Self {
@@ -14,7 +13,6 @@ impl Workspace {
             tip,
             typed: None,
             queries: Default::default(),
-            bulk: Default::default(),
         }
     }
 }

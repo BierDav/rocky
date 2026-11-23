@@ -2404,7 +2404,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
                 }
                 Unavailable::NotHeld => (crate::ErrorKind::Rejected, false),
                 Unavailable::Revoked => (crate::ErrorKind::AuthorityChanged, true),
-                Unavailable::Released => (crate::ErrorKind::Rejected, false),
             },
             Some(Error::Conflict) => (crate::ErrorKind::Conflict, true),
             Some(Error::Backpressure) => (crate::ErrorKind::Quota, true),

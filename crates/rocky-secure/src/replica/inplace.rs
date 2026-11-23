@@ -139,7 +139,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.reshape_undo(&before, &schema, None).await?;
         self.record_projection_access(&projected).await?;
-        self.refresh_history_for(&projected).await?;
         self.store_typed(&schema, domain, readers).await?;
         self.workspace.typed = Some(projected);
         Ok(true)

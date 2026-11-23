@@ -75,8 +75,6 @@ pub struct CursorPlan {
     pub epoch: Option<(String, u64)>,
     pub limits: CursorLimits,
     pub guard: Guard,
-    pub prelude: Vec<String>,
-    pub requires: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -480,7 +478,6 @@ fn start_snapshot(
 }
 fn snapshot_authorizer(
     readable: Vec<String>,
-    prelude_views: bool,
 ) -> impl FnMut(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization + Send + 'static
 {
     use rusqlite::hooks::{AuthAction, Authorization};
@@ -494,9 +491,6 @@ fn snapshot_authorizer(
                     .iter()
                     .any(|table| table.eq_ignore_ascii_case(table_name)) =>
         {
-            Authorization::Allow
-        }
-        AuthAction::Read { .. } if prelude_views && context.database_name == Some("temp") => {
             Authorization::Allow
         }
         _ => Authorization::Deny,
@@ -557,13 +551,6 @@ fn clean(raw: &rusqlite::Connection) -> rusqlite::Result<()> {
         raw.execute_batch("ROLLBACK")?;
     }
     raw.pragma_update(None, "query_only", 0)?;
-    let views = raw
-        .prepare("SELECT name FROM sqlite_temp_schema WHERE type='view'")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for view in views {
-        raw.execute_batch(&format!("DROP VIEW temp.\"{}\"", view.replace('"', "\"\"")))?;
-    }
     Ok(())
 }
 
@@ -578,9 +565,6 @@ async fn run(
     let expires = started + plan.limits.lifetime;
     let cancelled = control.cancelled.clone();
     let prepared = (|| {
-        for sql in &plan.prelude {
-            raw.execute_batch(sql).map_err(engine)?;
-        }
         raw.pragma_update(None, "query_only", 1).map_err(engine)?;
         raw.execute_batch("BEGIN").map_err(engine)?;
         let revision = start_snapshot(raw, plan.revision.as_deref())?;
@@ -590,27 +574,8 @@ async fn run(
                 return Err(Error::Conflict);
             }
         }
-        if let Some(sql) = &plan.requires {
-            let found = raw
-                .query_row(sql, [], |_| Ok(()))
-                .map(|_| true)
-                .or_else(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
-                    error => Err(error),
-                })
-                .map_err(engine)?;
-            if !found {
-                return Err(Error::Sql(SqlError::Unavailable {
-                    table: String::new(),
-                    reason: crate::sql::Unavailable::Released,
-                }));
-            }
-        }
-        raw.authorizer(Some(snapshot_authorizer(
-            plan.readable.clone(),
-            !plan.prelude.is_empty(),
-        )))
-        .map_err(engine)?;
+        raw.authorizer(Some(snapshot_authorizer(plan.readable.clone())))
+            .map_err(engine)?;
         let interrupt = cancelled.clone();
         raw.progress_handler(
             1000,
@@ -884,8 +849,6 @@ mod tests {
             revision: Some("SELECT count(*) FROM items".into()),
             limits,
             guard,
-            prelude: Vec::new(),
-            requires: None,
         }
     }
     fn open() -> Guard {
@@ -899,14 +862,12 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn a_thousand_cursor_leases_reuse_the_worker_and_clear_temporary_views() {
+    async fn a_thousand_cursor_leases_reuse_one_worker() {
         let file = file(1).await;
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         for _ in 0..1000 {
-            let mut plan = plan(&file, "SELECT * FROM leased", small(1), open());
-            plan.prelude
-                .push("CREATE TEMP VIEW leased AS SELECT id,title FROM items".into());
+            let plan = plan(&file, "SELECT id,title FROM items", small(1), open());
             let mut cursor = SnapshotCursor::open(&host, count.clone(), plan)
                 .await
                 .unwrap();
@@ -914,15 +875,6 @@ mod tests {
             drop(cursor);
         }
         assert_eq!(host.workers(), 1);
-        assert!(
-            SnapshotCursor::open(
-                &host,
-                count.clone(),
-                plan(&file, "SELECT * FROM leased", small(1), open())
-            )
-            .await
-            .is_err()
-        );
         let mut cursor = SnapshotCursor::open(
             &host,
             count,

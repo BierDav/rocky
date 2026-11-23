@@ -190,7 +190,6 @@ async fn state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
         "secure_finalized",
         "secure_seal_bounds",
         "secure_checkpoints",
-        "secure_kept_marks",
         "secure_applied",
         "secure_scope_state",
         "secure_row_records",

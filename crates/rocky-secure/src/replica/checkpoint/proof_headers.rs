@@ -1,27 +1,16 @@
-use super::served::Served;
 use super::*;
-
-impl Served {
-    pub(super) fn header_view(&self) -> i64 {
-        match self {
-            Self::Base => 0,
-            Self::Kept => 1,
-        }
-    }
-}
 
 impl<A: RowApplication> Inner<A> {
     pub(in crate::replica) async fn index_page_headers(
         &self,
         id: i64,
-        served: &Served,
     ) -> Result<BTreeSet<Hash>, Error> {
         let mut first = BTreeMap::new();
         let mut creations = BTreeSet::new();
         let mut after = Vec::new();
         loop {
             let records = collect_rows(self.conn.query(
-                format!("SELECT row,fields FROM {} WHERE scope=? AND row>? ORDER BY row LIMIT ?", served.rows()),
+                "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
                 bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?).await?;
             #[cfg(feature = "qualification")]
             self.flusher
@@ -44,17 +33,16 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "DELETE FROM secure_checkpoint_page_headers WHERE scope=? AND view=?",
-                [id, served.header_view()],
+                "DELETE FROM secure_checkpoint_page_headers WHERE scope=?",
+                [id],
             )
             .await?;
         for (header, row) in first {
             self.conn
                 .execute(
-                    "INSERT INTO secure_checkpoint_page_headers VALUES(?,?,?,?)",
+                    "INSERT INTO secure_checkpoint_page_headers VALUES(?,?,?)",
                     bindings(vec![
                         SqlValue::Integer(id),
-                        SqlValue::Integer(served.header_view()),
                         SqlValue::Blob(header.to_vec()),
                         SqlValue::Blob(row),
                     ]),
@@ -66,12 +54,16 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn page_header_needed(
         &self,
         id: i64,
-        served: &Served,
         header: Commitment,
         after: Option<Commitment>,
     ) -> Result<bool, Error> {
-        let mut rows = self.conn.query("SELECT first_row FROM secure_checkpoint_page_headers WHERE scope=? AND view=? AND header=?", bindings(vec![
-            SqlValue::Integer(id), SqlValue::Integer(served.header_view()), SqlValue::Blob(header.to_vec())])).await?;
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT first_row FROM secure_checkpoint_page_headers WHERE scope=? AND header=?",
+                bindings(vec![SqlValue::Integer(id), SqlValue::Blob(header.to_vec())]),
+            )
+            .await?;
         let first: Vec<u8> = rows
             .next()
             .await?

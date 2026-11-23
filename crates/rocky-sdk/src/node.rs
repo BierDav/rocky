@@ -2227,7 +2227,6 @@ impl Node {
                     settings.publisher,
                     (now()?, 300),
                 )?;
-                let registry = self.registry(&*self.settings_snapshot().await).await?;
                 let mut current = self.settings.lock().await;
                 if let Some(statement) = current.revoking(&request.revocations)? {
                     if self
@@ -2247,8 +2246,7 @@ impl Node {
                     self.hold_keys(&current, &current.partitions(&self.domain())?)
                         .await?;
                 }
-                let reply =
-                    current.answer_epochs(&self.vault, &request.request.to_bytes()?, &registry)?;
+                let reply = current.answer_epochs(&self.vault, &request.request.to_bytes()?)?;
                 drop(current);
                 Ok(PeerReply::Epochs(reply))
             }

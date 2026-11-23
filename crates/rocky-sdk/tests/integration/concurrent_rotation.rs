@@ -166,7 +166,7 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
     Ok(())
 }
 
-#[ignore = "fails while the creator follows main (also on 68de7e0d through Configuration::create): the renewed offline writer finds items Incomplete"]
+#[ignore = "both issuers seal main for members on revocation; the lower-precedence issuer's row written after its own seal stays held on its losing line (a replayed intent, so no held change), and its single-use identity cannot mint the line node it needs to write on the winning line"]
 #[tokio::test]
 async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_renews_once()
 -> Result<(), Failure> {

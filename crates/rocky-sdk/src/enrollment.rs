@@ -2500,12 +2500,7 @@ impl Settings {
     }
 }
 impl Settings {
-    pub(crate) fn answer_epochs(
-        &self,
-        vault: &Vault,
-        bytes: &[u8],
-        registry: &Registry,
-    ) -> Result<Vec<u8>, Failure> {
+    pub(crate) fn answer_epochs(&self, vault: &Vault, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
         if !self.issuer() {
             return Err("only an issuer delivers epochs".into());
         }
@@ -2521,7 +2516,7 @@ impl Settings {
             (now()?, SKEW),
             &domain.families,
         )?;
-        if self.revoked_identity(&prior.subject, registry) {
+        if self.tombstoned(&prior.subject) {
             return Err("device was revoked".into());
         }
         let (prior, granted) = held(prior, &domain)?;

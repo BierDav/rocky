@@ -682,11 +682,8 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
             let issuer = PrivateKey::from_bytes(&source_vault.get("node")?).public_key();
             let (request, secret) =
                 RenewRequest::sign(&target_node, issuer, target.credentials.clone(), now()?)?;
-            let reply = Renewal::from_bytes(&source.answer_epochs(
-                source_vault,
-                &request.to_bytes()?,
-                &registry,
-            )?)?;
+            let reply =
+                Renewal::from_bytes(&source.answer_epochs(source_vault, &request.to_bytes()?)?)?;
             let sealed = Sealed::parse(&reply.open(source.publisher, &request, &secret)?)?;
             let keys = sealed
                 .keys
@@ -850,7 +847,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let issuer_node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let (request, exchange) = RenewRequest::sign(&node, issuer_node, chain, now()?)?;
     for bytes in [
-        issuer.answer_epochs(&vault, &request.to_bytes()?, &Registry::default())?,
+        issuer.answer_epochs(&vault, &request.to_bytes()?)?,
         issuer
             .renew(&vault, &request.to_bytes()?, &Registry::default())?
             .0,

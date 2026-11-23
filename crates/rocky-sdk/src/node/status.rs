@@ -277,19 +277,6 @@ impl Node {
                 alerts
             },
             mesh: self.mesh_status().await?,
-            coordination: CoordinationStatus {
-                mode: if self.coordinator().is_some() {
-                    CoordinationMode::Service
-                } else {
-                    CoordinationMode::NotConfigured
-                },
-                attempts: self
-                    .observations
-                    .snapshot()
-                    .into_iter()
-                    .filter(|attempt| attempt.target == "coordinator")
-                    .collect(),
-            },
         };
         let mut token_status = status.clone();
         token_status.observed_at_epoch_millis = None;
@@ -560,13 +547,6 @@ impl Node {
             );
             span.record("outcome", if result.is_ok() { "ok" } else { "error" });
 
-            if let Err(error) = self.push_revocations().await {
-                self.activity
-                    .record(crate::ActivityKind::RevocationsUnpushed {
-                        error: (error.to_string()).to_owned(),
-                        retry: None,
-                    });
-            }
             result
         };
         if result.is_ok() {

@@ -31,7 +31,6 @@ async fn a_supplied_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> 
         schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: None,
-        coordination: None,
     };
     let writer = Device::new(Database::install(
         open(),

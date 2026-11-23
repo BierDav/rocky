@@ -33,7 +33,6 @@ pub(crate) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: Some(keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 pub(crate) fn identity(root: &Path, name: &str) -> Result<Value, Failure> {

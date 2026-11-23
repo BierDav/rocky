@@ -1,7 +1,7 @@
 # Rocky
 
 Rocky provides local-first SQLite storage, encrypted peer replication,
-credentials, seal coordination and optional iroh networking.
+credentials and optional iroh networking.
 
 See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests, module
 declarations and tests to navigate the implementation.
@@ -101,34 +101,8 @@ HTTP server already upgraded through `Attachment::external(url)` and
 `Attachment::admit_websocket`, so Rocky can sit behind an HTTPS reverse proxy.
 A dialer pins the node it expects, so a route must reach one node: behind a
 load balancer give each node its own path.
-Coordination is an application-owned slot: supply `Arc<dyn rocky_sdk::Coordinator>`
-with `Configuration::coordination` (or the engine equivalent).
-For voters, construct `rocky_coordinator::Client::connect(&bundle, transport)`
-and pass the returned client. The SDK binds its database node credentials;
-it never starts a coordinator or closes the application's coordinator transport.
-Without one, counter claims and reads return `CoordinatorNotConfigured`.
-Local storage, enrollment and peer replication work independently.
-The database's owner-signed settings name its coordinator. Creating with
-a coordinator signs them at once; for an existing database the owner calls
-`Session::declare_coordinated` (signing a coordination grant also does it).
-Every device learns them by sync. With `CoordinatorSlot::Connector` (for
-voters, `rocky_coordinator::Connector`) a device reaches the named coordinator
-itself; an explicit client must be that coordinator, or opening, sealing and
-counters fail with `coordinator_mismatch`. Without one, a trusted device
-refuses to seal or stage a schema (`coordinator_required`), and its routine
-and member seals are skipped with a `SealSkipped` alert. A coordinated database
-is never made uncoordinated and its coordinator never changes: the owner's
-devices refuse to sign such a revision, and every device resolves the
-revisions it holds alike, the earliest coordinated one naming the coordinator.
-Only finality acknowledged at that coordinator counts; finality compacts
-only once the settings name it, and the owner may name only the coordinator
-its finality records name. When that coordinator's log decided a tip, a
-seal that lost it never ended the tip: rows written after it are late
-writes of that tip and reach the winning line, and nothing ends the log of
-a tip past it. A loss graphs decided before the log confirmed it, or one
-through a revoked seal, keeps its rows held for re-authoring. A trusted
-node whose finality pass cannot end or confirm a log raises
-`FinalityStalled`.
+Guarantees that need a global authority, such as gap-free numbers or
+admitting a ticket once, come from the optional `rocky-coordinator` crate.
 
 Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
 it needs a clang that targets wasm32 and an `llvm-ar` that indexes wasm

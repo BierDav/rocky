@@ -33,7 +33,6 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
-        coordination: None,
     }
 }
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {

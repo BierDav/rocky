@@ -12,7 +12,6 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 
@@ -220,7 +219,6 @@ async fn own_id_partitions_continue_the_table_log() {
         schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: None,
-        coordination: None,
     };
     let mut db = Database::create(options(), None).unwrap().database;
     let _scope: Value = serde_json::to_value(db.scope()).unwrap();

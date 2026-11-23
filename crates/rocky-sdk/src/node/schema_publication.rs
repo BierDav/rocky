@@ -29,10 +29,6 @@ impl Node {
         let Ok(signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
-        if let Some(blocked) = self.seal_blocker().await? {
-            tracing::warn!(%blocked, "the declared schema waits for the database's coordinator");
-            return Ok(());
-        }
         let source = self.replica.followed_tip().await;
         let graph = self.replica.tip_graph(scope).await?;
         if graph.bookmark(&bookmark)? != Some(source) || graph.seal(source)?.is_some() {
@@ -51,12 +47,7 @@ impl Node {
             self.declared.version,
             rocky_core::EngineIdentity::current(),
         )?;
-        let continues_live = !migrates && self.replica.domain_log().is_some();
-        let signer = if continues_live {
-            self.hold_chain(signer, scope).await?
-        } else {
-            self.hold_stage_chain(signer, scope).await?
-        };
+        let signer = self.hold_stage_chain(signer, scope).await?;
         let seal = signer.endorse::<SignedSeal>(SealStatement {
             format: SEAL_FORMAT,
             scope,
@@ -96,35 +87,6 @@ impl Node {
             Some(source),
             Some(target),
         )?);
-        if !migrates && self.replica.domain_log().is_some() {
-            match self.replica.publish_tip_statements(&statements).await {
-                Ok(_) => {}
-                Err(rocky_secure::Error::Application(inner))
-                    if inner
-                        .downcast_ref::<rocky_secure::Refusal>()
-                        .is_some_and(rocky_secure::Refusal::retryable) =>
-                {
-                    return Ok(());
-                }
-                Err(error) => return Err(error.into()),
-            }
-            drop(signer);
-            self.replica
-                .install_tip_schema(
-                    target,
-                    domain.manifest(),
-                    Record::new(
-                        &self.declared,
-                        self.declared.version,
-                        rocky_core::EngineIdentity::current(),
-                    )
-                    .bytes()?,
-                )
-                .await?;
-            self.follow_schema().await?;
-            self.finalize_seals().await;
-            return Ok(());
-        }
         let mut parents = BTreeSet::new();
         for migration in self.declared.migrations.iter().filter(|migration| {
             migration.version > settings.generation && migration.version <= self.declared.version
@@ -155,7 +117,7 @@ impl Node {
                 source,
                 target,
                 from_version: settings.generation,
-                coordinated: self.replica.domain_log().is_some(),
+                coordinated: false,
                 statements,
                 program: serde_json::to_vec(&self.declared)?,
                 parents: parents.into_iter().collect(),
@@ -341,12 +303,10 @@ impl Node {
             )?;
             self.replica.admit_migration_publication(signed).await?;
         }
-        if !stage.coordinated {
-            self.replica
-                .release_uncoordinated_schema(stage.publication)
-                .await?;
-            self.finalize_seals().await;
-        }
+        self.replica
+            .release_uncoordinated_schema(stage.publication)
+            .await?;
+        self.finalize_seals().await;
         Ok(())
     }
 

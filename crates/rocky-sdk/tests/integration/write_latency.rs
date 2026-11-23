@@ -25,7 +25,6 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
-        coordination: None,
     }
 }
 

@@ -183,7 +183,6 @@ pub(crate) fn failure(error: &Failure, stage: &AttemptStage) -> AttemptFailure {
             rocky_secure::Error::Protocol(_) | rocky_secure::Error::Incompatible(_) => {
                 FailureKind::Protocol
             }
-            rocky_secure::Error::Coordination(_) => FailureKind::Coordination,
             rocky_secure::Error::Application(cause)
                 if cause.is::<rocky_secure::network::link::Busy>() =>
             {

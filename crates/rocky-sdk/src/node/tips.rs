@@ -1,10 +1,9 @@
 use super::*;
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
-    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, Coordination, CredentialChain,
-    GENESIS_LINE_FORMAT, GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement,
-    SignedBookmarkMove, SignedDatabaseSettings, SignedGenesisLine, SignedSeal, SignedTipOpening,
-    TipGraph, TipOpeningStatement,
+    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, GENESIS_LINE_FORMAT,
+    GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove,
+    SignedGenesisLine, SignedSeal, SignedTipOpening, TipGraph, TipOpeningStatement,
 };
 use rocky_secure::TipStatement;
 
@@ -332,7 +331,6 @@ impl Node {
         }
         expected(&graph)?;
         let before = self.replica.followed_tip().await;
-        self.prepare_terminal_credentials().await?;
         let published = self.replica.publish_tip_statements(&statements).await;
         drop(signer);
         self.wake_sync();
@@ -464,203 +462,6 @@ impl Node {
         .await
     }
 
-    pub(crate) async fn publish_settings(
-        &self,
-        signed: SignedDatabaseSettings,
-    ) -> Result<(), Failure> {
-        let id = signed.id()?;
-        self.publish_tips(
-            self.domain().scope,
-            None,
-            vec![TipStatement::Settings(signed)],
-            |graph| match graph
-                .settings
-                .iter()
-                .any(|held| held.id().is_ok_and(|held| held == id))
-            {
-                true => Ok(()),
-                false => Err(refused("the database settings did not take effect")),
-            },
-        )
-        .await
-    }
-    pub(super) async fn declare_coordinated(
-        &self,
-        scope: Scope,
-        root: &super::Root,
-    ) -> Result<(), Failure> {
-        let coordinator = self.coordinator().ok_or_else(|| {
-            refused("compose the coordinator before naming it in the database's settings")
-        })?;
-        let bundle = coordinator.bundle()?;
-        let graph = self.replica.tip_graph(scope).await?;
-        if graph
-            .coordinator()?
-            .is_some_and(|named| named.identity != bundle.identity)
-        {
-            return Err(super::coordinated::coordination_refusal(
-                rocky_secure::Refusal::CoordinatorMismatch(
-                    "the database's settings name another coordinator; changing it is not supported".into(),
-                ),
-            ));
-        }
-        if graph.coordinator()?.is_none()
-            && graph
-                .finality_coordinators()?
-                .iter()
-                .any(|named| *named != bundle.identity)
-        {
-            return Err(super::coordinated::coordination_refusal(
-                rocky_secure::Refusal::CoordinatorMismatch(
-                    "the database's finality records name another coordinator; compose and name that one".into(),
-                ),
-            ));
-        }
-        let Some(statement) = graph.next_settings(Coordination::Coordinated { bundle })? else {
-            return Ok(());
-        };
-        let settings = self.settings.lock().await.clone();
-        let root = crate::enrollment::root_signer(
-            root.signer(),
-            settings.publisher,
-            "signing the database's settings",
-        )?;
-        let signed = SignedDatabaseSettings::sign(statement, root)?;
-        self.publish_settings(signed).await
-    }
-    async fn prepare_terminal_credentials(&self) -> Result<(), Failure> {
-        if self.replica.domain_log().is_none() {
-            return Ok(());
-        }
-        let settings = self.settings.lock().await.clone();
-        let Some(links) = settings.trusted_links() else {
-            return Ok(());
-        };
-        let (node, _) = self.replica.terminal_author().await?;
-        let certificate = settings
-            .credentials
-            .certificate()
-            .filter(|certificate| certificate.capability.subject == node)
-            .ok_or("missing certificate for the composed log's node")?;
-        let chain = links.with_certificate(certificate.clone());
-        self.replica.install_terminal_credentials(chain).await?;
-        Ok(())
-    }
-
-    pub(super) async fn finalize_seals(&self) {
-        if self.replica.followed_bookmark().await.is_some() {
-            match self.replica.finalize_arrived(self.domain().scope).await {
-                Ok(0) => {}
-                Ok(_) => self.observations.touch(),
-                Err(error) => {
-                    self.activity
-                        .record(crate::ActivityKind::FinalizationFailed {
-                            error: (error.to_string()).to_owned(),
-                        });
-                }
-            }
-        }
-        if self.replica.domain_log().is_some() {
-            if let Err(error) = self.prepare_terminal_credentials().await {
-                self.activity
-                    .record(crate::ActivityKind::TerminalCredentialsFailed {
-                        error: (error.to_string()).to_owned(),
-                    });
-            }
-            let before = self.replica.followed_tip().await;
-            match self.replica.settle_tip_statements().await {
-                Ok(0) => {}
-                Ok(_) => {
-                    self.followed_tip_changed(before).await;
-                    if let Err(error) = self.ensure_tip_node().await {
-                        self.activity.record(crate::ActivityKind::LineNodeFailed {
-                            error: (error.to_string()).to_owned(),
-                        });
-                    }
-                    self.observations.touch();
-                }
-                Err(error) => {
-                    self.activity
-                        .record(crate::ActivityKind::SealSettlementFailed {
-                            error: (error.to_string()).to_owned(),
-                        });
-                }
-            }
-            match self.replica.finalize_seals(self.domain().scope).await {
-                Ok(finalization) => {
-                    if finalization.admitted > 0 {
-                        self.observations.touch();
-                    }
-                    self.finality_stalled(finalization.stalled.map(crate::FinalityStall::of));
-                }
-                Err(rocky_secure::Error::Incompatible(error)) => {
-                    self.finality_stalled(Some(crate::FinalityStall::UnsupportedFormat { error }));
-                }
-                Err(error) => {
-                    self.activity.record(crate::ActivityKind::FinalityFailed {
-                        error: (error.to_string()).to_owned(),
-                    });
-                }
-            }
-        }
-        if let Err(error) = self.compact_final_seal().await {
-            self.activity
-                .record(crate::ActivityKind::FinalCompactionFailed {
-                    error: (error.to_string()).to_owned(),
-                });
-        }
-    }
-
-    fn finality_stalled(&self, reason: Option<crate::FinalityStall>) {
-        let mut stalled = self
-            .finality_stalled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let same = match (&*stalled, &reason) {
-            (None, None) => true,
-            (
-                Some(crate::Alert {
-                    kind: crate::AlertKind::FinalityStalled { reason: held },
-                    ..
-                }),
-                Some(reason),
-            ) => held == reason,
-            _ => false,
-        };
-        if same {
-            return;
-        }
-        *stalled = reason.map(|reason| {
-            tracing::warn!(%reason, "a seal stays unfinal");
-            crate::Alert {
-                kind: crate::AlertKind::FinalityStalled { reason },
-                since: self.status_time().ok(),
-            }
-        });
-        drop(stalled);
-        self.observations.touch();
-    }
-    async fn compact_final_seal(&self) -> Result<(), Failure> {
-        let scope = self.domain().scope;
-        let graph = self.replica.tip_graph(scope).await?;
-        if graph.finalities.is_empty() {
-            return Ok(());
-        }
-        self.replica.finalize_path(scope).await?;
-        let status = self.replica.compaction_status(scope).await?;
-        let Some(seal) = status.finalized else {
-            return Ok(());
-        };
-        if !graph.compacts_final(seal)? {
-            return Ok(());
-        }
-        if status.compacted != Some(seal) || self.replica.needs_base_at(scope, seal).await? {
-            self.replica.compact(scope, 0).await?;
-        }
-        self.list_checkpoints(scope).await?;
-        Ok(())
-    }
-
     async fn create_bookmark(&self, scope: Scope, name: &str) -> Result<(), Failure> {
         let tip = self.replica.followed_tip().await;
         let signer = self
@@ -674,5 +475,21 @@ impl Node {
             Ok(())
         })
         .await
+    }
+
+    pub(super) async fn finalize_seals(&self) {
+        if self.replica.followed_bookmark().await.is_none() {
+            return;
+        }
+        match self.replica.finalize_arrived(self.domain().scope).await {
+            Ok(0) => {}
+            Ok(_) => self.observations.touch(),
+            Err(error) => {
+                self.activity
+                    .record(crate::ActivityKind::FinalizationFailed {
+                        error: (error.to_string()).to_owned(),
+                    });
+            }
+        }
     }
 }

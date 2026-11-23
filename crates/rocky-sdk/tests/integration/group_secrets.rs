@@ -83,7 +83,6 @@ fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<
         schema: crate::support::snapshot::schema(schema),
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 fn open_with_identity<'a>(

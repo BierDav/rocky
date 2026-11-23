@@ -651,7 +651,6 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
             schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
-            coordination: None,
         },
         None,
     )?)?;
@@ -693,7 +692,6 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
             schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Borrowed(gate.clone())),
-            coordination: None,
         },
         &invitation,
     )?)?;
@@ -715,7 +713,6 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: None,
-        coordination: None,
     })?)?;
     assert_eq!(
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
@@ -763,7 +760,6 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
             schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
-            coordination: None,
         },
         None,
     )?)?;
@@ -778,7 +774,6 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
             schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("unmet"))),
-            coordination: None,
         },
         &invitation,
     )?)?;
@@ -798,7 +793,6 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
             schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("member"))),
-            coordination: None,
         },
         &invitation,
     )?)?;
@@ -819,7 +813,6 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: Some(Network::Owned(hub.connector("member"))),
-        coordination: None,
     })?)?;
     let _ = member.sync().await;
     assert_eq!(

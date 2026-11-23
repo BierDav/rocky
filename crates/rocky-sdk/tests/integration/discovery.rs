@@ -153,7 +153,6 @@ async fn simulator_peer() -> Result<(), Failure> {
             schema: crate::support::snapshot::schema(&schema),
             secrets: None,
             network: Some(starter(None, true)),
-            coordination: None,
         },
         invitation.trim(),
     )?)?;

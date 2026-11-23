@@ -23,17 +23,14 @@ impl Node {
         if !self.signs_for_members().await {
             return None;
         }
-        let (mut sealing, mut skipped) = (false, None);
+        let mut sealing = false;
         let scope = self.domain().scope;
         let published = async {
             match self.replica.earlier_epoch_writes(scope).await? {
-                EarlierEpochWrites::Unsealed => match self.seal_blocker().await? {
-                    Some(blocked) => skipped = Some(blocked),
-                    None => {
-                        sealing = true;
-                        return self.seal_for_members().await;
-                    }
-                },
+                EarlierEpochWrites::Unsealed => {
+                    sealing = true;
+                    return self.seal_for_members().await;
+                }
                 EarlierEpochWrites::Unbased => {
                     self.replica.compact(scope, 0).await?;
                 }
@@ -55,7 +52,7 @@ impl Node {
                 return Some(crate::SealSkip::Failed(error.to_string()));
             }
         }
-        skipped
+        None
     }
     pub(super) async fn seal_routinely(&self) -> Option<crate::SealSkip> {
         self.settings.lock().await.trusted_links()?;
@@ -69,9 +66,6 @@ impl Node {
             }
             if let Err(error) = self.tip_signer(scope).await {
                 return Ok(due.then(|| crate::SealSkip::NoTipAuthority(error.to_string())));
-            }
-            if let Some(blocked) = self.seal_blocker().await? {
-                return Ok(due.then_some(blocked));
             }
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS

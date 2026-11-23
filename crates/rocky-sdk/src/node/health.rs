@@ -1,10 +1,8 @@
 use super::*;
 use crate::status::{
-    Alert, AlertKind, BlockerCount, CoordinationFailure, HealthReport, MeshDevice, SILENT_AFTER,
-    STANDING_FAILURE, TRUSTED_STALE_AFTER,
+    Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER, TRUSTED_STALE_AFTER,
 };
 use live_links::io::Writer;
-use rocky_core::CoordinationError;
 use rocky_credentials::Signature;
 use rocky_secure::network::link::{self, Frame, HEALTH_BYTES};
 
@@ -12,139 +10,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 3;
-
-#[derive(Default)]
-struct Standing {
-    skew: Option<Alert>,
-    unanswered: Option<u64>,
-    unreachable: Option<Alert>,
-    failing_push: Option<u64>,
-    unpushed: Option<Alert>,
-    failure: Option<CoordinationFailure>,
-}
-pub(crate) struct Coordination {
-    state: std::sync::Mutex<Standing>,
-    observations: crate::status::Observations,
-}
-impl Coordination {
-    pub(crate) fn new(observations: crate::status::Observations) -> Self {
-        Self {
-            state: Default::default(),
-            observations,
-        }
-    }
-    pub(crate) fn observer(self: &Arc<Self>) -> rocky_credentials::CoordinationObserver {
-        let coordination = Arc::downgrade(self);
-        Arc::new(move |result| {
-            if let (Some(coordination), Ok(time)) = (coordination.upgrade(), now()) {
-                coordination.observe(result, time);
-            }
-        })
-    }
-    pub(crate) fn observe(&self, result: Result<(), &CoordinationError>, time: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut changed = false;
-        if let Err(error) = result {
-            state.failure = Some(CoordinationFailure {
-                code: error.category().into(),
-                at_epoch_seconds: time,
-            });
-            changed = true;
-        }
-        if let Err(CoordinationError::Unavailable) = result {
-            let start = *state.unanswered.get_or_insert(time);
-            if state.unreachable.is_none()
-                && time.saturating_sub(start) >= STANDING_FAILURE.as_secs()
-            {
-                tracing::warn!(since = start, "the coordination service has not answered");
-                state.unreachable = Some(Alert {
-                    kind: AlertKind::CoordinatorUnreachable,
-                    since: Some(start),
-                });
-            }
-        } else {
-            state.unanswered = None;
-            if state.unreachable.take().is_some() {
-                tracing::info!("the coordination service answers again");
-                changed = true;
-            }
-            match result {
-                Err(CoordinationError::ClockSkew { coordinator_time }) => {
-                    let kind = AlertKind::CoordinatorClockSkew {
-                        seconds: time.abs_diff(*coordinator_time),
-                        ahead: time > *coordinator_time,
-                    };
-                    let since = match &state.skew {
-                        Some(alert) => alert.since,
-                        None => {
-                            tracing::warn!(
-                                seconds = time.abs_diff(*coordinator_time),
-                                "the coordination service refuses this device's clock"
-                            );
-                            Some(time)
-                        }
-                    };
-                    state.skew = Some(Alert { kind, since });
-                }
-                Err(CoordinationError::Denied) => {}
-                _ if state.skew.take().is_some() => {
-                    tracing::info!("the coordination service accepts this device's clock again");
-                    changed = true;
-                }
-                _ => {}
-            }
-        }
-        drop(state);
-        if changed {
-            self.observations.touch();
-        }
-    }
-    pub(crate) fn observe_push(&self, pushed: bool, time: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut changed = false;
-        if pushed {
-            state.failing_push = None;
-            if state.unpushed.take().is_some() {
-                tracing::info!("the coordination service acknowledged the held revocations");
-                changed = true;
-            }
-        } else {
-            let start = *state.failing_push.get_or_insert(time);
-            if state.unpushed.is_none() && time.saturating_sub(start) >= STANDING_FAILURE.as_secs()
-            {
-                tracing::warn!(
-                    since = start,
-                    "held revocations have not reached the coordination service"
-                );
-                state.unpushed = Some(Alert {
-                    kind: AlertKind::RevocationsUnpushed,
-                    since: Some(start),
-                });
-                changed = true;
-            }
-        }
-        drop(state);
-        if changed {
-            self.observations.touch();
-        }
-    }
-    fn alerts(&self) -> Vec<Alert> {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        [&state.skew, &state.unreachable, &state.unpushed]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
-    }
-    fn failure(&self) -> Option<CoordinationFailure> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failure
-            .clone()
-    }
-}
+const VERSION: u32 = 4;
 
 #[derive(Default)]
 pub(super) struct TrustedWatch {
@@ -244,12 +110,6 @@ fn label(node: &PublicKey) -> String {
 }
 
 impl Node {
-    #[cfg(test)]
-    pub(crate) fn observe_coordination(&self, result: Result<(), &CoordinationError>) {
-        if let Ok(time) = self.status_time() {
-            self.coordination.observe(result, time);
-        }
-    }
     pub(super) fn alerts(&self) -> Vec<Alert> {
         let time = self.status_time().unwrap_or_default();
         let stale: Vec<Alert> = self
@@ -270,17 +130,10 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .values()
             .cloned()
-            .chain(self.coordination.alerts())
             .chain(stale)
             .chain(membership)
             .chain(
                 self.seal_skipped
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone(),
-            )
-            .chain(
-                self.finality_stalled
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone(),
@@ -582,7 +435,6 @@ impl Node {
                 .take(MAX_ITEMS)
                 .map(|(kind, count)| BlockerCount { kind, count })
                 .collect(),
-            coordination_failure: self.coordination.failure(),
         })
     }
     async fn sign_report(&self, report: &HealthReport) -> Result<SignedReport, Failure> {
@@ -987,70 +839,5 @@ mod tests {
         );
         let ordinary_database = TrustedWatch::default();
         assert_eq!(ordinary_database.alerts(1000).count(), 0);
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn standing_failures_raise_alerts_after_their_bound_and_clear_by_events() {
-        let observations = crate::status::Observations::default();
-        let coordination = Coordination::new(observations.clone());
-        let revision = || *observations.subscribe().borrow();
-        let standing = STANDING_FAILURE.as_secs();
-        let kinds = |coordination: &Coordination| -> Vec<(AlertKind, Option<u64>)> {
-            coordination
-                .alerts()
-                .into_iter()
-                .map(|alert| (alert.kind, alert.since))
-                .collect()
-        };
-        coordination.observe(Err(&CoordinationError::Unavailable), 1000);
-        coordination.observe(Err(&CoordinationError::Unavailable), 1000 + standing - 1);
-        assert!(kinds(&coordination).is_empty());
-        coordination.observe(Err(&CoordinationError::Unavailable), 1000 + standing);
-        assert_eq!(
-            kinds(&coordination),
-            [(AlertKind::CoordinatorUnreachable, Some(1000))]
-        );
-        let before = revision();
-        coordination.observe(
-            Err(&CoordinationError::ClockSkew {
-                coordinator_time: 5000,
-            }),
-            2000,
-        );
-        coordination.observe(
-            Err(&CoordinationError::ClockSkew {
-                coordinator_time: 5000,
-            }),
-            2010,
-        );
-        assert_ne!(revision(), before);
-        assert_eq!(
-            kinds(&coordination),
-            [(
-                AlertKind::CoordinatorClockSkew {
-                    seconds: 2990,
-                    ahead: false
-                },
-                Some(2000)
-            )]
-        );
-        assert_eq!(
-            coordination.failure(),
-            Some(CoordinationFailure {
-                code: "clock_skew".into(),
-                at_epoch_seconds: 2010
-            })
-        );
-        coordination.observe(Ok(()), 2020);
-        assert!(kinds(&coordination).is_empty());
-        coordination.observe_push(false, 3000);
-        assert!(kinds(&coordination).is_empty());
-        coordination.observe_push(false, 3000 + standing);
-        assert_eq!(
-            kinds(&coordination),
-            [(AlertKind::RevocationsUnpushed, Some(3000))]
-        );
-        coordination.observe_push(true, 3000 + standing + 1);
-        assert!(kinds(&coordination).is_empty());
     }
 }

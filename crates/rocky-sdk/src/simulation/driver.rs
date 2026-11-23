@@ -273,27 +273,6 @@ impl Simulation {
                     .map_err(|_| "not woken")???;
                 Ok(self.alerts(&alerts))
             }
-            Action::Coordinated(node, behind) => {
-                let running = self.members[*node]
-                    .running
-                    .as_ref()
-                    .and_then(|running| running.node.upgrade())
-                    .ok_or("the node is not running")?;
-                let refusal = behind
-                    .map(|behind| -> Result<_, Failure> {
-                        Ok(rocky_core::CoordinationError::ClockSkew {
-                            coordinator_time: crate::enrollment::now()? + behind,
-                        })
-                    })
-                    .transpose()?;
-                running.observe_coordination(refusal.as_ref().map_or(Ok(()), Err));
-                Ok(if refusal.is_some() {
-                    "refused"
-                } else {
-                    "accepted"
-                }
-                .into())
-            }
             Action::Trust(node) => {
                 self.invite_as(0, *node, crate::GrantProfile::Issuer)
                     .await?;
@@ -716,18 +695,10 @@ impl Simulation {
                 crate::AlertKind::PeerClockAhead { node, seconds } => {
                     format!("{} ahead {} min", name(node), seconds / 60)
                 }
-                crate::AlertKind::CoordinatorClockSkew { seconds, ahead } => {
-                    format!("coordinator skew {} min ahead {ahead}", seconds / 60)
-                }
-                crate::AlertKind::CoordinatorUnreachable => "coordinator unreachable".into(),
                 crate::AlertKind::MembershipFork { identity, sequence } => {
                     format!("membership fork {identity} at {sequence}")
                 }
-                crate::AlertKind::RevocationsUnpushed => "revocations unpushed".into(),
                 crate::AlertKind::SealSkipped { reason } => format!("seal skipped {reason}"),
-                crate::AlertKind::FinalityStalled { reason } => {
-                    format!("finality stalled {reason}")
-                }
                 crate::AlertKind::TipStatementsPastCut {
                     node,
                     statements,

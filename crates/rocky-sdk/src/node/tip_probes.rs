@@ -1,8 +1,8 @@
 use super::*;
 use crate::testing::{
     Bookmark, BookmarkMove, LosingMove, Probe, TipAuthorMark, TipCheckpoint, TipCompaction,
-    TipCoordinator, TipDevice, TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock,
-    TipRecovery, TipScopeFrontier, TipSeal, TipSealAction, TipStatus,
+    TipDevice, TipFrontierLog, TipInspection, TipNode, TipOpening, TipPruneBlock, TipScopeFrontier,
+    TipSeal, TipSealAction, TipStatus,
 };
 use rocky_core::Scope;
 use rocky_credentials::SealAction;
@@ -148,7 +148,6 @@ impl Node {
                     canonical: graph.seal(statement.tip)? == Some(seal),
                     authority: graph.authority(seal.endorsement()),
                     revoked: graph.revoked.contains(&seal.id()?),
-                    finalized: graph.is_final(seal.id()?)?,
                     checkpoints: graph
                         .checkpoints_at(seal.id()?)?
                         .into_iter()
@@ -164,10 +163,6 @@ impl Node {
                         })
                         .collect::<Result<_, Failure>>()?,
                     held: held.get(&seal.id()?).copied(),
-                    recovery: statement.recovery.map(|recovery| TipRecovery {
-                        retained: recovery.retained.position,
-                        replaced: recovery.replaced.position,
-                    }),
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -240,14 +235,6 @@ impl Node {
             scope,
             genesis: hex(&graph.genesis().0),
             schema: hex(&graph.genesis_schema),
-            genesis_minimum: graph
-                .line_minimum(graph.genesis())?
-                .and_then(|minimum| u32::try_from(minimum).ok()),
-            coordinator: graph.coordinator()?.map(|bundle| TipCoordinator {
-                root: HEXLOWER.encode(&bundle.identity.root),
-                genesis: hex(&bundle.identity.genesis),
-                url: bundle.url.clone(),
-            }),
             seals,
             openings,
             bookmarks,

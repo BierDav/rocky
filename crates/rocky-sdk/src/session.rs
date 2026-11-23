@@ -95,18 +95,6 @@ pub struct SessionInfo {
 }
 
 impl Session {
-    pub async fn sign_coordination_grant(
-        &self,
-        tenant: crate::credentials::PublicKey,
-        lifetime: u64,
-        root: std::sync::Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::credentials::SignedCoordinationGrant, Failure> {
-        self.send_rooted(Some(root), |root, reply| {
-            Request::SignCoordinationGrant(tenant, lifetime, root, reply)
-        })
-        .await
-    }
-
     pub async fn info(&self) -> Result<SessionInfo, Failure> {
         self.send(Request::Info).await
     }

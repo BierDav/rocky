@@ -17,7 +17,6 @@ fn issuer(directory: &Path, hub: &Arc<Hub>) -> Result<Device, Failure> {
             schema: common::parsed_schema(),
             secrets: None,
             network: Some(Network::Owned(hub.connector("issuer"))),
-            coordination: None,
         },
         None,
     )?)
@@ -29,7 +28,6 @@ fn reopened(directory: &Path, hub: &Arc<Hub>) -> Result<Device, Failure> {
         schema: common::parsed_schema(),
         secrets: None,
         network: Some(Network::Owned(hub.connector("issuer"))),
-        coordination: None,
     })?)
 }
 async fn accept(
@@ -254,7 +252,6 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
             schema: common::parsed_schema(),
             secrets: None,
             network: None,
-            coordination: None,
         },
         None,
     )?)?;

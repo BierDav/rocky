@@ -8,7 +8,6 @@ pub(crate) enum Kind {
     IdentityLabel,
     HeldChanges,
     DropHeld,
-    Coordinated,
     Retention,
     RetentionLimits,
     TrustedStaleAfter,
@@ -39,7 +38,6 @@ pub(crate) enum Kind {
     #[cfg(any(test, feature = "test-support"))]
     Tips,
     Trust,
-    Claims,
     Provision,
     Invitations,
     Renew,
@@ -53,7 +51,6 @@ pub(crate) enum Kind {
     Session,
     Grant,
     Install,
-    CoordinationGrant,
     PartitionRole,
     PartitionNext,
     PartitionShare,
@@ -143,7 +140,6 @@ pub(crate) enum Request {
     IdentityLabel(PublicKey, Vec<u8>, Reply<()>),
     HeldChanges(Reply<Vec<crate::HeldChange>>),
     DropHeld(rocky_core::Commitment, Reply<()>),
-    Coordinated(Reply<crate::CoordinatedLogStatus>),
     Retention(
         String,
         Option<crate::RetentionPolicy>,
@@ -177,15 +173,6 @@ pub(crate) enum Request {
         crate::node::Root,
         Reply<crate::TrustGrant>,
     ),
-    GrantClaims(
-        rocky_credentials::PublicKey,
-        Option<std::collections::BTreeSet<Vec<u8>>>,
-        u8,
-        Reply<crate::ClaimGrant>,
-    ),
-    InstallClaims(crate::ClaimGrant, Reply<()>),
-    HeldClaims(Reply<Option<crate::ClaimGrant>>),
-    RevokeClaims(rocky_credentials::PublicKey, Reply<()>),
     Provision(
         crate::GrantProfile,
         Option<Vec<u8>>,
@@ -226,12 +213,6 @@ pub(crate) enum Request {
         Reply<crate::Supplied>,
     ),
     Install(Box<crate::Supplied>, Reply<()>),
-    SignCoordinationGrant(
-        rocky_credentials::PublicKey,
-        u64,
-        crate::node::Root,
-        Reply<rocky_credentials::SignedCoordinationGrant>,
-    ),
     ReplicaRole(crate::ReplicaRoleConfig, Reply<()>),
     PartitionCustody(
         rocky_core::ResourceScope,
@@ -264,7 +245,6 @@ impl Request {
             Self::IdentityLabel(..) => Kind::IdentityLabel,
             Self::HeldChanges(..) => Kind::HeldChanges,
             Self::DropHeld(..) => Kind::DropHeld,
-            Self::Coordinated(..) => Kind::Coordinated,
             Self::Retention(..) => Kind::Retention,
             Self::RetentionLimits(..) => Kind::RetentionLimits,
             Self::TrustedStaleAfter(..) => Kind::TrustedStaleAfter,
@@ -295,10 +275,6 @@ impl Request {
             #[cfg(any(test, feature = "test-support"))]
             Self::Tips(..) => Kind::Tips,
             Self::Trust(..) | Self::InstallTrust(..) => Kind::Trust,
-            Self::GrantClaims(..) => Kind::Claims,
-            Self::InstallClaims(..) => Kind::Claims,
-            Self::HeldClaims(..) => Kind::Claims,
-            Self::RevokeClaims(..) => Kind::Claims,
             Self::Provision(..) => Kind::Provision,
             Self::Invite(..) | Self::WithdrawInvitation(..) | Self::OpenInvitations(..) => {
                 Kind::Invitations
@@ -315,7 +291,6 @@ impl Request {
             Self::Info(..) => Kind::Session,
             Self::Grant(..) => Kind::Grant,
             Self::Install(..) => Kind::Install,
-            Self::SignCoordinationGrant(..) => Kind::CoordinationGrant,
             Self::ReplicaRole(..) | Self::PartitionCustody(..) => Kind::PartitionRole,
             Self::NextPartition(..) => Kind::PartitionNext,
             Self::PartitionRecipients(..) => Kind::PartitionStatus,
@@ -345,9 +320,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::DropHeld(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Coordinated(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Retention(_, _, _, reply) => {
@@ -439,18 +411,6 @@ impl Request {
             Self::Trust(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::GrantClaims(_, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::InstallClaims(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::HeldClaims(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::RevokeClaims(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::Provision(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
@@ -497,9 +457,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::Install(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::SignCoordinationGrant(_, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::ReplicaRole(_, reply) | Self::PartitionCustody(_, _, reply) => {

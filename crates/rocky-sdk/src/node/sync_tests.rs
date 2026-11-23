@@ -1,6 +1,5 @@
 use rocky_credentials::testing::MemoryKeys;
 mod bootstrap_intent;
-mod coordination;
 mod state_advice;
 mod status;
 use super::*;

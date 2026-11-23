@@ -30,7 +30,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 40;
+pub const VERSION: u32 = 41;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -269,8 +269,6 @@ pub struct Settings {
     pub contact_meta: BTreeMap<PublicKey, crate::mesh::ContactMeta>,
     pub logged_out: bool,
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
-    pub claims: Option<crate::claims::Holding>,
-    pub revocations_pushed: Option<Commitment>,
 }
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,7 +296,6 @@ pub struct Rotation {
 pub enum Revoke {
     Identity(PublicKey),
     TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
-    Claims(Commitment),
 }
 enum ReadBound {
     Unbounded,
@@ -468,8 +465,6 @@ struct Sealed {
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    claims: Option<CredentialChain>,
 }
 impl Sealed {
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
@@ -595,7 +590,6 @@ pub struct Renewed {
     pub groups: Vec<GroupDelivery>,
     pub profile: Option<Profile>,
     pub issuers: Vec<String>,
-    pub claims: Option<CredentialChain>,
 }
 
 pub fn now() -> Result<u64, Failure> {
@@ -744,19 +738,7 @@ impl Settings {
         Ok(crate::RevocationStatus {
             digest: HEXLOWER.encode(&self.revocations.digest(time)?),
             statements: self.revocations.live(time) as u64,
-            unpushed: self.unpushed_revocations(time)?.is_some(),
         })
-    }
-    pub(crate) fn unpushed_revocations(
-        &self,
-        time: u64,
-    ) -> Result<Option<(RevocationSet, Commitment)>, Failure> {
-        if self.revocations.live(time) == 0 {
-            return Ok(None);
-        }
-        let digest = self.revocations.digest(time)?;
-        Ok((self.revocations_pushed != Some(digest))
-            .then(|| (self.revocations.pruned(time), digest)))
     }
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
         let time = now()?;
@@ -1285,8 +1267,6 @@ impl Settings {
             peers: BTreeMap::new(),
             logged_out: false,
             deliveries: BTreeMap::new(),
-            claims: None,
-            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
@@ -2044,7 +2024,6 @@ impl Settings {
             keys,
             profile: Some(profile_of(&grants, &domain)),
             issuers: Vec::new(),
-            claims: None,
         })
     }
     fn own_chain(
@@ -2257,8 +2236,6 @@ impl Settings {
             peers: BTreeMap::new(),
             logged_out: false,
             deliveries: BTreeMap::new(),
-            claims: None,
-            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2468,8 +2445,6 @@ impl Settings {
             peers: BTreeMap::from([(enrollment.issuer, issuer)]),
             logged_out: false,
             deliveries: BTreeMap::new(),
-            claims: None,
-            revocations_pushed: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2577,7 +2552,6 @@ impl Settings {
             keys,
             groups: self.groups_for(vault, request.node, prior, all)?,
             issuers: self.issuer_contacts(&[request.node])?,
-            claims: None,
         };
         let node = Self::node_key(vault)?;
         Ok(Renewal::seal_current_with_families(
@@ -2651,7 +2625,6 @@ impl Settings {
                 groups,
                 epoch_statements,
                 issuers,
-                claims: _,
             } = Sealed::parse(&payload)?;
             let mut keys = Vec::new();
             let domain = self.domain()?;
@@ -2683,7 +2656,6 @@ impl Settings {
                 epoch_statements,
                 profile: None,
                 issuers,
-                claims: None,
             });
         }
         Err(failure)
@@ -2714,7 +2686,6 @@ impl Settings {
                 groups: Vec::new(),
                 profile: None,
                 issuers: Vec::new(),
-                claims: None,
             });
         }
         let transport = transport.ok_or(ServiceError::NetworkRequired("renew"))?;
@@ -2803,7 +2774,6 @@ impl Settings {
             groups,
             epoch_statements,
             issuers,
-            claims,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -2826,7 +2796,6 @@ impl Settings {
             keys,
             profile: None,
             issuers,
-            claims,
         })
     }
     pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
@@ -2912,9 +2881,6 @@ impl Settings {
         }
         draft.learn_revocations(&renewed.revocations)?;
         draft.credentials = renewed.chain.clone();
-        if let Some(claims) = &renewed.claims {
-            draft.hold_claims(claims.clone(), renewed.contacted)?;
-        }
         draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
@@ -2942,7 +2908,6 @@ impl Settings {
         vault: &Vault,
         request: &[u8],
         registry: &Registry,
-        claims: Option<CredentialChain>,
     ) -> Result<(Vec<u8>, Changes), Failure> {
         if !self.issuer() {
             return Err("only an issuer renews devices".into());
@@ -2984,7 +2949,6 @@ impl Settings {
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
             keys: self.keys_for(vault, &domain, &granted)?,
             issuers: self.issuer_contacts(&[request.node])?,
-            claims,
         };
         let renewal = Renewal::seal(
             &authority,
@@ -3097,7 +3061,6 @@ impl Settings {
             Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
                 registry.trusted.contains_key(&identity)
             }
-            Revoke::Claims(_) => false,
         };
         let root = if trusted {
             Some(root_signer(
@@ -3137,7 +3100,6 @@ impl Settings {
                 }
                 identities.into_iter().collect()
             }
-            Revoke::Claims(_) => Vec::new(),
         };
         let nodes: Vec<PublicKey> = identities
             .iter()
@@ -3177,18 +3139,7 @@ impl Settings {
                     .collect(),
                 cut: if root.is_some() { cut } else { Vec::new() },
             },
-            Revoke::Claims(capability) => Revocation {
-                app: domain.manifest().app,
-                issuer: own,
-                time,
-                mode: rocky_credentials::RevocationMode::Lost,
-                nodes: BTreeSet::new(),
-                identities: BTreeSet::new(),
-                capabilities: [capability].into(),
-                cut: Default::default(),
-            },
         };
-        let claim_right_reads_nothing = matches!(target, Revoke::Claims(_));
         let bounded_by_records = !records.is_empty();
         let readable: Vec<Profile> = records
             .iter()
@@ -3197,9 +3148,7 @@ impl Settings {
             .collect();
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
-            if claim_right_reads_nothing
-                || (bounded_by_records && !readable.iter().any(|profile| profile.reads(name)))
-            {
+            if bounded_by_records && !readable.iter().any(|profile| profile.reads(name)) {
                 continue;
             }
             if epochs.len() >= MAX_EPOCHS {
@@ -3210,11 +3159,7 @@ impl Settings {
                 RotationEpoch::after(epochs.iter().max().copied()).ok_or("key epoch overflow")?,
             );
         }
-        let groups = if claim_right_reads_nothing {
-            BTreeMap::new()
-        } else {
-            self.next_group_epochs(&domain, &records, &readable)?
-        };
+        let groups = self.next_group_epochs(&domain, &records, &readable)?;
         let links = match root {
             Some(_) => CredentialChain::default(),
             None => self.issuer_links(),
@@ -3711,8 +3656,6 @@ impl Settings {
             contact_meta: _,
             logged_out,
             deliveries,
-            claims,
-            revocations_pushed,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -3738,8 +3681,6 @@ impl Settings {
             && *device_revocations == other.device_revocations
             && *logged_out == other.logged_out
             && *deliveries == other.deliveries
-            && *claims == other.claims
-            && *revocations_pushed == other.revocations_pushed
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

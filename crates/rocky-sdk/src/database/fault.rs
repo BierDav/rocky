@@ -3,7 +3,6 @@ use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Stage {
-    SettingsSigned,
     Started,
 }
 #[cfg(test)]

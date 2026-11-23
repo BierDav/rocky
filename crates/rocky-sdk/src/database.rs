@@ -28,7 +28,6 @@ pub struct Open<'a> {
     pub secrets: Option<Arc<dyn SecretStore>>,
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
-    pub coordination: Option<CoordinatorSlot>,
 }
 pub(crate) struct Opening<'a> {
     pub(crate) directory: &'a Path,
@@ -36,7 +35,6 @@ pub(crate) struct Opening<'a> {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub(crate) network: Option<Network>,
-    pub(crate) coordination: Option<CoordinatorSlot>,
 }
 impl<'a> From<Open<'a>> for Opening<'a> {
     fn from(open: Open<'a>) -> Self {
@@ -46,14 +44,8 @@ impl<'a> From<Open<'a>> for Opening<'a> {
             secrets: open.secrets,
             identity: open.identity,
             network: open.network,
-            coordination: open.coordination,
         }
     }
-}
-#[derive(Clone)]
-pub enum CoordinatorSlot {
-    Client(Arc<dyn rocky_credentials::Coordinator>),
-    Connector(Arc<dyn rocky_credentials::CoordinatorConnector>),
 }
 pub struct Opened {
     pub database: Arc<Database>,
@@ -109,8 +101,6 @@ struct Setup {
     secrets: Arc<dyn SecretStore>,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
-    coordination: Option<CoordinatorSlot>,
-    created_settings: std::sync::Mutex<Option<rocky_credentials::SignedDatabaseSettings>>,
     confirmation: Option<String>,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
@@ -168,14 +158,6 @@ enum Command {
         queued: web_time::Instant,
         reply: oneshot::Sender<()>,
     },
-    Coordinate(
-        Option<Arc<dyn rocky_credentials::Coordinator>>,
-        oneshot::Sender<Result<(), Failure>>,
-    ),
-    Connector(
-        Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
-        oneshot::Sender<()>,
-    ),
     #[cfg(feature = "qualification")]
     LockMeasurements(oneshot::Sender<rocky_secure::LockMeasurements>),
     #[cfg(feature = "qualification")]
@@ -189,18 +171,6 @@ enum Command {
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
-
-    Claim(
-        crate::counters::Name,
-        crate::counters::Claim,
-        oneshot::Sender<Result<u64, Failure>>,
-    ),
-
-    Counter(
-        crate::counters::Name,
-        Option<crate::counters::Claim>,
-        oneshot::Sender<Result<crate::counters::Reading, Failure>>,
-    ),
 }
 type Greeting = Result<Ready, Failure>;
 type Ready = (rocky_core::Scope, Option<u64>);
@@ -591,8 +561,6 @@ impl Database {
             identity: open.identity,
             directory,
             install,
-            coordination: open.coordination,
-            created_settings: std::sync::Mutex::new(None),
             confirmation,
             #[cfg(test)]
             expose: None,
@@ -660,42 +628,6 @@ impl Database {
             .request(|reply| Command::Attach(network, reply))
             .await??;
         Ok(NetworkService::new(&self.shared, id))
-    }
-    pub async fn coordinate(
-        &self,
-        log: Option<Arc<dyn rocky_credentials::Coordinator>>,
-    ) -> Result<(), Failure> {
-        self.shared
-            .request(|reply| Command::Coordinate(log, reply))
-            .await??;
-        Ok(())
-    }
-    pub async fn connect_coordinator(
-        &self,
-        connector: Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
-    ) -> Result<(), Failure> {
-        self.shared
-            .request(|reply| Command::Connector(connector, reply))
-            .await?;
-        Ok(())
-    }
-    pub async fn claim(
-        &self,
-        counter: crate::counters::Name,
-        claim: crate::counters::Claim,
-    ) -> Result<u64, Failure> {
-        self.shared
-            .request(|reply| Command::Claim(counter, claim, reply))
-            .await?
-    }
-    pub async fn counter(
-        &self,
-        counter: crate::counters::Name,
-        claim: Option<crate::counters::Claim>,
-    ) -> Result<crate::counters::Reading, Failure> {
-        self.shared
-            .request(|reply| Command::Counter(counter, claim, reply))
-            .await?
     }
     pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
         self.shared
@@ -1087,33 +1019,6 @@ impl Session {
         self.send(|reply| crate::request::Request::InstallTrust(grant.into(), reply))
             .await
     }
-    pub async fn grant_claims(
-        &self,
-        identity: rocky_credentials::PublicKey,
-        counters: crate::ClaimCounters<'_>,
-        delegations: u8,
-    ) -> Result<crate::ClaimGrant, Failure> {
-        let counters = counters.names();
-        self.send(|reply| {
-            crate::request::Request::GrantClaims(identity, counters, delegations, reply)
-        })
-        .await
-    }
-    pub async fn install_claims(&self, grant: &crate::ClaimGrant) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::InstallClaims(grant.clone(), reply))
-            .await
-    }
-    pub async fn held_claims(&self) -> Result<Option<crate::ClaimGrant>, Failure> {
-        self.send(crate::request::Request::HeldClaims).await
-    }
-    pub async fn revoke_claims(
-        &self,
-        identity: rocky_credentials::PublicKey,
-    ) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::RevokeClaims(identity, reply))
-            .await
-    }
-
     pub async fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
@@ -1188,23 +1093,6 @@ async fn identity(
                 .as_ref()
                 .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
             let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
-            if let Some(CoordinatorSlot::Client(client)) = &setup.coordination {
-                *setup
-                    .created_settings
-                    .lock()
-                    .map_err(|_| "created settings poisoned")? =
-                    Some(rocky_credentials::SignedDatabaseSettings::sign(
-                        rocky_credentials::DatabaseSettingsStatement {
-                            format: rocky_credentials::DATABASE_SETTINGS_FORMAT,
-                            scope: settings.domain()?.scope,
-                            revision: 1,
-                            coordination: rocky_credentials::Coordination::Coordinated {
-                                bundle: client.bundle()?,
-                            },
-                        },
-                        &*root,
-                    )?);
-            }
             drop(root);
             let vault = settings.vault(secrets);
             let started = async {
@@ -1733,20 +1621,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             .await?;
         settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
-        let coordinator = match &setup.coordination {
-            Some(CoordinatorSlot::Client(client)) => Some(client),
-            Some(CoordinatorSlot::Connector(_)) | None => None,
-        }
-        .map(|client| {
-            let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
-            let certificate = settings
-                .credentials
-                .certificate()
-                .ok_or("missing node certificate")?
-                .clone();
-            client.bind(key, certificate).map_err(Failure::from)
-        })
-        .transpose()?;
         replica
             .put_authority_state(
                 crate::enrollment::AUTHORITY_IDENTITY_KEY,
@@ -1754,10 +1628,10 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 now()?,
             )
             .await?;
-        Ok::<_, Failure>((domain, replica, coordinator))
+        Ok::<_, Failure>((domain, replica))
     }
     .await;
-    let (domain, replica, coordinator) = match opened {
+    let (domain, replica) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             if let Some((transport, true)) = &link {
@@ -1790,12 +1664,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if let Some(expose) = &setup.expose {
         let _ = expose.send(Arc::downgrade(&node));
     }
-    node.coordinate_bound(coordinator);
-    if let Some(CoordinatorSlot::Connector(connector)) = &setup.coordination {
-        node.set_connector(Some(connector.clone()));
-    }
     let started = async {
-        node.refuse_mismatched_coordinator().await?;
         crate::identities::supplying(startup_identity, async {
             node.restore_line_signers().await?;
             node.complete_revocation().await?;
@@ -1808,15 +1677,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             Ok::<_, Failure>(())
         })
         .await?;
-        let created = setup
-            .created_settings
-            .lock()
-            .map_err(|_| "created settings poisoned")?
-            .take();
-        if let Some(signed) = created {
-            fault::check(&directory, fault::Stage::SettingsSigned)?;
-            node.publish_settings(signed).await?;
-        }
         if matches!(setup.install, Install::Create { .. }) {
             node.follow_main().await?;
         }
@@ -2028,14 +1888,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 timing.finish(connection);
                 let _ = reply.send(());
             }
-            Command::Coordinate(log, reply) => {
-                let _ = reply.send(node.coordinate(log).await);
-            }
-            Command::Connector(connector, reply) => {
-                node.set_connector(connector);
-                node.adopt_named_coordinator().await;
-                let _ = reply.send(());
-            }
             #[cfg(feature = "qualification")]
             Command::LockMeasurements(reply) => {
                 let _ = reply.send(node.replica.lock_measurements());
@@ -2061,18 +1913,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 crate::reactor::spawn_in(&mut tasks, "flush", async move {
                     let flushed = node.replica.flush().await.map(drop).map_err(Failure::from);
                     let _ = reply.send(flushed);
-                });
-            }
-
-            Command::Claim(counter, claim, reply) => {
-                crate::reactor::spawn_in(&mut tasks, "claim", async move {
-                    let _ = reply.send(node.claim(counter, claim).await);
-                });
-            }
-
-            Command::Counter(counter, claim, reply) => {
-                crate::reactor::spawn_in(&mut tasks, "counter", async move {
-                    let _ = reply.send(node.counter(counter, claim).await);
                 });
             }
             Command::Outcome(token, reply) => {
@@ -2283,58 +2123,6 @@ mod tests {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_create_that_cannot_publish_its_settings_leaves_no_database() -> Result<(), Failure> {
-        let directory = rocky_platform::fs::Scratch::new().await;
-        let schema = crate::Schema::builder("settled", 1)
-            .table(
-                crate::Table::replayed("items")
-                    .column(crate::Column::new("title", crate::Affinity::Text)),
-            )
-            .build()?;
-        let log = rocky_coordinator::coordinated::MemoryLog::new();
-        let options = || Open {
-            directory: directory.path(),
-            schema: &schema,
-            secrets: None,
-            identity: None,
-            network: None,
-            coordination: Some(CoordinatorSlot::Client(Arc::new(
-                log.client(rocky_credentials::PrivateKey::new().public_key()),
-            ))),
-        };
-        fault::STOPS
-            .lock()
-            .map_err(|_| "poisoned fault")?
-            .push((directory.path().to_owned(), fault::Stage::SettingsSigned));
-        let failed = Database::create(options(), None)
-            .err()
-            .ok_or("the create published no settings yet succeeded")?;
-        assert!(failed.to_string().contains("SettingsSigned"), "{failed}");
-        assert!(
-            Database::open(Open {
-                coordination: None,
-                ..options()
-            })
-            .is_err(),
-            "nothing is left to open"
-        );
-        let created = Database::create(options(), None)?;
-        let named = created
-            .database
-            .session()
-            .inspect_tips()
-            .await?
-            .coordinator
-            .ok_or("the settings name no coordinator")?;
-        assert_eq!(
-            named.genesis,
-            data_encoding::HEXLOWER.encode(&log.bundle().identity.genesis)
-        );
-        created.database.close().await
-    }
-
-    #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn close_yields_while_the_database_thread_ends() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
@@ -2354,7 +2142,6 @@ mod tests {
                 secrets: None,
                 identity: None,
                 network: None,
-                coordination: None,
             },
             None,
         )?
@@ -2393,7 +2180,6 @@ mod tests {
             secrets: None,
             identity: None,
             network: Some(Network::Owned(hub.connector("held"))),
-            coordination: None,
         };
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -2437,7 +2223,6 @@ mod tests {
                 secrets: None,
                 identity: None,
                 network: None,
-                coordination: None,
             }
         }
         let created = Database::create(open(&path), None)?;
@@ -2488,7 +2273,6 @@ mod tests {
                 secrets: None,
                 identity: None,
                 network: None,
-                coordination: None,
             },
             None,
         )?
@@ -2667,7 +2451,6 @@ mod tests {
                     secrets: None,
                     identity: Some(identity.clone()),
                     network: None,
-                    coordination: None,
                 },
                 supplied.clone(),
             )
@@ -2712,7 +2495,6 @@ mod tests {
                     schema: &schema,
                     secrets: None,
                     network: None,
-                    coordination: None,
                 };
                 let error = if create {
                     Database::create(options, None)
@@ -2755,7 +2537,6 @@ mod tests {
             schema: &schema,
             secrets: None,
             network: None,
-            coordination: None,
         };
         let database = Database::create(options(), None)?.database;
         let mut tx = database.transaction().await?;
@@ -2812,7 +2593,6 @@ mod tests {
                 schema: &schema,
                 secrets: None,
                 network: None,
-                coordination: None,
             },
             None,
         )?;
@@ -2858,7 +2638,6 @@ mod tests {
                 schema: &schema,
                 secrets: None,
                 network: None,
-                coordination: None,
             },
             None,
         )?;

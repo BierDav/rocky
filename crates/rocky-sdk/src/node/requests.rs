@@ -36,9 +36,6 @@ impl Node {
             Request::DropHeld(a, reply) => {
                 let _ = reply.send(self.drop_held(a).await);
             }
-            Request::Coordinated(reply) => {
-                let _ = reply.send(self.coordinated_status().await);
-            }
             Request::Retention(a, b, c, reply) => {
                 let _ = reply.send(self.retention(&a, b, c).await);
             }
@@ -161,18 +158,6 @@ impl Node {
             Request::Trust(identity, root, reply) => {
                 let _ = reply.send(self.trust_identity(identity, &root).await);
             }
-            Request::GrantClaims(identity, counters, delegations, reply) => {
-                let _ = reply.send(self.grant_claims(identity, counters, delegations).await);
-            }
-            Request::InstallClaims(grant, reply) => {
-                let _ = reply.send(self.install_claims(grant).await);
-            }
-            Request::HeldClaims(reply) => {
-                let _ = reply.send(self.held_claims().await);
-            }
-            Request::RevokeClaims(identity, reply) => {
-                let _ = reply.send(self.revoke_claims(identity).await.map(drop));
-            }
             Request::Provision(profile, label, reply) => {
                 let _ = reply.send(self.provision(profile, label).await);
             }
@@ -226,9 +211,6 @@ impl Node {
             }
             Request::Install(supplied, reply) => {
                 let _ = reply.send(self.install_supplied(*supplied).await);
-            }
-            Request::SignCoordinationGrant(tenant, lifetime, root, reply) => {
-                let _ = reply.send(self.sign_coordination_grant(tenant, lifetime, &root).await);
             }
             Request::PartitionCustody(scope, policy, reply) => {
                 let result = self

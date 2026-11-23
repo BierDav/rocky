@@ -25,8 +25,6 @@ serialized!(
     sdk::DatabaseStatus,
     sdk::ReconciliationReport,
     sdk::NetworkStatus,
-    sdk::ClaimGrant,
-    Option<sdk::ClaimGrant>,
     sdk::PartitionShare,
     sdk::PreparedPartition,
     sdk::CreatedPartition,
@@ -127,17 +125,12 @@ impl Snapshot for sdk::GenerationStatus {
 }
 impl Snapshot for Vec<sdk::IdentityInfo> {
     fn snapshot(self) -> Value {
-        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"single_use":identity.single_use,"own":identity.own,"revoked":identity.revoked,"profile":identity.profile,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"claims":identity.claims,"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"single_use":identity.single_use,"own":identity.own,"revoked":identity.revoked,"profile":identity.profile,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 impl Snapshot for sdk::RetentionStatus {
     fn snapshot(self) -> Value {
         json!({"policy":self.policy,"covered":self.checkpoint.covered,"uncovered":self.checkpoint.uncovered,"pruned_prefix":self.checkpoint.pruned_prefix,"maintenance_error":self.checkpoint.maintenance_error})
-    }
-}
-impl Snapshot for sdk::CoordinatedLogStatus {
-    fn snapshot(self) -> Value {
-        json!({"trusted":self.trusted,"tip":data_encoding::HEXLOWER.encode(&self.tip.0)})
     }
 }
 impl Snapshot for sdk::PartitionAddress {
@@ -417,7 +410,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::IdentityRevoked { identity } => json!({"kind":"identity_revoked","identity":identity}),
                 sdk::ActivityKind::NodeUnlinked { identity, node } => json!({"kind":"node_unlinked","identity":identity,"node":node}),
                 sdk::ActivityKind::RevocationCutDroppedStages { identity, count, heads } => json!({"kind":"revocation_cut_dropped_stages","identity":identity,"count":count,"heads":heads}),
-                sdk::ActivityKind::RevocationsUnpushed { error, retry } => json!({"kind":"revocations_unpushed","error":error,"retry":retry}),
                 sdk::ActivityKind::RevocationSealFailed { error } => json!({"kind":"revocation_seal_failed","error":error}),
                 sdk::ActivityKind::LineNodeFailed { error } => json!({"kind":"line_node_failed","error":error}),
                 sdk::ActivityKind::RegistryFailed { error } => json!({"kind":"registry_failed","error":error}),
@@ -431,10 +423,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::EpochDeliveryFailed { peer, error } => json!({"kind":"epoch_delivery_failed","peer":peer,"error":error}),
                 sdk::ActivityKind::BootstrapStarted { peer, scopes } => json!({"kind":"bootstrap_started","peer":peer,"scopes":scopes}),
                 sdk::ActivityKind::BootstrapFinished { peer } => json!({"kind":"bootstrap_finished","peer":peer}),
-                sdk::ActivityKind::ClaimsGranted { identity, counters } => json!({"kind":"claims_granted","identity":identity,"counters":counters}),
-                sdk::ActivityKind::ClaimsRevoked { identity, grant } => json!({"kind":"claims_revoked","identity":identity,"grant":data_encoding::HEXLOWER.encode(&grant)}),
-                sdk::ActivityKind::RevocationsPushed { digest } => json!({"kind":"revocations_pushed","digest":data_encoding::HEXLOWER.encode(&digest)}),
-                sdk::ActivityKind::ClaimsRenewalFailed { error } => json!({"kind":"claims_renewal_failed","error":error}),
                 sdk::ActivityKind::IdentityAdmitted { identity, profile } => json!({"kind":"identity_admitted","identity":identity,"profile":profile}),
                 sdk::ActivityKind::NodeLinked { identity, node } => json!({"kind":"node_linked","identity":identity,"node":node}),
                 sdk::ActivityKind::MemberSealFailed { error } => json!({"kind":"member_seal_failed","error":error}),
@@ -460,10 +448,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::LinkClosed { peer, reason, error } => json!({"kind":"link_closed","peer":peer,"reason":reason,"error":error}),
                 sdk::ActivityKind::LinkOpened { peer, reason } => json!({"kind":"link_opened","peer":peer,"reason":reason}),
                 sdk::ActivityKind::FinalizationFailed { error } => json!({"kind":"finalization_failed","error":error}),
-                sdk::ActivityKind::TerminalCredentialsFailed { error } => json!({"kind":"terminal_credentials_failed","error":error}),
-                sdk::ActivityKind::SealSettlementFailed { error } => json!({"kind":"seal_settlement_failed","error":error}),
-                sdk::ActivityKind::FinalityFailed { error } => json!({"kind":"finality_failed","error":error}),
-                sdk::ActivityKind::FinalCompactionFailed { error } => json!({"kind":"final_compaction_failed","error":error}),
                 sdk::ActivityKind::TipSchemaUnavailable { manifest, peer, error } => json!({"kind":"tip_schema_unavailable","manifest":data_encoding::HEXLOWER.encode(&manifest),"peer":peer,"error":error}),
                 sdk::ActivityKind::SchemaPublicationConflict { publication, terminal } => json!({"kind":"schema_publication_conflict","publication":data_encoding::HEXLOWER.encode(&publication),"terminal":data_encoding::HEXLOWER.encode(&terminal)}),
             };
@@ -472,20 +456,6 @@ impl Snapshot for sdk::ActivityPage {
             detail
         }).collect::<Vec<_>>();
         json!({"events":events,"token":self.token.to_string()})
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl Snapshot for rocky_coordinator::control::ControlReceipt {
-    fn snapshot(self) -> Value {
-        json!({"tenant":self.tenant,"revision":self.revision,"control":data_encoding::HEXLOWER.encode(&self.control),"expires":self.expires})
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl Snapshot for rocky_coordinator::service::Usage {
-    fn snapshot(self) -> Value {
-        serde_json::to_value(self).expect("usage snapshot")
     }
 }
 

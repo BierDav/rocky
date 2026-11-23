@@ -28,12 +28,6 @@ pub enum DiscoveryPathState {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CoordinationMode {
-    NotConfigured,
-    Service,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AttemptOperation {
     ResolveContact,
     OpenLink,
@@ -46,7 +40,6 @@ pub enum AttemptStage {
     Dial,
     Admission,
     Reconciliation,
-    CoordinatorRequest,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,7 +57,6 @@ pub enum FailureKind {
     RemoteRefusal,
     LocalAuthorization,
     Protocol,
-    Coordination,
     Other,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,7 +97,6 @@ pub struct Route {
 pub struct RevocationStatus {
     pub digest: String,
     pub statements: u64,
-    pub unpushed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedRevocation {
@@ -341,11 +332,6 @@ pub struct NetworkStatus {
     pub discovery: DiscoveryStatus,
     pub last_reconciliation: Option<ReconciliationReport>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoordinationStatus {
-    pub mode: CoordinationMode,
-    pub attempts: Vec<AttemptObservation>,
-}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Alert {
     pub kind: AlertKind,
@@ -356,8 +342,6 @@ pub struct Alert {
 pub enum SealSkip {
     NoFollowedBookmark,
     NoTipAuthority(String),
-    CoordinatorRequired(String),
-    CoordinatorMismatch,
     SealPending(String),
     Failed(String),
 }
@@ -366,8 +350,6 @@ impl SealSkip {
         match self {
             Self::NoFollowedBookmark => "no_followed_bookmark",
             Self::NoTipAuthority(_) => "no_tip_authority",
-            Self::CoordinatorRequired(_) => rocky_secure::COORDINATOR_REQUIRED,
-            Self::CoordinatorMismatch => rocky_secure::COORDINATOR_MISMATCH,
             Self::SealPending(_) => "seal_pending",
             Self::Failed(_) => "failed",
         }
@@ -376,44 +358,10 @@ impl SealSkip {
 impl std::fmt::Display for SealSkip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoFollowedBookmark | Self::CoordinatorMismatch => f.write_str(self.code()),
-            Self::NoTipAuthority(detail)
-            | Self::CoordinatorRequired(detail)
-            | Self::SealPending(detail)
-            | Self::Failed(detail) => write!(f, "{}: {detail}", self.code()),
-        }
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
-pub enum FinalityStall {
-    LogDropped { tip: String },
-    EndRefused { tip: String, error: String },
-    EntryPending { tip: String },
-    UnsupportedFormat { error: String },
-}
-impl FinalityStall {
-    pub(crate) fn of(stall: rocky_secure::FinalityStall) -> Self {
-        let hex = |tip: rocky_core::TipId| data_encoding::HEXLOWER.encode(&tip.0);
-        match stall {
-            rocky_secure::FinalityStall::LogDropped { tip } => Self::LogDropped { tip: hex(tip) },
-            rocky_secure::FinalityStall::EndRefused { tip, error } => Self::EndRefused {
-                tip: hex(tip),
-                error,
-            },
-            rocky_secure::FinalityStall::EntryPending { tip } => {
-                Self::EntryPending { tip: hex(tip) }
+            Self::NoFollowedBookmark => f.write_str(self.code()),
+            Self::NoTipAuthority(detail) | Self::SealPending(detail) | Self::Failed(detail) => {
+                write!(f, "{}: {detail}", self.code())
             }
-        }
-    }
-}
-impl std::fmt::Display for FinalityStall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LogDropped { tip } => write!(f, "log_dropped at {tip}"),
-            Self::EndRefused { tip, error } => write!(f, "end_refused at {tip}: {error}"),
-            Self::EntryPending { tip } => write!(f, "entry_pending at {tip}"),
-            Self::UnsupportedFormat { error } => write!(f, "unsupported_format: {error}"),
         }
     }
 }
@@ -432,12 +380,6 @@ pub enum AlertKind {
         node: String,
         seconds: u64,
     },
-    CoordinatorClockSkew {
-        seconds: u64,
-        ahead: bool,
-    },
-    CoordinatorUnreachable,
-    RevocationsUnpushed,
     TrustedNodeLinked {
         identity: String,
         node: String,
@@ -455,9 +397,6 @@ pub enum AlertKind {
     SealSkipped {
         reason: SealSkip,
     },
-    FinalityStalled {
-        reason: FinalityStall,
-    },
     TipStatementsPastCut {
         signer: String,
         node: String,
@@ -473,26 +412,18 @@ pub enum AlertKind {
 }
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);
-pub const STANDING_FAILURE: std::time::Duration = std::time::Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReport {
     pub produced_at_epoch_seconds: u64,
     pub alerts: Vec<Alert>,
     pub blockers: Vec<BlockerCount>,
-    pub coordination_failure: Option<CoordinationFailure>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockerCount {
     pub kind: String,
     pub count: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoordinationFailure {
-    pub code: String,
-    pub at_epoch_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshDevice {
@@ -510,7 +441,6 @@ pub struct DatabaseStatus {
     pub authority: AuthorityStatus,
     pub data: DataStatus,
     pub network: NetworkStatus,
-    pub coordination: CoordinationStatus,
     pub alerts: Vec<Alert>,
     pub mesh: Option<Vec<MeshDevice>>,
 }

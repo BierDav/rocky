@@ -10,7 +10,6 @@ pub struct Configuration {
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
-    coordination: Option<crate::CoordinatorSlot>,
 }
 impl Configuration {
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
@@ -27,7 +26,6 @@ impl Configuration {
             secrets: None,
             identity: None,
             network: None,
-            coordination: None,
         }
     }
     #[must_use]
@@ -45,19 +43,6 @@ impl Configuration {
         self.network = Some(network);
         self
     }
-    #[must_use]
-    pub fn coordination(mut self, coordination: Arc<dyn rocky_credentials::Coordinator>) -> Self {
-        self.coordination = Some(crate::CoordinatorSlot::Client(coordination));
-        self
-    }
-    #[must_use]
-    pub fn coordinator_connector(
-        mut self,
-        connector: Arc<dyn rocky_credentials::CoordinatorConnector>,
-    ) -> Self {
-        self.coordination = Some(crate::CoordinatorSlot::Connector(connector));
-        self
-    }
     fn options(&self) -> Opening<'_> {
         Opening {
             directory: &self.directory,
@@ -65,7 +50,6 @@ impl Configuration {
             secrets: self.secrets.clone(),
             identity: self.identity.clone(),
             network: self.network.clone(),
-            coordination: self.coordination.clone(),
         }
     }
     pub async fn create(&self) -> Result<Opened, Failure> {

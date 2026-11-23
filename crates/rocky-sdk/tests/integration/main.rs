@@ -2,7 +2,6 @@ mod activity;
 #[cfg(not(target_family = "wasm"))]
 mod application;
 #[cfg(not(target_family = "wasm"))]
-#[cfg(not(target_family = "wasm"))]
 mod bootstrap;
 #[cfg(not(target_family = "wasm"))]
 mod common;
@@ -12,7 +11,6 @@ mod composition;
 mod concurrent_rotation;
 #[cfg(not(target_family = "wasm"))]
 mod continuous_sync;
-mod coordination_slot;
 #[cfg(not(target_family = "wasm"))]
 mod credentials;
 #[cfg(not(target_family = "wasm"))]
@@ -44,12 +42,9 @@ mod migrations;
 #[cfg(not(target_family = "wasm"))]
 mod node_writers;
 #[cfg(not(target_family = "wasm"))]
-#[cfg(not(target_family = "wasm"))]
 mod partitions;
 #[cfg(not(target_family = "wasm"))]
 mod peers;
-#[cfg(not(target_family = "wasm"))]
-#[cfg(not(target_family = "wasm"))]
 #[cfg(not(target_family = "wasm"))]
 mod readiness;
 #[cfg(not(target_family = "wasm"))]
@@ -64,9 +59,6 @@ mod removal;
 mod replayed;
 #[cfg(not(target_family = "wasm"))]
 mod revocations;
-#[cfg(not(target_family = "wasm"))]
-#[cfg(not(target_family = "wasm"))]
-mod service;
 #[cfg(not(target_family = "wasm"))]
 mod shared_lists;
 #[cfg(not(target_family = "wasm"))]

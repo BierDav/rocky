@@ -22,7 +22,6 @@ fn open<'a>(directory: &'a Path, schema: &'a str) -> Open<'a> {
         identity: Some(common::external_identity(directory)),
         secrets: None,
         network: None,
-        coordination: None,
     }
 }
 

@@ -88,11 +88,6 @@ pub struct TipAuthorMark {
     pub sequence: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TipRecovery {
-    pub retained: u64,
-    pub replaced: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipSeal {
     pub id: String,
     pub tip: String,
@@ -102,11 +97,8 @@ pub struct TipSeal {
     pub canonical: bool,
     pub authority: TipAuthority,
     pub revoked: bool,
-    #[serde(rename = "final")]
-    pub finalized: bool,
     pub checkpoints: Vec<TipCheckpoint>,
     pub held: Option<HeldSeal>,
-    pub recovery: Option<TipRecovery>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,18 +155,10 @@ pub struct TipInspection {
     pub scope: rocky_core::Scope,
     pub genesis: String,
     pub schema: String,
-    pub genesis_minimum: Option<u32>,
-    pub coordinator: Option<TipCoordinator>,
     pub seals: Vec<TipSeal>,
     pub openings: Vec<TipOpening>,
     pub bookmarks: Vec<Bookmark>,
     pub nodes: Vec<TipNode>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TipCoordinator {
-    pub root: String,
-    pub genesis: String,
-    pub url: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCompaction {

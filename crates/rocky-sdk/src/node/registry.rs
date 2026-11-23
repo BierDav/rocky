@@ -100,8 +100,7 @@ impl Node {
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let settings = self.settings.lock().await.clone();
-        let claims = settings.renew_claims(&self.vault, request, &registry, now()?)?;
-        let (reply, changes) = settings.renew(&self.vault, request, &registry, claims)?;
+        let (reply, changes) = settings.renew(&self.vault, request, &registry)?;
         self.commit(changes).await?;
         let renewed = rocky_credentials::RenewRequest::from_bytes(request)?;
         if let Some(identity) = renewed.chain.principal() {
@@ -252,7 +251,6 @@ impl Node {
                             })
                         })
                         .transpose()?,
-                    claims: registry.claims.get(identity).cloned(),
                     nodes: membership
                         .nodes(identity)
                         .map(|linked| crate::IdentityNode {

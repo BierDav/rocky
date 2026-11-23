@@ -1,8 +1,7 @@
 #![cfg(target_family = "wasm")]
-use rocky_coordinator::certified::TrustBundle;
-use rocky_platform::{fs::Scratch, time};
+use rocky_platform::fs::Scratch;
 use rocky_sdk::{
-    Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, counters, params,
+    Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, params,
 };
 use std::sync::Arc;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -32,20 +31,14 @@ async fn note(db: &Database, body: &str) -> Result<(), Failure> {
 }
 
 #[wasm_bindgen_test]
-async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Result<(), Failure> {
+async fn a_browser_node_syncs_with_a_native_node_over_a_relay() -> Result<(), Failure> {
     let peer: serde_json::Value = serde_json::from_str(
         option_env!("ROCKY_BROWSER_PEER").ok_or("run this test through scripts/browser-sync")?,
     )?;
     let relay = peer["relay"].as_str().ok_or("no relay")?;
     let invitation = peer["invitation"].as_str().ok_or("no invitation")?;
-    let bundle: TrustBundle = serde_json::from_value(peer["bundle"].clone())?;
     let schema = Schema::builder("browser_sync", 1)
         .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
-        .table(
-            Table::replayed("invoices")
-                .column(Column::new("claim", Affinity::Text).required())
-                .column(Column::new("number", Affinity::Integer).required()),
-        )
         .build()?;
     let directory = Scratch::new().await;
     let network = rocky_iroh::Options {
@@ -55,69 +48,14 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         local: false,
         bind: None,
     };
-    let coordinator_transport = network
-        .start(*rocky_sdk::credentials::PrivateKey::new().as_bytes())
-        .await?
-        .transport();
-    let coordinator = rocky_coordinator::Client::connect(&bundle, coordinator_transport.clone())?;
-    let configuration = Configuration::new(directory.path(), &schema)?
-        .network(Network::Owned(Arc::new(network)))
-        .coordination(coordinator);
+    let configuration =
+        Configuration::new(directory.path(), &schema)?.network(Network::Owned(Arc::new(network)));
     let db = configuration.join(invitation).await?.database;
     let session = db.session();
     session.set_automatic_sync(false).await?;
     session.sync_once().await?;
     assert_eq!(bodies(&db, "from %").await?, ["from native"]);
 
-    let principal = session.info().await?.principal;
-    note(&db, &format!("member {principal}")).await?;
-    let deadline = time::Instant::now() + time::Duration::from_secs(60);
-    loop {
-        session.sync_once().await?;
-        if !bodies(&db, &format!("granted {principal}"))
-            .await?
-            .is_empty()
-        {
-            break;
-        }
-        assert!(
-            time::Instant::now() < deadline,
-            "the owner never granted this node a claim right"
-        );
-        time::sleep(time::Duration::from_millis(200)).await;
-    }
-
-    let invoices = counters::Name::new("invoices")?;
-    let first = counters::Claim::fresh()?;
-    let number = db.claim(invoices.clone(), first).await?;
-    assert_eq!(number, 1);
-    assert_eq!(
-        db.claim(invoices.clone(), first).await?,
-        number,
-        "a retry with the same claim answers its value"
-    );
-    assert_eq!(
-        db.claim(invoices.clone(), counters::Claim::fresh()?)
-            .await?,
-        2
-    );
-    let refused = db
-        .claim(counters::Name::new("credits")?, counters::Claim::fresh()?)
-        .await
-        .err()
-        .ok_or("a claim on a counter the right does not name succeeded")?;
-    assert_eq!(
-        refused.downcast_ref::<rocky_sdk::CoordinationError>(),
-        Some(&rocky_sdk::CoordinationError::Denied)
-    );
-    let mut tx = db.transaction().await?;
-    let id = tx.next_id("invoices", vec![]).await?;
-    tx.execute(
-        "INSERT INTO invoices(id,claim,number) VALUES(?,?,?)",
-        params![id, serde_json::to_string(&first)?, i64::try_from(number)?],
-    )
-    .await?;
-    tx.commit().await?;
     note(&db, "from browser").await?;
     session.sync_once().await?;
     db.close().await?;
@@ -128,13 +66,6 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         ["from browser", "from native"],
         "reopened from OPFS, the node still holds both writes"
     );
-    let reading = db.counter(invoices.clone(), Some(first)).await?;
-    assert_eq!(
-        (reading.value, reading.claim),
-        (2, Some(counters::Lookup::Claimed(1)))
-    );
-    assert_eq!(db.claim(invoices, first).await?, 1);
     db.close().await?;
-    coordinator_transport.close().await;
     Ok(())
 }

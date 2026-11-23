@@ -37,7 +37,6 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
         schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network,
-        coordination: None,
     }
 }
 async fn sync(device: &Device) {

@@ -50,7 +50,6 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: parsed_schema(),
         secrets: Some(keys(directory)),
         network: Some(crate::Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 impl Device {

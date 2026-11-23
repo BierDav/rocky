@@ -17,7 +17,6 @@ fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: Some(fixture::keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 async fn join(

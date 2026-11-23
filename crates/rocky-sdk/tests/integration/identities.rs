@@ -21,7 +21,6 @@ fn open<'a>(
         schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 fn person(directory: &Path) -> Result<Arc<dyn IdentityProvider>, Failure> {
@@ -241,10 +240,14 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     let created = Database::create(open(&path, &hub, "a", Some(key.clone())), None)?;
     created.database.close().await?;
     let database = Database::open(open(&path, &hub, "a", None))?.database;
-    let member = IdentityKey::generate().public_key().to_hex();
     let session = database.session();
     session
-        .grant_claims(member.parse()?, rocky_sdk::ClaimCounters::Every, 1)
+        .provision(
+            rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".into()].into(),
+            },
+            None,
+        )
         .await?;
     session.sync_once_with_identity(key).await?;
     assert!(
@@ -385,28 +388,6 @@ async fn a_refused_signed_call_returns_only_after_its_identity_was_dropped() -> 
     session.close().await;
     member.close().await;
     issuer.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_root_signed_call_returns_only_after_the_database_released_its_root()
--> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
-    let hub = Arc::new(Hub::default());
-    let root = Arc::new(rocky_sdk::RootKey::generate());
-    let database = Database::create_with_root(
-        open(&directory.path().join("owner"), &hub, "owner", None),
-        None,
-        root.clone(),
-    )?
-    .database;
-    let session = database.session();
-    let tenant = IdentityKey::generate().public_key();
-    returns_only_after_release(root, |root| {
-        session.sign_coordination_grant(tenant, 86_400, root)
-    })
-    .await??;
-    database.close().await?;
     Ok(())
 }
 

@@ -58,10 +58,6 @@ pub enum ActivityKind {
         count: usize,
         heads: Vec<crate::DroppedStage>,
     },
-    RevocationsUnpushed {
-        error: String,
-        retry: Option<u64>,
-    },
     RevocationSealFailed {
         error: String,
     },
@@ -111,20 +107,6 @@ pub enum ActivityKind {
     },
     BootstrapFinished {
         peer: PublicKey,
-    },
-    ClaimsGranted {
-        identity: PublicKey,
-        counters: Option<Vec<String>>,
-    },
-    ClaimsRevoked {
-        identity: PublicKey,
-        grant: rocky_core::Commitment,
-    },
-    RevocationsPushed {
-        digest: rocky_core::Commitment,
-    },
-    ClaimsRenewalFailed {
-        error: String,
     },
     IdentityAdmitted {
         identity: PublicKey,
@@ -212,18 +194,6 @@ pub enum ActivityKind {
         reason: String,
     },
     FinalizationFailed {
-        error: String,
-    },
-    TerminalCredentialsFailed {
-        error: String,
-    },
-    SealSettlementFailed {
-        error: String,
-    },
-    FinalityFailed {
-        error: String,
-    },
-    FinalCompactionFailed {
         error: String,
     },
     TipSchemaUnavailable {

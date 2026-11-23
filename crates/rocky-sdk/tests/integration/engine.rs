@@ -48,7 +48,6 @@ impl OpenedDb {
             schema: crate::support::snapshot::schema(schema),
             secrets,
             network: Some(network),
-            coordination: None,
         };
         let Opened {
             database, network, ..

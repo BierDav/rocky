@@ -56,7 +56,6 @@ impl Member {
                 secrets: Some(secrets),
                 identity: None,
                 network: Some(Network::Owned(hub.connector(&self.name))),
-                coordination: None,
             },
             install,
             self.ahead.clone(),

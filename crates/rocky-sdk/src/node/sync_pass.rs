@@ -165,7 +165,6 @@ impl Node {
         let progress = self.reconcile_targets(&pass, targets).await?;
         let catalog_changed = self.acquire_schemas(transport).await?;
         let schema_changed = self.follow_schema().await?;
-        self.adopt_named_coordinator().await;
         self.finalize_seals().await;
         self.close_migrations().await?;
         Ok(self.settle_attempts(
@@ -222,7 +221,6 @@ impl Node {
         )
     }
     async fn prepare_pass(&self, transport: &dyn Transport) -> Result<(), Failure> {
-        self.adopt_named_coordinator().await;
         let routine = self.seal_routinely().await;
         self.finalize_seals().await;
         let members = self.publish_for_members().await;

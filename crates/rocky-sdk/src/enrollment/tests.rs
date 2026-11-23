@@ -90,9 +90,7 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
     let renew = |issuer: &Settings, node: &PrivateKey| -> Result<Vec<u8>, Failure> {
         let chain = member_chain(&links, &user, node)?;
         let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
-        Ok(issuer
-            .renew(&vault, &request.to_bytes()?, &registry, None)?
-            .0)
+        Ok(issuer.renew(&vault, &request.to_bytes()?, &registry)?.0)
     };
     renew(&issuer, &node)?;
     renew(&issuer, &PrivateKey::new())?;
@@ -542,9 +540,7 @@ async fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the
         let fresh = PrivateKey::new();
         let chain = member_chain(root, user, &fresh)?;
         let (request, _) = RenewRequest::sign(&fresh, me, chain, now()?)?;
-        Ok(issuer
-            .renew(&vault, &request.to_bytes()?, registry, None)?
-            .0)
+        Ok(issuer.renew(&vault, &request.to_bytes()?, registry)?.0)
     };
     for (issuer, registry) in [(&a, &registry), (&b, &Registry::default())] {
         assert!(renew(issuer, registry, &revoked_user, &revoked_root).is_err());
@@ -713,7 +709,6 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                         epoch_statements: sealed.epoch_statements,
                         profile: None,
                         issuers: Vec::new(),
-                        claims: None,
                     },
                 )?
                 .0;
@@ -857,7 +852,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     for bytes in [
         issuer.answer_epochs(&vault, &request.to_bytes()?, &Registry::default())?,
         issuer
-            .renew(&vault, &request.to_bytes()?, &Registry::default(), None)?
+            .renew(&vault, &request.to_bytes()?, &Registry::default())?
             .0,
     ] {
         let renewal = Renewal::from_bytes(&bytes)?;
@@ -1052,128 +1047,5 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
         issuer.may_migrate(&domain)?,
         "holding the group secret under its own wildcard grants, an issuer may migrate"
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
-    let (mut a, vault, _) = issuer_at(TWO, directory.path()).await?;
-    let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-    let owner = a.identity;
-    let owner_links = a.issuer_links();
-    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?);
-    let credentials = a.credentials.clone();
-    let mut rows = BTreeMap::new();
-    let mut registry = Registry::default();
-    let mut holders = Vec::new();
-    for _ in 0..3 {
-        let (user, node) = (PrivateKey::new(), PrivateKey::new());
-        let (supplied, changes) = a.grant(
-            &vault,
-            NodeKeys {
-                identity: user.public_key(),
-                node: node.public_key(),
-            },
-            (
-                Profile::Reader {
-                    scopes: ["items".into()].into(),
-                },
-                Terms::default(),
-            ),
-            None,
-            &registry,
-        )?;
-        Registry::merged(&mut rows, &changes)?;
-        let (grant, changes) = a.grant_claims(
-            &vault,
-            user.public_key(),
-            Some([b"invoices".to_vec()].into()),
-            1,
-        )?;
-        registry = Registry::merged(&mut rows, &changes)?;
-        holders.push((user, supplied.credentials.chain(), grant));
-    }
-    let mut b = issuer_that_granted_nothing(&a);
-    let request = |user: &PrivateKey, root: &CredentialChain, time: u64| {
-        let fresh = PrivateKey::new();
-        let chain = member_chain(root, user, &fresh)?;
-        Ok::<_, Failure>(RenewRequest::sign(&fresh, me, chain, time)?.0.to_bytes()?)
-    };
-    let links = |grant: &crate::ClaimGrant| -> Result<CredentialChain, Failure> {
-        Ok(rocky_credentials::decode_bounded(
-            &HEXLOWER.decode(grant.grant.as_bytes())?,
-            rocky_credentials::MAX_CREDENTIAL_BYTES,
-        )?)
-    };
-    let (user, root, grant) = &holders[0];
-    let lapsed = grant.expires + 600;
-    let none = RevocationSet::new();
-    assert!(
-        links(grant)?
-            .claim_right(a.publisher, user.public_key(), &none, lapsed)
-            .is_err()
-    );
-    let renewed = b
-        .renew_claims(&vault, &request(user, root, lapsed)?, &registry, lapsed)?
-        .ok_or("B renews the right A granted")?;
-    let right = renewed.claim_right(a.publisher, user.public_key(), &none, lapsed)?;
-    assert_eq!(right.counters, Some([b"invoices".to_vec()].into()));
-    assert!(renewed.expires() > grant.expires);
-
-    let time = now()?;
-    let revoke = |identities: BTreeSet<PublicKey>, capabilities: BTreeSet<Commitment>| {
-        let statement = rocky_credentials::SignedRevocation::sign(
-            rocky_credentials::Revocation {
-                app: a.domain()?.manifest().app,
-                issuer: owner,
-                time,
-                nodes: BTreeSet::new(),
-                identities,
-                capabilities,
-                cut: Default::default(),
-                mode: rocky_credentials::RevocationMode::Lost,
-            },
-            rocky_credentials::Signer::node(&issuer_node, &credentials)?,
-            &owner_links,
-        )?;
-        Ok::<_, Failure>(RevocationSet::try_from(vec![statement])?)
-    };
-    let (revoked_user, revoked_root, _) = &holders[1];
-    let identity = revoke([revoked_user.public_key()].into(), BTreeSet::new())?;
-    let (ended_user, ended_root, ended_grant) = &holders[2];
-    let ended = links(ended_grant)?
-        .0
-        .iter()
-        .find(|link| link.capability.extended().is_ok_and(|e| e.claims.is_some()))
-        .ok_or("claim link")?
-        .capability
-        .extended()?;
-    let grant = revoke(
-        BTreeSet::new(),
-        [ended.claims.ok_or("claim link")?.grant].into(),
-    )?;
-    for issuer in [&mut a, &mut b] {
-        issuer.learn_revocations(&identity)?;
-        issuer.learn_revocations(&grant)?;
-    }
-    for issuer in [&a, &b] {
-        for (user, root) in [(revoked_user, revoked_root), (ended_user, ended_root)] {
-            let renewal = issuer.renew_claims(&vault, &request(user, root, time)?, &registry, time);
-            assert!(
-                !matches!(renewal, Ok(Some(_))),
-                "a revoked identity or grant renews nowhere"
-            );
-        }
-        let (_, changes) = issuer.revoke_claims(user.public_key(), &registry)?;
-        let mut rows = rows.clone();
-        let unclaimed = Registry::merged(&mut rows, &changes)?;
-        assert!(
-            issuer
-                .renew_claims(&vault, &request(user, root, time)?, &unclaimed, time)?
-                .is_none(),
-            "a removed row renews nowhere"
-        );
-    }
     Ok(())
 }

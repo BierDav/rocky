@@ -1,8 +1,6 @@
 mod repair;
 mod requests;
 use repair::RepairWork;
-mod claims;
-mod coordinated;
 mod delivery;
 mod discovery;
 mod exchange;
@@ -263,12 +261,10 @@ pub(crate) struct Node {
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
-    coordination: Arc<health::Coordination>,
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
     trusted_watch: std::sync::Mutex<health::TrustedWatch>,
     tip_chain: Arc<tokio::sync::Mutex<()>>,
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
-    finality_stalled: std::sync::Mutex<Option<crate::Alert>>,
     mesh_revision: watch::Sender<u64>,
     report_failing: AtomicBool,
     #[cfg(test)]
@@ -298,16 +294,9 @@ pub(crate) struct Node {
     status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
     last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
-    coordinator: std::sync::RwLock<Option<Arc<dyn rocky_credentials::Coordinator>>>,
-    connector: std::sync::RwLock<Option<Arc<dyn rocky_credentials::CoordinatorConnector>>>,
-    connect_failure: std::sync::Mutex<Option<String>>,
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    claims_asked: std::sync::Mutex<u64>,
-    revocations_pushing: Mutex<()>,
-
-    push_retry: std::sync::Mutex<claims::PushRetry>,
 }
 
 impl Node {
@@ -338,13 +327,11 @@ impl Node {
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
             last_syncs: Default::default(),
-            coordination: Arc::new(health::Coordination::new(observations.clone())),
             mesh: Default::default(),
             link_requests: Default::default(),
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
-            finality_stalled: Default::default(),
             tip_chain: Default::default(),
             report_failing: AtomicBool::new(false),
             #[cfg(test)]
@@ -402,20 +389,11 @@ impl Node {
             announcing: AtomicBool::new(false),
             #[cfg(test)]
             discovery_skew: AtomicU64::new(0),
-            coordinator: Default::default(),
-            connector: Default::default(),
-            connect_failure: Default::default(),
             mailbox: Mutex::new(None),
             declared: settings_schema,
             schema_fetch: Mutex::new(()),
             schema_acquisition: Default::default(),
             widened: Default::default(),
-
-            claims_asked: Default::default(),
-
-            revocations_pushing: Mutex::new(()),
-
-            push_retry: Default::default(),
         }
     }
     pub fn with_declared(mut self, schema: crate::schema::Schema) -> Self {
@@ -1107,6 +1085,7 @@ impl Node {
         });
         Ok(result)
     }
+    #[cfg(test)]
     async fn revoke(
         &self,
         target: crate::enrollment::Revoke,
@@ -1151,7 +1130,6 @@ impl Node {
                     .map(|linked| linked.node)
                     .collect(),
             ),
-            crate::enrollment::Revoke::Claims(_) => return Ok(Default::default()),
         };
         let (mut cut, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
         for lane in lanes {
@@ -1229,16 +1207,7 @@ impl Node {
         let status = settings.revocation_status()?;
         drop(settings);
         Box::pin(self.complete_revocation()).await?;
-        if let Err(error) = self.push_revocations().await {
-            self.activity
-                .record(crate::ActivityKind::RevocationsUnpushed {
-                    error: (error.to_string()).to_owned(),
-                    retry: None,
-                });
-        }
-        if !matches!(target, crate::enrollment::Revoke::Claims(_))
-            && let Err(error) = self.seal_for_members().await
-        {
+        if let Err(error) = self.seal_for_members().await {
             self.activity
                 .record(crate::ActivityKind::RevocationSealFailed {
                     error: (error.to_string()).to_owned(),
@@ -1260,11 +1229,6 @@ impl Node {
             .learn_revocations(&settings.revocations)
             .await?;
         self.replica.renew_credentials(chain.clone()).await?;
-        if let Some(client) = self.coordinator()
-            && let Some(certificate) = chain.certificate()
-        {
-            client.certify(certificate.clone());
-        }
         if let Err(error) = self.refresh_line_node(settings).await {
             self.activity
                 .record_changed(crate::ActivityKind::LineNodeFailed {
@@ -2345,38 +2309,6 @@ impl Node {
                 self.replica.relay_staged_close(&close.to_bytes()?).await?,
             )),
         }
-    }
-
-    async fn sign_coordination_grant(
-        &self,
-        tenant: PublicKey,
-        lifetime: u64,
-        root: &Root,
-    ) -> Result<rocky_credentials::SignedCoordinationGrant, Failure> {
-        let publisher = self.settings.lock().await.publisher;
-        let owner = crate::enrollment::root_signer(
-            root.signer(),
-            publisher,
-            "signing a coordination grant",
-        )?;
-        if !(1..=366 * 86_400).contains(&lifetime) {
-            return Err(refused("lifetime must be 1 s to 366 days"));
-        }
-        let time = now()?;
-        let grant = rocky_credentials::SignedCoordinationGrant::sign(
-            rocky_credentials::CoordinationGrant {
-                publisher: rocky_credentials::Publisher(owner.public_key()?),
-                application: self.domain().manifest().name,
-                tenant: rocky_credentials::CoordinatorControl(tenant),
-                not_before: time.saturating_sub(60),
-                expires: time.saturating_add(lifetime),
-            },
-            owner,
-        )?;
-        if self.coordinator().is_some() {
-            self.declare_coordinated(self.domain().scope, root).await?;
-        }
-        Ok(grant)
     }
 }
 

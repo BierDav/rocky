@@ -9,7 +9,6 @@
 )]
 mod activity;
 mod bootstrap_intent;
-mod claims;
 mod configuration;
 mod connection;
 mod database;
@@ -52,38 +51,23 @@ mod tip_schemas;
 pub mod transport;
 
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
-pub use claims::{ClaimCounters, ClaimGrant};
 pub use configuration::Configuration;
 pub use connection::{
     ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
 };
-pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
+pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
 pub use enrollment::{NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms};
 pub use error::{Error, ErrorKind};
 pub use inspection::*;
-pub use partitions::*;
-#[cfg(feature = "qualification")]
-pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
-pub use registry::{
-    ClaimRecord as RecordedClaimRight, Grant as RecordedPartitionGrant, Kind as IdentityOrigin,
-};
-pub use rocky_credentials::counters;
-pub use rocky_credentials::{Coordinator, CoordinatorBundle, CoordinatorConnector};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CoordinatorNotConfigured;
-impl std::fmt::Display for CoordinatorNotConfigured {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("coordinator not configured")
-    }
-}
-impl std::error::Error for CoordinatorNotConfigured {}
 pub use invitation::{
     DEFAULT_INVITATION_VALIDITY, Invitation, InvitationId, InvitationRefusal, InviteTerms,
     MAX_OPEN_INVITATIONS, OpenInvitation,
 };
-pub use rocky_core::CoordinationError;
+pub use partitions::*;
+#[cfg(feature = "qualification")]
+pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
+pub use registry::{Grant as RecordedPartitionGrant, Kind as IdentityOrigin};
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, DeleteAction, ForeignKeyDefinition, IndexColumn,

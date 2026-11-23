@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 pub const MAX_IDENTITIES: usize = 256;
 pub const MAX_LABEL: usize = 256;
 const MAX_GRANTS: usize = 256;
-pub const MAX_CLAIM_RIGHTS: usize = 256;
 pub const MAX_TRUSTED: usize = 32;
 
 #[derive(Debug)]
@@ -61,14 +60,6 @@ pub struct Grant {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClaimRecord {
-    pub right: rocky_credentials::ClaimRight,
-    pub delegations: u8,
-    pub issuer: PublicKey,
-    pub granted: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TrustedRecord {
     pub grant: rocky_credentials::SignedCapability,
     pub granted: u64,
@@ -107,7 +98,6 @@ impl IdentityRecord {
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     pub records: BTreeMap<PublicKey, IdentityRecord>,
-    pub claims: BTreeMap<PublicKey, ClaimRecord>,
     pub trusted: BTreeMap<PublicKey, TrustedRecord>,
 }
 impl Registry {
@@ -177,10 +167,6 @@ impl Registry {
 
     fn apply(&mut self, identity: &str, entry: &str, value: &str) -> Result<(), Failure> {
         let identity: PublicKey = identity.parse()?;
-        if entry == CLAIMS {
-            self.claims.insert(identity, parse(value)?);
-            return Ok(());
-        }
         if entry == TRUSTED {
             self.trusted.insert(identity, parse(value)?);
             return Ok(());
@@ -334,14 +320,8 @@ impl Changes {
         )
     }
 
-    pub fn claims(&mut self, identity: &PublicKey, record: &ClaimRecord) -> Result<(), Failure> {
-        self.push(identity, CLAIMS.into(), record, Mode::Replace)
-    }
     pub fn trusted(&mut self, identity: &PublicKey, record: &TrustedRecord) -> Result<(), Failure> {
         self.push(identity, TRUSTED.into(), record, Mode::Replace)
-    }
-    pub fn unclaim(&mut self, identity: &PublicKey) -> Result<(), Failure> {
-        self.push(identity, CLAIMS.into(), &Tombstone {}, Mode::Delete)
     }
     pub fn label(&mut self, identity: &PublicKey, label: &[u8]) -> Result<(), Failure> {
         if label.len() > MAX_LABEL {
@@ -354,7 +334,6 @@ impl Changes {
     }
 }
 const IDENTITY: &str = "identity";
-const CLAIMS: &str = "claims";
 const TRUSTED: &str = "trusted";
 fn capability_entry(capability: &Capability) -> String {
     format!("capability/{}", HEXLOWER.encode(&capability.id))
@@ -441,12 +420,6 @@ pub async fn write(
                 (None, Mode::Keep | Mode::Replace) => {
                     if change.entry == IDENTITY && count(&sql, IDENTITY).await? >= MAX_IDENTITIES {
                         return Err(Box::new(RegistryFull) as Failure);
-                    }
-                    if change.entry == CLAIMS && count(&sql, CLAIMS).await? >= MAX_CLAIM_RIGHTS {
-                        return Err(format!(
-                            "the issuer registry holds {MAX_CLAIM_RIGHTS} claim rights"
-                        )
-                        .into());
                     }
                     let id = sql.next_id(REGISTRY).await?;
                     let mut values = key;

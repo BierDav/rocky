@@ -16,7 +16,6 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
         schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network,
-        coordination: None,
     }
 }
 fn version(schema: &str, version: u32) -> String {

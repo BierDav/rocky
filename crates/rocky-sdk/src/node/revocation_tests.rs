@@ -503,7 +503,6 @@ async fn stop_at(
         schema: &schema,
         secrets: Some(store.clone()),
         network: None,
-        coordination: None,
     };
     let reopened = crate::Database::open(open())?.database;
     let completed = Settings::load(&root.path().join("rocky.sqlite"))?;
@@ -627,7 +626,6 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
             schema: &schema,
             secrets: Some(store),
             network: None,
-            coordination: None,
         })?
         .database;
         let settings = Settings::load(&root.path().join("rocky.sqlite"))?;

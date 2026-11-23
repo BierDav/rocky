@@ -24,7 +24,6 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
-        coordination: None,
     }
 }
 fn service(error: &Failure) -> Option<&ServiceError> {

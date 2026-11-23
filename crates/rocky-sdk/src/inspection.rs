@@ -27,7 +27,6 @@ pub struct IdentityInfo {
     pub label: Option<Vec<u8>>,
     pub partitions: Vec<crate::RecordedPartitionGrant>,
     pub trusted: Option<TrustedIdentity>,
-    pub claims: Option<crate::RecordedClaimRight>,
     pub nodes: Vec<IdentityNode>,
 }
 #[derive(Clone, Debug)]
@@ -47,11 +46,6 @@ pub struct TrustedIdentity {
 pub struct RetentionStatus {
     pub policy: Option<crate::RetentionPolicy>,
     pub checkpoint: crate::CheckpointStatus,
-}
-#[derive(Clone, Debug)]
-pub struct CoordinatedLogStatus {
-    pub trusted: bool,
-    pub tip: rocky_core::TipId,
 }
 impl Session {
     pub async fn domain(&self) -> Result<DomainInfo, Failure> {
@@ -76,9 +70,6 @@ impl Session {
     }
     pub async fn drop_held(&self, id: Commitment) -> Result<(), Failure> {
         self.send(|reply| Request::DropHeld(id, reply)).await
-    }
-    pub async fn coordinated_status(&self) -> Result<CoordinatedLogStatus, Failure> {
-        self.send(Request::Coordinated).await
     }
     pub async fn retention(&self, collection: &str) -> Result<RetentionStatus, Failure> {
         self.send(|reply| Request::Retention(collection.into(), None, false, reply))

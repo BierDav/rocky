@@ -119,7 +119,6 @@ pub(super) enum Action {
     Alerts(usize),
     Watch(usize),
     Woken(usize),
-    Coordinated(usize, Option<u64>),
     Trust(usize),
     Mesh(usize),
     WatchMesh(usize, usize),
@@ -161,10 +160,6 @@ impl fmt::Display for Action {
             Self::Alerts(node) => write!(f, "alerts {}", name(node)),
             Self::Watch(node) => write!(f, "watch {}", name(node)),
             Self::Woken(node) => write!(f, "woken {}", name(node)),
-            Self::Coordinated(node, Some(behind)) => {
-                write!(f, "coordinated {} {behind} s behind", name(node))
-            }
-            Self::Coordinated(node, None) => write!(f, "coordinated {}", name(node)),
             Self::Trust(node) => write!(f, "trust {}", name(node)),
             Self::Mesh(node) => write!(f, "mesh {}", name(node)),
             Self::WatchMesh(node, device) => {

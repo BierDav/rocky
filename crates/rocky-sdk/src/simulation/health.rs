@@ -29,27 +29,6 @@ async fn run(nodes: usize, steps: Vec<Action>, kinds: &[&str]) -> Result<Vec<Str
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted() -> Result<(), Failure> {
-    let steps = vec![
-        Watch(1),
-        Coordinated(1, Some(3600)),
-        Woken(1),
-        Coordinated(1, Some(3600)),
-        Alerts(1),
-        Alerts(0),
-        Watch(1),
-        Coordinated(1, None),
-        Woken(1),
-    ];
-    let skewed = r#"alerts ["coordinator skew 60 min ahead false"]"#;
-    assert_eq!(
-        run(2, steps, &[" woken ", " alerts "]).await?,
-        [skewed, skewed, r#"alerts ["a linked"]"#, "alerts []"]
-    );
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
     let relink = [Sever(1, 2), Heal(1, 2)];

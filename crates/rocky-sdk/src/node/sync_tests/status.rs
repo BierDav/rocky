@@ -1,9 +1,7 @@
 use super::change_driven::{frozen, start, targets, transport};
 use super::*;
 use crate::test_snapshot as snap;
-use crate::{
-    AttachmentState, AttemptOperation, AttemptOutcome, CoordinationMode, LinkState, SkipReason,
-};
+use crate::{AttachmentState, AttemptOperation, AttemptOutcome, LinkState, SkipReason};
 
 #[tokio::test(start_paused = true)]
 async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> Result<(), Failure> {
@@ -14,7 +12,6 @@ async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> R
             let a = enrolled(root.path(), &hub, "a", None).await?;
             let first = a.observed_status().await?;
             assert_eq!(first.network.connected_peer_count, 0);
-            assert_eq!(first.coordination.mode, CoordinationMode::NotConfigured);
             let report = a.sync(&*transport(&a).await?).await?.0;
             assert_eq!(report["peers"], json!([]));
             assert!(report["skip"].is_null());

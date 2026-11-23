@@ -114,7 +114,6 @@ fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> O
         schema: crate::support::snapshot::schema(schema),
         secrets: Some(secrets::keys(directory)),
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 fn at_without_identity<'a>(

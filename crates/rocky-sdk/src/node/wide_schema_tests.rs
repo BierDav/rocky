@@ -96,7 +96,6 @@ fn open<'a>(
         identity: prepared_identity(directory),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        coordination: None,
     }
 }
 fn settings(directory: &Path) -> Settings {
@@ -390,7 +389,6 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
             identity: None,
             secrets: None,
             network: None,
-            coordination: None,
         },
         None,
     )?)?;

@@ -530,18 +530,32 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         id: i64,
     ) -> Result<IdentityLedger, Error> {
+        self.recomputed_ledger_after(scope, id, None).await
+    }
+    async fn recomputed_ledger_after(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        mark: Option<(i64, IdentityLedger)>,
+    ) -> Result<IdentityLedger, Error> {
         if self.ledger_waits(scope).await? {
             return Ok(IdentityLedger::default());
         }
-        let (mut after, mut ledger) = match self.checkpoint_record(id, true).await? {
-            Some(record) => {
+        let (mut after, mut ledger) = match (self.checkpoint_record(id, true).await?, mark) {
+            (record, Some(mark)) => {
+                if let Some(record) = record {
+                    self.verify_record(scope, &record)?;
+                }
+                mark
+            }
+            (Some(record), None) => {
                 let signed = self.verify_record(scope, &record)?;
                 (
                     record.position,
                     IdentityLedger::based(&signed.statement.identities)?,
                 )
             }
-            None => (0, IdentityLedger::default()),
+            (None, None) => (0, IdentityLedger::default()),
         };
         loop {
             let records = collect_rows(self.conn.query(
@@ -723,6 +737,15 @@ impl<A: RowApplication> Inner<A> {
         ))
     }
     pub(super) async fn verify_identity_ledgers(&self) -> Result<(), Error> {
+        self.verify_identity_ledgers_from(&BTreeMap::new())
+            .await
+            .map(drop)
+    }
+    pub(super) async fn verify_identity_ledgers_from(
+        &self,
+        marks: &BTreeMap<i64, checkpoint::AuditMark>,
+    ) -> Result<BTreeMap<i64, (ResourceScope, checkpoint::Audited)>, Error> {
+        let mut audited = BTreeMap::new();
         if !rows(&self.conn, "SELECT 1 FROM secure_identity_own o LEFT JOIN secure_identity_marks p ON p.scope=o.scope AND p.author=o.author WHERE p.author IS NULL OR o.sequence<0 OR o.sequence>p.sequence OR EXISTS(SELECT 1 FROM secure_identity_tables t JOIN secure_identity_partitions b ON b.allocation=t.id WHERE t.scope=o.scope AND b.scope<>o.scope) LIMIT 1").await?.is_empty() {
             return Err(Error::Corrupt("own-birth floor exceeds permanent marks or names a template scope".into()));
         }
@@ -740,10 +763,14 @@ impl<A: RowApplication> Inner<A> {
             let permanent = self.identity_marks(scope).await?;
             let ledger = self.ledger_marks(scope).await?;
             let queued = self.ledger_queued(scope).await?;
+            let recomputed = match (queued, self.ledger_readable(scope)) {
+                (false, true) => Some(self.verified_ledger(scope, *id, &ledger, marks).await?),
+                _ => None,
+            };
             if (queued && !ledger.is_empty())
-                || (!queued
-                    && self.ledger_readable(scope)
-                    && ledger != self.recomputed_ledger(scope, *id).await?.into_marks())
+                || recomputed
+                    .as_ref()
+                    .is_some_and(|recomputed| ledger != recomputed.clone().into_marks())
                 || ledger.iter().any(|mark| {
                     !permanent.iter().any(|held| {
                         held.author == mark.author
@@ -765,8 +792,44 @@ impl<A: RowApplication> Inner<A> {
                     "identity ledger or summary differs from its history".into(),
                 ));
             }
+            let resumable = match recomputed {
+                Some(recomputed) if !self.ledger_waits(scope).await? => Some(recomputed),
+                _ => None,
+            };
+            audited.insert(
+                *id,
+                (
+                    scope,
+                    checkpoint::Audited {
+                        tail: None,
+                        ledger: resumable,
+                    },
+                ),
+            );
         }
-        Ok(())
+        Ok(audited)
+    }
+    async fn verified_ledger(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        stored: &[checkpoint::IdentityMark],
+        marks: &BTreeMap<i64, checkpoint::AuditMark>,
+    ) -> Result<IdentityLedger, Error> {
+        if let Some(checkpoint::AuditMark {
+            position,
+            ledger: Some(ledger),
+            ..
+        }) = marks.get(&id)
+        {
+            let resumed = self
+                .recomputed_ledger_after(scope, id, Some((*position, ledger.clone())))
+                .await?;
+            if resumed.clone().into_marks() == stored {
+                return Ok(resumed);
+            }
+        }
+        self.recomputed_ledger(scope, id).await
     }
     pub(super) async fn ledger_marks(
         &self,

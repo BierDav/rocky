@@ -4,6 +4,8 @@ pub(crate) use archive::CheckpointVouch;
 mod backend_vectors;
 pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
+mod audit_mark;
+pub(super) use audit_mark::{AuditMark, Audited, SCHEMA as AUDIT_MARK_SCHEMA, Tail};
 mod create;
 mod failures;
 pub use failures::IMPORT_ATTEMPTS;
@@ -698,12 +700,21 @@ pub(super) struct Log {
 pub(super) enum Overlay {
     Build,
     Scratch,
+    AuditMark,
 }
 impl Overlay {
     pub(super) fn table(self) -> &'static str {
         match self {
             Self::Build => "secure_checkpoint_overlay",
-            Self::Scratch => "secure_checkpoint_scratch",
+            Self::Scratch | Self::AuditMark => "secure_checkpoint_scratch",
+        }
+    }
+    fn under(self) -> &'static str {
+        match self {
+            Self::Build | Self::Scratch => {
+                "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?"
+            }
+            Self::AuditMark => audit_mark::AUDITED_ROW,
         }
     }
 }
@@ -1295,9 +1306,8 @@ impl<A: RowApplication> Inner<A> {
             "SELECT fields FROM {} WHERE scope=? AND row=?",
             overlay.table()
         );
-        let under = "SELECT fields FROM secure_checkpoint_rows WHERE scope=? AND row=?";
-        for (index, sql) in [over.as_str(), under].into_iter().enumerate() {
-            if index == 1 && self.ignores_base() {
+        for (index, sql) in [over.as_str(), overlay.under()].into_iter().enumerate() {
+            if index == 1 && self.ignores_base() && !matches!(overlay, Overlay::AuditMark) {
                 continue;
             }
             let mut result = self

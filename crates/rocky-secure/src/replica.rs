@@ -538,6 +538,8 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) quiesces: usize,
     #[cfg(test)]
+    pub(super) audit_replayed: u64,
+    #[cfg(test)]
     pub(super) quiet_pause: Option<(
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
@@ -731,6 +733,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         author_sets::SCHEMA,
         partition::SCHEMA,
         checkpoint::SCHEMA,
+        checkpoint::AUDIT_MARK_SCHEMA,
         checkpoint::ARCHIVE_SCHEMA,
         checkpoint::PULLED_SCHEMA,
         checkpoint::FAILURE_SCHEMA,
@@ -1168,6 +1171,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             audit_global_passes: 0,
             #[cfg(test)]
             quiesces: 0,
+            #[cfg(test)]
+            audit_replayed: 0,
             #[cfg(test)]
             quiet_pause: None,
             #[cfg(test)]

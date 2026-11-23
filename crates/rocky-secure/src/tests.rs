@@ -1637,6 +1637,7 @@ mod formats;
 mod generations;
 mod group;
 mod header_scans;
+mod open_audit;
 mod partitions;
 mod placements;
 mod recovery;

@@ -87,22 +87,52 @@ impl<A: RowApplication> Inner<A> {
         self.audit_positions().await?;
         self.audit_migration_accounts().await?;
         self.verify_admission_head().await?;
-        self.verify_identity_ledgers().await?;
+        let mut marks = BTreeMap::new();
+        for (scope, id) in self.scope_ids().await? {
+            if let Some(mark) = self.audit_mark(scope, id).await? {
+                marks.insert(id, mark);
+            }
+        }
+        let mut audited = self.verify_identity_ledgers_from(&marks).await?;
         self.verify_no_frames_records().await?;
         let scopes: Vec<_> = self.config.keys.iter().map(|key| key.scope).collect();
         for scope in scopes {
-            self.verify_tail(scope).await?;
+            let Some(id) = self.find_scope_id(scope).await? else {
+                continue;
+            };
+            let (_, _, tail) = self.verify_tail_from(scope, marks.get(&id)).await?;
+            audited
+                .entry(id)
+                .or_insert((scope, Audited::default()))
+                .1
+                .tail = tail;
         }
-        Ok(())
+        transaction!(@without_wal_checkpoint self, |inner| {
+            for (id, (scope, audited)) in std::mem::take(&mut audited) {
+                inner.store_audit_mark(scope, id, audited).await?;
+            }
+            Ok(())
+        })
+    }
+    async fn scope_ids(&self) -> Result<Vec<(ResourceScope, i64)>, Error> {
+        rows(&self.conn, "SELECT id,scope FROM secure_scope_state")
+            .await?
+            .into_iter()
+            .map(|record| match record.as_slice() {
+                [SqlValue::Integer(id), SqlValue::Blob(scope)] => Ok((decode(scope)?, *id)),
+                _ => Err(Error::Corrupt("scope state".into())),
+            })
+            .collect()
     }
     async fn audit_replay(
         &mut self,
         scope: ResourceScope,
         id: i64,
+        overlay: Overlay,
         mut cursor: i64,
         mut sets: Sets,
         mut ledger: identity::IdentityLedger,
-    ) -> Result<Sets, Error> {
+    ) -> Result<(Sets, identity::IdentityLedger), Error> {
         loop {
             let (last, next, marks) = transaction!(@without_wal_checkpoint self, |inner| {
                 let mut next = sets.clone();
@@ -112,7 +142,7 @@ impl<A: RowApplication> Inner<A> {
                         checkpoint::ReplayRequest {
                             scope,
                             id,
-                            overlay: Overlay::Scratch,
+                            overlay,
                             target: inner.workspace.tip,
                             after: cursor,
                             through: i64::MAX,
@@ -134,7 +164,7 @@ impl<A: RowApplication> Inner<A> {
             #[cfg(test)]
             self.fault(Stage::AuditReplay)?;
         }
-        Ok(sets)
+        Ok((sets, ledger))
     }
     async fn audit_staged_rows(
         &mut self,
@@ -237,8 +267,16 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: ResourceScope,
     ) -> Result<(Option<SignedCheckpoint>, u64), Error> {
+        let (signed, replayed, _) = self.verify_tail_from(scope, None).await?;
+        Ok((signed, replayed))
+    }
+    async fn verify_tail_from(
+        &mut self,
+        scope: ResourceScope,
+        mark: Option<&AuditMark>,
+    ) -> Result<(Option<SignedCheckpoint>, u64, Option<Tail>), Error> {
         let Some(id) = self.find_scope_id(scope).await? else {
-            return Ok((None, 0));
+            return Ok((None, 0, None));
         };
         let record = self.checkpoint_record(id, true).await?;
         if let Some(signed) = record.as_ref().and_then(|record| record.signed.as_ref())
@@ -249,7 +287,20 @@ impl<A: RowApplication> Inner<A> {
             super::super::blockers::refuse(self.readable_blockers(scope).await?)?;
         }
         if self.replayed_scope(scope) {
-            return self.verify_replayed_tail(scope, id, record).await;
+            let (signed, replayed) = self.verify_replayed_tail(scope, id, record).await?;
+            return Ok((signed, replayed, None));
+        }
+        if let Some(AuditMark {
+            position,
+            tail: Some(tail),
+            ..
+        }) = mark
+            && self.staged_row_fields(scope.domain).await?.is_none()
+            && let Ok(verified) = self
+                .verify_tail_after(scope, id, record.clone(), *position, tail.clone())
+                .await
+        {
+            return Ok(verified);
         }
         let (signed, cursor, mut sets, ledger) = match record {
             Some(record) => {
@@ -288,10 +339,17 @@ impl<A: RowApplication> Inner<A> {
             Some([SqlValue::Integer(count)]) => *count as u64,
             _ => return Err(Error::Corrupt("applied positions".into())),
         };
+        #[cfg(test)]
+        {
+            self.audit_replayed += replayed;
+        }
         (self.rebuilding_tip, self.tip_base) = (true, true);
-        let replay = self.audit_replay(scope, id, cursor, sets, ledger).await;
+        let replay = self
+            .audit_replay(scope, id, Overlay::Scratch, cursor, sets, ledger)
+            .await;
         (self.rebuilding_tip, self.tip_base) = (rebuilding, based);
-        let (sets, transformed) = self.audit_staged_rows(scope, id, replay?).await?;
+        let (sets, replayed_ledger) = replay?;
+        let (sets, transformed) = self.audit_staged_rows(scope, id, sets).await?;
         let (rows, tombstones, digest, _) = self.scope_state(id).await?;
         let unchanged = if transformed {
             ""
@@ -314,9 +372,103 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(mismatch());
         }
-        Ok((signed, replayed))
+        Ok((
+            signed,
+            replayed,
+            (!transformed).then_some(Tail {
+                sets,
+                replayed_ledger,
+            }),
+        ))
         }.await;
         (self.rebuilding_tip, self.tip_base) = (rebuilding, based);
+        let cleanup = transaction!(@without_wal_checkpoint self, |inner| {
+            inner.conn.execute(clear, [id]).await?;
+            Ok(())
+        });
+        match verified {
+            Err(error) => Err(error),
+            Ok(report) => cleanup.map(|()| report),
+        }
+    }
+    async fn verify_tail_after(
+        &mut self,
+        scope: ResourceScope,
+        id: i64,
+        record: Option<Record>,
+        position: i64,
+        tail: Tail,
+    ) -> Result<(Option<SignedCheckpoint>, u64, Option<Tail>), Error> {
+        let signed = record
+            .as_ref()
+            .map(|record| self.verify_record(scope, record))
+            .transpose()?;
+        let clear = "DELETE FROM secure_checkpoint_scratch WHERE scope=?";
+        transaction!(@without_wal_checkpoint self, |inner| {
+            inner.conn.execute(clear, [id]).await?;
+            Ok(())
+        })?;
+        let replayed = match collect_rows(
+            self.conn
+                .query(
+                    "SELECT COUNT(*) FROM secure_applied WHERE scope=? AND position>?",
+                    [id, position],
+                )
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Integer(count)]) => *count as u64,
+            _ => return Err(Error::Corrupt("applied positions".into())),
+        };
+        #[cfg(test)]
+        {
+            self.audit_replayed += replayed;
+        }
+        let (rebuilding, based) = (self.rebuilding_tip, self.tip_base);
+        (self.rebuilding_tip, self.tip_base) = (true, true);
+        let replay = self
+            .audit_replay(
+                scope,
+                id,
+                Overlay::AuditMark,
+                position,
+                tail.sets,
+                tail.replayed_ledger,
+            )
+            .await;
+        (self.rebuilding_tip, self.tip_base) = (rebuilding, based);
+        let verified = async {
+            let (sets, replayed_ledger) = replay?;
+            let (rows, tombstones, digest, _) = self.scope_state(id).await?;
+            let differing = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_checkpoint_scratch s LEFT JOIN secure_row_records r ON r.scope=?1 AND r.row=s.row WHERE s.scope=?2 AND (s.fields=X'' AND r.fields IS NOT NULL OR s.fields<>X'' AND (r.fields IS NULL OR r.fields<>s.fields)) UNION ALL SELECT 1 FROM secure_audit_before b LEFT JOIN secure_rows r ON r.scope=b.scope AND r.row=b.row WHERE b.scope=?2 AND coalesce(r.fields,X'')<>b.fields AND NOT EXISTS(SELECT 1 FROM secure_checkpoint_scratch s WHERE s.scope=?2 AND s.row=b.row) LIMIT 1",
+                        bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(id)]),
+                    )
+                    .await?,
+            )
+            .await?;
+            if !differing.is_empty()
+                || sets.rows != rows
+                || sets.tombstones != tombstones
+                || sets.digest != digest
+            {
+                return Err(mismatch());
+            }
+            Ok((
+                signed,
+                replayed,
+                Some(Tail {
+                    sets,
+                    replayed_ledger,
+                }),
+            ))
+        }
+        .await;
         let cleanup = transaction!(@without_wal_checkpoint self, |inner| {
             inner.conn.execute(clear, [id]).await?;
             Ok(())

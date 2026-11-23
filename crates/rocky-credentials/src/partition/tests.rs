@@ -438,7 +438,6 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         families: false,
         issues: false,
         trusted: None,
-        claims: None,
         origin: None,
         sequence: Some(0),
         previous: None,

@@ -2,9 +2,9 @@ use openraft::{
     storage::{LogFlushed, RaftLogStorage, RaftStateMachine},
     *,
 };
+use rocky_coordinator::CoordinationError;
 use rocky_coordinator::{certified::*, protocol::Request, service::Outcome, state::Metadata};
 use rocky_core::{Commitment, commitment};
-use rocky_credentials::CoordinationError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
@@ -24,7 +24,7 @@ pub struct Proposal {
 
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
-const FORMAT: u32 = 13;
+const FORMAT: u32 = 14;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;

@@ -2,7 +2,11 @@ use super::fixture::{Fixture, T};
 use super::*;
 use crate::counters::{CLAIM_WINDOW, Claim, Lookup, Name};
 use p2panda_core::PrivateKey;
-use rocky_credentials::{CLAIM_LIFETIME, ClaimRight, Revocation, SignedRevocation};
+use rocky_core::{FieldSelection, ResourceGrant, ResourceScope, RowSelection};
+use rocky_credentials::{Revocation, SignedRevocation, Validity};
+use std::time::Duration;
+
+const LIFETIME: u64 = 3_600;
 
 fn name(text: &str) -> Name {
     Name::new(text).unwrap()
@@ -13,54 +17,70 @@ fn claim(n: u8, issued: u64) -> Claim {
         issued,
     }
 }
-struct Holder {
+struct Person {
     identity: PrivateKey,
     node: PrivateKey,
     chain: CredentialChain,
 }
 impl Fixture {
-    fn right(&self, counters: Option<&[&str]>) -> ClaimRight {
-        ClaimRight {
-            scope: self.scope,
-            counters: counters
-                .map(|names| names.iter().map(|name| name.as_bytes().to_vec()).collect()),
-            grant: [7; 32],
+    fn grant(&self, scope: Scope, rights: &[Right]) -> ResourceGrant {
+        ResourceGrant {
+            scope: ResourceScope {
+                domain: scope,
+                encryption: [5; 32],
+                table: [6; 32],
+            },
+            rows: RowSelection::All,
+            rights: rights.iter().copied().collect(),
+            fields: FieldSelection::All,
         }
     }
-    fn holder(&self, right: ClaimRight, delegations: u8) -> Holder {
+    fn person_of(&self, publisher: &PrivateKey, scope: Scope, rights: &[Right]) -> Person {
         let (identity, node) = (PrivateKey::new(), PrivateKey::new());
-        let link = rocky_credentials::Authority::owner(&self.owner)
-            .issue_claims(
-                identity.public_key(),
-                right,
-                delegations,
-                (T, CLAIM_LIFETIME),
-            )
-            .unwrap();
+        let link = rocky_credentials::Authority::owner_in(
+            publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: publisher.public_key(),
+                scope,
+            },
+        )
+        .unwrap()
+        .issue(
+            identity.public_key(),
+            vec![self.grant(scope, rights)],
+            Validity {
+                issued_at: T,
+                lifetime: Duration::from_secs(LIFETIME),
+                clock_skew: Duration::ZERO,
+            },
+        )
+        .unwrap();
         let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, &node)
+            .certify(&identity, &node)
             .unwrap();
-        Holder {
+        Person {
             identity,
             node,
             chain,
         }
     }
-    fn presenting(&self, holder: &Holder, operation: Operation, time: u64) -> Request {
-        Request::sign_at(
+    fn person(&self, rights: &[Right]) -> Person {
+        self.person_of(&self.owner.clone(), self.scope, rights)
+    }
+    fn presenting(&self, person: &Person, operation: Operation, time: u64) -> Request {
+        Request::unsigned(
             self.state.genesis.id().unwrap(),
             crate::transport::nonce(),
             operation,
-            &holder.node,
+            (person.node.public_key(), None, Some(person.chain.clone())),
             time,
         )
-        .unwrap()
-        .with_claims(holder.chain.clone(), &holder.node)
+        .signed(&person.node)
         .unwrap()
     }
     fn claim_by(
         &mut self,
-        holder: &Holder,
+        person: &Person,
         counter: &str,
         claim: Claim,
         time: u64,
@@ -70,7 +90,7 @@ impl Fixture {
             counter: name(counter),
             claim,
         };
-        let request = self.presenting(holder, operation, time);
+        let request = self.presenting(person, operation, time);
         match self.state.apply_at(time, &request)? {
             Outcome::Claimed(value) => Ok(value),
             other => panic!("claim: {other:?}"),
@@ -78,7 +98,7 @@ impl Fixture {
     }
     fn read_by(
         &self,
-        holder: &Holder,
+        person: &Person,
         counter: &str,
         claim: Option<Claim>,
         time: u64,
@@ -88,7 +108,7 @@ impl Fixture {
             counter: name(counter),
             claim,
         };
-        match self.state.read(&self.presenting(holder, operation, time))? {
+        match self.state.read(&self.presenting(person, operation, time))? {
             Outcome::Counter(reading) => Ok(reading.claim.unwrap_or(Lookup::Unclaimed)),
             other => panic!("reading: {other:?}"),
         }
@@ -108,7 +128,7 @@ impl Fixture {
             other => panic!("claim: {other:?}"),
         }
     }
-    fn push_revocation(&mut self, identity: PublicKey, pusher: &PrivateKey, time: u64) -> Outcome {
+    fn push_removal(&mut self, identity: PublicKey, pusher: &PrivateKey, time: u64) -> Outcome {
         let statement = SignedRevocation::sign_in(
             Revocation {
                 app: self.scope.app,
@@ -142,88 +162,76 @@ impl Fixture {
         self.state.apply_at(time, &request).unwrap()
     }
 }
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_holder_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
+fn a_writer_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
     let mut f = Fixture::new(Limits::default());
-    let holder = f.holder(f.right(None), 1);
+    let writer = f.person(&[Right::Insert]);
     assert!(
         !f.state.controls[0]
             .control
             .trusted
-            .contains(&holder.identity.public_key())
+            .contains(&writer.node.public_key())
     );
-    assert_eq!(f.claim_by(&holder, "invoices", claim(1, T), T), Ok(1));
+    assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 2);
-    assert_eq!(f.claim_by(&holder, "invoices", claim(3, T), T + 1), Ok(3));
+    assert_eq!(f.claim_by(&writer, "invoices", claim(3, T), T + 1), Ok(3));
     assert_eq!(
-        f.claim_by(&holder, "invoices", claim(1, T), T + 2),
+        f.claim_by(&writer, "invoices", claim(1, T), T + 2),
         Ok(1),
-        "a retry answers the same value from the holder"
+        "a retry answers the same value"
     );
-    assert_eq!(f.trusted_claim("invoices", claim(3, T), T + 2), 3);
     assert_eq!(
-        f.read_by(&holder, "invoices", Some(claim(3, T)), T + 2),
+        f.read_by(&writer, "invoices", Some(claim(3, T)), T + 2),
         Ok(Lookup::Claimed(3))
     );
     assert_eq!(
-        f.claim_by(&holder, "invoices", claim(4, T - CLAIM_WINDOW - 1), T + 2),
+        f.claim_by(&writer, "invoices", claim(4, T - CLAIM_WINDOW - 1), T + 2),
         Err(CoordinationError::Expired),
         "an issue time outside the window is expired, never a new value"
     );
     assert_eq!(
-        f.claim_by(&holder, "invoices", claim(1, T + 1), T + 2),
+        f.claim_by(&writer, "invoices", claim(1, T + 1), T + 2),
         Err(CoordinationError::RequestConflict)
     );
-    assert_eq!(f.claim_by(&holder, "invoices", claim(5, T), T + 2), Ok(4));
+    assert_eq!(f.claim_by(&writer, "invoices", claim(5, T), T + 2), Ok(4));
+    for right in [Right::Update, Right::Delete] {
+        let writer = f.person(&[right]);
+        assert!(f.claim_by(&writer, "credits", claim(6, T), T + 2).is_ok());
+    }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn non_holders_and_other_counters_are_denied() {
+fn readers_strangers_and_foreign_chains_never_claim() {
     let mut f = Fixture::new(Limits::default());
-    let invoices = f.holder(f.right(Some(&["invoices"])), 1);
-    assert_eq!(f.claim_by(&invoices, "invoices", claim(1, T), T), Ok(1));
+    let writer = f.person(&[Right::Insert]);
+    let reader = f.person(&[Right::Read]);
+    assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(
-        f.claim_by(&invoices, "credits", claim(2, T), T),
-        Err(CoordinationError::Denied)
+        f.claim_by(&reader, "invoices", claim(2, T), T),
+        Err(CoordinationError::Denied),
+        "a person without write access claims nothing"
     );
     assert_eq!(
-        f.read_by(&invoices, "credits", None, T),
-        Err(CoordinationError::Denied)
+        f.read_by(&reader, "invoices", Some(claim(1, T)), T),
+        Ok(Lookup::Claimed(1)),
+        "a person without write access still reads"
     );
-    assert_eq!(
-        f.read_by(&invoices, "invoices", None, T),
-        Ok(Lookup::Unclaimed)
-    );
-
-    let stranger = Holder {
+    let stranger = Person {
         identity: PrivateKey::new(),
         node: PrivateKey::new(),
-        chain: invoices.chain.clone(),
+        chain: writer.chain.clone(),
     };
     assert_eq!(
         f.claim_by(&stranger, "invoices", claim(3, T), T),
         Err(CoordinationError::Denied),
         "a node presenting another node's chain claims nothing"
     );
-    let foreign = {
-        let publisher = PrivateKey::new();
-        let identity = PrivateKey::new();
-        let node = PrivateKey::new();
-        let link = rocky_credentials::Authority::owner(&publisher)
-            .issue_claims(identity.public_key(), f.right(None), 1, (T, CLAIM_LIFETIME))
-            .unwrap();
-        let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, &node)
-            .unwrap();
-        Holder {
-            identity,
-            node,
-            chain,
-        }
-    };
+    let foreign = f.person_of(&PrivateKey::new(), f.scope, &[Right::Insert]);
     assert_eq!(
         f.claim_by(&foreign, "invoices", claim(4, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a person of another publisher claims nothing"
     );
     let unchained = Request::sign_at(
         f.state.genesis.id().unwrap(),
@@ -233,7 +241,7 @@ fn non_holders_and_other_counters_are_denied() {
             counter: name("invoices"),
             claim: claim(5, T),
         },
-        &invoices.node,
+        &writer.node,
         T,
     )
     .unwrap();
@@ -241,75 +249,100 @@ fn non_holders_and_other_counters_are_denied() {
         f.state.apply_at(T, &unchained),
         Err(CoordinationError::Denied)
     );
-    let mut elsewhere = f.right(None);
-    elsewhere.scope.domain = DomainId([8; 16]);
-    let elsewhere = f.holder(elsewhere, 1);
+    let mut elsewhere = f.scope;
+    elsewhere.domain = DomainId([8; 16]);
+    let elsewhere = f.person_of(&f.owner.clone(), elsewhere, &[Right::Insert]);
     assert_eq!(
         f.claim_by(&elsewhere, "invoices", claim(6, T), T),
         Err(CoordinationError::Denied),
-        "a right for another domain claims nothing here"
+        "a person of another domain claims nothing here"
     );
     assert_eq!(f.trusted_claim("invoices", claim(7, T), T), 2);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_holder_never_closes_the_domain() {
+fn a_request_signed_outside_the_extension_label_is_refused() {
     let mut f = Fixture::new(Limits::default());
-    let holder = f.holder(f.right(None), 1);
-    let request = f.presenting(&holder, Operation::Close { scope: f.scope }, T);
+    let writer = f.person(&[Right::Insert]);
+    f.trusted_claim("invoices", claim(1, T), T);
+    let request = f.presenting(
+        &writer,
+        Operation::Counter {
+            scope: f.scope,
+            counter: name("invoices"),
+            claim: None,
+        },
+        T,
+    );
+    let body = request.extension_body().unwrap();
+    let forged = request.clone().with_signature(writer.node.sign(&body));
+    assert_eq!(f.state.read(&forged), Err(CoordinationError::Denied));
+    let signed = request.with_signature(
+        writer
+            .node
+            .sign(&rocky_credentials::extension_message(REQUEST_LABEL, &body).unwrap()),
+    );
+    assert_eq!(f.state.read(&signed).map(drop), Ok(()));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_member_never_closes_the_domain() {
+    let mut f = Fixture::new(Limits::default());
+    let writer = f.person(&[Right::Insert]);
+    let request = f.presenting(&writer, Operation::Close { scope: f.scope }, T);
     assert_eq!(
         f.state.apply_at(T, &request),
-        Err(CoordinationError::Denied),
-        "a claim holder never closes the domain"
+        Err(CoordinationError::Denied)
     );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
+fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     let mut f = Fixture::new(Limits::default());
-    let pushed = f.holder(f.right(None), 1);
-    let lapsing = f.holder(f.right(None), 1);
-    assert_eq!(f.claim_by(&pushed, "invoices", claim(1, T), T), Ok(1));
+    let removed = f.person(&[Right::Insert]);
+    let lapsing = f.person(&[Right::Insert]);
+    assert_eq!(f.claim_by(&removed, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(f.claim_by(&lapsing, "invoices", claim(2, T), T), Ok(2));
 
     let stranger = PrivateKey::new();
-    let outcome = f.push_revocation(pushed.identity.public_key(), &stranger, T + 1);
+    let outcome = f.push_removal(removed.identity.public_key(), &stranger, T + 1);
     assert!(
         matches!(outcome, Outcome::Revoked(_)),
-        "any node may push the owner's revocation"
+        "any node may push the publisher's removal"
     );
     assert_eq!(
-        f.claim_by(&pushed, "invoices", claim(3, T), T + 1),
+        f.claim_by(&removed, "invoices", claim(3, T), T + 1),
         Err(CoordinationError::Denied)
     );
     assert_eq!(
-        f.claim_by(&pushed, "invoices", claim(1, T), T + 1),
+        f.claim_by(&removed, "invoices", claim(1, T), T + 1),
+        Err(CoordinationError::Denied),
+        "a removed person cannot even replay an earlier claim"
+    );
+    assert_eq!(
+        f.read_by(&removed, "invoices", None, T + 1),
         Err(CoordinationError::Denied)
     );
     assert_eq!(
-        f.read_by(&pushed, "invoices", None, T + 1),
-        Err(CoordinationError::Denied)
-    );
-    assert_eq!(
-        f.push_revocation(pushed.identity.public_key(), &stranger, T + 1),
+        f.push_removal(removed.identity.public_key(), &stranger, T + 1),
         outcome,
-        "pushing a revocation again changes nothing"
+        "pushing a removal again changes nothing"
     );
     let image = crate::certified::encode(&f.state).unwrap();
     f.state = crate::certified::decode(&image).unwrap();
     assert_eq!(
-        f.claim_by(&pushed, "invoices", claim(3, T), T + 2),
+        f.claim_by(&removed, "invoices", claim(3, T), T + 2),
         Err(CoordinationError::Denied)
     );
 
     assert_eq!(
-        f.claim_by(&lapsing, "invoices", claim(4, T), T + CLAIM_LIFETIME - 1),
-        Ok(3),
-        "an unpushed revocation still ends the right with its link"
+        f.claim_by(&lapsing, "invoices", claim(4, T), T + LIFETIME - 1),
+        Ok(3)
     );
     assert_eq!(
-        f.claim_by(&lapsing, "invoices", claim(5, T), T + CLAIM_LIFETIME),
-        Err(CoordinationError::Denied)
+        f.claim_by(&lapsing, "invoices", claim(5, T), T + LIFETIME + 1),
+        Err(CoordinationError::Denied),
+        "an expired person link claims nothing"
     );
 
     let forged = SignedRevocation::sign(
@@ -335,63 +368,20 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
             revocations: Box::new(RevocationSet::try_from(vec![forged]).unwrap()),
         },
         &stranger,
-        T + CLAIM_LIFETIME,
+        T + 2,
     )
     .unwrap();
     assert_eq!(
-        f.state.apply_at(T + CLAIM_LIFETIME, &request),
+        f.state.apply_at(T + 2, &request),
         Err(CoordinationError::Denied),
         "a statement another publisher signed is refused"
     );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_delegate_claims_only_within_its_delegators_right() {
-    let mut f = Fixture::new(Limits::default());
-    let delegator = f.holder(f.right(Some(&["invoices", "credits"])), 2);
-    let (identity, node) = (PrivateKey::new(), PrivateKey::new());
-    let held = delegator.chain.delegable();
-    let narrowed = held
-        .delegate_claims(
-            &delegator.identity,
-            identity.public_key(),
-            f.right(Some(&["invoices"])),
-            1,
-            (T, CLAIM_LIFETIME),
-        )
-        .unwrap();
-    let delegate = Holder {
-        chain: narrowed.certify_claims(&identity, &node).unwrap(),
-        identity,
-        node,
-    };
-    assert_eq!(f.claim_by(&delegate, "invoices", claim(1, T), T), Ok(1));
-    assert_eq!(
-        f.claim_by(&delegate, "credits", claim(2, T), T),
-        Err(CoordinationError::Denied)
-    );
-    assert!(
-        held.delegate_claims(
-            &delegator.identity,
-            PrivateKey::new().public_key(),
-            f.right(None),
-            1,
-            (T, CLAIM_LIFETIME),
-        )
-        .is_err()
-    );
-    f.push_revocation(delegator.identity.public_key(), &PrivateKey::new(), T + 1);
-    assert_eq!(
-        f.claim_by(&delegate, "invoices", claim(3, T), T + 1),
-        Err(CoordinationError::Denied),
-        "revoking the delegator ends its delegate's right too"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_control_without_a_publisher_admits_only_trusted_nodes() {
     let mut f = Fixture::new(Limits::default());
-    let holder = f.holder(f.right(None), 1);
+    let writer = f.person(&[Right::Insert]);
     let mut control = f.state.controls[0].control.clone();
     control.revision += 1;
     control.publisher = None;
@@ -399,7 +389,7 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
     let request = Request::sign_at(
         f.state.genesis.id().unwrap(),
         [3; 32],
-        Operation::Control(revision),
+        Operation::Control(Box::new(revision)),
         &f.owner,
         T,
     )
@@ -413,9 +403,9 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
     control.publisher = None;
     f.state.controls[0] = ControlCertificate::sign(control, &f.owner).unwrap();
     assert_eq!(
-        f.claim_by(&holder, "invoices", claim(1, T), T),
+        f.claim_by(&writer, "invoices", claim(1, T), T),
         Err(CoordinationError::Denied),
-        "a control that names no publisher admits no claim right"
+        "a control that names no publisher admits no person"
     );
     assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 1);
 }

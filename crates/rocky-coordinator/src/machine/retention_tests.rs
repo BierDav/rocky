@@ -198,7 +198,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
             mesh.apply(
                 &mut metadata,
                 &mesh.authority,
-                Operation::Control(mesh.control(scope, revision)),
+                Operation::Control(Box::new(mesh.control(scope, revision))),
                 t
             )
             .is_err()
@@ -224,7 +224,7 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
     mesh.apply(
         &mut metadata,
         &mesh.authority,
-        Operation::Control(mesh.control(mesh.scopes[1], 1)),
+        Operation::Control(Box::new(mesh.control(mesh.scopes[1], 1))),
         t,
     )
     .unwrap();
@@ -232,7 +232,7 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
         mesh.apply(
             &mut metadata,
             &mesh.authority,
-            Operation::Control(mesh.control(mesh.scopes[2], 1)),
+            Operation::Control(Box::new(mesh.control(mesh.scopes[2], 1))),
             t
         ),
         Err(CoordinationError::Backpressure)
@@ -249,7 +249,7 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
     mesh.apply(
         &mut metadata,
         &mesh.authority,
-        Operation::Control(mesh.control(mesh.scopes[2], 1)),
+        Operation::Control(Box::new(mesh.control(mesh.scopes[2], 1))),
         t,
     )
     .expect("closing a domain frees its slot");

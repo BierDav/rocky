@@ -1,7 +1,7 @@
+use crate::CoordinationError;
 pub use crate::client::{NetworkCoordinator, Observer};
 pub use crate::machine::Usage;
 pub use crate::machine::{Operation, Outcome, Registration};
-use rocky_credentials::CoordinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

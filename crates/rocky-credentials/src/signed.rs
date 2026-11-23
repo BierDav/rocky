@@ -49,7 +49,6 @@ fn check_node(capability: &Capability, identity: PublicKey) -> Result<(), Error>
         || extended.issues
         || extended.families
         || extended.trusted.is_some()
-        || extended.claims.is_some()
         || extended.origin.is_some()
         || extended.database.is_none()
         || extended
@@ -772,8 +771,7 @@ impl CredentialChain {
                         .first()
                         .map(|grant| grant.scope.domain)
                 })
-                .or_else(|| extended.partitions.first().map(|grant| grant.domain))
-                .or_else(|| extended.claims.map(|claims| claims.scope));
+                .or_else(|| extended.partitions.first().map(|grant| grant.domain));
             if let Some(scope) = scope {
                 return Ok(crate::DatabaseContext { publisher, scope });
             }
@@ -853,6 +851,29 @@ impl CredentialChain {
         }
         Ok(leaf.subject)
     }
+    pub fn node_holder(
+        &self,
+        publisher: PublicKey,
+        node: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<&Capability, Error> {
+        let leaf = self.links(publisher, Some((revocations, time)))?;
+        let holder = self
+            .0
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|link| &link.capability)
+            .ok_or_else(|| denied("the chain certifies no node for a person"))?;
+        if leaf.kind != PrincipalKind::Node
+            || leaf.subject != node
+            || holder.kind != PrincipalKind::User
+        {
+            return Err(denied("the chain certifies no node for a person"));
+        }
+        Ok(holder)
+    }
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
@@ -890,10 +911,6 @@ impl CredentialChain {
                 || extended
                     .trusted
                     .is_some_and(|scope| scope != database.scope)
-                || extended
-                    .claims
-                    .as_ref()
-                    .is_some_and(|claims| claims.scope != database.scope)
                 || extended.database.is_some_and(|context| context != database)
                 || signed.attestation.certificate().is_some_and(|certificate| {
                     certificate
@@ -935,18 +952,8 @@ impl CredentialChain {
                 || capability.not_before >= capability.expires
                 || lifetime > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || (held == 0
-                    && !node
-                    && !extended.issues
-                    && extended.trusted.is_none()
-                    && extended.claims.is_none())
+                || (held == 0 && !node && !extended.issues && extended.trusted.is_none())
                 || held > crate::MAX_GRANTS
-                || (extended.claims.is_some()
-                    && (held != 0
-                        || extended.issues
-                        || extended.trusted.is_some()
-                        || capability.expires - capability.not_before
-                            > crate::CLAIM_LIFETIME + crate::CLAIM_SKEW))
                 || signed.verify_signature().is_err()
             {
                 return Err(denied("invalid or revoked credential"));
@@ -990,13 +997,6 @@ impl CredentialChain {
                             !allowed_partitions
                                 .iter()
                                 .any(|allowed| allowed.includes(grant))
-                        }))
-                    || (!authority
-                        && extended.claims.as_ref().is_some_and(|right| {
-                            !parent_extended
-                                .claims
-                                .as_ref()
-                                .is_some_and(|held| held.includes(right))
                         }))
                 {
                     return Err(denied("delegation expands authority"));
@@ -1052,19 +1052,14 @@ impl CredentialChain {
             .is_some_and(|trusted| self.0[index].issuer == trusted))
     }
     fn shape(capability: &Capability, extended: &Extended, issuer: PublicKey) -> Result<(), Error> {
-        if extended.families
-            && (extended.issues || extended.trusted.is_some() || extended.claims.is_some())
-        {
+        if extended.families && (extended.issues || extended.trusted.is_some()) {
             return Err(denied("grant families apply only to collection authority"));
         }
         let valid = match capability.kind {
             PrincipalKind::Node => check_node(capability, issuer).is_ok(),
             PrincipalKind::User => extended.node.is_none(),
             PrincipalKind::Deployment => {
-                extended.node.is_none()
-                    && !extended.issues
-                    && extended.trusted.is_none()
-                    && extended.claims.is_none()
+                extended.node.is_none() && !extended.issues && extended.trusted.is_none()
             }
         };
         if valid {

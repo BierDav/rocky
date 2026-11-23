@@ -1,4 +1,4 @@
-use rocky_credentials::CoordinationError;
+use crate::CoordinationError;
 use serde::{Deserialize, Serialize};
 
 pub const DAY: u64 = 86_400;

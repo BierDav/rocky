@@ -1,8 +1,8 @@
+use crate::tenancy::{SignedCoordinationGrant, SignedTenantAdmission};
 use crate::{certified::*, retention::DAY, *};
 use p2panda_core::{PublicKey, Signature};
-use rocky_credentials::{
-    CredentialChain, RevocationSet, SignedCoordinationGrant, SignedTenantAdmission,
-};
+use rocky_core::Right;
+use rocky_credentials::{CredentialChain, RevocationSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -10,6 +10,7 @@ const ACCOUNTED_DOMAIN_BYTES: usize = 1024;
 const ACCOUNTED_TENANT_BYTES: usize = 64;
 pub const MAX_PUBLIC_DOMAINS: usize = 65536;
 pub const TRUSTED_NODES: usize = 32;
+pub const REQUEST_LABEL: &str = "rocky.ext.coordinator-request.v10";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Domain {
@@ -82,7 +83,7 @@ impl State {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Operation {
-    Control(ControlCertificate),
+    Control(Box<ControlCertificate>),
     Membership {
         voters: BTreeSet<u64>,
         expected: BTreeSet<u64>,
@@ -119,7 +120,7 @@ pub struct Request {
     pub genesis: Commitment,
     pub key: PublicKey,
     pub certificate: Option<rocky_credentials::SignedCapability>,
-    pub claims: Option<CredentialChain>,
+    pub credentials: Option<CredentialChain>,
     pub id: Commitment,
     pub time: u64,
     pub operation: Operation,
@@ -212,44 +213,62 @@ impl Request {
         ),
         time: u64,
     ) -> Result<Self, CoordinationError> {
-        let mut request = Self {
+        Self::unsigned(
             genesis,
-            key: key.public_key(),
+            id,
+            operation,
+            (key.public_key(), certificate, None),
+            time,
+        )
+        .signed(key)
+    }
+    pub fn unsigned(
+        genesis: Commitment,
+        id: Commitment,
+        operation: Operation,
+        (key, certificate, credentials): (
+            PublicKey,
+            Option<rocky_credentials::SignedCapability>,
+            Option<CredentialChain>,
+        ),
+        time: u64,
+    ) -> Self {
+        Self {
+            genesis,
+            key,
             certificate,
-            claims: None,
+            credentials,
             id,
             time,
             operation,
-            signature: key.sign(b""),
-        };
-        request.signature = key.sign(&request.signing_bytes()?);
-        Ok(request)
+            signature: Signature::from_bytes(&[0; 64]),
+        }
     }
-    pub fn with_claims(
-        mut self,
-        claims: CredentialChain,
-        key: &p2panda_core::PrivateKey,
-    ) -> Result<Self, CoordinationError> {
+    pub fn signed(mut self, key: &p2panda_core::PrivateKey) -> Result<Self, CoordinationError> {
         if key.public_key() != self.key {
             return Err(CoordinationError::Denied);
         }
-        self.claims = Some(claims);
         self.signature = key.sign(&self.signing_bytes()?);
         Ok(self)
     }
+    pub fn with_signature(mut self, signature: Signature) -> Self {
+        self.signature = signature;
+        self
+    }
+    pub fn extension_body(&self) -> Result<Vec<u8>, CoordinationError> {
+        encode(&(
+            self.genesis,
+            self.key,
+            &self.certificate,
+            &self.credentials,
+            self.id,
+            self.time,
+            &self.operation,
+        ))
+    }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
-        bytes(
-            "rocky.coordination-request.v9",
-            &(
-                self.genesis,
-                self.key,
-                &self.certificate,
-                &self.claims,
-                self.id,
-                self.time,
-                &self.operation,
-            ),
-        )
+        rocky_credentials::extension_message(REQUEST_LABEL, &self.extension_body()?)
+            .map_err(|_| CoordinationError::Corrupt)
     }
     pub fn identity(&self, time: u64) -> Option<PublicKey> {
         self.certificate.as_ref()?.certifies(self.key, time).ok()
@@ -407,11 +426,9 @@ impl Metadata {
                 self.registration_authorized(request, grant, admission.as_ref(), certificate, time)
             }
             Operation::Usage => self.tenant(request.key).map(|_| ()),
-            Operation::Claim { scope, counter, .. } => {
-                self.counter_authorized(*scope, counter, true, request, time)
-            }
-            Operation::Counter { scope, counter, .. } => {
-                self.counter_authorized(*scope, counter, false, request, time)
+            Operation::Claim { scope, .. } => self.counter_authorized(*scope, true, request, time),
+            Operation::Counter { scope, .. } => {
+                self.counter_authorized(*scope, false, request, time)
             }
             Operation::Revoke { scope, revocations } => self
                 .merged_revocations(*scope, revocations, time)
@@ -507,15 +524,12 @@ impl Metadata {
     fn counter_authorized(
         &self,
         scope: Scope,
-        counter: &crate::counters::Name,
         claim: bool,
         request: &Request,
         time: u64,
     ) -> Result<(), CoordinationError> {
         let control = self.current_control(scope, time)?;
-        if !self.trusts(control, request, time)
-            && !self.holds_claim(control, counter, request, time)
-        {
+        if !self.trusts(control, request, time) && !self.member(control, claim, request, time) {
             return Err(CoordinationError::Denied);
         }
         if claim && !self.state.find(scope)?.open() {
@@ -523,16 +537,10 @@ impl Metadata {
         }
         Ok(())
     }
-    fn holds_claim(
-        &self,
-        control: &DomainControl,
-        counter: &crate::counters::Name,
-        request: &Request,
-        time: u64,
-    ) -> bool {
+    fn member(&self, control: &DomainControl, writes: bool, request: &Request, time: u64) -> bool {
         let (Some(publisher), Some(chain), Ok(domain)) = (
             control.publisher.as_deref().copied(),
-            request.claims.as_ref(),
+            request.credentials.as_ref(),
             self.state.find(control.scope),
         ) else {
             return false;
@@ -547,14 +555,16 @@ impl Metadata {
             return false;
         }
         chain
-            .claimant(
-                publisher,
-                request.key,
-                (control.scope, counter.as_bytes()),
-                &domain.revocations,
-                time,
-            )
-            .is_ok()
+            .node_holder(publisher, request.key, &domain.revocations, time)
+            .is_ok_and(|person| {
+                !writes
+                    || person.grants.iter().any(|grant| {
+                        grant.scope.domain == control.scope
+                            && grant.rights.iter().any(|right| {
+                                matches!(right, Right::Insert | Right::Update | Right::Delete)
+                            })
+                    })
+            })
     }
     fn merged_revocations(
         &self,
@@ -620,7 +630,7 @@ impl Metadata {
         request: &Request,
     ) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
-        self.counter_authorized(scope, counter, false, request, time)?;
+        self.counter_authorized(scope, false, request, time)?;
         let domain = self.state.find(scope)?;
         domain
             .counters
@@ -635,7 +645,7 @@ impl Metadata {
         request: &Request,
     ) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
-        self.counter_authorized(scope, counter, true, request, time)?;
+        self.counter_authorized(scope, true, request, time)?;
         let available = self.tenant_available(scope)?.min(
             self.state
                 .limits
@@ -683,18 +693,14 @@ impl Metadata {
         let (scope, counter) = match &request.operation {
             Operation::Register(_) | Operation::Usage => return Some(request.key),
             Operation::Membership { .. } => return None,
-            Operation::Control(certificate) => (certificate.control.scope, None),
-            Operation::Close { scope } | Operation::Revoke { scope, .. } => (*scope, None),
-            Operation::Claim { scope, counter, .. } | Operation::Counter { scope, counter, .. } => {
-                (*scope, Some(counter))
-            }
+            Operation::Control(certificate) => (certificate.control.scope, false),
+            Operation::Close { scope } | Operation::Revoke { scope, .. } => (*scope, false),
+            Operation::Claim { scope, .. } | Operation::Counter { scope, .. } => (*scope, true),
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
             && !self.trusts(&certificate.control, request, request.time)
-            && !counter.is_some_and(|counter| {
-                self.holds_claim(&certificate.control, counter, request, request.time)
-            })
+            && !(counter && self.member(&certificate.control, false, request, request.time))
         {
             return None;
         }
@@ -1014,7 +1020,7 @@ impl Metadata {
                     return Err(CoordinationError::Denied);
                 }
                 self.control_authorized(certificate, time)?;
-                self.control(certificate.clone())
+                self.control((**certificate).clone())
             }
             Operation::Register(registration) => {
                 let Registration {
@@ -1097,11 +1103,11 @@ mod public_tests;
 mod retention_tests;
 
 #[cfg(test)]
-#[path = "machine/claim_tests.rs"]
-mod claim_tests;
-#[cfg(test)]
 #[path = "machine/counter_tests.rs"]
 mod counter_tests;
 #[cfg(test)]
 #[path = "machine/fixture.rs"]
 mod fixture;
+#[cfg(test)]
+#[path = "machine/member_tests.rs"]
+mod member_tests;

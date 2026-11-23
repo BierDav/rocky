@@ -2590,10 +2590,10 @@ impl Settings {
             }
             let (request, secret) =
                 RenewRequest::sign(&node, *issuer, self.credentials.clone(), now()?)?;
-            let message = PeerRequest::Epochs(EpochRequest {
+            let message = PeerRequest::Epochs(Box::new(EpochRequest {
                 request: request.clone(),
                 revocations: self.revocations.clone(),
-            });
+            }));
             let bytes = match exchange(transport, &addresses, self.domain()?.scope, &message).await
             {
                 Ok(PeerReply::Epochs(bytes)) => bytes,
@@ -2730,7 +2730,7 @@ impl Settings {
             transport,
             addresses,
             self.domain()?.scope,
-            &PeerRequest::Renew(request.clone()),
+            &PeerRequest::Renew(Box::new(request.clone())),
         )
         .await
         {

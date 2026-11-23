@@ -1,11 +1,11 @@
 use crate::support;
+use rocky_coordinator::CoordinationError;
 use rocky_coordinator::{
     Limits,
     counters::Claim,
     service::{NetworkCoordinator, Operation, Usage},
 };
 use rocky_core::*;
-use rocky_credentials::CoordinationError;
 use rocky_voter::{backup, restore};
 use std::sync::Arc;
 use support::{fresh_claim, invoices, membership_after_election, public::*, reading};

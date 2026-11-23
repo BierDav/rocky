@@ -1,16 +1,21 @@
-use crate::{
-    CoordinatorControl, Error, IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose, denied,
-    signing_bytes,
-};
+use crate::CoordinationError;
 use p2panda_core::Signature;
 use rocky_core::{AppId, ApplicationManifest};
+use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_APPLICATION_NAME: usize = 128;
 
-fn current(not_before: u64, expires: u64, time: u64) -> Result<(), Error> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CoordinatorControl(pub PublicKey);
+
+fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, CoordinationError> {
+    rocky_credentials::signing_bytes(label, value).map_err(|_| CoordinationError::Corrupt)
+}
+
+fn current(not_before: u64, expires: u64, time: u64) -> Result<(), CoordinationError> {
     if not_before >= expires || not_before > time || expires <= time {
-        return Err(denied("control token is not current"));
+        return Err(CoordinationError::Denied);
     }
     Ok(())
 }
@@ -29,19 +34,24 @@ pub struct SignedCoordinationGrant {
     signature: Signature,
 }
 impl SignedCoordinationGrant {
-    pub fn sign(grant: CoordinationGrant, owner: &dyn IdentityProvider) -> Result<Self, Error> {
-        if grant.publisher.0 != owner.public_key()? {
-            return Err(denied("grant publisher mismatch"));
+    pub fn sign(
+        grant: CoordinationGrant,
+        owner: &dyn IdentityProvider,
+    ) -> Result<Self, CoordinationError> {
+        if owner.public_key().ok() != Some(grant.publisher.0) {
+            return Err(CoordinationError::Denied);
         }
         Ok(Self {
-            signature: owner.sign(
-                Purpose::Statement,
-                &signing_bytes("rocky.coordination-grant.v1", &grant)?,
-            )?,
+            signature: owner
+                .sign(
+                    Purpose::Statement,
+                    &signing_bytes("rocky.coordination-grant.v1", &grant)?,
+                )
+                .map_err(|_| CoordinationError::Denied)?,
             grant,
         })
     }
-    pub fn verify(&self, time: u64) -> Result<AppId, Error> {
+    pub fn verify(&self, time: u64) -> Result<AppId, CoordinationError> {
         let grant = &self.grant;
         if grant.application.is_empty()
             || grant.application.len() > MAX_APPLICATION_NAME
@@ -50,7 +60,7 @@ impl SignedCoordinationGrant {
                 &self.signature,
             )
         {
-            return Err(denied("invalid coordination grant"));
+            return Err(CoordinationError::Denied);
         }
         current(grant.not_before, grant.expires, time)?;
         Ok(ApplicationManifest::app_id(
@@ -73,16 +83,23 @@ pub struct SignedTenantAdmission {
     signature: Signature,
 }
 impl SignedTenantAdmission {
-    pub fn sign(admission: TenantAdmission, provider: &PrivateKey) -> Result<Self, Error> {
+    pub fn sign(
+        admission: TenantAdmission,
+        provider: &PrivateKey,
+    ) -> Result<Self, CoordinationError> {
         if admission.provider != provider.public_key() {
-            return Err(denied("admission provider mismatch"));
+            return Err(CoordinationError::Denied);
         }
         Ok(Self {
             signature: provider.sign(&signing_bytes("rocky.tenant-admission.v1", &admission)?),
             admission,
         })
     }
-    pub fn verify(&self, provider: PublicKey, time: u64) -> Result<CoordinatorControl, Error> {
+    pub fn verify(
+        &self,
+        provider: PublicKey,
+        time: u64,
+    ) -> Result<CoordinatorControl, CoordinationError> {
         let admission = &self.admission;
         if admission.provider != provider
             || !provider.verify(
@@ -90,7 +107,7 @@ impl SignedTenantAdmission {
                 &self.signature,
             )
         {
-            return Err(denied("invalid tenant admission"));
+            return Err(CoordinationError::Denied);
         }
         current(admission.not_before, admission.expires, time)?;
         Ok(admission.tenant)

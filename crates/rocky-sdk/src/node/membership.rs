@@ -222,7 +222,7 @@ impl Node {
                 retry.ready()
             });
         }
-        let request = PeerRequest::Unlink(known);
+        let request = PeerRequest::Unlink(Box::new(known));
         let transport = &*link.transport;
         let scope = self.domain().scope;
         let request = &request;

@@ -1,11 +1,12 @@
 use super::*;
 use crate::counters::{Claim, Name};
+use crate::tenancy::{
+    CoordinationGrant, CoordinatorControl, SignedCoordinationGrant, SignedTenantAdmission,
+    TenantAdmission,
+};
 use crate::transport::nonce;
 use p2panda_core::PrivateKey;
-use rocky_credentials::{
-    CoordinationGrant, CoordinatorControl, Publisher, SignedCoordinationGrant,
-    SignedTenantAdmission, TenantAdmission,
-};
+use rocky_credentials::Publisher;
 
 const T: u64 = 1_900_000_000;
 
@@ -266,10 +267,13 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
         (&b.executor, claim(sa)),
         (&b.executor, log_head.clone()),
         (&b.key, log_head.clone()),
-        (&b.key, Operation::Control(b.control(sa, 2, &[&b.executor]))),
         (
             &b.key,
-            Operation::Control(a.signed_control(sa, 2, &[&b.executor], &b.key)),
+            Operation::Control(Box::new(b.control(sa, 2, &[&b.executor]))),
+        ),
+        (
+            &b.key,
+            Operation::Control(Box::new(a.signed_control(sa, 2, &[&b.executor], &b.key))),
         ),
         (&b.key, Operation::Close { scope: sa }),
     ] {
@@ -355,7 +359,7 @@ fn owners_change_trusted_nodes_and_keep_the_counters() {
         .apply(
             &mut m,
             &a.key,
-            Operation::Control(a.control(scope, 2, &[&a.alternate])),
+            Operation::Control(Box::new(a.control(scope, 2, &[&a.alternate]))),
             T,
         )
         .unwrap();
@@ -370,7 +374,12 @@ fn owners_change_trusted_nodes_and_keep_the_counters() {
         service.apply(
             &mut m,
             &a.alternate,
-            Operation::Control(a.signed_control(scope, 3, &[&a.alternate], &a.alternate)),
+            Operation::Control(Box::new(a.signed_control(
+                scope,
+                3,
+                &[&a.alternate],
+                &a.alternate
+            ))),
             T
         ),
         Err(CoordinationError::Denied),
@@ -496,7 +505,7 @@ fn retained_outcomes_are_bounded_per_tenant() {
     let mut accepted = 0;
     for revision in 2..limits().retry_records as u64 * 2 {
         let control = a.control(scope, revision, &[&a.executor, &a.alternate]);
-        match service.apply(&mut m, &a.key, Operation::Control(control), T) {
+        match service.apply(&mut m, &a.key, Operation::Control(Box::new(control)), T) {
             Ok(_) => accepted += 1,
             Err(CoordinationError::Backpressure) => break,
             Err(error) => panic!("{error:?}"),

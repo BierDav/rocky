@@ -54,6 +54,7 @@ pub(crate) enum Kind {
     PartitionRole,
     PartitionNext,
     PartitionShare,
+    Extension,
 }
 impl Kind {
     pub(crate) fn waits(self) -> bool {
@@ -234,6 +235,8 @@ pub(crate) enum Request {
         rocky_credentials::PublicKey,
         Reply<Option<rocky_credentials::PublicKey>>,
     ),
+    DeviceCredential(Reply<crate::DeviceCredential>),
+    SignExtension(Vec<u8>, Reply<rocky_credentials::Signature>),
 }
 impl Request {
     pub(crate) fn kind(&self) -> Kind {
@@ -296,6 +299,7 @@ impl Request {
             Self::PartitionRecipients(..) => Kind::PartitionStatus,
             Self::SharePartition(..) => Kind::PartitionShare,
             Self::IdentityForNode(..) => Kind::Identities,
+            Self::DeviceCredential(..) | Self::SignExtension(..) => Kind::Extension,
         }
     }
     pub(crate) fn waits(&self) -> bool {
@@ -472,6 +476,12 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::IdentityForNode(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::DeviceCredential(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::SignExtension(_, reply) => {
                 let _ = reply.send(Err(error));
             }
         }

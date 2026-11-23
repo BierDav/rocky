@@ -1,9 +1,10 @@
+use crate::tenancy::{SignedCoordinationGrant, SignedTenantAdmission};
 use crate::{
     certified::{ControlCertificate, DomainControl, TrustBundle},
     service::NetworkCoordinator,
 };
 use rocky_core::{Commitment, Scope, net::Transport};
-use rocky_credentials::{PrivateKey, PublicKey, SignedCoordinationGrant, SignedTenantAdmission};
+use rocky_credentials::{PrivateKey, PublicKey};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -118,10 +119,10 @@ impl ControlClient {
             let grant = match (grant, root) {
                 (Some(grant), _) => grant,
                 (None, Some(root)) => SignedCoordinationGrant::sign(
-                    rocky_credentials::CoordinationGrant {
+                    crate::tenancy::CoordinationGrant {
                         publisher: rocky_credentials::Publisher(domain.publisher),
                         application: domain.application.clone(),
-                        tenant: rocky_credentials::CoordinatorControl(request.tenant.public_key()),
+                        tenant: crate::tenancy::CoordinatorControl(request.tenant.public_key()),
                         not_before: time.saturating_sub(60),
                         expires: time.saturating_add(3600),
                     },

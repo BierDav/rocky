@@ -196,12 +196,12 @@ pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
 pub enum PeerRequest {
-    Renew(RenewRequest),
-    Epochs(EpochRequest),
+    Renew(Box<RenewRequest>),
+    Epochs(Box<EpochRequest>),
     Policy,
     Identity(Box<IdentityEnrollment>),
     LinkEnroll(Box<SignedCapability>),
-    Unlink(RevocationSet),
+    Unlink(Box<RevocationSet>),
     Resolve(PeerResolutionRequest),
     TipSchema { manifest: Commitment },
 }

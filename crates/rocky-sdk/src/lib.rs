@@ -16,6 +16,7 @@ mod delivery;
 mod domain;
 mod enrollment;
 mod error;
+mod extension;
 mod generation;
 mod groups;
 mod identities;
@@ -59,6 +60,7 @@ pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
 pub use enrollment::{NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms};
 pub use error::{Error, ErrorKind};
+pub use extension::DeviceCredential;
 pub use inspection::*;
 pub use invitation::{
     DEFAULT_INVITATION_VALIDITY, Invitation, InvitationId, InvitationRefusal, InviteTerms,

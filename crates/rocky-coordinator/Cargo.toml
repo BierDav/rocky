@@ -1,6 +1,6 @@
 [package]
 name = "rocky-coordinator"
-description = "Generic execution fencing, head confirmation and request deduplication"
+description = "Gap-free counters and at-most-once admission for Rocky databases, and the coordinator protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 license-file.workspace = true
 
 [features]
+default = ["database"]
+database = ["dep:rocky-sdk"]
 test-support = []
 
 # The protocol, the state machine and the client, on every target.
@@ -17,6 +19,7 @@ tracing.workspace = true
 rocky-core.workspace = true
 rocky-credentials.workspace = true
 rocky-platform.workspace = true
+rocky-sdk = { workspace = true, optional = true }
 p2panda-core = "=0.5.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +27,10 @@ tokio = { version = "1", features = ["io-util", "sync"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", features = ["net", "time"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 rocky-credentials = { workspace = true, features = ["test-support"] }

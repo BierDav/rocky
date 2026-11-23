@@ -1,4 +1,8 @@
 use crate::{
+    CoordinationError,
+    tenancy::{SignedCoordinationGrant, SignedTenantAdmission},
+};
+use crate::{
     certified::*,
     machine::Request,
     service::{Operation, Outcome, Registration, Reply},
@@ -9,23 +13,18 @@ use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
-use rocky_credentials::{
-    CoordinationError, CoordinationFuture, CoordinatorIdentity, CredentialChain, NodeKey,
-    RevocationSet, SignedCapability, SignedCoordinationGrant, SignedTenantAdmission,
-};
+use rocky_credentials::{RevocationSet, SignedCapability};
 use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
     key: PrivateKey,
     certificate: Mutex<Option<SignedCapability>>,
-    claims: Mutex<Option<CredentialChain>>,
     public_client_lane: Option<Arc<dyn Transport>>,
     preferred: Mutex<(Option<u64>, Option<u64>)>,
     observer: Mutex<Option<Observer>>,
-    identity: CoordinatorIdentity,
 }
-pub use rocky_credentials::CoordinationObserver as Observer;
+pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
 #[cfg(target_family = "wasm")]
 fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
     Err(CoordinationError::Configuration)
@@ -48,17 +47,10 @@ impl NetworkCoordinator {
         public_client_lane: Option<Arc<dyn Transport>>,
     ) -> Result<Self, CoordinationError> {
         genesis.verify(root, mesh)?;
-        let identity = CoordinatorIdentity {
-            root: *root.as_bytes(),
-            mesh,
-            genesis: genesis.id()?,
-        };
         Ok(Self {
-            identity,
             genesis,
             key,
             certificate: Mutex::new(None),
-            claims: Mutex::new(None),
             public_client_lane,
             preferred: Mutex::new((None, None)),
             observer: Mutex::new(None),
@@ -73,8 +65,8 @@ impl NetworkCoordinator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
-    pub fn present_claims(&self, claims: Option<CredentialChain>) {
-        *self.claims.lock().unwrap_or_else(PoisonError::into_inner) = claims;
+    pub fn genesis(&self) -> Result<Commitment, CoordinationError> {
+        self.genesis.id()
     }
     pub fn connect(
         bundle: &TrustBundle,
@@ -180,8 +172,11 @@ impl NetworkCoordinator {
         id: Commitment,
         operation: Operation,
     ) -> Result<Outcome, CoordinationError> {
-        let request = self.request(id, operation)?;
-        let result = self.send(&request).await;
+        self.submit(&self.request(id, operation)?).await
+    }
+    pub async fn submit(&self, request: &Request) -> Result<Outcome, CoordinationError> {
+        request.within_client_limit()?;
+        let result = self.send(request).await;
         let observer = self
             .observer
             .lock()
@@ -198,26 +193,13 @@ impl NetworkCoordinator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let claims = match operation {
-            Operation::Claim { .. } | Operation::Counter { .. } => self
-                .claims
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-            _ => None,
-        };
-        let mut request = Request::certified(
+        Request::certified(
             self.genesis.id()?,
             id,
             operation,
             (&self.key, certificate),
             now()?,
-        )?;
-        if let Some(claims) = claims {
-            request = request.with_claims(claims, &self.key)?;
-        }
-        request.within_client_limit()?;
-        Ok(request)
+        )
     }
     async fn send(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         timeout(Duration::from_secs(12), async {
@@ -264,7 +246,10 @@ impl NetworkCoordinator {
         certificate: ControlCertificate,
         id: Commitment,
     ) -> Result<Commitment, CoordinationError> {
-        match self.call(id, Operation::Control(certificate)).await? {
+        match self
+            .call(id, Operation::Control(Box::new(certificate)))
+            .await?
+        {
             Outcome::Controlled(reference) => Ok(reference),
             _ => Err(CoordinationError::Corrupt),
         }
@@ -386,70 +371,4 @@ impl NetworkCoordinator {
     }
 }
 #[cfg(test)]
-mod tests;
-
-impl rocky_credentials::Coordinator for NetworkCoordinator {
-    fn node(&self) -> NodeKey {
-        *self.key.public_key().as_bytes()
-    }
-    fn identity(&self) -> CoordinatorIdentity {
-        self.identity
-    }
-    fn bundle(&self) -> Result<rocky_credentials::CoordinatorBundle, CoordinationError> {
-        Ok(rocky_credentials::CoordinatorBundle {
-            identity: self.identity,
-            certified: self.genesis.to_bytes()?,
-            url: None,
-        })
-    }
-    fn bind(
-        &self,
-        key: PrivateKey,
-        certificate: SignedCapability,
-    ) -> Result<Arc<dyn rocky_credentials::Coordinator>, CoordinationError> {
-        if certificate.capability.subject != key.public_key() {
-            return Err(CoordinationError::Denied);
-        }
-        let client = Self::new(
-            self.genesis.clone(),
-            self.genesis.root,
-            self.genesis.genesis.mesh,
-            key,
-            self.public_client_lane.clone(),
-        )?;
-        client.certify(certificate);
-        Ok(Arc::new(client))
-    }
-    fn certify(&self, certificate: SignedCapability) {
-        self.certify(certificate);
-    }
-    fn observe(&self, observer: Observer) {
-        self.observe(observer);
-    }
-    fn present_claims(&self, claims: Option<CredentialChain>) {
-        self.present_claims(claims);
-    }
-    fn claim(
-        &self,
-        scope: Scope,
-        counter: crate::counters::Name,
-        claim: crate::counters::Claim,
-    ) -> CoordinationFuture<'_, u64> {
-        Box::pin(self.claim(scope, counter, claim))
-    }
-    fn counter(
-        &self,
-        scope: Scope,
-        counter: crate::counters::Name,
-        claim: Option<crate::counters::Claim>,
-    ) -> CoordinationFuture<'_, crate::counters::Reading> {
-        Box::pin(self.counter(scope, counter, claim))
-    }
-    fn revoke(
-        &self,
-        scope: Scope,
-        revocations: RevocationSet,
-    ) -> CoordinationFuture<'_, Commitment> {
-        Box::pin(self.revoke(scope, revocations))
-    }
-}
+pub(crate) mod tests;

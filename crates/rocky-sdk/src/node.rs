@@ -2278,7 +2278,7 @@ impl Node {
                 Ok(PeerReply::LinkEnroll(self.accept_link(*certificate).await?))
             }
             PeerRequest::Unlink(known) => {
-                self.accept_unlink(known).await?;
+                self.accept_unlink(*known).await?;
                 let settings = self.settings.lock().await;
                 let database = settings.database_context()?;
                 let mut committed = settings.revocations.clone();

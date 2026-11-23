@@ -1,17 +1,17 @@
 use super::*;
+use crate::tenancy::{CoordinationGrant, CoordinatorControl};
 use crate::{
-    certified::SkewedClock,
     counters::{CLAIM_WINDOW, Claim, Lookup, Name},
     machine::{Metadata, self_certificate_in},
     retention::DAY,
 };
 use rocky_core::net::{BoxFuture, Failure, Stream};
-use rocky_credentials::{CoordinationGrant, CoordinatorControl, Publisher};
+use rocky_credentials::Publisher;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-const KIND: &str = "memory";
+pub(crate) const KIND: &str = "memory";
 
-struct Memory {
+pub(crate) struct Memory {
     genesis: Commitment,
     key: PrivateKey,
     state: Arc<Mutex<Metadata>>,
@@ -58,7 +58,7 @@ impl Memory {
         let _ = served.await;
     }
 }
-struct Lane(Arc<Memory>, &'static str);
+pub(crate) struct Lane(pub(crate) Arc<Memory>, pub(crate) &'static str);
 impl Transport for Lane {
     fn request<'a>(
         &'a self,
@@ -139,11 +139,11 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
     .unwrap()
 }
 
-struct Service {
-    bundle: TrustBundle,
-    voter: Arc<Memory>,
-    scope: Scope,
-    publisher: PrivateKey,
+pub(crate) struct Service {
+    pub(crate) bundle: TrustBundle,
+    pub(crate) voter: Arc<Memory>,
+    pub(crate) scope: Scope,
+    publisher: PublicKey,
     node: PrivateKey,
     owner: NetworkCoordinator,
     tenant: PrivateKey,
@@ -154,6 +154,21 @@ impl Service {
         Self::answered_by(None).await
     }
     async fn answered_by(impostor: Option<PrivateKey>) -> Self {
+        let publisher = PrivateKey::new();
+        let scope = Scope {
+            mesh: MeshId([0x72; 16]),
+            app: ApplicationManifest::app_id(*publisher.public_key().as_bytes(), "invoices"),
+            domain: DomainId([0x73; 16]),
+        };
+        Self::serving(impostor, &publisher, scope, "invoices").await
+    }
+    pub(crate) async fn serving(
+        impostor: Option<PrivateKey>,
+        publisher: &dyn rocky_credentials::IdentityProvider,
+        scope: Scope,
+        application: &str,
+    ) -> Self {
+        let publisher_key = publisher.public_key().unwrap();
         let voter = PrivateKey::new();
         let genesis = genesis(&voter);
         let memory = Arc::new(Memory {
@@ -165,25 +180,19 @@ impl Service {
             streams: AtomicUsize::new(0),
             clock_ahead_seconds: Default::default(),
         });
-        let publisher = PrivateKey::new();
         let tenant = PrivateKey::new();
         let node = PrivateKey::new();
-        let scope = Scope {
-            mesh: MeshId([0x72; 16]),
-            app: ApplicationManifest::app_id(*publisher.public_key().as_bytes(), "invoices"),
-            domain: DomainId([0x73; 16]),
-        };
         let bundle = TrustBundle::new(&genesis).unwrap();
         let time = now().unwrap();
         let grant = SignedCoordinationGrant::sign(
             CoordinationGrant {
-                publisher: Publisher(publisher.public_key()),
-                application: "invoices".into(),
+                publisher: Publisher(publisher_key),
+                application: application.into(),
                 tenant: CoordinatorControl(tenant.public_key()),
                 not_before: time - 60,
                 expires: time + 3600,
             },
-            &publisher,
+            publisher,
         )
         .unwrap();
         let control = DomainControl {
@@ -191,7 +200,7 @@ impl Service {
             configuration: genesis.genesis.configuration,
             revision: 1,
             trusted: vec![node.public_key()],
-            publisher: Some(Box::new(publisher.public_key())),
+            publisher: Some(Box::new(publisher_key)),
             not_before: time - 60,
             expires: time + 3600,
         };
@@ -224,35 +233,27 @@ impl Service {
             bundle,
             voter: memory,
             scope,
-            publisher,
+            publisher: publisher_key,
             node,
             owner,
             tenant,
             control: Mutex::new(control),
         }
     }
-    async fn pass(&self, clock: &SkewedClock, seconds: u64) {
-        clock.pass(seconds);
-        let time = now().unwrap();
-        let renewed = {
-            let mut control = self.control.lock().unwrap_or_else(PoisonError::into_inner);
-            control.revision += 1;
-            control.not_before = time - 60;
-            control.expires = time + 3600;
-            ControlCertificate::sign(control.clone(), &self.tenant).unwrap()
-        };
-        self.owner.control(renewed, nonce()).await.unwrap();
-    }
     fn database(&self) -> rocky_credentials::DatabaseContext {
         rocky_credentials::DatabaseContext {
-            publisher: self.publisher.public_key(),
+            publisher: self.publisher,
             scope: self.scope,
         }
     }
     fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
         self.client_on(key, Arc::new(Lane(self.voter.clone(), KIND)))
     }
-    fn client_on(&self, key: &PrivateKey, transport: Arc<dyn Transport>) -> NetworkCoordinator {
+    pub(crate) fn client_on(
+        &self,
+        key: &PrivateKey,
+        transport: Arc<dyn Transport>,
+    ) -> NetworkCoordinator {
         let client = NetworkCoordinator::connect(&self.bundle, key.clone(), transport).unwrap();
         client.certify(self_certificate_in(key, self.database()));
         client
@@ -289,33 +290,6 @@ async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
         "a client reopened on the same node sees the same counter"
     );
     assert_eq!(reopened.claim(service.scope, invoices, second).await, Ok(2));
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn the_network_coordinator_meets_the_claim_contract() {
-    let clock = SkewedClock::new();
-    let service = Service::start().await;
-    rocky_credentials::testing::claim_contract(
-        &service.client(&service.node),
-        service.scope,
-        async |seconds| service.pass(&clock, seconds).await,
-    )
-    .await;
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn the_network_coordinator_meets_the_coordinator_contract() {
-    let service = Service::start().await;
-    rocky_credentials::testing::coordinator_contract(
-        &service.client(&service.node),
-        &service.node,
-        service.database(),
-        rocky_credentials::testing::CoordinatorBehaviour {
-            observes_calls: true,
-            denies_untrusted_claims: true,
-        },
-    )
-    .await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -368,101 +342,6 @@ async fn only_trusted_nodes_claim() {
         .await
         .unwrap();
     assert_eq!(reading.value, 0);
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
-    use rocky_credentials::{
-        Authority, CLAIM_LIFETIME, ClaimRight, CredentialChain, Revocation, RevocationSet,
-        SignedRevocation,
-    };
-    let service = Service::start().await;
-    let (identity, node) = (PrivateKey::new(), PrivateKey::new());
-    let time = now().unwrap();
-    let link = Authority::owner(&service.publisher)
-        .issue_claims(
-            identity.public_key(),
-            ClaimRight {
-                scope: service.scope,
-                counters: Some([b"invoices".to_vec()].into()),
-                grant: [7; 32],
-            },
-            1,
-            (time, CLAIM_LIFETIME),
-        )
-        .unwrap();
-    let chain = CredentialChain(vec![link])
-        .certify_claims(&identity, &node)
-        .unwrap();
-    let holder = service.client(&node);
-    let invoices = Name::new("invoices").unwrap();
-    let first = Claim::fresh().unwrap();
-    assert_eq!(
-        holder.claim(service.scope, invoices.clone(), first).await,
-        Err(CoordinationError::Denied)
-    );
-    holder.present_claims(Some(chain));
-    assert_eq!(
-        holder.claim(service.scope, invoices.clone(), first).await,
-        Ok(1)
-    );
-    assert_eq!(
-        holder.claim(service.scope, invoices.clone(), first).await,
-        Ok(1)
-    );
-    assert_eq!(
-        holder
-            .claim(
-                service.scope,
-                Name::new("credits").unwrap(),
-                Claim::fresh().unwrap()
-            )
-            .await,
-        Err(CoordinationError::Denied)
-    );
-    let trusted = service.client(&service.node);
-    assert_eq!(
-        trusted
-            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
-            .await,
-        Ok(2)
-    );
-
-    let statement = SignedRevocation::sign_in(
-        Revocation {
-            app: service.scope.app,
-            issuer: service.publisher.public_key(),
-            time,
-            nodes: Default::default(),
-            identities: [identity.public_key()].into(),
-            capabilities: Default::default(),
-            cut: Default::default(),
-            mode: rocky_credentials::RevocationMode::Lost,
-        },
-        &service.publisher,
-        &CredentialChain::default(),
-        rocky_credentials::DatabaseContext {
-            publisher: service.publisher.public_key(),
-            scope: service.scope,
-        },
-    )
-    .unwrap();
-    holder
-        .revoke(
-            service.scope,
-            RevocationSet::try_from(vec![statement]).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        holder.claim(service.scope, invoices.clone(), first).await,
-        Err(CoordinationError::Denied),
-        "a pushed revocation denies its holder from then on"
-    );
-    assert_eq!(
-        holder.counter(service.scope, invoices, None).await,
-        Err(CoordinationError::Denied)
-    );
 }
 
 fn control_beyond_the_client_request_limit(service: &Service) -> ControlCertificate {
@@ -586,108 +465,20 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         Err(CoordinationError::Configuration)
     ));
 }
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn application_client_bindings_keep_node_authority_and_observers_independent() {
-    let service = Service::start().await;
-    let client =
-        crate::Client::connect(&service.bundle, Arc::new(Lane(service.voter.clone(), KIND)))
-            .unwrap();
-    let bind = |key: &PrivateKey| {
-        client
-            .bind(
-                key.clone(),
-                self_certificate_in(
-                    key,
-                    rocky_credentials::DatabaseContext {
-                        publisher: service.publisher.public_key(),
-                        scope: service.scope,
-                    },
-                ),
-            )
-            .unwrap()
-    };
-    let trusted = bind(&service.node);
-    let stranger = bind(&PrivateKey::new());
-    assert_eq!(trusted.node(), *service.node.public_key().as_bytes());
-    assert_ne!(trusted.node(), stranger.node());
-    let trusted_calls = Arc::new(AtomicUsize::new(0));
-    let stranger_calls = Arc::new(AtomicUsize::new(0));
-    for (client, calls) in [
-        (&trusted, trusted_calls.clone()),
-        (&stranger, stranger_calls.clone()),
-    ] {
-        client.observe(Arc::new(move |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-        }));
-    }
-    let counter = Name::new("invoices").unwrap();
-    let claim = Claim::fresh().unwrap();
-    assert_eq!(
-        trusted.claim(service.scope, counter.clone(), claim).await,
-        Ok(1)
-    );
-    assert_eq!(
-        stranger.claim(service.scope, counter.clone(), claim).await,
-        Err(CoordinationError::Denied)
-    );
-    assert_eq!(trusted.claim(service.scope, counter, claim).await, Ok(1));
-    assert_eq!(trusted_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(stranger_calls.load(Ordering::SeqCst), 1);
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_connector_reaches_only_the_coordinator_its_bundle_certifies() {
-    use rocky_credentials::{Coordinator, CoordinatorConnector};
-    let certified = genesis(&PrivateKey::new());
-    let memory = Arc::new(Memory {
-        genesis: certified.id().unwrap(),
-        key: PrivateKey::new(),
-        state: Arc::new(Mutex::new(Metadata::new(certified.clone()).unwrap())),
-        streams: AtomicUsize::new(0),
-        clock_ahead_seconds: Default::default(),
-    });
-    let lane = Arc::new(Lane(memory, KIND));
-    let named = NetworkCoordinator::connect(
-        &TrustBundle::new(&certified).unwrap(),
-        PrivateKey::new(),
-        lane.clone(),
-    )
-    .unwrap()
-    .bundle()
-    .unwrap();
-    let connector = crate::Connector::new(lane);
-    let reached = connector.connect(&named).unwrap();
-    assert_eq!(reached.identity(), named.identity);
-
-    let mut forged = named.clone();
-    forged.certified = genesis(&PrivateKey::new()).to_bytes().unwrap();
-    assert!(
-        connector.connect(&forged).is_err(),
-        "another service's genesis does not verify against the named identity"
-    );
-    let mut renamed = named;
-    renamed.identity.genesis = [9; 32];
-    assert!(
-        connector.connect(&renamed).is_err(),
-        "a genesis other than the named one is refused"
-    );
-}
-
-struct CallerOwned {
+pub(crate) struct CallerOwned {
     lane: Lane,
     refusing: AtomicBool,
     closes: AtomicUsize,
 }
 impl CallerOwned {
-    fn new(lane: Lane) -> Arc<Self> {
+    pub(crate) fn new(lane: Lane) -> Arc<Self> {
         Arc::new(Self {
             lane,
             refusing: AtomicBool::new(false),
             closes: AtomicUsize::new(0),
         })
     }
-    fn refuse_connections(&self, refusing: bool) {
+    pub(crate) fn refuse_connections(&self, refusing: bool) {
         self.refusing.store(refusing, Ordering::SeqCst);
     }
     fn closes(&self) -> usize {
@@ -787,52 +578,5 @@ async fn connecting_never_closes_the_callers_transport() {
         (transport.closes(), unserved.closes()),
         (0, 0),
         "a client never closes the transport its caller owns"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_connector_never_closes_the_callers_transport() {
-    use rocky_credentials::{Coordinator, CoordinatorConnector};
-    let service = Service::start().await;
-    let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
-    let bundle = service.owner.bundle().unwrap();
-    let invoices = Name::new("invoices").unwrap();
-    let bind = |coordinator: &dyn Coordinator| {
-        coordinator
-            .bind(
-                service.node.clone(),
-                self_certificate_in(&service.node, service.database()),
-            )
-            .unwrap()
-    };
-    {
-        let connector = crate::Connector::new(transport.clone());
-        let bound = bind(&*connector.connect(&bundle).unwrap());
-        assert_eq!(
-            bound
-                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
-                .await,
-            Ok(1)
-        );
-        let mut renamed = bundle.clone();
-        renamed.identity.genesis = [9; 32];
-        assert!(connector.connect(&renamed).is_err());
-    }
-    let reconnected = bind(
-        &*crate::Connector::new(transport.clone())
-            .connect(&bundle)
-            .unwrap(),
-    );
-    assert_eq!(
-        reconnected
-            .claim(service.scope, invoices, Claim::fresh().unwrap())
-            .await,
-        Ok(2),
-        "the caller's transport still carries a new connection"
-    );
-    assert_eq!(
-        transport.closes(),
-        0,
-        "a connector never closes the transport its caller owns"
     );
 }

@@ -9,9 +9,6 @@ pub struct Publisher(pub PublicKey);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Identity(pub PublicKey);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CoordinatorControl(pub PublicKey);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     NodeCertificate,

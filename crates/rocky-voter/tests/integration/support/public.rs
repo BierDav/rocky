@@ -1,12 +1,13 @@
 #![expect(dead_code, reason = "Shared by independent multiprocess exercises.")]
 use super::timestamp;
 use p2panda_core::{PrivateKey, PublicKey};
+use rocky_coordinator::tenancy::{
+    CoordinationGrant, CoordinatorControl, SignedCoordinationGrant, SignedTenantAdmission,
+    TenantAdmission,
+};
 use rocky_coordinator::{certified::*, service::*};
 use rocky_core::{net::Transport, *};
-use rocky_credentials::{
-    CoordinationGrant, CoordinatorControl, Publisher, SignedCoordinationGrant,
-    SignedTenantAdmission, TenantAdmission,
-};
+use rocky_credentials::Publisher;
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},

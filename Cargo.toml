@@ -16,8 +16,9 @@ publish = false
 rocky-core = { path = "crates/rocky-core", version = "=0.1.0" }
 rocky-credentials = { path = "crates/rocky-credentials", version = "=0.1.0" }
 rocky-secure = { path = "crates/rocky-secure", version = "=0.1.0" }
+rocky-sdk = { path = "crates/rocky-sdk", version = "=0.1.0" }
 rocky-storage = { path = "crates/rocky-storage", version = "=0.1.0" }
-rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0" }
+rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0", default-features = false }
 rocky-voter = { path = "crates/rocky-voter" }
 rocky-iroh = { path = "crates/rocky-iroh", version = "=0.1.0" }
 rocky-tcp = { path = "crates/rocky-tcp", version = "=0.1.0" }

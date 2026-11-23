@@ -527,8 +527,7 @@ impl<'a> Authority<'a> {
                 let scope = grants
                     .first()
                     .map(|grant| grant.scope.domain)
-                    .or_else(|| extended.partitions.first().map(|grant| grant.domain))
-                    .or_else(|| extended.claims.as_ref().map(|claims| claims.scope));
+                    .or_else(|| extended.partitions.first().map(|grant| grant.domain));
                 scope.and_then(|scope| {
                     self.signer
                         .principal()
@@ -544,10 +543,6 @@ impl<'a> Authority<'a> {
                 .partitions
                 .iter()
                 .any(|grant| grant.domain != database.scope)
-            || extended
-                .claims
-                .as_ref()
-                .is_some_and(|claims| claims.scope != database.scope)
         {
             return Err(denied("a grant belongs to another database"));
         }
@@ -557,13 +552,6 @@ impl<'a> Authority<'a> {
         }
         if ttl > MAX_CHAIN_LIFETIME || skew > crate::LIFETIME_SKEW {
             return Err(denied("a credential lives at most 366 days"));
-        }
-        if extended.claims.is_some()
-            && (ttl > crate::CLAIM_LIFETIME || skew > crate::CLAIM_SKEW || !grants.is_empty())
-        {
-            return Err(denied(
-                "a claim link holds no grants and lives at most a day",
-            ));
         }
         let (mut not_before, mut expires) = (time.saturating_sub(skew), time.saturating_add(ttl));
         if let Some(parent) = self.chain.0.last() {
@@ -625,7 +613,6 @@ impl<'a> Authority<'a> {
                 families: extended.families,
                 issues: extended.issues,
                 trusted: None,
-                claims: extended.claims,
                 origin: extended.origin,
                 ..Extended::default()
             },

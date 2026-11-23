@@ -1,8 +1,8 @@
 pub mod public;
 use p2panda_core::PrivateKey;
+use rocky_coordinator::CoordinationError;
 use rocky_coordinator::{certified::*, service::*};
 use rocky_core::*;
-use rocky_credentials::CoordinationError;
 use std::{
     collections::BTreeSet,
     path::PathBuf,

@@ -4,6 +4,7 @@ use openraft::{
     BasicNode, LogId, RaftMetrics, SnapshotPolicy, error::Fatal, raft::ClientWriteResponse,
 };
 use p2panda_core::{PrivateKey, PublicKey};
+use rocky_coordinator::CoordinationError;
 use rocky_coordinator::{
     certified::*,
     protocol::{Reply, Request},
@@ -13,7 +14,6 @@ use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
-use rocky_credentials::CoordinationError;
 use std::{
     collections::{BTreeSet, HashMap},
     convert::Infallible,

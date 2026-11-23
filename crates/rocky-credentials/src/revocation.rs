@@ -282,10 +282,7 @@ impl SignedRevocation {
                 self.statement.nodes.contains(&node)
                     && (!self.identity_unlink() || link.issuer == self.statement.issuer)
             })
-            || capabilities.contains(&link.id()?)
-            || extended
-                .claims
-                .is_some_and(|right| capabilities.contains(&right.grant)))
+            || capabilities.contains(&link.id()?))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
@@ -848,9 +845,6 @@ impl RevocationSet {
                     || self.membership_ends(link.issuer, node)
             })
             || capabilities.contains(&link.id()?)
-            || extended
-                .claims
-                .is_some_and(|right| capabilities.contains(&right.grant))
             || extended
                 .origin
                 .is_some_and(|origin| self.revokes_origin(&origin.identity)))

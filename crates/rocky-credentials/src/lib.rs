@@ -14,15 +14,6 @@ macro_rules! never_implements {
 
 mod author_binding;
 mod checkpoint_record;
-mod claims;
-mod coordination;
-mod coordinator;
-pub mod counters;
-pub use coordinator::{
-    Configuration, CoordinationError, CoordinationFuture, CoordinationObserver, Coordinator,
-    CoordinatorBundle, CoordinatorConnector, CoordinatorIdentity, MAX_BUNDLE_URL,
-    MAX_COORDINATOR_BUNDLE, NodeKey, genesis,
-};
 mod delivery;
 mod discovery;
 mod enroll;
@@ -52,22 +43,13 @@ pub use author_binding::AuthorBinding;
 pub use checkpoint_record::{
     CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement, SignedCheckpointRecord,
 };
-pub use claims::{
-    CLAIM_LIFETIME, CLAIM_SKEW, ClaimRight, MAX_CLAIM_COUNTER_NAME, MAX_CLAIM_COUNTERS,
-};
-pub use coordination::{
-    CoordinationGrant, MAX_APPLICATION_NAME, SignedCoordinationGrant, SignedTenantAdmission,
-    TenantAdmission,
-};
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
-pub use identity::{
-    CoordinatorControl, FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose,
-};
+pub use identity::{FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose};
 pub use identity_key::IdentityKey;
 pub use issuance::{Delegation, DelegationTerms, Validity};
 pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_chain};
@@ -163,6 +145,17 @@ pub fn decode_bounded<T: Serialize + DeserializeOwned>(
 pub fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error> {
     encode(&(label, value))
 }
+pub const EXTENSION_LABEL_PREFIX: &str = "rocky.ext.";
+pub const MAX_EXTENSION_LABEL: usize = 128;
+pub fn extension_message(label: &str, message: &[u8]) -> Result<Vec<u8>, Error> {
+    let named = label
+        .strip_prefix(EXTENSION_LABEL_PREFIX)
+        .is_some_and(|name| !name.is_empty());
+    if !named || label.len() > MAX_EXTENSION_LABEL || !label.is_ascii() {
+        return Err(denied("an extension signs only under a rocky.ext. label"));
+    }
+    signing_bytes(label, &serde_bytes::Bytes::new(message))
+}
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -205,5 +198,27 @@ mod tests {
             signing_bytes("rocky.example.v2", &value).unwrap(),
             "one value signs differently under every label"
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_extension_signs_only_under_its_own_label_space() {
+        let message = extension_message("rocky.ext.counters.v1", b"claim").unwrap();
+        assert_ne!(
+            message,
+            extension_message("rocky.ext.counters.v2", b"claim").unwrap()
+        );
+        for label in [
+            "rocky.seal.v3",
+            "rocky.ext.",
+            "rocky.ext",
+            "other.ext.x",
+            "rocky.ext.é",
+        ] {
+            assert!(
+                extension_message(label, b"claim").is_err(),
+                "{label} is not an extension label"
+            );
+        }
+        assert!(extension_message(&format!("rocky.ext.{}", "x".repeat(128)), b"").is_err());
     }
 }

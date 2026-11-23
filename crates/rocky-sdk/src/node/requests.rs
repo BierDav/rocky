@@ -236,7 +236,27 @@ impl Node {
             Request::IdentityForNode(node, reply) => {
                 let _ = reply.send(self.identity_for_node(node).await);
             }
+            Request::DeviceCredential(reply) => {
+                let _ = reply.send(self.device_credential().await);
+            }
+            Request::SignExtension(signing, reply) => {
+                let _ = reply.send(Settings::node_key(&self.vault).map(|node| node.sign(&signing)));
+            }
         }
+    }
+
+    async fn device_credential(&self) -> Result<crate::DeviceCredential, Failure> {
+        let node = Settings::node_key(&self.vault)?.public_key();
+        let revocations = self.replica.revocations().await;
+        let settings = self.settings.lock().await;
+        Ok(crate::DeviceCredential {
+            scope: self.domain().scope,
+            publisher: settings.publisher,
+            identity: settings.identity,
+            node,
+            chain: settings.credentials.clone(),
+            revocations,
+        })
     }
 
     async fn next_activity(

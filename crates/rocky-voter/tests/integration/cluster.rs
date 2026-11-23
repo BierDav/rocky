@@ -1,10 +1,10 @@
 use crate::support;
+use rocky_coordinator::CoordinationError;
 use rocky_coordinator::{
     counters::{Claim, Lookup, Name},
     service::{NetworkCoordinator, Operation, Outcome},
 };
 use rocky_core::*;
-use rocky_credentials::CoordinationError;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
 
@@ -16,7 +16,10 @@ async fn three_persistent_voters_keep_controls_and_counters_across_restarts() {
     let alice = cluster.client(&cluster.executor);
     let alternate = cluster.client(&cluster.alternate);
     issuer
-        .call([1; 32], Operation::Control(cluster.app_control(1)))
+        .call(
+            [1; 32],
+            Operation::Control(Box::new(cluster.app_control(1))),
+        )
         .await
         .unwrap();
     let first = fresh_claim(1);
@@ -104,12 +107,15 @@ async fn three_persistent_voters_keep_controls_and_counters_across_restarts() {
     invalid.control.configuration = [0; 16];
     assert!(
         issuer
-            .call([7; 32], Operation::Control(invalid))
+            .call([7; 32], Operation::Control(Box::new(invalid)))
             .await
             .is_err()
     );
     issuer
-        .call([9; 32], Operation::Control(cluster.app_control(2)))
+        .call(
+            [9; 32],
+            Operation::Control(Box::new(cluster.app_control(2))),
+        )
         .await
         .unwrap();
     assert_eq!(reading(&alice, cluster.scope).await, Ok(taken));
@@ -137,7 +143,10 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     let issuer = cluster.client(&cluster.issuer);
     let alice = cluster.client(&cluster.executor);
     issuer
-        .call([1; 32], Operation::Control(cluster.app_control(1)))
+        .call(
+            [1; 32],
+            Operation::Control(Box::new(cluster.app_control(1))),
+        )
         .await
         .unwrap();
     let mut last = None;
@@ -283,7 +292,10 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         Arc::new(cluster.client(&cluster.alternate)),
     ];
     issuer
-        .call([1; 32], Operation::Control(cluster.app_control(1)))
+        .call(
+            [1; 32],
+            Operation::Control(Box::new(cluster.app_control(1))),
+        )
         .await
         .unwrap();
     let scope = cluster.scope;

@@ -21,7 +21,6 @@ fn delegated(
         delegations: 2,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             trusted: None,
-            claims: None,
             origin: None,
             partitions: Vec::new(),
             node: None,
@@ -53,7 +52,6 @@ fn delegated(
         expires: rocky_credentials::NEVER,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             trusted: None,
-            claims: None,
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
             database: Some(database),
             sequence: Some(0),

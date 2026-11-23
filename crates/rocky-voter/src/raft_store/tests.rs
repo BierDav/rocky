@@ -465,7 +465,7 @@ async fn register_control(
     let request = self_certified(
         genesis.id().unwrap(),
         rocky_coordinator::protocol::nonce(),
-        Operation::Control(certificate),
+        Operation::Control(Box::new(certificate)),
         authority,
         time,
     )

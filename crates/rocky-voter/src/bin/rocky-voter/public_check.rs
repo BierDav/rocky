@@ -1,9 +1,8 @@
 use p2panda_core::PrivateKey;
+use rocky_coordinator::tenancy::{CoordinationGrant, CoordinatorControl, SignedCoordinationGrant};
 use rocky_coordinator::{certified::*, service::NetworkCoordinator};
 use rocky_core::*;
-use rocky_credentials::{
-    CoordinationGrant, CoordinatorControl, Publisher, SignedCoordinationGrant,
-};
+use rocky_credentials::Publisher;
 use rocky_iroh::iroh::{Endpoint, RelayMode, RelayUrl, SecretKey, endpoint::presets};
 use std::path::Path;
 

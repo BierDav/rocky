@@ -1,6 +1,8 @@
+use crate::CoordinationError;
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
-use rocky_credentials::{Configuration, CoordinationError};
+
+pub type Configuration = [u8; 16];
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
@@ -241,34 +243,8 @@ pub fn now() -> Result<u64, CoordinationError> {
         .duration_since(rocky_platform::time::UNIX_EPOCH)
         .map(|t| t.as_secs())
         .map_err(|_| CoordinationError::Corrupt)?;
-    #[cfg(test)]
-    let time = time.saturating_add(CLOCK_SKEW.with(std::cell::Cell::get));
     Ok(time)
 }
-#[cfg(test)]
-thread_local! {
-    static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-#[cfg(test)]
-#[must_use]
-pub(crate) struct SkewedClock(());
-#[cfg(test)]
-impl SkewedClock {
-    pub(crate) fn new() -> Self {
-        CLOCK_SKEW.with(|skew| skew.set(0));
-        Self(())
-    }
-    pub(crate) fn pass(&self, seconds: u64) {
-        CLOCK_SKEW.with(|skew| skew.set(skew.get().saturating_add(seconds)));
-    }
-}
-#[cfg(test)]
-impl Drop for SkewedClock {
-    fn drop(&mut self) {
-        CLOCK_SKEW.with(|skew| skew.set(0));
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustBundle {

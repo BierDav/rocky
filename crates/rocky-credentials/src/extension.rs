@@ -1,7 +1,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 15;
+const EXTENSION_VERSION: u32 = 16;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,7 +17,6 @@ struct Body {
     families: bool,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
-    claims: Option<crate::ClaimRight>,
     origin: Option<Origin>,
     sequence: Option<u64>,
     previous: Option<rocky_core::Commitment>,
@@ -35,7 +34,6 @@ pub struct Extended {
     pub families: bool,
     pub issues: bool,
     pub trusted: Option<rocky_core::Scope>,
-    pub claims: Option<crate::ClaimRight>,
     pub origin: Option<Origin>,
     pub sequence: Option<u64>,
     pub previous: Option<rocky_core::Commitment>,
@@ -68,7 +66,6 @@ impl Extension {
             node: extended.node,
             issues: extended.issues,
             trusted: extended.trusted,
-            claims: extended.claims,
             origin: extended.origin,
             sequence: extended.sequence,
             previous: extended.previous,
@@ -100,16 +97,12 @@ impl Extension {
         for grant in &body.partitions {
             grant.validate()?;
         }
-        if let Some(claims) = &body.claims {
-            claims.validate()?;
-        }
         Ok(Extended {
             partitions: body.partitions,
             families: body.families,
             node: body.node,
             issues: body.issues,
             trusted: body.trusted,
-            claims: body.claims,
             origin: body.origin,
             sequence: body.sequence,
             previous: body.previous,
@@ -145,7 +138,8 @@ mod tests {
             12,
             13,
             14,
-            16,
+            15,
+            17,
             u32::MAX,
         ] {
             let other = Extension(
@@ -156,7 +150,6 @@ mod tests {
                     families: false,
                     issues: false,
                     trusted: None,
-                    claims: None,
                     origin: None,
                     sequence: None,
                     previous: None,

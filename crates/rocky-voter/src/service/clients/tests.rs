@@ -186,9 +186,10 @@ async fn registered_tenant(
     transport: Arc<CallerOwned>,
     genesis: &CertifiedGenesis,
 ) -> NetworkCoordinator {
-    use rocky_credentials::{
-        CoordinationGrant, CoordinatorControl, Publisher, SignedCoordinationGrant,
+    use rocky_coordinator::tenancy::{
+        CoordinationGrant, CoordinatorControl, SignedCoordinationGrant,
     };
+    use rocky_credentials::Publisher;
     let tenant = PrivateKey::new();
     let publisher = PrivateKey::new();
     let time = now().unwrap();

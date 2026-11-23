@@ -223,9 +223,6 @@ impl Node {
             Request::RemovePeer(node, reply) => {
                 let _ = reply.send(self.remove_peer(node).await);
             }
-            Request::EnrollmentUpstream(contact, reply) => {
-                let _ = reply.send(self.enrollment_upstream(contact.as_deref()).await);
-            }
             Request::DeviceRevocationReceipt(node, reply) => {
                 let _ = reply.send(Ok(self
                     .settings

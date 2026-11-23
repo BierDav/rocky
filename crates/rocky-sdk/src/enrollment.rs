@@ -30,13 +30,13 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 39;
+pub const VERSION: u32 = 40;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
 pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
-const PROVISION_VERSION: u32 = 1;
-const CONTACT_VERSION: u32 = 3;
+const PROVISION_VERSION: u32 = 2;
+const CONTACT_VERSION: u32 = 4;
 pub const MAX_CONTACTS: usize = 64;
 pub const MAX_DIALED: usize = 16;
 const MAX_ISSUERS: usize = crate::registry::MAX_TRUSTED;
@@ -265,13 +265,9 @@ pub struct Settings {
     #[serde(skip)]
     pub issuers: Vec<PublicKey>,
     #[serde(skip)]
-    pub enrollment_upstream: Option<PublicKey>,
-    #[serde(skip)]
     pub peers: BTreeMap<PublicKey, Contact>,
     #[serde(skip)]
     pub contact_meta: BTreeMap<PublicKey, crate::mesh::ContactMeta>,
-    #[serde(skip)]
-    pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
     pub claims: Option<crate::claims::Holding>,
@@ -402,7 +398,6 @@ pub(crate) struct ContactRecord {
     pub(crate) node: PublicKey,
     pub(crate) routes: Vec<Route>,
     issuer: bool,
-    enrollment_only: bool,
 }
 impl ContactRecord {
     pub(crate) fn parse(uri: &str) -> Result<Self, Failure> {
@@ -420,9 +415,6 @@ impl ContactRecord {
         if record.database.publisher != record.publisher {
             return Err("contact database publisher mismatch".into());
         }
-        if record.enrollment_only && !record.issuer {
-            return Err("invalid enrollment-only contact".into());
-        }
         Ok(record)
     }
 }
@@ -433,7 +425,6 @@ pub(crate) struct ProvisioningBundle {
     routes: Vec<Route>,
     publisher: PublicKey,
     database: rocky_credentials::DatabaseContext,
-    via_custody: bool,
     node_key: String,
     identity_key: String,
     enrollment: Box<Enrollment>,
@@ -442,7 +433,6 @@ pub(crate) struct EnrollingIssuer {
     pub(crate) publisher: PublicKey,
     pub(crate) database: rocky_credentials::DatabaseContext,
     pub(crate) routes: Vec<Route>,
-    pub(crate) via_custody: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -489,10 +479,6 @@ impl Sealed {
 }
 
 impl ProvisioningBundle {
-    #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn profile(&self) -> &Profile {
-        &self.enrollment.profile
-    }
     pub(crate) fn parse(uri: &str) -> Result<Self, Failure> {
         let bytes = BASE64URL_NOPAD.decode(
             uri.trim()
@@ -799,11 +785,7 @@ impl Settings {
             return Err("unsupported identity version; reinstall the domain".into());
         }
         let settings: Self = serde_json::from_value(value)?;
-        for contact in settings
-            .peers
-            .values()
-            .chain(settings.enrollment_routes.values())
-        {
+        for contact in settings.peers.values() {
             Contact::checked(contact.routes.clone())?;
         }
         if settings.contact_meta.len() > MAX_CONTACTS
@@ -817,14 +799,7 @@ impl Settings {
         {
             return Err("invalid contact metadata".into());
         }
-        if settings.peers.len() > MAX_CONTACTS
-            || settings.issuers.len() > MAX_ISSUERS
-            || settings.enrollment_routes.len() > MAX_ISSUERS
-            || settings
-                .enrollment_routes
-                .keys()
-                .any(|node| !settings.issuers.contains(node))
-        {
+        if settings.peers.len() > MAX_CONTACTS || settings.issuers.len() > MAX_ISSUERS {
             return Err("identity holds too many peers".into());
         }
         for epochs in settings
@@ -997,12 +972,7 @@ impl Settings {
             .collect()
     }
     pub fn kept(&self) -> Vec<PublicKey> {
-        self.peers
-            .keys()
-            .chain(&self.issuers)
-            .chain(&self.enrollment_upstream)
-            .copied()
-            .collect()
+        self.peers.keys().chain(&self.issuers).copied().collect()
     }
     pub fn targets(&self) -> Vec<(PublicKey, Contact)> {
         let mut targets: Vec<_> = self
@@ -1032,7 +1002,6 @@ impl Settings {
             node,
             routes: routes.clone(),
             issuer: self.issuer(),
-            enrollment_only: false,
         };
         let uri = format!(
             "rocky://peer/{}",
@@ -1071,18 +1040,10 @@ impl Settings {
                 local: false,
             },
         );
-        self.peers.entry(record.node).or_default();
-        if record.enrollment_only {
-            self.enrollment_routes
-                .entry(record.node)
-                .or_default()
-                .learn(learned.routes);
-        } else {
-            self.peers
-                .entry(record.node)
-                .or_default()
-                .learn(learned.routes);
-        }
+        self.peers
+            .entry(record.node)
+            .or_default()
+            .learn(learned.routes);
         Ok(record.node)
     }
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
@@ -1096,7 +1057,6 @@ impl Settings {
         }
         self.contact_meta.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
-        self.enrollment_routes.remove(&node);
         Ok(())
     }
     pub fn expires(&self) -> u64 {
@@ -1204,11 +1164,6 @@ impl Settings {
             .map(|node| crate::RenewalRoute {
                 target: node.to_hex(),
                 routes: self.peers.get(node).map(routes).unwrap_or_default(),
-                enrollment_routes: self
-                    .enrollment_routes
-                    .get(node)
-                    .map(routes)
-                    .unwrap_or_default(),
             })
             .collect();
         candidates.extend(
@@ -1218,10 +1173,9 @@ impl Settings {
                 .map(|(id, entry)| crate::RenewalRoute {
                     target: HEXLOWER.encode(id.as_bytes()),
                     routes: routes(&entry.contact),
-                    enrollment_routes: entry.enrollment.as_ref().map(routes).unwrap_or_default(),
                 }),
         );
-        candidates.retain(|route| !route.routes.is_empty() || !route.enrollment_routes.is_empty());
+        candidates.retain(|route| !route.routes.is_empty());
         candidates
     }
     pub fn another_issuer(&self, registry: &Registry, membership: &Membership) -> bool {
@@ -1323,13 +1277,11 @@ impl Settings {
             authority: None,
             device_revocations: BTreeMap::new(),
             issuers: Vec::new(),
-            enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
             contact_refs: BTreeMap::new(),
             resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
-            enrollment_routes: BTreeMap::new(),
             logged_out: false,
             deliveries: BTreeMap::new(),
             claims: None,
@@ -1721,7 +1673,6 @@ impl Settings {
         &mut self,
         vault: &Vault,
         routes: Vec<Route>,
-        via_custody: bool,
         admission: (Profile, Option<Vec<u8>>),
         registry: &Registry,
     ) -> Result<((String, PublicKey, PublicKey), Changes), Failure> {
@@ -1738,7 +1689,6 @@ impl Settings {
             routes,
             publisher: self.publisher,
             database: self.database_context()?,
-            via_custody,
             node_key: HEXLOWER.encode(provisioned_node.as_bytes()),
             identity_key: HEXLOWER.encode(&provisioned_identity.secret()),
             enrollment: Box::new(enrollment),
@@ -2197,7 +2147,6 @@ impl Settings {
                 node: *node,
                 routes: contact.routes.clone(),
                 issuer: true,
-                enrollment_only: false,
             };
             contacts.push(format!(
                 "rocky://peer/{}",
@@ -2226,19 +2175,18 @@ impl Settings {
     }
     pub(crate) fn forget_revoked(&mut self) {
         self.contact_refs
-            .retain(|id, entry| entry.upstream || !self.revocations.revokes_reference(id));
+            .retain(|id, _| !self.revocations.revokes_reference(id));
         let gone: Vec<PublicKey> = self
             .peers
             .keys()
             .chain(&self.issuers)
-            .filter(|node| self.revoked(node) && self.enrollment_upstream != Some(**node))
+            .filter(|node| self.revoked(node))
             .copied()
             .collect();
         for node in gone {
             self.peers.remove(&node);
             self.contact_meta.remove(&node);
             self.issuers.retain(|issuer| *issuer != node);
-            self.enrollment_routes.remove(&node);
         }
     }
     pub fn prepare_install(
@@ -2302,13 +2250,11 @@ impl Settings {
             authority: None,
             device_revocations: BTreeMap::new(),
             issuers: Vec::new(),
-            enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
             contact_refs: BTreeMap::new(),
             resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
-            enrollment_routes: BTreeMap::new(),
             logged_out: false,
             deliveries: BTreeMap::new(),
             claims: None,
@@ -2457,7 +2403,6 @@ impl Settings {
                 publisher: bundle.publisher,
                 database: bundle.database,
                 routes: bundle.routes,
-                via_custody: bundle.via_custody,
             },
             *bundle.enrollment,
             (Arc::new(identity_key), single_use),
@@ -2509,24 +2454,11 @@ impl Settings {
             authority: None,
             device_revocations: BTreeMap::new(),
             issuers: vec![enrollment.issuer],
-            enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
             contact_refs: BTreeMap::new(),
             resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
-            peers: BTreeMap::from([(
-                enrollment.issuer,
-                if issuing.via_custody {
-                    Contact::default()
-                } else {
-                    issuer.clone()
-                },
-            )]),
-            enrollment_routes: if issuing.via_custody {
-                BTreeMap::from([(enrollment.issuer, issuer)])
-            } else {
-                BTreeMap::new()
-            },
+            peers: BTreeMap::from([(enrollment.issuer, issuer)]),
             logged_out: false,
             deliveries: BTreeMap::new(),
             claims: None,
@@ -2673,9 +2605,8 @@ impl Settings {
             .filter(|issuer| first.is_none_or(|first| **issuer == first))
         {
             let addresses = self
-                .enrollment_routes
+                .peers
                 .get(issuer)
-                .or_else(|| self.peers.get(issuer))
                 .map(|contact| contact.addresses(transport.kind()))
                 .unwrap_or_default();
             if addresses.is_empty() {
@@ -2797,9 +2728,8 @@ impl Settings {
         issuers.sort_by_key(|issuer| Some(*issuer) != first);
         for issuer in &issuers {
             let addresses = self
-                .enrollment_routes
+                .peers
                 .get(issuer)
-                .or_else(|| self.peers.get(issuer))
                 .map(|contact| contact.addresses(transport.kind()))
                 .unwrap_or_default();
             if addresses.is_empty() {
@@ -3661,43 +3591,6 @@ pub(crate) async fn exchange(
     }
     Ok(reply)
 }
-pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Failure> {
-    fn contact(uri: &str) -> Result<ContactRecord, Failure> {
-        let record = ContactRecord::parse(uri)?;
-        Contact::checked(record.routes.clone())?;
-        Ok(record)
-    }
-    let relay = contact(custody_contact)?;
-    if crate::invitation::is_uri(uri) {
-        crate::invitation::routed_through(uri, relay)
-    } else if uri.trim().starts_with("rocky://provision/") {
-        let mut bundle = ProvisioningBundle::parse(uri)?;
-        if bundle.publisher != relay.publisher {
-            return Err("relay belongs to another domain".into());
-        }
-        bundle.routes = relay.routes;
-        bundle.via_custody = true;
-        Ok(format!(
-            "rocky://provision/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
-        ))
-    } else {
-        let mut issuer = contact(uri)?;
-        if !issuer.issuer {
-            return Err("renewal routing needs an issuer contact".into());
-        }
-        if issuer.publisher != relay.publisher {
-            return Err("relay belongs to another domain".into());
-        }
-        issuer.routes = relay.routes;
-        issuer.enrollment_only = true;
-        Ok(format!(
-            "rocky://peer/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&issuer)?)
-        ))
-    }
-}
-
 pub(crate) fn whole_partitions(
     domain: &Domain,
     grants: &[ResourceGrant],
@@ -3743,8 +3636,6 @@ pub(crate) struct StoredContact {
     pub(crate) contact: Contact,
     meta: Option<crate::mesh::ContactMeta>,
     issuer: bool,
-    enrollment: Option<Contact>,
-    upstream: bool,
 }
 impl Settings {
     pub(crate) fn contact_count(&self) -> usize {
@@ -3776,8 +3667,6 @@ impl Settings {
                     contact: contact.clone(),
                     meta: self.contact_meta.get(node).cloned(),
                     issuer: self.issuers.contains(node),
-                    enrollment: self.enrollment_routes.get(node).cloned(),
-                    upstream: self.enrollment_upstream == Some(*node),
                 },
             );
         }
@@ -3812,10 +3701,8 @@ impl Settings {
             authority,
             device_revocations,
             issuers: _,
-            enrollment_upstream: _,
             peers: _,
             contact_meta: _,
-            enrollment_routes: _,
             logged_out,
             deliveries,
             claims,
@@ -3858,23 +3745,11 @@ impl Settings {
                 .filter(|entry| entry.issuer)
                 .count()
                 > MAX_ISSUERS
-            || self
-                .contact_refs
-                .values()
-                .filter(|entry| entry.upstream)
-                .count()
-                > 1
         {
             return Err("identity holds too many contacts".into());
         }
         for entry in self.contact_refs.values() {
             Contact::checked(entry.contact.routes.clone())?;
-            if let Some(contact) = &entry.enrollment {
-                Contact::checked(contact.routes.clone())?;
-                if !entry.issuer {
-                    return Err("enrollment route requires an issuer".into());
-                }
-            }
             if entry.meta.as_ref().is_some_and(|meta| {
                 !matches!(
                     meta.source.as_str(),
@@ -3898,12 +3773,6 @@ impl Settings {
             if entry.issuer && !self.issuers.contains(&node) {
                 self.issuers.push(node);
             }
-            if let Some(contact) = &entry.enrollment {
-                self.enrollment_routes.insert(node, contact.clone());
-            }
-            if entry.upstream {
-                self.enrollment_upstream = Some(node);
-            }
         }
     }
     pub(crate) async fn resolve_saved_route(
@@ -3914,15 +3783,7 @@ impl Settings {
         let Some(entry) = self.contact_refs.get(&id) else {
             return Ok(None);
         };
-        let contact = if entry.contact.routes.is_empty() {
-            match &entry.enrollment {
-                Some(contact) => contact,
-                None => return Ok(None),
-            }
-        } else {
-            &entry.contact
-        };
-        let addresses = contact.addresses(transport.kind());
+        let addresses = entry.contact.addresses(transport.kind());
         if addresses.is_empty() {
             return Ok(None);
         }
@@ -3938,18 +3799,6 @@ impl Settings {
             return Err("resolution reply kind".into());
         };
         Ok(Some(reply.verify(&request, id)?))
-    }
-    pub(crate) fn has_enrollment_upstream(&self) -> bool {
-        self.enrollment_upstream.is_some() || self.contact_refs.values().any(|entry| entry.upstream)
-    }
-    pub(crate) async fn resolve_saved_upstream(
-        &self,
-        transport: &dyn Transport,
-    ) -> Result<Option<PublicKey>, Failure> {
-        let Some((id, _)) = self.contact_refs.iter().find(|(_, entry)| entry.upstream) else {
-            return Ok(None);
-        };
-        self.resolve_saved_route(transport, *id).await
     }
     pub(crate) fn unresolved_contacts(&self) -> Vec<(rocky_credentials::PeerId, Contact)> {
         self.contact_refs

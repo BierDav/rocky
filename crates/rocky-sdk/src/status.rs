@@ -125,7 +125,6 @@ pub enum RevocationReason {
 pub struct RenewalRoute {
     pub target: String,
     pub routes: Vec<Route>,
-    pub enrollment_routes: Vec<Route>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityStatus {

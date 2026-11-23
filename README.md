@@ -39,9 +39,8 @@ single-use identity the issuer minted, or `Configuration::join_linkable`
 returns its identity phrase once. To keep an identity the person already
 has, an issuer calls `Session::invite` with its public key instead; the
 URI carries no secret, and `Configuration::accept_invitation` joins with
-the configured identity provider over the network, asking the issuing node,
-directly or through a custody relay (`route_enrollment`), for an enrollment
-that node signs. Such an invitation is single use and expires (ten
+the configured identity provider over the network, asking the issuing node
+for an enrollment that node signs. Such an invitation is single use and expires (ten
 minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
 unused one with `Session::withdraw_invitation`. Supply the identity for
 later linking; opening and renewal use the node key alone.
@@ -96,7 +95,7 @@ HTTP server already upgraded through `Attachment::external(url)` and
 A dialer pins the node it expects, so a route must reach one node: behind a
 load balancer give each node its own path.
 Coordination is an application-owned slot: supply `Arc<dyn rocky_sdk::Coordinator>`
-with `Configuration::coordination` (or the engine/custody equivalents).
+with `Configuration::coordination` (or the engine equivalent).
 For voters, construct `rocky_coordinator::Client::connect(&bundle, transport)`
 and pass the returned client. The SDK binds its database node credentials;
 it never starts a coordinator or closes the application's coordinator transport.

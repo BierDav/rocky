@@ -6075,18 +6075,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocky-peer"
-version = "0.1.0"
-dependencies = [
- "rocky-coordinator",
- "rocky-iroh",
- "rocky-sdk",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "rocky-platform"
 version = "0.1.0"
 dependencies = [

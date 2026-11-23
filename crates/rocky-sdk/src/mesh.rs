@@ -133,10 +133,8 @@ impl Settings {
         let expired: Vec<_> = self
             .contact_meta
             .iter()
-            .filter(|(node, meta)| {
-                self.enrollment_upstream != Some(**node)
-                    && meta.source != "application"
-                    && meta.learned.saturating_add(AGE) < time
+            .filter(|(_, meta)| {
+                meta.source != "application" && meta.learned.saturating_add(AGE) < time
             })
             .map(|(node, _)| *node)
             .collect();
@@ -151,11 +149,9 @@ impl Settings {
                 .peers
                 .keys()
                 .filter(|node| {
-                    self.enrollment_upstream != Some(**node)
-                        && self
-                            .contact_meta
-                            .get(node)
-                            .is_none_or(|meta| meta.source != "application")
+                    self.contact_meta
+                        .get(node)
+                        .is_none_or(|meta| meta.source != "application")
                 })
                 .min_by_key(|node| self.contact_meta.get(node).map_or(0, |meta| meta.learned))
                 .copied();
@@ -959,11 +955,10 @@ mod tests {
             settings.learn_contact(&vault, hint(PrivateKey::new().public_key()), "handover", at)?;
         }
         assert_eq!(settings.peers.len(), 64);
-        settings.enrollment_upstream = Some(oldest);
         let newest = PrivateKey::new().public_key();
         settings.learn_contact(&vault, hint(newest), "request", 64)?;
-        assert!(settings.peers.contains_key(&oldest));
-        assert!(!settings.contact_meta.values().any(|meta| meta.learned == 2));
+        assert!(!settings.peers.contains_key(&oldest));
+        assert!(settings.contact_meta.values().any(|meta| meta.learned == 2));
         assert!(settings.peers.contains_key(&newest));
         assert_eq!(settings.peers[&configured].routes[0].address, "configured");
         assert!(!settings.learn_contact(&vault, hint(configured), "handover", 65)?);
@@ -973,8 +968,7 @@ mod tests {
             "handover",
             AGE + 66,
         )?;
-        assert_eq!(settings.peers.len(), 3);
-        assert!(settings.peers.contains_key(&oldest));
+        assert_eq!(settings.peers.len(), 2);
         assert!(settings.peers.contains_key(&configured));
         Ok(())
     }

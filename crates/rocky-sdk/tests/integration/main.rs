@@ -18,8 +18,6 @@ mod coordination_slot;
 #[cfg(not(target_family = "wasm"))]
 mod credentials;
 #[cfg(not(target_family = "wasm"))]
-mod custody;
-#[cfg(not(target_family = "wasm"))]
 mod discovery;
 #[cfg(not(target_family = "wasm"))]
 mod driver;

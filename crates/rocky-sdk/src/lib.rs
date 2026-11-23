@@ -12,8 +12,6 @@ mod bootstrap_intent;
 mod claims;
 mod configuration;
 mod connection;
-#[cfg(not(target_family = "wasm"))]
-mod custody;
 mod database;
 mod delivery;
 mod domain;
@@ -57,13 +55,9 @@ pub use configuration::Configuration;
 pub use connection::{
     Binding, ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
 };
-#[cfg(not(target_family = "wasm"))]
-pub use custody::{CustodyConfiguration, CustodyPeer};
 pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
-pub use enrollment::{
-    NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms, route_enrollment,
-};
+pub use enrollment::{NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms};
 pub use error::{Error, ErrorKind};
 pub use inspection::*;
 pub use partitions::*;

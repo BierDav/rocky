@@ -739,13 +739,7 @@ impl Node {
             draft.learn_revocations(&held)?;
             draft.bootstrap = Some(bootstrap);
             let provisioned = draft
-                .provision(
-                    &self.vault,
-                    routes,
-                    false,
-                    (profile.clone(), label),
-                    &registry,
-                )
+                .provision(&self.vault, routes, (profile.clone(), label), &registry)
                 .map_err(named)?;
             draft.bootstrap = None;
             settings.commit(draft, &self.replica).await?;
@@ -815,28 +809,6 @@ impl Node {
         Self::networked(attached.as_deref(), work).await
     }
 
-    async fn enrollment_upstream(&self, contact: Option<&str>) -> Result<(), Failure> {
-        self.configure(|settings| {
-            if !matches!(settings.profile, Profile::Custody { .. }) || settings.issuer() {
-                return Err("enrollment forwarding requires a custody-only node".into());
-            }
-            settings.enrollment_upstream = match contact {
-                Some(contact) => {
-                    let node = settings.add_peer(&self.vault, contact)?;
-                    if !settings.issuers.contains(&node) {
-                        return Err("upstream must name an issuer".into());
-                    }
-                    Some(node)
-                }
-                None => None,
-            };
-            Ok(())
-        })
-        .await?;
-        self.wake_sync();
-        Ok(())
-    }
-
     async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let node = self
@@ -857,13 +829,8 @@ impl Node {
     }
 
     async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
-        self.configure(|settings| {
-            if settings.enrollment_upstream == Some(node) {
-                return Err("clear enrollment forwarding before removing its issuer".into());
-            }
-            settings.remove_peer(node)
-        })
-        .await?;
+        self.configure(|settings| settings.remove_peer(node))
+            .await?;
         self.reached()?.remove(&node);
         self.met
             .lock()
@@ -2271,13 +2238,6 @@ impl Node {
     }
 
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
-        let is_enrollment = matches!(
-            request,
-            PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
-        ) || matches!(&request, PeerRequest::Identity(enrollment) if enrollment.invited());
-        if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
-            return Ok(reply);
-        }
         if matches!(
             request,
             PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
@@ -2383,63 +2343,6 @@ impl Node {
                 self.replica.relay_staged_close(&close.to_bytes()?).await?,
             )),
         }
-    }
-
-    async fn forward_enrollment(
-        &self,
-        request: &PeerRequest,
-    ) -> Result<Option<PeerReply>, Failure> {
-        let settings = self.settings.lock().await.clone();
-        if !settings.has_enrollment_upstream() {
-            return Ok(None);
-        }
-        if settings.issuer() || !matches!(settings.profile, Profile::Custody { .. }) {
-            return Err(refused(
-                "enrollment forwarding requires a custody-only node",
-            ));
-        }
-        let attached = self.network.read().await;
-        let link = attached
-            .as_ref()
-            .ok_or(ServiceError::NetworkRequired("enrollment forwarding"))?;
-        if settings.enrollment_upstream.is_none()
-            && let Some(node) = settings.resolve_saved_upstream(&*link.transport).await?
-        {
-            self.settings.lock().await.bind_saved_contact(node);
-        }
-        let settings = self.settings.lock().await.clone();
-        let upstream = settings
-            .enrollment_upstream
-            .ok_or_else(|| refused("enrollment upstream could not be resolved"))?;
-        let (target, peer) = match request {
-            PeerRequest::Identity(enrollment)
-                if let IdentityEnrollment::Invited(invited) = &**enrollment =>
-            {
-                let issuer = invited.request.audience();
-                if !settings.issuers.contains(&issuer) {
-                    return Err(refused(
-                        "the invitation names an issuer this relay does not know",
-                    ));
-                }
-                (issuer, "the invitation's issuer")
-            }
-            _ => (upstream, "enrollment upstream"),
-        };
-        let contact = settings
-            .peers
-            .get(&target)
-            .ok_or_else(|| refused(format!("{peer} is not configured")))?;
-        let addresses = contact.addresses(link.transport.kind());
-        if addresses.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer,
-                network: link.transport.kind().into(),
-            }
-            .into());
-        }
-        Ok(Some(
-            exchange(&*link.transport, &addresses, self.domain().scope, request).await?,
-        ))
     }
 
     async fn sign_coordination_grant(

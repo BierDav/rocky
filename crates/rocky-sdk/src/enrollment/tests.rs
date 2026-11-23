@@ -145,7 +145,6 @@ async fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopen
             address: "127.0.0.1:9000".into(),
         }],
         issuer: false,
-        enrollment_only: false,
     };
     let uri = format!(
         "rocky://peer/{}",
@@ -173,7 +172,7 @@ async fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopen
 }
 
 #[test]
-fn contact_versions_are_independent_of_routing_flags() {
+fn contact_records_of_other_versions_are_refused() {
     let key = PrivateKey::new().public_key();
     let mut record = ContactRecord {
         v: CONTACT_VERSION,
@@ -189,7 +188,6 @@ fn contact_versions_are_independent_of_routing_flags() {
         node: key,
         routes: Vec::new(),
         issuer: true,
-        enrollment_only: false,
     };
     let uri = |record: &ContactRecord| {
         format!(
@@ -197,14 +195,8 @@ fn contact_versions_are_independent_of_routing_flags() {
             BASE64URL_NOPAD.encode(&serde_json::to_vec(record).unwrap())
         )
     };
-    for enrollment_only in [false, true] {
-        record.enrollment_only = enrollment_only;
-        assert_eq!(
-            ContactRecord::parse(&uri(&record)).unwrap().enrollment_only,
-            enrollment_only
-        );
-    }
-    for version in [0, 1, 2, 4, u32::MAX] {
+    assert!(ContactRecord::parse(&uri(&record)).is_ok());
+    for version in [0, 1, 2, 3, 5, u32::MAX] {
         record.v = version;
         assert_eq!(
             ContactRecord::parse(&uri(&record))
@@ -784,7 +776,6 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
             address: "127.0.0.1:9000".into(),
         }],
         issuer: true,
-        enrollment_only: false,
     };
     let uri = format!(
         "rocky://peer/{}",

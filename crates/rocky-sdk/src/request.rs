@@ -46,7 +46,6 @@ pub(crate) enum Kind {
     Contact,
     PeerAdd,
     PeerRemove,
-    EnrollmentUpstream,
     Unlink,
     Revoke,
     Session,
@@ -224,7 +223,6 @@ pub(crate) enum Request {
     Contact(Reply<crate::ContactInfo>),
     AddPeer(String, Reply<PublicKey>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
-    EnrollmentUpstream(Option<String>, Reply<()>),
     DeviceRevocationReceipt(
         rocky_credentials::PeerId,
         Reply<Option<crate::DeviceRevocationReceipt>>,
@@ -334,7 +332,6 @@ impl Request {
             Self::Contact(..) => Kind::Contact,
             Self::AddPeer(..) => Kind::PeerAdd,
             Self::RemovePeer(..) => Kind::PeerRemove,
-            Self::EnrollmentUpstream(..) => Kind::EnrollmentUpstream,
             Self::DeviceRevocationReceipt(..) => Kind::Status,
             Self::Unlink(..) => Kind::Unlink,
             Self::RevokeIdentity(..) => Kind::Revoke,
@@ -521,9 +518,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::RemovePeer(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::EnrollmentUpstream(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::DeviceRevocationReceipt(_, reply) => {

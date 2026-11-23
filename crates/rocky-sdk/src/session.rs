@@ -234,8 +234,4 @@ impl Session {
     pub async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
         self.send(|reply| Request::RemovePeer(node, reply)).await
     }
-    pub async fn set_enrollment_upstream(&self, contact: Option<&str>) -> Result<(), Failure> {
-        self.send(|reply| Request::EnrollmentUpstream(contact.map(str::to_owned), reply))
-            .await
-    }
 }

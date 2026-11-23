@@ -27,19 +27,13 @@ fn open<'a>(directory: &'a Path, schema: &'a str) -> Open<'a> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn additive_publication_requires_following_and_old_app_opens_behind() -> Result<(), Failure> {
+async fn additive_publication_moves_main_and_an_old_app_opens_behind() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
     a.add(1, "apples").await;
+    let before = snap::ok(a.session.tip_status()).await["tip"].clone();
     a.close().await;
     let declared = schema(2, false);
-    let a = Device::new(Database::open(open(root.path(), &declared))?)?
-        .with_identity(common::external_identity(root.path()));
-    let status = snap::ok(a.session.generation()).await;
-    assert_eq!(status["application"], "ahead");
-    assert_eq!(status["reason"], "follow_required");
-    let before = main(&a).await["tip"].clone();
-    a.close().await;
     let a = Device::new(Database::open(open(root.path(), &declared))?)?
         .with_identity(common::external_identity(root.path()));
     let status = snap::ok(a.session.generation()).await;
@@ -59,8 +53,6 @@ async fn additive_publication_requires_following_and_old_app_opens_behind() -> R
 async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
-    main(&a).await;
-    snap::ok(a.session.set_genesis_minimum(1)).await;
     a.add(1, "apples").await;
     a.close().await;
     let declared = schema(2, true);
@@ -91,8 +83,6 @@ async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Res
 async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
-    main(&a).await;
-    snap::ok(a.session.set_genesis_minimum(1)).await;
     a.add(1, "apples").await;
     a.close().await;
     let mut declared: Value = serde_json::from_str(&schema(2, true))?;

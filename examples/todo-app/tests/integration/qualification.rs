@@ -33,7 +33,7 @@ async fn converged(
 }
 
 async fn seal(world: &World) -> Result<String, Failure> {
-    let tip = world.trusted().database().session().seal(false).await?.tip;
+    let tip = world.trusted().database().session().seal().await?.tip;
     world.sync().await?;
     for device in &world.devices {
         assert_eq!(device.database().session().tip_status().await?.tip, tip);

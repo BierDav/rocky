@@ -448,12 +448,7 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
     opened.database.close().await?;
     let opened = config.open().await?;
     assert!(opened.root.is_none() && opened.identity.is_none());
-    assert_eq!(
-        outcome(opened.database.session().create_bookmark("offline", None))
-            .await?
-            .0,
-        "ok"
-    );
+    assert_eq!(outcome(opened.database.session().seal()).await?.0, "ok");
     opened.database.close().await?;
     no_identity_secret(&path, &[key.secret(), key.identity().secret()])?;
     Ok(())
@@ -623,12 +618,7 @@ async fn an_application_root_signer_requires_an_explicit_owner_identity() -> Res
     no_identity_secret(&path, &[identity.secret()])?;
     opened.database.close().await?;
     let opened = config.open().await?;
-    assert_eq!(
-        outcome(opened.database.session().create_bookmark("keyless", None))
-            .await?
-            .0,
-        "ok"
-    );
+    assert_eq!(outcome(opened.database.session().seal()).await?.0, "ok");
     opened.database.close().await?;
     Ok(())
 }
@@ -1186,12 +1176,6 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
         None,
         root.clone(),
     )?)?;
-    owner
-        .database
-        .session()
-        .create_bookmark("main", None)
-        .await?;
-    owner.database.session().follow("main").await?;
     let first_opened = Database::join(
         open(&path.join("first"), &hub, "first", Some(personal.clone())),
         &owner.invite_as(json!({"kind":"issuer"})).await,
@@ -1212,7 +1196,6 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
         .await?;
     first.database.session().install_trust(&grant.grant).await?;
     first.sync().await.map_err(|error| error.to_string())?;
-    first.database.session().follow("main").await?;
     let second = Device::new(
         common::link(
             open(&path.join("second"), &hub, "second", Some(personal.clone())),
@@ -1228,13 +1211,12 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
             device.sync().await.map_err(|error| error.to_string())?;
         }
     }
-    second.database.session().follow("main").await?;
     let mut seals = Vec::new();
     for (index, signer) in [&first, &second, &first, &second].into_iter().enumerate() {
         signer
             .add(100 + index as u8, &format!("sealed {index}"))
             .await;
-        let sealed = snap::ok(signer.session.seal(false)).await;
+        let sealed = snap::ok(signer.session.seal()).await;
         seals.push(sealed["tip"].clone());
         for _ in 0..2 {
             for device in all {

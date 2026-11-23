@@ -255,44 +255,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(blockers)
     }
-    pub(super) async fn dropped_tip_blockers(&self) -> Result<Vec<Blocker>, Error> {
-        let graph = self
-            .graphs
-            .iter()
-            .find(|(_, graph)| graph.schema_any(self.workspace.tip).is_ok());
-        let mut count = 0u64;
-        let mut missing = self.conn.query(
-            "SELECT tip FROM secure_dropped_tip_frames d WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=d.hash)", ()).await?;
-        while let Some(row) = missing.next().await? {
-            let dropped: TipId = decode(&row.get::<Vec<u8>>(0)?)?;
-            let mut cursor = self.workspace.tip;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                if dropped == cursor {
-                    count += 1;
-                    break;
-                }
-                let Some((_, graph)) = graph else { break };
-                let Some((parent, _)) = Self::tip_parent(graph, cursor)? else {
-                    break;
-                };
-                cursor = parent;
-            }
-        }
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let label = match (graph, &self.workspace.typed) {
-            (Some((domain, _)), _) => domain_label(domain),
-            (None, Some(typed)) => domain_label(&typed.domain),
-            (None, None) => String::new(),
-        };
-        Ok(vec![blocker(
-            label,
-            BlockerKind::DroppedTipFrames { count },
-            ClearsBy::AnyPeer,
-        )])
-    }
     pub(super) fn line_node_blockers(&self) -> Result<Vec<Blocker>, Error> {
         let time = now()?;
         let clears_by = match &self.node_author {
@@ -521,7 +483,6 @@ impl PendingCounts {
 const PENDING_HEADS: usize = if cfg!(test) { 1 } else { 64 };
 const BLOCKER_PASSES: usize = 4;
 const LISTING_TABLES: &[&str] = &[
-    "secure_dropped_tip_frames",
     "secure_quarantine",
     "secure_scope_state",
     "secure_position_ranges",
@@ -651,8 +612,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(blockers)
     }
     async fn state_listing(&self) -> Result<Vec<Blocker>, Error> {
-        let mut blockers = self.dropped_tip_blockers().await?;
-        blockers.extend(self.line_node_blockers()?);
+        let mut blockers = self.line_node_blockers()?;
         blockers.extend(self.scope_state_blockers().await?);
         Ok(blockers)
     }

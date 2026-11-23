@@ -103,8 +103,6 @@ pub(super) enum Action {
     Crash(usize, Option<CrashPoint>),
     Seal(usize),
     Compact(usize),
-    Branch(usize, String),
-    Follow(usize, String),
     Partition(String),
     Share(String, usize),
     WritePart(usize, String),
@@ -147,8 +145,6 @@ impl fmt::Display for Action {
             Self::Crash(node, point) => write!(f, "crash {} at {point:?}", name(node)),
             Self::Seal(node) => write!(f, "seal {}", name(node)),
             Self::Compact(node) => write!(f, "compact {}", name(node)),
-            Self::Branch(node, bookmark) => write!(f, "branch {} {bookmark}", name(node)),
-            Self::Follow(node, bookmark) => write!(f, "follow {} {bookmark}", name(node)),
             Self::Partition(list) => write!(f, "partition {list}"),
             Self::Share(list, node) => write!(f, "share {list} with {}", name(node)),
             Self::WritePart(node, list) => write!(f, "write {} in {list}", name(node)),
@@ -185,7 +181,7 @@ pub(super) fn node_name(node: usize) -> String {
     char::from(b'a' + node as u8).to_string()
 }
 
-const WEIGHTS: [(Kind, u64); 20] = [
+const WEIGHTS: [(Kind, u64); 18] = [
     (Kind::Write, 20),
     (Kind::Probe, 6),
     (Kind::Sync, 14),
@@ -199,8 +195,6 @@ const WEIGHTS: [(Kind, u64); 20] = [
     (Kind::Crash, 5),
     (Kind::Seal, 6),
     (Kind::Compact, 4),
-    (Kind::Branch, 3),
-    (Kind::Follow, 5),
     (Kind::Partition, 3),
     (Kind::Share, 3),
     (Kind::WritePart, 4),
@@ -222,8 +216,6 @@ enum Kind {
     Crash,
     Seal,
     Compact,
-    Branch,
-    Follow,
     Partition,
     Share,
     WritePart,
@@ -250,7 +242,6 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
     let mut steps = Vec::with_capacity(scenario.steps);
     let mut members = 2;
     let mut revoked = false;
-    let mut branches: Vec<String> = Vec::new();
     let mut lists: Vec<String> = Vec::new();
     while steps.len() < scenario.steps {
         let index = steps.len();
@@ -304,18 +295,6 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
             }
             Kind::Seal => Action::Seal(signer(&mut draws)),
             Kind::Compact => Action::Compact(signer(&mut draws)),
-            Kind::Branch => {
-                let name = format!("dev{index}");
-                branches.push(name.clone());
-                Action::Branch(signer(&mut draws), name)
-            }
-            Kind::Follow => {
-                let bookmark = match draws.below(2) {
-                    0 => branches.last().cloned(),
-                    _ => None,
-                };
-                Action::Follow(node(&mut draws), bookmark.unwrap_or_else(|| "main".into()))
-            }
             Kind::Partition => {
                 let list = format!("list{index}");
                 lists.push(list.clone());
@@ -349,13 +328,6 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
                 *joined,
                 [None, Some(CrashPoint::Import), Some(CrashPoint::Switch)][draws.below(3) as usize],
             )),
-            Action::Branch(node, bookmark) if draws.chance(500) => {
-                let other = (node + 1 + draws.below(members as u64 - 1) as usize) % members;
-                Some(Action::Follow(other, bookmark.clone()))
-            }
-            Action::Follow(_, bookmark) if bookmark != "main" && draws.chance(500) => {
-                Some(Action::Seal(0))
-            }
             _ => None,
         };
         steps.push(action);

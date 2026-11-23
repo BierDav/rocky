@@ -29,9 +29,6 @@ pub enum BlockerKind {
         listed: u64,
     },
     RestorationGuard,
-    DroppedTipFrames {
-        count: u64,
-    },
     LineNode,
     PendingFrames {
         reason: WaitReason,
@@ -133,7 +130,6 @@ impl fmt::Display for Blocker {
                 format!("seal rebootstrap (replay={replay:?}, listed={listed})")
             }
             BlockerKind::RestorationGuard => "restoration guard".into(),
-            BlockerKind::DroppedTipFrames { count } => format!("{count} dropped tip frames"),
             BlockerKind::LineNode => "no node of this identity on the followed line".into(),
             BlockerKind::PendingFrames { reason, count } => {
                 format!("{count} pending frames ({reason:?})")

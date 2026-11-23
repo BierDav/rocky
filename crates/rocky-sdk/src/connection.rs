@@ -16,11 +16,6 @@ const PAGE_ROWS: usize = 256;
 const PAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULTS: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Binding {
-    Seal(rocky_core::Commitment),
-    Bookmark(String),
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
     Buffered,
@@ -31,7 +26,6 @@ pub struct ConnectionOptions {
     pub read_only: bool,
     pub durability: Durability,
     pub transaction_timeout: Option<std::time::Duration>,
-    pub binding: Option<Binding>,
 }
 impl ConnectionOptions {
     fn sql(&self) -> rocky_secure::SqlOptions {
@@ -351,24 +345,13 @@ pub(crate) struct State {
     open: bool,
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
-    seal: Option<rocky_core::Commitment>,
     committed: Option<rocky_core::TransactionToken>,
     handle: Option<rocky_core::Commitment>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
-        let seal = match &options.binding {
-            None => None,
-            Some(Binding::Seal(seal)) => Some(*seal),
-            Some(Binding::Bookmark(name)) => Some(
-                node.replica
-                    .bookmark_seal(node.domain().scope, name)
-                    .await?,
-            ),
-        };
-        let bound_to_a_seal = seal.is_some();
         let mut state = Self {
-            read_only: options.read_only || bound_to_a_seal,
+            read_only: options.read_only,
             options,
             node,
             opened: None,
@@ -376,7 +359,6 @@ impl State {
             open: false,
             reading: None,
             results: BTreeMap::new(),
-            seal,
             committed: None,
             handle: None,
         };
@@ -403,11 +385,7 @@ impl State {
             None => false,
         };
         if !current {
-            let mut sql = self.node.sql_session(self.options.sql()).await?;
-            if let Some(seal) = self.seal {
-                sql.bind_seal(seal).await?;
-            }
-            self.opened = Some(sql);
+            self.opened = Some(self.node.sql_session(self.options.sql()).await?);
         }
         self.opened
             .as_ref()
@@ -477,9 +455,6 @@ impl State {
             )),
             QueryOnly::Set(_) if self.active() => {
                 Err(failure(code::ERROR, "query_only cannot change inside a transaction").into())
-            }
-            QueryOnly::Set(false) if self.seal.is_some() => {
-                Err(failure(code::READONLY, "a connection bound to a seal is read-only").into())
             }
             QueryOnly::Set(read_only) => {
                 self.read_only = read_only;
@@ -590,15 +565,6 @@ impl State {
                 none()
             }
             Control::Begin("DEFERRED") => Err(failure(
-                code::ERROR,
-                "cannot start a transaction within a transaction",
-            )
-            .into()),
-            Control::Begin(_) if self.seal.is_some() && self.reading.is_none() => {
-                self.reading = Some(Reading::default());
-                none()
-            }
-            Control::Begin(_) if self.seal.is_some() => Err(failure(
                 code::ERROR,
                 "cannot start a transaction within a transaction",
             )
@@ -732,7 +698,7 @@ pub(crate) struct Registry {
 }
 impl Registry {
     fn pool_key(options: &ConnectionOptions) -> Option<(bool, bool)> {
-        if options.binding.is_none() && options.transaction_timeout.is_none() {
+        if options.transaction_timeout.is_none() {
             Some((options.read_only, options.durability == Durability::Flushed))
         } else {
             None
@@ -813,7 +779,6 @@ impl Registry {
                     read_only: true,
                     durability: Durability::Buffered,
                     transaction_timeout: None,
-                    binding: None,
                 };
                 Arc::new(Mutex::new(State::new(node, options).await?))
             }

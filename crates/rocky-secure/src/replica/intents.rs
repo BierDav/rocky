@@ -292,7 +292,6 @@ impl<A: RowApplication> Inner<A> {
 
     pub(super) async fn refuse_intent_blockers(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut blocked = self.scope_blockers(scope).await?;
-        blocked.extend(self.dropped_tip_blockers().await?);
         blocked.extend(self.line_node_blockers()?);
         blockers::refuse(blocked)
     }

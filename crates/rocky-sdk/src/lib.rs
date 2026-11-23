@@ -46,15 +46,16 @@ mod store_only;
 mod sync;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_directory;
+#[cfg(any(test, feature = "test-support"))]
+mod testing;
 mod tip_schemas;
-mod tips;
 pub mod transport;
 
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use claims::{ClaimCounters, ClaimGrant};
 pub use configuration::Configuration;
 pub use connection::{
-    Binding, ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
+    ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
 };
 pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
@@ -110,12 +111,13 @@ pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::{
     ContactInfo, DeviceRevocationReceipt, Discovered, DroppedStage, LinkRequest, Provisioning,
-    RevocationResult, SeenDevice, SessionInfo,
+    RevocationResult, SeenDevice, SessionInfo, TrustGrant,
 };
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use store_only::StoreOnlyRefusal;
-pub use tips::*;
+#[cfg(any(test, feature = "test-support"))]
+pub use testing::*;
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub use self_enrollment::AwaitingLink;
 

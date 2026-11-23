@@ -25,7 +25,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             keep(self.restored(scope).await);
         }
         keep(self.rederive().await);
-        keep(self.forget_covered_drops().await);
         first.map_or(Ok(()), Err)
     }
     async fn recover_base_cleanup(&self) -> Result<(), Error> {
@@ -88,85 +87,5 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 _ => Err(Error::Corrupt("eviction guard".into())),
             })
             .collect()
-    }
-    async fn forget_covered_drops(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let mut forget = Vec::new();
-        for record in rows(
-            &inner.conn,
-            "SELECT d.tip,d.hash,d.scope,EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=d.hash) FROM secure_dropped_tip_frames d",
-        )
-        .await?
-        {
-            let [
-                SqlValue::Blob(tip),
-                SqlValue::Blob(hash),
-                SqlValue::Blob(scope),
-                SqlValue::Integer(back),
-            ] = record.as_slice()
-            else {
-                return Err(Error::Corrupt("dropped tip frame".into()));
-            };
-            if *back == 1 || inner.base_covers(decode(scope)?, decode(tip)?).await? {
-                forget.push((tip.clone(), hash.clone()));
-            }
-        }
-        if forget.is_empty() {
-            return Ok(());
-        }
-        transaction!(inner, |inner| {
-            for (tip, hash) in &forget {
-                inner
-                    .conn
-                    .execute(
-                        "DELETE FROM secure_dropped_tip_frames WHERE tip=? AND hash=?",
-                        [tip.clone(), hash.clone()],
-                    )
-                    .await?;
-            }
-            Ok(())
-        })?;
-        inner = flush_guard(inner, &self.inner).await?;
-        inner.publish_revision().await
-    }
-}
-
-impl<A: RowApplication> Inner<A> {
-    async fn base_covers(&self, scope: ResourceScope, tip: TipId) -> Result<bool, Error> {
-        let Some(id) = self.find_scope_id(scope).await? else {
-            return Ok(false);
-        };
-        let Some(record) = self.checkpoint_record(id, true).await? else {
-            return Ok(false);
-        };
-        let Ok(signed) = self.verify_record(scope, &record) else {
-            return Ok(false);
-        };
-        let Some(seal) = signed.statement.seal else {
-            return Ok(false);
-        };
-        let Some(graph) = self.graphs.get(&scope.domain) else {
-            return Ok(false);
-        };
-        let checkpoint = signed.id()?;
-        if self.path_index(scope.domain, seal)?.is_none()
-            || !graph.checkpoints.iter().any(|listed| {
-                listed.statement.table == scope && listed.statement.checkpoint == checkpoint
-            })
-        {
-            return Ok(false);
-        }
-        let mut cursor = graph.seal_by_id(seal).map_err(credential)?.statement.tip;
-        let mut visited = BTreeSet::new();
-        while visited.insert(cursor) {
-            if cursor == tip {
-                return Ok(true);
-            }
-            let Some((parent, _)) = Self::tip_parent(graph, cursor)? else {
-                break;
-            };
-            cursor = parent;
-        }
-        Ok(false)
     }
 }

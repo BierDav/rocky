@@ -153,30 +153,10 @@ impl Node {
             Request::Logout(purge, reply) => {
                 let _ = reply.send(self.logout(purge).await);
             }
-            Request::ChangeTip(change, root, reply) => {
-                let _ = reply.send(self.change_tip(change, &root).await);
-            }
-            Request::InspectTips(reply) => {
-                let _ = reply.send(self.inspect_tips(self.domain().scope).await);
-            }
-            Request::KeptSeals(reply) => {
-                let _ = reply.send(self.kept_seals().await);
-            }
-            Request::SetKeptSeals(config, reply) => {
-                let _ = reply.send(self.set_kept_seals(config).await);
-            }
-            Request::Compaction(reply) => {
-                let _ = reply.send(self.compaction(self.domain().scope, 0, Vec::new()).await);
-            }
-            Request::Compact(keep, reply) => {
-                let _ = reply.send(self.compact_tips(keep).await);
-            }
-            Request::OpenTip(seal, minimum, reply) => {
-                let _ = reply.send(
-                    self.open_tip(self.domain().scope, seal, minimum)
-                        .await
-                        .map(|tip| HEXLOWER.encode(&tip.0)),
-                );
+            #[cfg(any(test, feature = "test-support"))]
+            Request::Tips(probe) => self.probe_tips(probe).await,
+            Request::InstallTrust(grant, reply) => {
+                let _ = reply.send(self.install_trust(&grant).await);
             }
             Request::Trust(identity, root, reply) => {
                 let _ = reply.send(self.trust_identity(identity, &root).await);

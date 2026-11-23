@@ -8,21 +8,7 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            a.change_tip(
-                crate::request::TipChange::Create {
-                    name: "main".into(),
-                    tip: None,
-                },
-                &Root::default(),
-            )
-            .await?;
-            a.change_tip(
-                crate::request::TipChange::Follow {
-                    name: "main".into(),
-                },
-                &Root::default(),
-            )
-            .await?;
+            a.follow_main().await?;
             for row in 1..=4 {
                 add(&a, row).await?;
             }
@@ -90,29 +76,11 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            a.change_tip(
-                crate::request::TipChange::Create {
-                    name: "main".into(),
-                    tip: None,
-                },
-                &Root::default(),
-            )
-            .await?;
-            a.change_tip(
-                crate::request::TipChange::Follow {
-                    name: "main".into(),
-                },
-                &Root::default(),
-            )
-            .await?;
+            a.follow_main().await?;
             for handle in 1..=64 {
                 add(&a, handle).await?;
             }
-            a.change_tip(
-                crate::request::TipChange::Seal { close: false },
-                &Root::default(),
-            )
-            .await?;
+            a.seal_followed(a.domain().scope).await?;
             a.compact_tips(0).await?;
             let profile = Profile::Writer {
                 scopes: ["items".into()].into(),

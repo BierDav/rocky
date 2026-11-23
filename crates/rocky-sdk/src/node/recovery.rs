@@ -16,7 +16,7 @@ impl Node {
             self.wake_sync();
         }
         recovered?;
-        self.complete_pending_follow().await?;
+        self.follow_main_when_held().await?;
         self.blockers().await
     }
     pub(super) async fn publish_for_members(&self) -> Option<crate::SealSkip> {
@@ -76,7 +76,7 @@ impl Node {
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
-                match self.seal_followed(scope, false).await {
+                match self.seal_followed(scope).await {
                     Err(error)
                         if crate::Error::from_failure(&error).kind()
                             == &crate::ErrorKind::Sealed => {}
@@ -172,8 +172,7 @@ impl Node {
             };
             let local = blockers
                 .iter()
-                .any(|blocker| blocker.clears_by == ClearsBy::LocalWork)
-                || self.settings.lock().await.pending_follow.is_some();
+                .any(|blocker| blocker.clears_by == ClearsBy::LocalWork);
             let tick = rocky_platform::time::sleep(TICK);
             tokio::pin!(tick);
             let clock = self.replica.clock_wait().await.ok().flatten();
@@ -192,9 +191,7 @@ impl Node {
                     () = &mut tick, if local => break,
                     () = &mut due, if clock.is_some() => break,
                 }
-                if self.settings.lock().await.pending_follow.is_some()
-                    || !self.blockers().await.unwrap_or_default().is_empty()
-                {
+                if !self.blockers().await.unwrap_or_default().is_empty() {
                     break;
                 }
             }

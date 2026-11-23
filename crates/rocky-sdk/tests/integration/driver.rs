@@ -135,13 +135,11 @@ const WRITER: ConnectionOptions = ConnectionOptions {
     read_only: false,
     durability: rocky_sdk::Durability::Buffered,
     transaction_timeout: None,
-    binding: None,
 };
 const READER: ConnectionOptions = ConnectionOptions {
     read_only: true,
     durability: rocky_sdk::Durability::Buffered,
     transaction_timeout: None,
-    binding: None,
 };
 
 async fn all(
@@ -871,147 +869,5 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     reader.close().await;
     b.close().await?;
     a.close().await?;
-    Ok(())
-}
-
-async fn continue_seal_id(database: &Database) -> Result<Value, Failure> {
-    Ok(snap::value(database.session().seal(false)).await?["tip"].clone())
-}
-
-async fn failing(connection: &Connection, sql: &str) -> Result<i32, Failure> {
-    match all(connection, sql, Vec::new()).await {
-        Ok(_) => Err(format!("{sql} succeeded").into()),
-        Err(error) => Ok(error
-            .downcast::<rocky_sdk::SqlFailure>()
-            .map_err(|_| "code")?
-            .code),
-    }
-}
-fn titles(rows: Vec<Vec<SqlValue>>) -> Vec<String> {
-    rows.into_iter()
-        .filter_map(|row| match row.into_iter().next() {
-            Some(SqlValue::Text(title)) => Some(title),
-            _ => None,
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
-    snap::value(database.session().create_bookmark("main", None)).await?;
-    snap::value(database.session().follow("main")).await?;
-    snap::value(
-        database.session().set_kept_seals(
-            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
-                .expect("typed fixture"),
-        ),
-    )
-    .await?;
-    let writer = database.connect(WRITER).await?;
-    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    run(
-        &writer,
-        "INSERT INTO lists(key,title) VALUES('l1','Groceries')",
-    )
-    .await?;
-    run(
-        &writer,
-        "INSERT INTO items(key,list,title,completed) VALUES('i1','l1','Milk',0)",
-    )
-    .await?;
-    run(&writer, "END TRANSACTION").await?;
-    let first = continue_seal_id(&database).await?;
-    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    run(&writer, "UPDATE items SET title='Oat milk' WHERE key='i1'").await?;
-    run(
-        &writer,
-        "INSERT INTO items(key,list,title,completed) VALUES('i2','l1','Eggs',0)",
-    )
-    .await?;
-    run(&writer, "END TRANSACTION").await?;
-    let second = continue_seal_id(&database).await?;
-    run(&writer, "DELETE FROM items WHERE key='i1'").await?;
-    let seal = |value: &Value| -> Result<rocky_core::Commitment, Failure> {
-        let hex = value.as_str().ok_or("seal")?;
-        let bytes: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16))
-            .collect::<Result<_, _>>()?;
-        Ok(bytes.try_into().map_err(|_| "seal")?)
-    };
-    let kept = snap::value(database.session().inspect_tips()).await?;
-    for id in [&first, &second] {
-        let held = kept["seals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|known| known["id"] == *id)
-            .map(|known| known["held"].clone());
-        assert_eq!(held, Some(json!("kept")), "{id}");
-    }
-
-    let bound = |binding| ConnectionOptions {
-        binding: Some(binding),
-        ..WRITER
-    };
-    let at_first = database
-        .connect(bound(rocky_sdk::Binding::Seal(seal(&first)?)))
-        .await?;
-    let items = "SELECT title FROM items ORDER BY key";
-    assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
-    let at_main = database
-        .connect(bound(rocky_sdk::Binding::Bookmark("main".into())))
-        .await?;
-    assert_eq!(
-        titles(all(&at_main, items, vec![]).await?),
-        ["Oat milk", "Eggs"],
-        "a bookmark's open tip shows the seal it starts from"
-    );
-    assert_eq!(titles(all(&writer, items, vec![]).await?), ["Eggs"]);
-    for sql in [
-        "INSERT INTO items(key,list,title,completed) VALUES('i9','l1','x',0)",
-        "UPDATE items SET title='x'",
-        "DELETE FROM items",
-        "PRAGMA query_only = 0",
-    ] {
-        assert_eq!(
-            failing(&at_first, sql).await?,
-            SQLITE_READONLY,
-            "a bound connection refuses writes outside a transaction: {sql}"
-        );
-    }
-    run(&at_first, "BEGIN IMMEDIATE TRANSACTION").await?;
-    assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
-    assert_eq!(
-        failing(&at_first, "DELETE FROM items").await?,
-        SQLITE_READONLY,
-        "a bound connection refuses writes inside a transaction"
-    );
-    run(&at_first, "END TRANSACTION").await?;
-    let unlimited = 8;
-    let mut many = Vec::new();
-    for _ in 0..unlimited {
-        many.push(
-            database
-                .connect(bound(rocky_sdk::Binding::Seal(seal(&second)?)))
-                .await?,
-        );
-    }
-    for connection in &many {
-        assert_eq!(
-            count(connection, "items").await?,
-            2,
-            "any number of bound connections may be open at once"
-        );
-    }
-    assert!(
-        database
-            .connect(bound(rocky_sdk::Binding::Seal([7; 32])))
-            .await
-            .is_err(),
-        "a seal this device does not keep cannot be bound"
-    );
     Ok(())
 }

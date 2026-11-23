@@ -117,7 +117,6 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     let title = "Quietly kept row value 7f3a";
     a.add(1, title).await;
     let invitation = a.invite().await;

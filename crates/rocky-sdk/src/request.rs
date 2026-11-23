@@ -36,7 +36,9 @@ pub(crate) enum Kind {
     NetworkForeground,
     NetworkBackground,
     Logout,
+    #[cfg(any(test, feature = "test-support"))]
     Tips,
+    Trust,
     Claims,
     Provision,
     Invitations,
@@ -91,22 +93,6 @@ impl Lifecycle {
             }
         )
     }
-}
-
-pub(crate) enum TipChange {
-    Status,
-    Seal { close: bool },
-    Recover,
-    Pull { seal: String },
-    GenesisMinimum { minimum_in_sync: u32 },
-    DeclareCoordinated,
-    Create { name: String, tip: Option<String> },
-    Move { name: String, tip: String },
-    Delete { name: String },
-    FollowWhenReady { name: String },
-    Follow { name: String },
-    Drop { tip: String },
-    InstallTrust { grant: String },
 }
 
 use tokio::sync::oneshot;
@@ -183,13 +169,9 @@ pub(crate) enum Request {
     Foreground(Reply<()>),
     Background(Reply<()>),
     Logout(bool, Reply<()>),
-    ChangeTip(TipChange, crate::node::Root, Reply<crate::TipStatus>),
-    InspectTips(Reply<crate::TipInspection>),
-    KeptSeals(Reply<crate::KeptSeals>),
-    SetKeptSeals(crate::KeptSeals, Reply<crate::KeptSeals>),
-    Compaction(Reply<crate::TipCompaction>),
-    Compact(usize, Reply<crate::TipCompaction>),
-    OpenTip(rocky_core::Commitment, u32, Reply<String>),
+    #[cfg(any(test, feature = "test-support"))]
+    Tips(crate::testing::Probe),
+    InstallTrust(String, Reply<()>),
     Trust(
         rocky_credentials::PublicKey,
         crate::node::Root,
@@ -310,14 +292,9 @@ impl Request {
             Self::Foreground(..) => Kind::NetworkForeground,
             Self::Background(..) => Kind::NetworkBackground,
             Self::Logout(..) => Kind::Logout,
-            Self::ChangeTip(..) => Kind::Tips,
-            Self::InspectTips(..) => Kind::Tips,
-            Self::KeptSeals(..) => Kind::Tips,
-            Self::SetKeptSeals(..) => Kind::Tips,
-            Self::Compaction(..) => Kind::Tips,
-            Self::Compact(..) => Kind::Tips,
-            Self::OpenTip(..) => Kind::Tips,
-            Self::Trust(..) => Kind::Tips,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Tips(..) => Kind::Tips,
+            Self::Trust(..) | Self::InstallTrust(..) => Kind::Trust,
             Self::GrantClaims(..) => Kind::Claims,
             Self::InstallClaims(..) => Kind::Claims,
             Self::HeldClaims(..) => Kind::Claims,
@@ -454,25 +431,9 @@ impl Request {
             Self::Logout(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::ChangeTip(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::InspectTips(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::KeptSeals(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::SetKeptSeals(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Compaction(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Compact(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::OpenTip(_, _, reply) => {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Tips(probe) => probe.fail(error),
+            Self::InstallTrust(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Trust(_, _, reply) => {

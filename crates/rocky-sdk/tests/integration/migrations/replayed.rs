@@ -29,7 +29,6 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, ITEMS, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, ITEMS, network("b")),
         &a.invite().await,
@@ -139,7 +138,6 @@ impl Listed {
             open(&listed.path("a"), LISTED, network("a")),
             None,
         )?)?;
-        a.follow_main_migrating().await;
         let b = Device::new(Database::join(
             open(&listed.path("b"), LISTED, network("b")),
             &a.invite().await,

@@ -402,24 +402,6 @@ impl<A: RowApplication> Inner<A> {
             self.authorize_peer(peer, credentials, scope)
         }
     }
-    pub(in crate::replica) fn descends(
-        graph: &rocky_credentials::TipGraph,
-        tip: TipId,
-        ancestor: TipId,
-    ) -> Result<bool, Error> {
-        let mut cursor = tip;
-        let mut visited = BTreeSet::new();
-        while let Some((parent, _)) = Self::tip_parent(graph, cursor)? {
-            if parent == ancestor {
-                return Ok(true);
-            }
-            if !visited.insert(parent) {
-                break;
-            }
-            cursor = parent;
-        }
-        Ok(false)
-    }
     pub(in crate::replica) async fn staging(&self, id: i64) -> Result<Option<Staging>, Error> {
         let mut result = self
             .conn

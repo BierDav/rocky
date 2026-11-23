@@ -1651,7 +1651,6 @@ mod rotation;
 #[cfg(not(target_family = "wasm"))]
 mod slow_peer;
 mod sql;
-mod tip_drop;
 mod tip_network;
 mod tip_schemas;
 mod tips;

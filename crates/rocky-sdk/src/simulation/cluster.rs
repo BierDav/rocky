@@ -81,7 +81,6 @@ impl Member {
             Install::Create {
                 ttl: DEFAULT_TTL,
                 root: std::sync::Mutex::new(Some(root)),
-                bookmark: None,
             },
         )
         .await
@@ -134,16 +133,6 @@ impl Member {
                     .await
             }
             None => self.session()?.sync_once().await,
-        }
-    }
-    pub(super) async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        match &self.root {
-            Some(root) => {
-                self.session()?
-                    .follow_with_identity(name, Arc::new(root.identity()))
-                    .await
-            }
-            None => self.session()?.follow(name).await,
         }
     }
     pub(super) async fn write(&self, key: &str, handle: u64) -> Result<(), Failure> {

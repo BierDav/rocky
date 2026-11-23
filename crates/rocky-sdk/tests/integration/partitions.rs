@@ -58,7 +58,6 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
             read_only: false,
             durability: rocky_sdk::Durability::Buffered,
             transaction_timeout: None,
-            binding: None,
         })
         .await
         .unwrap();

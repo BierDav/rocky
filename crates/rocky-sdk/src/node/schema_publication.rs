@@ -249,7 +249,7 @@ impl Node {
             return Ok(());
         }
         if needs_seal {
-            self.seal_followed(scope, false).await?;
+            self.seal_followed(scope).await?;
         }
         self.replica.finalize_path(scope).await?;
         self.replica.compact(scope, 0).await?;

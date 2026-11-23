@@ -100,7 +100,6 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
-    a.follow_main().await;
     let early = join(root, &hub, "early", &a.invite().await)?;
     a.add(1, "Milk").await;
     synced(&early).await?;
@@ -393,7 +392,6 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
-    a.follow_main().await;
     let t = join(
         root,
         &hub,

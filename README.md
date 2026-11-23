@@ -52,20 +52,21 @@ the application's schema, so one process can relay for many tenants
 (`cargo run -p rocky-sdk --example relay`).
 The root grants and revokes trust per identity; those calls fail with
 `publisher_required` without it. Every linked node of a trusted identity
-can invite, renew, revoke ordinary identities and seal. Linking another node
-needs the identity signer and matching codes on both devices, with no root
-ceremony. Every node certificate carries the node's own signature naming its
-identity and database, so no identity can list another's node; a node key
-that two identities hold live certificates for belongs to neither. A node
-that once signed for two identities stays ended for both until one of them
-unlinks it; revoking either identity does not release it, and if neither
-unlinks it, the remedy is a new node key. Trusted observers retain
-`TrustedNodeLinked` and `TrustedNodeUnlinked` alerts, including for their
-own identity. Trust never expires; an identity raises `TrustedIdentityStale`
-on its trusted peers when none of its linked nodes has been heard from
-within the configured threshold. Root revocation keeps each linked node's
-seals and bookmark moves through the latest heads the revoking node holds;
-unlink cuts that node's lane independently. Later statements raise
+can invite, renew and revoke ordinary identities, and seals: Rocky seals
+routinely and when the schema changes, never through an application call.
+Linking another node needs the identity signer and matching codes on both
+devices, with no root ceremony. Every node certificate carries the node's
+own signature naming its identity and database, so no identity can list
+another's node; a node key that two identities hold live certificates for
+belongs to neither. A node that once signed for two identities stays ended
+for both until one of them unlinks it; revoking either identity does not
+release it, and if neither unlinks it, the remedy is a new node key.
+Trusted observers retain `TrustedNodeLinked` and `TrustedNodeUnlinked`
+alerts, including for their own identity. Trust never expires; an identity
+raises `TrustedIdentityStale` on its trusted peers when none of its linked
+nodes has been heard from within the configured threshold. Root revocation
+keeps each linked node's seals through the latest heads the revoking node
+holds; unlink cuts that node's lane independently. Later statements raise
 `TipStatementsPastCut`.
 
 The todo app shares ordered lists between trusted, full and partial

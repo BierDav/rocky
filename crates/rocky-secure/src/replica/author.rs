@@ -67,7 +67,6 @@ impl<A: RowApplication> Inner<A> {
             .scope;
         self.ensure_tip_writable(scope.domain)?;
         let mut blocked = self.scope_blockers(scope).await?;
-        blocked.extend(self.dropped_tip_blockers().await?);
         blocked.extend(self.line_node_blockers()?);
         blockers::refuse(blocked)?;
         let partition = self

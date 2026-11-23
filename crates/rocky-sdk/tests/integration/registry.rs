@@ -819,6 +819,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
     assert_eq!(identities(&a).await.len(), 255);
 
+    online(&a, false).await;
     let before = (
         common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
@@ -853,6 +854,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     );
     assert_eq!(before, after);
     assert_eq!(identities(&a).await.len(), 255);
+    online(&a, true).await;
 
     let start = Instant::now();
     synced(&b).await?;

@@ -29,7 +29,6 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
         default["policy"],
         json!({"required": [], "behind": [], "copies": 1, "window": 256})
     );
-    device.follow_main().await;
     device.add(1, "sole copy").await;
     device.seal_and_compact().await;
     let policy = json!({"required": [], "behind": [], "copies": 1, "window": 0});
@@ -89,7 +88,6 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     a.add(1, "base").await;
     let b = Device::join(
         &root.path().join("b"),
@@ -185,7 +183,6 @@ async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failur
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
@@ -211,7 +208,6 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     a.add(1, "before revocation").await;
     let revoked = Device::join(
         &root.path().join("revoked"),
@@ -582,7 +578,6 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     a.add(1, "epoch one").await;
     let b_path = root.path().join("b");
     let b = Device::join(
@@ -660,7 +655,6 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         },
         None,
     )?)?;
-    a.follow_main().await;
     a.add(1, "first scope").await;
     snap::ok(snap::mutate(
         &a.database,
@@ -887,7 +881,6 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
@@ -972,7 +965,6 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    a.follow_main().await;
     for handle in 0..60 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;

@@ -379,7 +379,6 @@ fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
         read_only,
         durability,
         transaction_timeout: None,
-        binding: None,
     }
 }
 impl Database {

@@ -183,14 +183,8 @@ fn short(message: &str) -> String {
 impl Simulation {
     async fn setup(&mut self) -> Result<(), Failure> {
         self.members[0].create(&self.hub).await?;
-        self.members[0]
-            .session()?
-            .create_bookmark("main", None)
-            .await?;
-        self.follow(0, "main").await?;
         self.invite(0, 1).await?;
         self.sync(1).await?;
-        self.follow(1, "main").await?;
         if self.fixture == Fixture::Relational {
             for list in LISTS {
                 self.step(0, &Action::Partition(list.into())).await?;
@@ -474,7 +468,7 @@ impl Simulation {
                 Ok(format!("{fired}, {}", self.reopen(*node).await?))
             }
             Action::Seal(node) => {
-                let sealed = self.running(*node)?.session()?.seal(false).await?;
+                let sealed = self.running(*node)?.session()?.seal().await?;
                 Ok(format!("sealed {}", short_hash(&sealed.tip)))
             }
             Action::Compact(node) => {
@@ -486,8 +480,6 @@ impl Simulation {
                     .await?;
                 Ok(format!("compacted, pruned {}", report.pruned))
             }
-            Action::Branch(node, bookmark) => self.branch(*node, bookmark).await,
-            Action::Follow(node, bookmark) => self.follow(*node, bookmark).await,
             Action::Partition(list) => {
                 self.running(0)?
                     .session()?
@@ -777,43 +769,6 @@ impl Simulation {
             .count();
         Ok(format!("reconciled {completed}/{peers}"))
     }
-    async fn follow(&mut self, node: usize, bookmark: &str) -> Result<String, Failure> {
-        self.running(node)?.follow(bookmark).await?;
-        let member = self.running(node)?;
-        if member.keys().await.is_ok() {
-            return Ok("following".into());
-        }
-        let blockers = match member
-            .running
-            .as_ref()
-            .and_then(|running| running.node.upgrade())
-        {
-            Some(node) => node.blockers().await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let kinds: Vec<String> = blockers
-            .iter()
-            .map(|blocker| variant(&blocker.kind))
-            .collect();
-        Ok(format!("following, unreadable behind {kinds:?}"))
-    }
-    async fn branch(&mut self, node: usize, bookmark: &str) -> Result<String, Failure> {
-        let member = self.running(node)?;
-        let inspection = member.session()?.inspect_tips().await?;
-        let seal = inspection
-            .seals
-            .iter()
-            .rfind(|seal| seal.canonical)
-            .map(|seal| seal.id.clone())
-            .ok_or("skipped: no seal")?;
-        let tip = member.session()?.open_tip(&seal, 1).await?;
-        member
-            .session()?
-            .create_bookmark(bookmark, Some(&(tip)))
-            .await?;
-        self.follow(node, bookmark).await?;
-        Ok(format!("following {}", short_hash(&tip)))
-    }
     async fn crash_at(
         &mut self,
         node: usize,
@@ -1062,20 +1017,6 @@ impl Simulation {
         for round in 0..rounds {
             for node in &live {
                 let _ = self.sync(*node).await;
-                let before = self.members[*node]
-                    .running
-                    .as_ref()
-                    .and_then(|running| running.node.upgrade());
-                let tip = match &before {
-                    Some(node) => Some(node.replica.followed_tip().await),
-                    None => None,
-                };
-                let _ = self.follow(*node, "main").await;
-                if let Some(running) = before
-                    && tip != Some(running.replica.followed_tip().await)
-                {
-                    let _ = self.sync(*node).await;
-                }
             }
             tokio::time::sleep(RECOVERY_DRIVER_SETTLE).await;
             self.safety().await?;

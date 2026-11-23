@@ -233,7 +233,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(), Failure> {
+async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Failure> {
     use rocky_sdk::{Network, transport::memory::Hub};
     use std::sync::Arc;
     let directory = Scratch::new().await;
@@ -244,7 +244,7 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     let session = db.session();
     session.set_automatic_sync(false).await?;
     let status = session.tip_status().await?;
-    assert_eq!(status.bookmark.as_deref(), Some(Configuration::BOOKMARK));
+    assert_eq!(status.bookmark.as_deref(), Some("main"));
     let genesis = status.tip;
     let transactions_for_routine_seal = 128;
     for index in 0..transactions_for_routine_seal {
@@ -259,7 +259,7 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     }
     session.sync_once().await?;
     let sealed = session.tip_status().await?;
-    assert_eq!(sealed.bookmark.as_deref(), Some(Configuration::BOOKMARK));
+    assert_eq!(sealed.bookmark.as_deref(), Some("main"));
     assert_ne!(
         sealed.tip, genesis,
         "the routine seal moved the bookmark on"
@@ -268,65 +268,8 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     let db = configuration.open().await?.database;
     assert_eq!(
         db.session().tip_status().await?.bookmark.as_deref(),
-        Some(Configuration::BOOKMARK)
+        Some("main")
     );
-    db.close().await
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test]
-async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failure> {
-    use rocky_sdk::{AlertKind, Database, Network, Open, transport::memory::Hub};
-    use std::sync::Arc;
-    let directory = Scratch::new().await;
-    let hub = Arc::new(Hub::default());
-    let schema = serde_json::to_string(&schema()?)?;
-    let db = Database::create(
-        Open {
-            directory: directory.path(),
-            schema: crate::support::snapshot::schema(&schema),
-            secrets: None,
-            identity: None,
-            network: Some(Network::Owned(hub.connector("owner"))),
-            coordination: None,
-        },
-        None,
-    )?
-    .database;
-    let session = db.session();
-    session.set_automatic_sync(false).await?;
-    let skipped = |alerts: &[rocky_sdk::Alert]| -> Vec<rocky_sdk::SealSkip> {
-        alerts
-            .iter()
-            .filter_map(|alert| match &alert.kind {
-                AlertKind::SealSkipped { reason } => Some(reason.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    for index in 0..128 {
-        let mut tx = db.transaction().await?;
-        let id = tx.next_id("notes", vec![]).await?;
-        tx.execute(
-            "INSERT INTO notes(id,body) VALUES(?,?)",
-            params![id, format!("note {index}")],
-        )
-        .await?;
-        tx.commit().await?;
-    }
-    session.sync_once().await?;
-    assert_eq!(
-        skipped(&session.status().await?.alerts),
-        [rocky_sdk::SealSkip::NoFollowedBookmark]
-    );
-    let genesis = session.tip_status().await?.tip;
-    session
-        .create_bookmark(Configuration::BOOKMARK, None)
-        .await?;
-    session.follow(Configuration::BOOKMARK).await?;
-    session.sync_once().await?;
-    assert_ne!(session.tip_status().await?.tip, genesis);
-    assert!(skipped(&session.status().await?.alerts).is_empty());
     db.close().await
 }
 

@@ -13,7 +13,6 @@ pub struct Configuration {
     coordination: Option<crate::CoordinatorSlot>,
 }
 impl Configuration {
-    pub const BOOKMARK: &'static str = "main";
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
         let schema = schema.validated()?;
         Ok(Self {
@@ -80,7 +79,7 @@ impl Configuration {
         &self,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Database::launch_create(self.options(), None, root, Self::BOOKMARK).await
+        Database::launch_create(self.options(), None, root).await
     }
     pub async fn open(&self) -> Result<Opened, Failure> {
         Database::launch_open(self.options()).await

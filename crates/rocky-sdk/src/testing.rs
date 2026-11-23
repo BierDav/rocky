@@ -1,11 +1,60 @@
+use crate::{Failure, Session};
 pub use rocky_credentials::TipAuthority;
 pub use rocky_secure::HeldSeal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+
+type Reply<T> = oneshot::Sender<Result<T, Failure>>;
+
+pub(crate) enum Probe {
+    Status(Reply<TipStatus>),
+    Inspect(Reply<TipInspection>),
+    Seal(Reply<TipStatus>),
+    Compact(usize, Reply<TipCompaction>),
+    Compaction(Reply<TipCompaction>),
+}
+impl Probe {
+    pub(crate) fn fail(self, error: Failure) {
+        match self {
+            Self::Status(reply) | Self::Seal(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Inspect(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Compact(_, reply) | Self::Compaction(reply) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+}
+
+impl Session {
+    pub async fn tip_status(&self) -> Result<TipStatus, Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::Status(reply)))
+            .await
+    }
+    pub async fn inspect_tips(&self) -> Result<TipInspection, Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::Inspect(reply)))
+            .await
+    }
+    pub async fn seal(&self) -> Result<TipStatus, Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::Seal(reply)))
+            .await
+    }
+    pub async fn compact(&self, keep: usize) -> Result<TipCompaction, Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::Compact(keep, reply)))
+            .await
+    }
+    pub async fn compaction(&self) -> Result<TipCompaction, Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::Compaction(reply)))
+            .await
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipStatus {
     pub bookmark: Option<String>,
-    pub pending_follow: Option<String>,
     pub tip: String,
     pub operations_since_seal: u64,
     pub evidence_releasable: Option<TipEvidence>,
@@ -65,16 +114,6 @@ pub enum TipSealAction {
     Continue,
     Close,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct KeptSeals {
-    #[serde(default)]
-    pub bookmarked: bool,
-    #[serde(default)]
-    pub latest: u32,
-    #[serde(default)]
-    pub every: bool,
-}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCheckpoint {
     pub id: String,
@@ -118,14 +157,6 @@ pub struct TipNode {
     pub node: String,
     pub followed_tip: Option<String>,
     pub kept_tips: Option<Vec<String>>,
-    pub kept_seals: Option<Vec<String>>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrustGrant {
-    pub identity: String,
-    pub capability: String,
-    pub grant: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipInspection {

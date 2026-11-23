@@ -251,7 +251,6 @@ pub struct Settings {
     pub generation: u32,
     pub engine: rocky_core::EngineIdentity,
     pub pending: Option<crate::tip_schemas::Pending>,
-    pub pending_follow: Option<String>,
     pub(crate) bootstrap: Option<crate::tip_schemas::Bootstrap>,
     pub revocations: RevocationSet,
     pub credentials: CredentialChain,
@@ -1270,7 +1269,6 @@ impl Settings {
             engine: rocky_core::EngineIdentity::current(),
             genesis: manifest,
             pending: None,
-            pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
@@ -2243,7 +2241,6 @@ impl Settings {
             generation: schema.version,
             engine: rocky_core::EngineIdentity::current(),
             pending: None,
-            pending_follow: None,
             bootstrap: None,
             revocations: RevocationSet::new(),
             credentials: credentials.chain(),
@@ -2449,7 +2446,6 @@ impl Settings {
             generation: enrollment.record.generation,
             engine: enrollment.record.engine,
             pending: None,
-            pending_follow: None,
             bootstrap: Some(enrollment.bootstrap),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
@@ -3700,7 +3696,6 @@ impl Settings {
             generation,
             engine,
             pending,
-            pending_follow,
             bootstrap,
             revocations,
             credentials,
@@ -3731,7 +3726,6 @@ impl Settings {
             && *generation == other.generation
             && *engine == other.engine
             && *pending == other.pending
-            && *pending_follow == other.pending_follow
             && *bootstrap == other.bootstrap
             && *revocations == other.revocations
             && *credentials == other.credentials

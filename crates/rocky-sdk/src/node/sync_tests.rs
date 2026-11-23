@@ -525,7 +525,6 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
             read_only: false,
             durability: crate::Durability::Buffered,
             transaction_timeout: Some(Duration::from_secs(1)),
-            binding: None,
         };
         let writer = connections.get(connections.connect(node.clone(), options).await?)?;
         let execute = |sql: &str, params: Vec<SqlValue>| {
@@ -588,7 +587,6 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
                             read_only: false,
                             durability: crate::Durability::Buffered,
                             transaction_timeout: Some(timeout),
-                            binding: None,
                         },
                     )
                     .await?,

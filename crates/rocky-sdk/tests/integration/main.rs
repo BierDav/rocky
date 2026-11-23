@@ -12,8 +12,6 @@ mod composition;
 mod concurrent_rotation;
 #[cfg(not(target_family = "wasm"))]
 mod continuous_sync;
-#[cfg(not(target_family = "wasm"))]
-mod coordinated;
 mod coordination_slot;
 #[cfg(not(target_family = "wasm"))]
 mod credentials;

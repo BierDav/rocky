@@ -78,7 +78,6 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -174,7 +173,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
         open(&directory("a"), NOTED, network("a")),
         None,
     )?)?;
-    a.follow_main_migrating().await;
     let join = |name: &str, invitation: &str| -> Result<Device, Failure> {
         Device::new(Database::join(
             open(&directory(name), NOTED, network(name)),
@@ -279,7 +277,6 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -400,7 +397,6 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     let root = crate::support::small_directory()?;
     let directory = root.path();
     let a = Device::new(Database::create(open(directory, SHELVED, None), None)?)?;
-    a.follow_main_migrating().await;
     create(&a, 1, "shelves", json!({"label": "pantry"})).await;
     create(
         &a,
@@ -487,7 +483,6 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SHELVED, network("b")),
         &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
@@ -532,7 +527,6 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let peer_dir = root.path().join("peer");
     let peer = Device::new(Database::join(
         open(&peer_dir, SHELVED, network("peer")),
@@ -574,7 +568,6 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     schema["tables"][0]["primary_key"] = json!(["list", "key"]);
     let before = schema.to_string();
     let b = Device::new(Database::create(open(&b_dir, &before, None), None)?)?;
-    b.follow_main_migrating().await;
     for (_handle, list) in [(1, "first"), (2, "second")] {
         snap::ok(
             b.session

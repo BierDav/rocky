@@ -83,7 +83,6 @@ async fn graph(device: &Device) -> (Value, usize) {
 async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     let before = graph(&a).await;
@@ -163,7 +162,6 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b_opened = Database::join(
         open(&b_dir, common::SCHEMA, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -262,7 +260,6 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b_opened = Database::join(
         open(&b_dir, LISTS, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -393,7 +390,6 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -403,7 +399,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     sync(&b).await;
     let history_clock = std::time::Instant::now();
     for index in 0..history {
-        snap::ok(a.session.seal(false)).await;
+        snap::ok(a.session.seal()).await;
         if index == 0 {
             snap::ok(a.session.compact(0)).await;
         }
@@ -660,7 +656,6 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, LISTS, network("b")),
         &a.invite_as(json!({"kind": "grants", "grants": [{"scope": "lists", "rights": ["read", "insert", "update", "delete"]}]})).await,
@@ -737,7 +732,6 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
         ..open(&directory, schema, None)
     };
     let a = Device::new(Database::create(options(common::SCHEMA), None)?)?;
-    a.follow_main_migrating().await;
     a.add(1, "once").await;
     a.close().await;
     let a = Device::new(Database::open(options(POSITIONED))?)?;
@@ -763,7 +757,6 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let source = root.path().join("source");
     let a = Device::create(&source, network("a"))?;
-    a.follow_main_migrating().await;
     a.add(1, "inherited").await;
     a.close().await;
     let a = reopen(open(&source, POSITIONED, network("a")))?;
@@ -794,7 +787,6 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
 async fn a_migration_open_drives_maintenance_before_the_first_request() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.close().await;
     let finalized = || -> Result<i64, Failure> {
@@ -829,7 +821,6 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     let root = crate::support::small_directory()?;
     let source = root.path().join("source");
     let a = Device::create(&source, None)?;
-    a.follow_main_migrating().await;
     a.close().await;
     let a = reopen(open(&source, &SEEDED.replace("100000", "8"), None))?;
     a.close().await;
@@ -875,7 +866,6 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     let root = crate::support::small_directory()?;
     let a = Device::new(Database::create(open(root.path(), LISTED, None), None)?)?
         .with_identity(common::external_identity(root.path()));
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.close().await;
 
@@ -906,7 +896,6 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let a = Device::create(root.path(), None)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.close().await;
 

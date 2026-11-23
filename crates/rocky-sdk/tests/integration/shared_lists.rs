@@ -82,16 +82,6 @@ impl Peer {
             None => self.session.sync_once().await,
         }
     }
-    async fn follow(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
-        match &self.identity {
-            Some(identity) => {
-                self.session
-                    .follow_with_identity(name, identity.clone())
-                    .await
-            }
-            None => self.session.follow(name).await,
-        }
-    }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         let mut tx = self.database.transaction().await?;
         let id = tx
@@ -148,8 +138,6 @@ async fn checkpoint_writer(
     let mut options = open(&issuer_path, hub, "issuer");
     options.schema = crate::support::snapshot::schema(schema);
     let issuer = Peer::new(Database::create(options, None)?.database)?;
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
     snap::value(issuer.session.next_partition("lists")).await?;
     let base = issuer
         .insert(
@@ -158,7 +146,7 @@ async fn checkpoint_writer(
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.seal()).await?;
     snap::value(issuer.session.compact(0)).await?;
     let invite = snap::value(
         issuer.session.provision(
@@ -205,8 +193,6 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )?
         .database,
     )?;
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
     snap::value(issuer.session.next_partition("lists")).await?;
     let base = issuer
         .insert(
@@ -238,7 +224,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
     snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&base)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None)).await?;
     snap::value(writer.sync_once()).await?;
     let prepared = snap::value(writer.session.next_partition("lists")).await?;
-    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.seal()).await?;
     snap::value(issuer.session.compact(0)).await?;
     snap::value(writer.sync_once()).await?;
     let status = snap::value(writer.session.status()).await?;
@@ -516,8 +502,6 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
     let invitation = snap::value(
         issuer.session.provision(
             rocky_sdk::GrantProfile::Writer {
@@ -545,7 +529,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         )
         .await?;
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.seal()).await?;
     snap::value(issuer.session.compact(0)).await?;
     snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
@@ -630,8 +614,6 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
     let invitation = snap::value(
         issuer.session.provision(
             rocky_sdk::GrantProfile::Writer {
@@ -686,7 +668,7 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
         writer.column(&titles).await?,
         [json!("Flour"), json!("Milk")]
     );
-    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.seal()).await?;
     let compacted = snap::value(issuer.session.compact(0)).await?;
     assert!(
         compacted["pruned"].as_u64() >= Some(4),
@@ -703,22 +685,12 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
 }
 
 #[tokio::test]
-async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure> {
+async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = root.path().join("a");
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
-    snap::value(issuer.session.set_genesis_minimum(1)).await?;
-    snap::value(
-        issuer.session.set_kept_seals(
-            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every":true}))
-                .expect("typed fixture"),
-        ),
-    )
-    .await?;
     snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -736,8 +708,8 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
             )
             .await?;
     }
-    let kept = snap::value(issuer.session.seal(false)).await?["tip"].clone();
-    snap::value(issuer.session.compact(1)).await?;
+    snap::value(issuer.session.seal()).await?;
+    snap::value(issuer.session.compact(0)).await?;
     issuer.database.close().await?;
 
     let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
@@ -748,14 +720,6 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
             ))
             .await?,
         [json!("Milk"), json!("Bread")]
-    );
-    let inspected = snap::value(issuer.session.inspect_tips()).await?;
-    let kept_seals = inspected["nodes"][0]["kept_seals"].clone();
-    assert!(
-        kept_seals
-            .as_array()
-            .is_some_and(|seals| seals.contains(&kept)),
-        "the seal stays kept across the migration: {inspected}"
     );
     issuer.database.close().await?;
     Ok(())
@@ -959,15 +923,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
-    let inherited_by_migration_openings = 1;
-    snap::value(
-        issuer
-            .session
-            .set_genesis_minimum(inherited_by_migration_openings),
-    )
-    .await?;
     let grants_naming_every_table: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
@@ -1100,15 +1055,6 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
-    let inherited_by_migration_openings = 1;
-    snap::value(
-        issuer
-            .session
-            .set_genesis_minimum(inherited_by_migration_openings),
-    )
-    .await?;
     let grants_naming_every_table: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
@@ -1250,15 +1196,6 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
-    let inherited_by_migration_openings = 1;
-    snap::value(
-        issuer
-            .session
-            .set_genesis_minimum(inherited_by_migration_openings),
-    )
-    .await?;
     let invitation = snap::value(issuer.session.provision(
         rocky_sdk::GrantProfile::Writer {
             scopes: TABLES.map(String::from).into(),
@@ -1392,9 +1329,6 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    issuer.session.create_bookmark("main", None).await?;
-    issuer.follow("main").await?;
-    snap::value(issuer.session.set_genesis_minimum(1)).await?;
     let grants_naming_every_table: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))

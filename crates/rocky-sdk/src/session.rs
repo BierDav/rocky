@@ -72,6 +72,14 @@ pub struct DroppedStage {
     pub head: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustGrant {
+    pub identity: String,
+    pub capability: String,
+    pub grant: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub principal: crate::credentials::PublicKey,
@@ -99,53 +107,6 @@ impl Session {
         .await
     }
 
-    pub async fn follow_with_identity(
-        &self,
-        name: &str,
-        identity: std::sync::Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip_with_identity(
-            crate::request::TipChange::Follow { name: name.into() },
-            identity,
-        )
-        .await
-    }
-    pub async fn move_bookmark_with_identity(
-        &self,
-        name: &str,
-        tip: &str,
-        identity: std::sync::Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip_with_identity(
-            crate::request::TipChange::Move {
-                name: name.into(),
-                tip: tip.into(),
-            },
-            identity,
-        )
-        .await
-    }
-    pub async fn follow_when_ready_with_identity(
-        &self,
-        name: &str,
-        identity: std::sync::Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip_with_identity(
-            crate::request::TipChange::FollowWhenReady { name: name.into() },
-            identity,
-        )
-        .await
-    }
-    async fn change_tip_with_identity(
-        &self,
-        change: crate::request::TipChange,
-        identity: std::sync::Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.send_signed(Some(identity), |reply| {
-            Request::ChangeTip(change, crate::node::Root::default(), reply)
-        })
-        .await
-    }
     pub async fn info(&self) -> Result<SessionInfo, Failure> {
         self.send(Request::Info).await
     }

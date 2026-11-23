@@ -211,10 +211,6 @@ pub enum ActivityKind {
         peer: PublicKey,
         reason: String,
     },
-    BookmarkFollowFailed {
-        name: String,
-        reason: String,
-    },
     FinalizationFailed {
         error: String,
     },

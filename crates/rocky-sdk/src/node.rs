@@ -24,6 +24,8 @@ mod status;
 mod sync_pass;
 use sync_pass::PassOutcome;
 mod tip_nodes;
+#[cfg(any(test, feature = "test-support"))]
+mod tip_probes;
 mod tips;
 use crate::{
     Failure,

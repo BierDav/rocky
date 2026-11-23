@@ -172,7 +172,6 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    a.follow_main().await;
     let invitation = a
         .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
         .await;
@@ -197,7 +196,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
             provisional
         );
     }
-    a.database.session().seal(false).await?;
+    a.database.session().seal().await?;
     sync().await?;
     let sealed = Some(TransactionOutcome::Applied { sealed: true });
     for device in [&a, &b] {
@@ -226,7 +225,6 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
         open(&root.path().join("a"), &hub, "a"),
         None,
     )?)?;
-    a.follow_main().await;
     let invitation = a
         .invite_as(json!({"kind": "writer", "scopes": ["counters"]}))
         .await;
@@ -245,7 +243,7 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
     create(&a.database, "k", 1).await?;
     let later = create(&b.database, "k", 2).await?;
     sync().await?;
-    a.database.session().seal(false).await?;
+    a.database.session().seal().await?;
     sync().await?;
     for device in [&a, &b] {
         assert_eq!(

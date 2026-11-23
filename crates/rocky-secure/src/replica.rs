@@ -85,7 +85,6 @@ mod revoked_heads;
 pub(super) mod roles;
 mod session;
 mod sql;
-mod tip_drop;
 mod tip_observation;
 pub use tip_observation::{
     EarlierEpochWrites, PeerScopeFrontier, TipDevice, TipNodeObservation, TipObservation,
@@ -730,7 +729,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         schemas::SCHEMA,
         staging::SCHEMA,
         tips::SCHEMA,
-        tip_drop::SCHEMA,
         migrate::SCHEMA,
         rebuild::SCHEMA,
         removal::SCHEMA,

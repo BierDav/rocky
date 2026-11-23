@@ -70,7 +70,6 @@ pub(crate) enum Install {
     Create {
         ttl: u64,
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
-        bookmark: Option<&'static str>,
     },
     Join {
         provisioning: String,
@@ -339,7 +338,7 @@ impl Database {
         let created = crate::RootKey::from_secret(root.secret());
         let mut opened = Self::start(
             open.into(),
-            Self::create_install(credential_ttl, Arc::new(root), None)?,
+            Self::create_install(credential_ttl, Arc::new(root))?,
         )?;
         opened.root = Some(created);
         Ok(opened)
@@ -349,10 +348,7 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::start(
-            open.into(),
-            Self::create_install(credential_ttl, root, None)?,
-        )
+        Self::start(open.into(), Self::create_install(credential_ttl, root)?)
     }
     pub fn join(open: Open<'_>, provisioning: &str) -> Result<Opened, Failure> {
         let single_use = open.identity.is_none();
@@ -425,7 +421,6 @@ impl Database {
     fn create_install(
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
-        bookmark: Option<&'static str>,
     ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !CREDENTIAL_TTL_SECONDS.contains(&ttl) {
@@ -434,7 +429,6 @@ impl Database {
         Ok(Install::Create {
             ttl,
             root: std::sync::Mutex::new(Some(root)),
-            bookmark,
         })
     }
     fn join_install(
@@ -506,9 +500,8 @@ impl Database {
         open: Opening<'_>,
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
-        bookmark: &'static str,
     ) -> Result<Opened, Failure> {
-        let install = Self::create_install(credential_ttl, root, Some(bookmark))?;
+        let install = Self::create_install(credential_ttl, root)?;
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_join(
@@ -1047,155 +1040,6 @@ impl Session {
         self.send(|reply| crate::request::Request::Logout(purge_on_close, reply))
             .await
     }
-    async fn change_tip(
-        &self,
-        change: crate::request::TipChange,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.send_rooted(root, |root, reply| {
-            crate::request::Request::ChangeTip(change, root, reply)
-        })
-        .await
-    }
-    pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::Status, None)
-            .await
-    }
-    pub async fn inspect_tips(&self) -> Result<crate::TipInspection, Failure> {
-        self.send(crate::request::Request::InspectTips).await
-    }
-    pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::Seal { close }, None)
-            .await
-    }
-    pub async fn recover(
-        &self,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::Recover, Some(root))
-            .await
-    }
-    pub async fn set_genesis_minimum(
-        &self,
-        minimum_in_sync: u32,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::GenesisMinimum { minimum_in_sync },
-            None,
-        )
-        .await
-    }
-    pub async fn set_root_genesis_minimum(
-        &self,
-        root: Arc<dyn crate::IdentityProvider>,
-        minimum_in_sync: u32,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::GenesisMinimum { minimum_in_sync },
-            Some(root),
-        )
-        .await
-    }
-    pub async fn declare_coordinated(
-        &self,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::DeclareCoordinated, Some(root))
-            .await
-    }
-    pub async fn compact(&self, keep: usize) -> Result<crate::TipCompaction, Failure> {
-        self.send(|reply| crate::request::Request::Compact(keep, reply))
-            .await
-    }
-    pub async fn compaction(&self) -> Result<crate::TipCompaction, Failure> {
-        self.send(crate::request::Request::Compaction).await
-    }
-    pub async fn kept_seals(&self) -> Result<crate::KeptSeals, Failure> {
-        self.send(crate::request::Request::KeptSeals).await
-    }
-    pub async fn set_kept_seals(
-        &self,
-        kept: crate::KeptSeals,
-    ) -> Result<crate::KeptSeals, Failure> {
-        self.send(|reply| crate::request::Request::SetKeptSeals(kept, reply))
-            .await
-    }
-    pub async fn pull_seal(&self, seal: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::Pull { seal: seal.into() }, None)
-            .await
-    }
-    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
-        self.open_tip_signed(seal, minimum_in_sync, None).await
-    }
-    pub async fn open_tip_with_identity(
-        &self,
-        seal: &str,
-        minimum_in_sync: u32,
-        identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<String, Failure> {
-        self.open_tip_signed(seal, minimum_in_sync, Some(identity))
-            .await
-    }
-    async fn open_tip_signed(
-        &self,
-        seal: &str,
-        minimum_in_sync: u32,
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<String, Failure> {
-        let seal = data_encoding::HEXLOWER
-            .decode(seal.as_bytes())?
-            .try_into()
-            .map_err(|_| "expected a seal digest")?;
-        self.send_signed(identity, |reply| {
-            crate::request::Request::OpenTip(seal, minimum_in_sync, reply)
-        })
-        .await
-    }
-    pub async fn create_bookmark(
-        &self,
-        name: &str,
-        tip: Option<&str>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::Create {
-                name: name.into(),
-                tip: tip.map(str::to_owned),
-            },
-            None,
-        )
-        .await
-    }
-    pub async fn move_bookmark(&self, name: &str, tip: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::Move {
-                name: name.into(),
-                tip: tip.into(),
-            },
-            None,
-        )
-        .await
-    }
-    pub async fn delete_bookmark(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::Delete { name: name.into() },
-            None,
-        )
-        .await
-    }
-    pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::Follow { name: name.into() },
-            None,
-        )
-        .await
-    }
-    pub async fn follow_when_ready(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::FollowWhenReady { name: name.into() },
-            None,
-        )
-        .await
-    }
     pub async fn trust(
         &self,
         identity: rocky_credentials::PublicKey,
@@ -1239,14 +1083,9 @@ impl Session {
         })
         .await
     }
-    pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(
-            crate::request::TipChange::InstallTrust {
-                grant: grant.into(),
-            },
-            None,
-        )
-        .await
+    pub async fn install_trust(&self, grant: &str) -> Result<(), Failure> {
+        self.send(|reply| crate::request::Request::InstallTrust(grant.into(), reply))
+            .await
     }
     pub async fn grant_claims(
         &self,
@@ -1272,10 +1111,6 @@ impl Session {
         identity: rocky_credentials::PublicKey,
     ) -> Result<(), Failure> {
         self.send(|reply| crate::request::Request::RevokeClaims(identity, reply))
-            .await
-    }
-    pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {
-        self.change_tip(crate::request::TipChange::Drop { tip: tip.into() }, None)
             .await
     }
 
@@ -1982,12 +1817,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             fault::check(&directory, fault::Stage::SettingsSigned)?;
             node.publish_settings(signed).await?;
         }
-        if let Install::Create {
-            bookmark: Some(name),
-            ..
-        } = &setup.install
-        {
-            node.follow_new_bookmark(name).await?;
+        if matches!(setup.install, Install::Create { .. }) {
+            node.follow_main().await?;
         }
         drain_migration_work(&replica, node.domain().scope).await?;
         fault::check(&directory, fault::Stage::Started)?;
@@ -2434,7 +2265,6 @@ mod tests {
         let ttl_of = |credential_ttl| match Database::create_install(
             credential_ttl,
             Arc::new(crate::RootKey::generate()),
-            None,
         )? {
             Install::Create { ttl, .. } => Ok::<_, Failure>(ttl),
             _ => Err("a create installs as a create".into()),
@@ -2567,8 +2397,7 @@ mod tests {
         };
         tokio::task::LocalSet::new()
             .run_until(async {
-                let create =
-                    Database::create_install(None, Arc::new(crate::RootKey::generate()), None)?;
+                let create = Database::create_install(None, Arc::new(crate::RootKey::generate()))?;
                 Database::launch_local(open(), create)
                     .await?
                     .database
@@ -2669,7 +2498,6 @@ mod tests {
                 read_only: true,
                 durability: connection::Durability::Buffered,
                 transaction_timeout: None,
-                binding: None,
             })
             .await?;
         let measurements = database.reactor_measurements().await?;
@@ -3082,7 +2910,6 @@ mod tests {
                 read_only: false,
                 durability: Durability::Buffered,
                 transaction_timeout: None,
-                binding: None,
             })
             .await?;
         conn.execute(
@@ -3111,7 +2938,6 @@ mod tests {
                 read_only: false,
                 durability: Durability::Buffered,
                 transaction_timeout: None,
-                binding: None,
             })
             .await?;
         let counters = fresh

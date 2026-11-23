@@ -71,7 +71,6 @@ async fn an_old_member_follows_main_to_a_published_schema_and_reports_behind() -
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -119,7 +118,6 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -217,7 +215,6 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let raw_grants_naming_items_alone = json!({"kind": "grants", "grants": [{"scope": "items", "rights": ["read", "insert", "update", "delete"]}]});
     let invitation = a.invite_as(raw_grants_naming_items_alone).await;
     let b = Device::join(&b_dir, &invitation, Network::Owned(hub.connector("b")))?;
@@ -279,7 +276,6 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let dirs = |name: &str| root.path().join(name);
     let a = Device::create(&dirs("a"), network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &dirs("b"),
         &a.invite().await,
@@ -381,7 +377,6 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
         open(&dirs("a"), NULLABLE, network("a")),
         None,
     )?)?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&dirs("b"), NULLABLE, network("b")),
         &a.invite().await,
@@ -442,7 +437,6 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
 async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::new(Database::create(open(root.path(), UNIQUE, None), None)?)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     a.close().await;
@@ -503,7 +497,6 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
 async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.close().await;
     let bumped = SCHEMA.replace(r#""version":1"#, r#""version":7"#);
@@ -527,7 +520,6 @@ const RENAMED: &str = r#"{"application":"shopping","version":2,"format":6,"table
 async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
-    a.follow_main_migrating().await;
     a.add(1, "apples").await;
     a.close().await;
     for (schema, refusal) in [(RETYPED, "changed type"), (RENAMED, "needs a default")] {
@@ -555,7 +547,6 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -603,33 +594,6 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
 }
 
 const NOTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-async fn follow_dev_opened_on_own_seal(device: &Device) -> Result<(), Failure> {
-    snap::ok(device.session.seal(false)).await;
-    let inspected = snap::ok(device.session.inspect_tips()).await;
-    let seal = inspected["seals"]
-        .as_array()
-        .and_then(|seals| {
-            seals
-                .iter()
-                .find(|seal| seal["canonical"] == true && seal["authority"] == "trusted")
-        })
-        .ok_or("seal")?["id"]
-        .clone();
-    let dev = snap::ok(async {
-        let value = device.open_tip(&(snap::text(&(seal))), 1).await?;
-        Ok(json!({"tip":value}))
-    })
-    .await["tip"]
-        .clone();
-    snap::ok(
-        device
-            .session
-            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
-    )
-    .await;
-    snap::ok(device.follow("dev")).await;
-    Ok(())
-}
 fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
     for name in ["rocky.sqlite", "rocky.sqlite-wal", "rocky.sqlite-shm"] {
         let _ = std::fs::remove_file(to.join(name));
@@ -671,7 +635,6 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -746,7 +709,6 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -763,7 +725,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     let b = reopen(open(&b_dir, NOTED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(tip(&b).await, target.0);
-    snap::ok(a.session.seal(false)).await;
+    snap::ok(a.session.seal()).await;
     let advanced_with_the_same_schema = tip(&a).await;
     assert_ne!(advanced_with_the_same_schema, target.0);
     b.sync().await.expect("sync");
@@ -799,7 +761,6 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let apples = a.add(1, "apples").await;
     a.close().await;
     let a = reopen(open(&a_dir, SECOND, network("a")))?;
@@ -848,7 +809,6 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
         root.path().join("c"),
     );
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -887,39 +847,13 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     );
     a.close().await;
 
-    follow_dev_opened_on_own_seal(&b).await?;
-    b.close().await;
-    let b = reopen(open(&b_dir, THIRD, network("b")))?;
-    let reopened = generation(&b).await;
-    assert_eq!(
-        reopened["application"], "ahead",
-        "a trusted node publishes its schema on `dev` as a migration that waits for finality: {reopened}"
-    );
-
-    let before = chain(&c_dir)?;
     c.sync().await.expect("sync");
     let status = generation(&c).await;
-    assert_eq!(
-        status["manifest"], reopened["manifest"],
-        "`c` learns the graph from `b`, its only reachable catalog holder, while `b` follows `dev`"
-    );
     assert_eq!(
         status["current"]["schema"], 2,
         "`c` fetches the record its first-schema application requires from `b`: {status}"
     );
     assert_eq!(status["application"], "behind");
-    assert_eq!(
-        chain(&c_dir)?,
-        before,
-        "`c` follows the published schema without renewing anything"
-    );
-    snap::ok(b.follow("main")).await;
-    b.sync().await.expect("sync");
-    assert_eq!(
-        generation(&b).await["pending"],
-        Value::Null,
-        "back on `main`, the next pass completes the pending switch"
-    );
 
     c.close().await;
     let c = reopen(open(&c_dir, SECOND, network("c")))?;
@@ -946,7 +880,6 @@ async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it(
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let invitation = a.invite().await;
     a.add(1, "apples").await;
     a.close().await;
@@ -984,7 +917,6 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SCHEMA, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -1056,77 +988,6 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_device_on_main_never_fetches_or_installs_a_dev_branch_schema() -> Result<(), Failure> {
-    let root = crate::support::small_directory()?;
-    let hub = Arc::new(Hub::default());
-    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
-    let b = Device::join(
-        &b_dir,
-        &a.invite().await,
-        Network::Owned(hub.connector("b")),
-    )?;
-    introduce(&a, &b).await;
-    a.add(1, "apples").await;
-    b.sync().await.expect("sync");
-    snap::ok(a.session.seal(false)).await;
-    let inspected = snap::ok(a.session.inspect_tips()).await;
-    let seal = inspected["seals"]
-        .as_array()
-        .and_then(|seals| seals.iter().find(|seal| seal["canonical"] == true))
-        .ok_or("seal")?["id"]
-        .clone();
-    let dev = snap::ok(async {
-        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
-        Ok(json!({"tip":value}))
-    })
-    .await["tip"]
-        .clone();
-    snap::ok(
-        a.session
-            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
-    )
-    .await;
-    snap::ok(a.follow("dev")).await;
-    a.close().await;
-    let a = reopen(open(&a_dir, SECOND, network("a")))?;
-    assert_eq!(generation(&a).await["current"]["schema"], 2);
-    let dev_manifest = generation(&a).await["manifest"].clone();
-    tag(&a, 2, "on dev").await;
-
-    hub.record("b");
-    b.sync().await.expect("sync");
-    let transcript = hub.transcript("b");
-    assert!(
-        !transcript
-            .windows(b"rocky.sdk.tip-schema.v1".len())
-            .any(|window| window == b"rocky.sdk.tip-schema.v1"),
-        "a device on main requested a dev schema"
-    );
-    let status = generation(&b).await;
-    assert_eq!(
-        status["current"]["schema"], 1,
-        "a device on `main` installs no dev schema"
-    );
-    assert_eq!(status["pending"], Value::Null);
-    assert_ne!(status["manifest"], dev_manifest);
-    assert_eq!(b.titles().await, ["apples"]);
-    let file = rusqlite::Connection::open(b_dir.join("rocky.sqlite"))?;
-    let stored: i64 = file.query_row(
-        "SELECT count(*) FROM secure_tip_schemas WHERE hex(manifest)=upper(?)",
-        [dev_manifest.as_str().ok_or("manifest")?],
-        |row| row.get(0),
-    )?;
-    assert_eq!(stored, 0, "a device on `main` stores no dev schema");
-    drop(file);
-    b.close().await;
-    a.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes_replay_after_it()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -1134,7 +995,6 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -1190,22 +1050,14 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Result<(), Failure> {
+async fn a_compacted_node_publishes_a_migration_adding_a_field() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let directory = root.path().join("a");
     let a = Device::create(&directory, None)?;
-    a.follow_main_migrating().await;
-    snap::ok(
-        a.session.set_kept_seals(
-            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
-                .expect("typed fixture"),
-        ),
-    )
-    .await;
     a.add(1, "cherries").await;
     a.add(2, "apples").await;
-    let kept = snap::ok(a.session.seal(false)).await["tip"].clone();
-    snap::ok(a.session.compact(1)).await;
+    snap::ok(a.session.seal()).await;
+    snap::ok(a.session.compact(0)).await;
     a.close().await;
     let a = reopen(open(&directory, REQUIRED, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
@@ -1216,12 +1068,6 @@ async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Res
             [snap::cell(text("cherries")), snap::cell(text("0001"))]
         ])
     );
-    let inspected = snap::ok(a.session.inspect_tips()).await;
-    let held = inspected["seals"]
-        .as_array()
-        .and_then(|seals| seals.iter().find(|seal| seal["id"] == kept))
-        .map(|seal| seal["held"].clone());
-    assert_eq!(held, Some(json!("kept")), "{inspected}");
     a.close().await;
     Ok(())
 }
@@ -1235,7 +1081,6 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
     let b = Device::new(Database::join(
         open(&b_dir, SCHEMA, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -1275,130 +1120,6 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(), Failure> {
-    let root = crate::support::small_directory()?;
-    let hub = Arc::new(Hub::default());
-    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
-    snap::ok(
-        a.session.set_kept_seals(
-            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
-                .expect("typed fixture"),
-        ),
-    )
-    .await;
-    let b = Device::join(
-        &b_dir,
-        &a.invite().await,
-        Network::Owned(hub.connector("b")),
-    )?;
-    introduce(&a, &b).await;
-    a.add(1, "cherries").await;
-    b.sync().await.expect("sync");
-    let seal = snap::ok(a.session.seal(false)).await["tip"].clone();
-    let dev = snap::ok(async {
-        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
-        Ok(json!({"tip":value}))
-    })
-    .await["tip"]
-        .clone();
-    snap::ok(
-        a.session
-            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
-    )
-    .await;
-    snap::ok(a.follow("dev")).await;
-    a.close().await;
-    let a = reopen(open(&a_dir, REQUIRED, network("a")))?;
-    assert_eq!(generation(&a).await["current"]["schema"], 2);
-    introduce(&a, &b).await;
-    snap::ok(a.follow("main")).await;
-    for _ in 0..3 {
-        let _ = a.sync().await;
-        let _ = b.sync().await;
-    }
-    assert_eq!(
-        generation(&a).await["pending"],
-        Value::Null,
-        "{}",
-        generation(&a).await
-    );
-    assert_eq!(
-        generation(&a).await["current"]["schema"],
-        1,
-        "a sync pass switches the database back to main's schema"
-    );
-    a.add(2, "apples").await;
-    let back = snap::ok(a.session.seal(false)).await["tip"].clone();
-    a.add(3, "bread").await;
-    snap::ok(a.session.seal(false)).await;
-    let compacted = snap::ok(a.session.compact(1)).await;
-    assert!(
-        compacted["compacted"].is_string(),
-        "finalizing main's seals replays no frame of the branch: {compacted}"
-    );
-    snap::observe(async {
-        let value = a.open_tip(&(snap::text(&(back))), 1).await?;
-        Ok(json!({"tip":value}))
-    })
-    .await
-    .expect("the owner holds main's seals and may roll back to one");
-    b.close().await;
-    a.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn reopening_main_restores_the_branch_signer_of_its_shared_checkpoint() -> Result<(), Failure>
-{
-    let root = crate::support::small_directory()?;
-    let hub = Arc::new(Hub::default());
-    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let a_dir = root.path().join("a");
-    let a = Device::create(&a_dir, network("a"))?;
-    a.follow_main_migrating().await;
-    a.add(1, "common").await;
-    let seal = snap::ok(a.session.seal(false)).await["tip"].clone();
-    let dev = snap::ok(async {
-        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
-        Ok(json!({"tip":value}))
-    })
-    .await["tip"]
-        .clone();
-    snap::ok(
-        a.session
-            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
-    )
-    .await;
-    snap::ok(a.follow("dev")).await;
-    snap::ok(a.session.compact(0)).await;
-    snap::ok(a.follow("main")).await;
-    let main = tip(&a).await;
-    a.close().await;
-    let a = reopen(open(&a_dir, SCHEMA, network("a")))?;
-    assert_eq!(tip(&a).await, main);
-    let b = Device::join(
-        &root.path().join("b"),
-        &a.invite().await,
-        Network::Owned(hub.connector("b")),
-    )?;
-    introduce(&a, &b).await;
-    b.sync()
-        .await
-        .expect("checkpoint transfer after issuer restart");
-    assert_eq!(b.titles().await, ["common"]);
-    b.add(2, "incremental").await;
-    b.sync().await.expect("incremental sync after checkpoint");
-    assert_eq!(a.titles().await, ["common", "incremental"]);
-    assert_eq!(tip(&a).await, main);
-    b.close().await;
-    a.close().await;
-    Ok(())
-}
-
 const LINKABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
 const LINKED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
 
@@ -1406,7 +1127,6 @@ const LINKED: &str = r#"{"application":"shopping","version":2,"format":6,"tables
 async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::new(Database::create(open(root.path(), LINKABLE, None), None)?)?;
-    a.follow_main_migrating().await;
     a.close().await;
     let error = Database::open(open(root.path(), LINKED, None))
         .err()

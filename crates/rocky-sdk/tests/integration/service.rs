@@ -10,10 +10,6 @@ use support::snapshot as snap;
 
 mod claims;
 mod fixture;
-mod inspection;
-mod migration;
-mod prerequisites;
-mod rollback;
 mod voters;
 use voters::{gated_service, service, starter};
 

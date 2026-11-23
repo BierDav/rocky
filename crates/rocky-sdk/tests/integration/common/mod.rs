@@ -104,9 +104,6 @@ impl Device {
         self.signer = Some(signer);
         self
     }
-    pub fn signer(&self) -> Option<Arc<dyn rocky_sdk::IdentityProvider>> {
-        self.signer.clone()
-    }
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         self.root_signer().expect("fixture root")
     }
@@ -188,16 +185,6 @@ impl Device {
         .expect("update");
         tx.commit().await.expect("commit");
     }
-    pub async fn remove(&self, _handle: u8, id: &str) {
-        let mut tx = self.database.transaction().await.expect("begin");
-        tx.execute(
-            "DELETE FROM items WHERE key=?",
-            vec![rocky_sdk::SqlValue::Text(id.into())],
-        )
-        .await
-        .expect("delete");
-        tx.commit().await.expect("commit");
-    }
     pub async fn items(&self) -> Vec<String> {
         let rows = self
             .database
@@ -237,46 +224,6 @@ impl Device {
         match self.signer.clone() {
             Some(identity) => self.session.sync_once_with_identity(identity).await,
             None => self.session.sync_once().await,
-        }
-    }
-    pub async fn follow(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
-        match self.signer.clone() {
-            Some(identity) => self.session.follow_with_identity(name, identity).await,
-            None => self.session.follow(name).await,
-        }
-    }
-    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
-        match self.signer.clone() {
-            Some(identity) => {
-                self.session
-                    .open_tip_with_identity(seal, minimum_in_sync, identity)
-                    .await
-            }
-            None => self.session.open_tip(seal, minimum_in_sync).await,
-        }
-    }
-    pub async fn move_bookmark(
-        &self,
-        name: &str,
-        tip: &str,
-    ) -> Result<rocky_sdk::TipStatus, Failure> {
-        match self.signer.clone() {
-            Some(identity) => {
-                self.session
-                    .move_bookmark_with_identity(name, tip, identity)
-                    .await
-            }
-            None => self.session.move_bookmark(name, tip).await,
-        }
-    }
-    pub async fn follow_when_ready(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
-        match self.signer.clone() {
-            Some(identity) => {
-                self.session
-                    .follow_when_ready_with_identity(name, identity)
-                    .await
-            }
-            None => self.session.follow_when_ready(name).await,
         }
     }
     pub async fn sync(&self) -> Result<Value, Value> {
@@ -331,19 +278,8 @@ impl Device {
     pub async fn close(&self) {
         self.database.close().await.expect("close");
     }
-    pub async fn follow_main(&self) {
-        self.session
-            .create_bookmark("main", None)
-            .await
-            .expect("bookmark");
-        self.follow("main").await.expect("follow");
-    }
-    pub async fn follow_main_migrating(&self) {
-        self.follow_main().await;
-        self.session.set_genesis_minimum(1).await.expect("minimum");
-    }
     pub async fn seal_and_compact(&self) -> Value {
-        self.session.seal(false).await.expect("seal");
+        self.session.seal().await.expect("seal");
         serde_json::to_value(self.session.compact(0).await.expect("compact")).expect("report")
     }
 }

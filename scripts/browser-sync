@@ -30,24 +30,29 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
-mkfifo "$work/input"
-"$peer" <"$work/input" >"$work/peer" &
+mkfifo "$work/input" "$work/output"
+"$peer" <"$work/input" >"$work/output" &
 peer_pid=$!
 # Holds the native side's stdin open until the browser is done.
 exec 3>"$work/input"
+# The native side's first line names its relay and invitation once both are
+# ready. The read waits for that line however loaded the host is, and returns
+# nothing if the native side ends first.
+exec 4<"$work/output"
+IFS= read -r ready <&4 || ready=
+[ -n "$ready" ] || { echo "browser-sync: the native side ended before it was ready" >&2; exit 1; }
 
-waited=0
-until [ -s "$work/peer" ]; do
-    kill -0 "$peer_pid" 2>/dev/null || { echo "browser-sync: the native side ended" >&2; exit 1; }
-    waited=$((waited + 1))
-    [ "$waited" -le 600 ] || { echo "browser-sync: the native side never started" >&2; exit 1; }
-    sleep 0.1
-done
+# The runner's deadline covers loading the test binary into the browser and
+# the whole sync over the relay; as in scripts/wasm-tests, it only catches a
+# hung browser, so a loaded host cannot fail a test that is still progressing.
+: "${WASM_BINDGEN_TEST_TIMEOUT:=1800}"
+export WASM_BINDGEN_TEST_TIMEOUT
 
 [ "$#" -gt 0 ] || set -- -p rocky-sdk
-ROCKY_BROWSER_PEER=$(head -n 1 "$work/peer") cargo test --locked \
+ROCKY_BROWSER_PEER=$ready cargo test --locked \
     --target wasm32-unknown-unknown "$@" --test browser_sync
 echo finished >&3
 exec 3>&-
 wait "$peer_pid"
 peer_pid=
+exec 4<&-

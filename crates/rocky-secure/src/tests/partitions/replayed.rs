@@ -304,7 +304,7 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
             .run("SELECT key FROM items WHERE list='A'", vec![])
             .await,
         Err(Error::Sql(crate::sql::SqlError::Unavailable {
-            reason: crate::sql::Unavailable::Incomplete,
+            reason: crate::sql::Unavailable::Incomplete { .. },
             ..
         }))
     ));

@@ -1,4 +1,4 @@
-use crate::{Database, Failure, SqlValue, request::Request};
+use crate::{Database, SqlValue, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -52,21 +52,24 @@ impl Database {
         &self,
         scope: rocky_core::ResourceScope,
         policy: crate::PartitionCustody,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::PartitionCustody(scope, policy, reply))
             .await
     }
-    pub async fn set_replica_role(&self, role: crate::ReplicaRoleConfig) -> Result<(), Failure> {
+    pub async fn set_replica_role(
+        &self,
+        role: crate::ReplicaRoleConfig,
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::ReplicaRole(role, reply)).await
     }
-    pub async fn next_partition(&self, table: &str) -> Result<CreatedPartition, Failure> {
+    pub async fn next_partition(&self, table: &str) -> Result<CreatedPartition, crate::Error> {
         self.send(|reply| Request::NextPartition(table.into(), reply))
             .await
     }
     pub async fn partition_recipients(
         &self,
         target: PartitionTarget,
-    ) -> Result<Vec<PublicKey>, Failure> {
+    ) -> Result<Vec<PublicKey>, crate::Error> {
         self.send(|reply| Request::PartitionRecipients(target, reply))
             .await
     }
@@ -75,7 +78,7 @@ impl Database {
         target: PartitionTarget,
         recipients: BTreeSet<PublicKey>,
         epoch: Option<rocky_core::KeyEpoch>,
-    ) -> Result<PartitionShare, Failure> {
+    ) -> Result<PartitionShare, crate::Error> {
         self.send(|reply| Request::SharePartition(target, recipients, epoch, reply))
             .await
     }
@@ -83,11 +86,14 @@ impl Database {
         &self,
         identity: PublicKey,
         target: PartitionTarget,
-    ) -> Result<PartitionShare, Failure> {
+    ) -> Result<PartitionShare, crate::Error> {
         self.send(|reply| Request::GrantPartition(identity, target, reply))
             .await
     }
-    pub async fn identity_for_node(&self, node: PublicKey) -> Result<Option<PublicKey>, Failure> {
+    pub async fn identity_for_node(
+        &self,
+        node: PublicKey,
+    ) -> Result<Option<PublicKey>, crate::Error> {
         self.send(|reply| Request::IdentityForNode(node, reply))
             .await
     }
@@ -142,18 +148,18 @@ impl Database {
         &self,
         table: &str,
         values: Vec<SqlValue>,
-    ) -> Result<PartitionAddress, Failure> {
+    ) -> Result<PartitionAddress, crate::Error> {
         self.send(|reply| Request::PartitionAddress(table.into(), values, reply))
             .await
     }
-    pub async fn partition_complete(&self, table: &str) -> Result<bool, Failure> {
+    pub async fn partition_complete(&self, table: &str) -> Result<bool, crate::Error> {
         self.send(|reply| Request::PartitionComplete(table.into(), reply))
             .await
     }
     pub async fn create_partition(
         &self,
         target: PartitionTarget,
-    ) -> Result<PreparedPartition, Failure> {
+    ) -> Result<PreparedPartition, crate::Error> {
         self.send(|reply| Request::CreatePartition(target, reply))
             .await
     }
@@ -162,14 +168,14 @@ impl Database {
         target: PartitionTarget,
         envelope: rocky_credentials::GroupSecretEnvelope,
         sender: CredentialChain,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::InstallPartition(target, Box::new(envelope), sender, reply))
             .await
     }
     pub async fn partition_status(
         &self,
         target: PartitionTarget,
-    ) -> Result<PartitionStatus, Failure> {
+    ) -> Result<PartitionStatus, crate::Error> {
         self.send(|reply| Request::PartitionStatus(target, reply))
             .await
     }
@@ -177,7 +183,7 @@ impl Database {
         &self,
         target: PartitionTarget,
         selection: PartitionSelection,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::RegisterPartition(target, selection, reply))
             .await
     }
@@ -185,7 +191,7 @@ impl Database {
         &self,
         target: PartitionTarget,
         selection: PartitionSelection,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::HoldPartition(target, selection, false, reply))
             .await
     }
@@ -193,7 +199,7 @@ impl Database {
         &self,
         target: PartitionTarget,
         selection: PartitionSelection,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::HoldPartition(target, selection, true, reply))
             .await
     }
@@ -201,7 +207,7 @@ impl Database {
         &self,
         target: PartitionTarget,
         omit: BTreeSet<String>,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::ReleasePartition(target, omit, reply))
             .await
     }
@@ -209,7 +215,7 @@ impl Database {
         &self,
         target: PartitionTarget,
         omit: BTreeSet<String>,
-    ) -> Result<PartitionEviction, Failure> {
+    ) -> Result<PartitionEviction, crate::Error> {
         self.send(|reply| Request::EvictPartition(target, omit, reply))
             .await
     }

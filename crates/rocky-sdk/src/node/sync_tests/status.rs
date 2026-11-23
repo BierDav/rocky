@@ -158,3 +158,102 @@ async fn a_scope_the_peer_does_not_share_is_not_a_blocker() -> Result<(), Failur
         }))
         .await
 }
+
+async fn committed_frames(
+    node: &Node,
+    key: &str,
+) -> Result<Vec<rocky_secure::EncryptedFrame>, Failure> {
+    let sql = node.sql_session(SqlOptions::default()).await?;
+    sql.run("BEGIN", Vec::new()).await?;
+    let id = sql.next_id("items").await?;
+    sql.run(
+        "INSERT INTO items(key,title,id) VALUES(?,'Milk',?)",
+        vec![SqlValue::Text(key.into()), id.sql()],
+    )
+    .await?;
+    let committed = sql
+        .commit(commitment("rocky.sdk.mutation.v1", key.as_bytes()))
+        .await?;
+    Ok(committed.committed.ok_or("a committed bundle")?.frames)
+}
+
+async fn read_failure(node: &Node) -> Result<crate::SqlFailure, Failure> {
+    match read_rows(node, "SELECT count(*) FROM items").await {
+        Ok(rows) => Err(format!("an incomplete table was read: {rows:?}").into()),
+        Err(error) => Ok(crate::connection::sql_failure(error)),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arrives()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, crate::Access::Full)),
+            )
+            .await?;
+            let mut frames = Vec::new();
+            for key in ["a", "b"] {
+                frames.extend(committed_frames(&a, key).await?);
+            }
+            let later = frames.pop().ok_or("a later frame")?;
+            assert_eq!(
+                b.replica.receive(later).await?,
+                rocky_secure::ReceiveStatus::PendingDependencies
+            );
+
+            let failure = read_failure(&b).await?;
+            let crate::SqlReason::Unavailable {
+                table,
+                reason: crate::Unavailability::Incomplete { blockers },
+            } = &failure.reason
+            else {
+                return Err(format!("expected an incomplete table, found {failure:?}").into());
+            };
+            assert_eq!(table, "items");
+            assert!(failure.retryable);
+            let pending = blockers
+                .iter()
+                .find(|blocker| {
+                    matches!(
+                        blocker.kind,
+                        rocky_core::BlockerKind::PendingFrames {
+                            reason: rocky_core::WaitReason::Dependencies,
+                            ..
+                        }
+                    )
+                })
+                .ok_or_else(|| format!("no pending-frames blocker in {blockers:?}"))?;
+            assert_eq!(pending.clears_by, rocky_core::ClearsBy::AnyPeer);
+            let error = crate::Error::from(failure.clone());
+            assert_eq!(error.code(), "missing_dependencies");
+            assert_eq!(error.blockers(), blockers.as_slice());
+            assert!(
+                b.observed_status().await?.data.blockers.contains(pending),
+                "status reports the blocker the read names"
+            );
+
+            for frame in frames {
+                b.replica.receive(frame).await?;
+            }
+            assert_eq!(
+                read_rows(&b, "SELECT count(*) FROM items").await?,
+                vec![vec![SqlValue::Integer(2)]]
+            );
+            assert!(
+                !b.observed_status().await?.data.blockers.contains(pending),
+                "the blocker clears once the missing frame arrives"
+            );
+            a.detach().await;
+            b.detach().await;
+            Ok(())
+        }))
+        .await
+}

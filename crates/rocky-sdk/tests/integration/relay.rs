@@ -56,10 +56,11 @@ async fn reads_nothing(relay: &Device) -> bool {
     .await
     .is_err()
 }
-fn refusal(opened: Result<rocky_sdk::Database, Failure>) -> Option<StoreOnlyRefusal> {
-    opened
-        .err()
-        .and_then(|error| error.downcast_ref::<StoreOnlyRefusal>().copied())
+fn refusal(opened: Result<rocky_sdk::Database, rocky_sdk::Error>) -> Option<StoreOnlyRefusal> {
+    match opened.err()?.kind {
+        rocky_sdk::ErrorKind::StoreOnly(refusal) => Some(refusal),
+        _ => None,
+    }
 }
 
 #[tokio::test]

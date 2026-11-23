@@ -46,6 +46,7 @@ async fn accept(
         .identity(person.clone())
         .accept_invitation(invitation)
         .await
+        .map_err(Into::into)
 }
 fn refusal(outcome: Result<Database, Failure>) -> Result<ErrorKind, Failure> {
     match outcome {
@@ -131,7 +132,7 @@ async fn an_existing_identity_joins_once_by_invitation_with_its_own_provider() -
         .err()
         .ok_or("a used invitation was withdrawn")?;
     assert_eq!(
-        rocky_sdk::Error::from_failure(&withdrawn).code(),
+        withdrawn.code(),
         InvitationRefusal::Used.code(),
         "a used invitation ends only with its identity's revocation"
     );
@@ -268,10 +269,7 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
         .await
         .err()
         .ok_or("an unroutable invitation was issued")?;
-    assert_eq!(
-        rocky_sdk::Error::from_failure(&unroutable).code(),
-        "network_required"
-    );
+    assert_eq!(unroutable.code(), "network_required");
     offline.close().await;
     let hub = Arc::new(Hub::default());
     let owner = issuer(&root.path().join("issuer"), &hub).await?;
@@ -286,10 +284,7 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
         .await
         .err()
         .ok_or("an invitation was accepted without a network")?;
-    assert_eq!(
-        rocky_sdk::Error::from_failure(&without_network).code(),
-        "network_required"
-    );
+    assert_eq!(without_network.code(), "network_required");
     let without_identity = Configuration::new(root.path().join("member"), common::parsed_schema())?
         .network(Network::Owned(hub.connector("member")))
         .accept_invitation(&invitation.uri)

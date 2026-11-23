@@ -1,5 +1,5 @@
 use common::{Device, Failure};
-use rocky_sdk::{CallFailure, Network, RevocationMode, SyncReport, transport::memory::Hub};
+use rocky_sdk::{Network, RevocationMode, SyncReport, transport::memory::Hub};
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
@@ -47,7 +47,7 @@ fn assert_issuers(root: &Path, name: &str, nodes: &[&str]) -> Result<(), Failure
     assert_eq!(actual, expected, "{name}");
     Ok(())
 }
-async fn synced(device: &Device) -> Result<SyncReport, Failure> {
+async fn synced(device: &Device) -> Result<SyncReport, rocky_sdk::Error> {
     device.sync_now().await
 }
 fn reconciled_with(report: &SyncReport, node: &str) -> bool {
@@ -178,7 +178,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         .err()
         .ok_or("revoked itself")?;
     assert_eq!(
-        CallFailure::from_failure(&error).code(),
+        error.code(),
         "publisher_required",
         "a trusted node does not revoke itself without the root: {error}"
     );
@@ -189,7 +189,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         .err()
         .ok_or("revoked a trusted node without the root")?;
     assert_eq!(
-        CallFailure::from_failure(&error).code(),
+        error.code(),
         "publisher_required",
         "a trusted node revokes no trusted node without the root: {error}"
     );
@@ -215,11 +215,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             .await
             .err()
             .ok_or("renewed a cascaded identity")?;
-        assert_eq!(
-            CallFailure::from_failure(&error).code(),
-            "revoked",
-            "{error}"
-        );
+        assert_eq!(error.code(), "revoked", "{error}");
         let status = early.database.status().await?;
         assert_eq!(
             status
@@ -431,7 +427,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         .err()
         .ok_or("revoked a trusted identity without the root")?;
     assert_eq!(
-        CallFailure::from_failure(&error).code(),
+        error.code(),
         "publisher_required",
         "only the root revokes a trusted identity: {error}"
     );

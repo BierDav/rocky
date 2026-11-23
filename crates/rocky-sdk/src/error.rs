@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Revoked,
@@ -14,8 +16,14 @@ pub enum ErrorKind {
     Quota,
     Storage,
     MigrationPending,
+    Schema(Box<crate::SchemaError>),
     Invitation(crate::InvitationRefusal),
-    Service(String),
+    Service(crate::ServiceError),
+    StoreOnly(crate::StoreOnlyRefusal),
+    AwaitingLink(Arc<crate::AwaitingLink>),
+    RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
+    Sql(Box<crate::SqlFailure>),
+    Decode(crate::DecodeError),
     Other(String),
 }
 
@@ -36,8 +44,21 @@ impl ErrorKind {
             Self::Quota => "quota",
             Self::Storage => "storage",
             Self::MigrationPending => "migration_pending",
+            Self::Schema(_) => "invalid_schema",
             Self::Invitation(refusal) => refusal.code(),
-            Self::Service(code) | Self::Other(code) => code,
+            Self::Service(service) => service.code(),
+            Self::StoreOnly(_) => "store_only",
+            Self::AwaitingLink(_) => "awaiting_link",
+            Self::RolloutConfirmation(_) => "rollout_confirmation_required",
+            Self::Sql(failure) => match failure.reason {
+                crate::SqlReason::Unavailable {
+                    reason: crate::Unavailability::Incomplete { .. },
+                    ..
+                } => "missing_dependencies",
+                crate::SqlReason::Unavailable { .. } | crate::SqlReason::Statement => "sql",
+            },
+            Self::Decode(_) => "decode",
+            Self::Other(code) => code,
         }
     }
 }
@@ -51,6 +72,15 @@ pub struct Error {
 }
 
 impl Error {
+    pub(crate) fn new(kind: ErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            retryable: false,
+            detail: detail.into(),
+            blockers: Vec::new(),
+        }
+    }
+
     pub fn from_failure(error: &crate::Failure) -> Self {
         crate::node::typed_error(error)
     }
@@ -76,21 +106,94 @@ impl Error {
     }
 }
 
+impl From<crate::Failure> for Error {
+    fn from(error: crate::Failure) -> Self {
+        match error.downcast::<crate::AwaitingLink>() {
+            Ok(pending) => Self {
+                detail: pending.to_string(),
+                kind: ErrorKind::AwaitingLink(Arc::new(*pending)),
+                retryable: false,
+                blockers: Vec::new(),
+            },
+            Err(error) => crate::node::typed_error(&error),
+        }
+    }
+}
+
+impl From<crate::ServiceError> for Error {
+    fn from(error: crate::ServiceError) -> Self {
+        Self {
+            retryable: error.retryable(),
+            detail: error.to_string(),
+            blockers: Vec::new(),
+            kind: ErrorKind::Service(error),
+        }
+    }
+}
+
+impl From<crate::SchemaError> for Error {
+    fn from(error: crate::SchemaError) -> Self {
+        Self::new(
+            ErrorKind::Schema(Box::new(error.clone())),
+            error.to_string(),
+        )
+    }
+}
+
+impl From<crate::DecodeError> for Error {
+    fn from(error: crate::DecodeError) -> Self {
+        Self::new(ErrorKind::Decode(error.clone()), error.to_string())
+    }
+}
+
+impl From<rocky_secure::Error> for Error {
+    fn from(error: rocky_secure::Error) -> Self {
+        crate::Failure::from(error).into()
+    }
+}
+
+impl From<rocky_credentials::Error> for Error {
+    fn from(error: rocky_credentials::Error) -> Self {
+        crate::Failure::from(error).into()
+    }
+}
+
+impl From<crate::SqlFailure> for Error {
+    fn from(failure: crate::SqlFailure) -> Self {
+        let blockers = match &failure.reason {
+            crate::SqlReason::Unavailable {
+                reason: crate::Unavailability::Incomplete { blockers },
+                ..
+            } => blockers.clone(),
+            _ => Vec::new(),
+        };
+        Self {
+            retryable: failure.retryable,
+            detail: failure.to_string(),
+            blockers,
+            kind: ErrorKind::Sql(Box::new(failure)),
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.detail)
     }
 }
 
-impl std::error::Error for Error {}
-
-impl From<Error> for crate::CallFailure {
-    fn from(error: Error) -> Self {
-        Self {
-            code: error.code().to_owned(),
-            retryable: error.retryable,
-            detail: error.detail,
-            blockers: error.blockers,
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            ErrorKind::Service(service) => Some(service),
+            ErrorKind::StoreOnly(refusal) => Some(refusal),
+            ErrorKind::AwaitingLink(pending) => Some(pending.as_ref()),
+            ErrorKind::RolloutConfirmation(required) => Some(required.as_ref()),
+            ErrorKind::Sql(failure) => Some(failure.as_ref()),
+            ErrorKind::Invitation(refusal) => Some(refusal),
+            ErrorKind::Schema(error) => Some(error.as_ref()),
+            ErrorKind::Decode(error) => Some(error),
+            _ => None,
         }
     }
 }

@@ -577,7 +577,9 @@ fn held_partitions_that_wait_refuse_the_write() {
     let tables = items(&["A"], &["B"]);
     let incomplete = IntentRefusal::Unavailable {
         table: "items".into(),
-        reason: Unavailable::Incomplete,
+        reason: Unavailable::Incomplete {
+            blockers: Vec::new(),
+        },
     };
     for sql in [
         "UPDATE items SET amount = 1",

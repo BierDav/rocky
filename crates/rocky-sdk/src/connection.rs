@@ -46,6 +46,36 @@ pub struct SqlFailure {
     pub code: i32,
     pub message: String,
     pub retryable: bool,
+    pub reason: SqlReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SqlReason {
+    Statement,
+    Unavailable {
+        table: String,
+        reason: Unavailability,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unavailability {
+    NotHeld,
+    KeyMissing,
+    Incomplete { blockers: Vec<rocky_core::Blocker> },
+    Revoked,
+}
+impl From<&Unavailable> for Unavailability {
+    fn from(reason: &Unavailable) -> Self {
+        match reason {
+            Unavailable::NotHeld => Self::NotHeld,
+            Unavailable::KeyMissing => Self::KeyMissing,
+            Unavailable::Incomplete { blockers } => Self::Incomplete {
+                blockers: blockers.clone(),
+            },
+            Unavailable::Revoked => Self::Revoked,
+        }
+    }
 }
 impl std::fmt::Display for SqlFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -68,6 +98,7 @@ pub(crate) fn failure(code: i32, message: impl Into<String>) -> SqlFailure {
         code,
         message: message.into(),
         retryable: false,
+        reason: SqlReason::Statement,
     }
 }
 pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
@@ -96,21 +127,23 @@ pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
         error,
         Error::Blocked(_)
             | Error::Backpressure
-            | Error::Sql(SqlError::Unavailable {
-                reason: Unavailable::NotHeld
-                    | Unavailable::KeyMissing
-                    | Unavailable::Incomplete
-                    | Unavailable::Revoked,
-                ..
-            })
+            | Error::Sql(SqlError::Unavailable { .. })
             | Error::Sql(SqlError::Aborted(
                 rocky_secure::AbortReason::Timeout | rocky_secure::AbortReason::Preempted
             ))
     );
+    let reason = match error {
+        Error::Sql(SqlError::Unavailable { table, reason }) => SqlReason::Unavailable {
+            table: table.clone(),
+            reason: reason.into(),
+        },
+        _ => SqlReason::Statement,
+    };
     SqlFailure {
         code,
         message,
         retryable,
+        reason,
     }
 }
 
@@ -922,7 +955,7 @@ impl TableEvents {
             observer: Mutex::new(observer),
         }
     }
-    pub async fn next(&self) -> Result<TableChange, Failure> {
+    pub async fn next(&self) -> Result<TableChange, crate::Error> {
         let change = self.observer.lock().await.next().await?;
         Ok(TableChange {
             tables: change.tables.into_iter().collect(),

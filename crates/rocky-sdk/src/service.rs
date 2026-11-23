@@ -91,7 +91,7 @@ pub struct StatusChanges {
     seen: Option<String>,
 }
 impl StatusChanges {
-    pub async fn next(&mut self) -> Result<DatabaseStatus, Failure> {
+    pub async fn next(&mut self) -> Result<DatabaseStatus, crate::Error> {
         let status = match self.seen.clone() {
             None => self.database.status().await?,
             Some(seen) => {
@@ -106,23 +106,23 @@ impl StatusChanges {
 }
 
 impl Database {
-    pub async fn contact(&self) -> Result<ContactInfo, Failure> {
+    pub async fn contact(&self) -> Result<ContactInfo, crate::Error> {
         self.send(Request::Contact).await
     }
-    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
+    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, crate::Error> {
         self.send(|reply| Request::AddPeer(contact.into(), reply))
             .await
     }
-    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
+    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), crate::Error> {
         self.send(|reply| Request::RemovePeer(node, reply)).await
     }
-    pub async fn sync_now(&self) -> Result<SyncReport, Failure> {
+    pub async fn sync_now(&self) -> Result<SyncReport, crate::Error> {
         self.send(Request::Sync).await
     }
-    pub async fn set_sync(&self, mode: SyncMode) -> Result<(), Failure> {
+    pub async fn set_sync(&self, mode: SyncMode) -> Result<(), crate::Error> {
         self.send(|reply| Request::SetSync(mode, reply)).await
     }
-    pub async fn status(&self) -> Result<DatabaseStatus, Failure> {
+    pub async fn status(&self) -> Result<DatabaseStatus, crate::Error> {
         self.send(Request::Status).await
     }
     pub fn status_changes(&self) -> StatusChanges {

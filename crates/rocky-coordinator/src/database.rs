@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum CounterError {
     Coordination(CoordinationError),
-    Database(rocky_sdk::Failure),
+    Database(rocky_sdk::Error),
 }
 impl std::fmt::Display for CounterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,8 +29,8 @@ impl From<CoordinationError> for CounterError {
         Self::Coordination(error)
     }
 }
-impl From<rocky_sdk::Failure> for CounterError {
-    fn from(error: rocky_sdk::Failure) -> Self {
+impl From<rocky_sdk::Error> for CounterError {
+    fn from(error: rocky_sdk::Error) -> Self {
         Self::Database(error)
     }
 }

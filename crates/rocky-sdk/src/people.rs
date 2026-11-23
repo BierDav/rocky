@@ -1,5 +1,5 @@
 use crate::request::Request;
-use crate::{Access, Database, Failure, PublicKey};
+use crate::{Access, Database, PublicKey};
 use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -89,7 +89,7 @@ pub struct DeviceInfo {
 }
 
 impl Database {
-    pub async fn info(&self) -> Result<DeviceInfo, Failure> {
+    pub async fn info(&self) -> Result<DeviceInfo, crate::Error> {
         self.send(Request::Info).await
     }
 
@@ -97,14 +97,14 @@ impl Database {
         &self,
         node: crate::PeerId,
         identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send_signed(Some(identity), |reply| Request::Unlink(node, reply))
             .await
     }
     pub async fn device_revocation_receipt(
         &self,
         node: crate::PeerId,
-    ) -> Result<Option<DeviceRevocationReceipt>, Failure> {
+    ) -> Result<Option<DeviceRevocationReceipt>, crate::Error> {
         self.send(|reply| Request::DeviceRevocationReceipt(node, reply))
             .await
     }
@@ -112,7 +112,7 @@ impl Database {
         &self,
         access: Access,
         label: Option<Vec<u8>>,
-    ) -> Result<Provisioning, Failure> {
+    ) -> Result<Provisioning, crate::Error> {
         self.send(|reply| Request::Provision(access, label, reply))
             .await
     }
@@ -121,34 +121,34 @@ impl Database {
         identity: PublicKey,
         access: Access,
         terms: crate::InviteTerms,
-    ) -> Result<crate::Invitation, Failure> {
+    ) -> Result<crate::Invitation, crate::Error> {
         self.send(|reply| Request::Invite(identity, access, terms, reply))
             .await
     }
-    pub async fn withdraw_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {
+    pub async fn withdraw_invitation(&self, id: crate::InvitationId) -> Result<(), crate::Error> {
         self.send(|reply| Request::WithdrawInvitation(id, reply))
             .await
     }
-    pub async fn open_invitations(&self) -> Result<Vec<crate::OpenInvitation>, Failure> {
+    pub async fn open_invitations(&self) -> Result<Vec<crate::OpenInvitation>, crate::Error> {
         self.send(Request::OpenInvitations).await
     }
-    pub async fn renew(&self) -> Result<(), Failure> {
+    pub async fn renew(&self) -> Result<(), crate::Error> {
         self.send(Request::Renew).await
     }
-    pub async fn discovered(&self) -> Result<Discovered, Failure> {
+    pub async fn discovered(&self) -> Result<Discovered, crate::Error> {
         self.send(Request::Discovered).await
     }
-    pub async fn confirm_link(&self, node: PublicKey, code: &str) -> Result<(), Failure> {
+    pub async fn confirm_link(&self, node: PublicKey, code: &str) -> Result<(), crate::Error> {
         self.send(|reply| Request::ConfirmLink(node, code.into(), reply))
             .await
     }
     pub async fn sync_now_with_identity(
         &self,
         identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::SyncReport, Failure> {
+    ) -> Result<crate::SyncReport, crate::Error> {
         self.send_signed(Some(identity), Request::Sync).await
     }
-    pub async fn logout(&self, purge_on_close: bool) -> Result<(), Failure> {
+    pub async fn logout(&self, purge_on_close: bool) -> Result<(), crate::Error> {
         self.send(|reply| Request::Logout(purge_on_close, reply))
             .await
     }
@@ -156,7 +156,7 @@ impl Database {
         &self,
         identity: PublicKey,
         root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<TrustGrant, Failure> {
+    ) -> Result<TrustGrant, crate::Error> {
         self.send_rooted(Some(root), |root, reply| {
             Request::Trust(identity, root, reply)
         })
@@ -167,11 +167,14 @@ impl Database {
         identity: PublicKey,
         mode: crate::RevocationMode,
         root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<RevocationResult, Failure> {
+    ) -> Result<RevocationResult, crate::Error> {
         self.revoke_identity_with_root(identity, mode, Some(root), true)
             .await
     }
-    pub async fn revoke_identity(&self, identity: PublicKey) -> Result<RevocationResult, Failure> {
+    pub async fn revoke_identity(
+        &self,
+        identity: PublicKey,
+    ) -> Result<RevocationResult, crate::Error> {
         self.revoke_identity_with_root(identity, crate::RevocationMode::Lost, None, true)
             .await
     }
@@ -181,13 +184,13 @@ impl Database {
         mode: crate::RevocationMode,
         root: Option<Arc<dyn crate::IdentityProvider>>,
         keep: bool,
-    ) -> Result<RevocationResult, Failure> {
+    ) -> Result<RevocationResult, crate::Error> {
         self.send_rooted(root, |root, reply| {
             Request::RevokeIdentity(identity, mode, root, keep, reply)
         })
         .await
     }
-    pub async fn install_trust(&self, grant: &str) -> Result<(), Failure> {
+    pub async fn install_trust(&self, grant: &str) -> Result<(), crate::Error> {
         self.send(|reply| Request::InstallTrust(grant.into(), reply))
             .await
     }

@@ -64,7 +64,7 @@ impl<A: RowApplication> Inner<A> {
             Err(SplitError::Refused(refusal)) => {
                 if let IntentRefusal::Unavailable {
                     table,
-                    reason: crate::sql::Unavailable::Incomplete,
+                    reason: crate::sql::Unavailable::Incomplete { .. },
                 } = &refusal
                     && let Some(projected) = typed.by_name(table)
                 {

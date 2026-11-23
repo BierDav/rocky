@@ -242,7 +242,7 @@ async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<()
 }
 
 async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
-    use rocky_sdk::{CallFailure, RevocationMode, RevocationReason};
+    use rocky_sdk::{RevocationMode, RevocationReason};
 
     let directory = tempfile::tempdir()?;
     let root = directory.path();
@@ -306,11 +306,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
         .await
         .err()
         .ok_or("renewed after cascade")?;
-    assert_eq!(
-        CallFailure::from_failure(&error).code(),
-        "revoked",
-        "{error}"
-    );
+    assert_eq!(error.code(), "revoked", "{error}");
     let status = early.database.status().await?;
     assert_eq!(
         status

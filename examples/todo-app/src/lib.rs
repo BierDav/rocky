@@ -93,7 +93,7 @@ fn unique<const N: usize>(name: &str, columns: [&str; N]) -> IndexDefinition {
 }
 
 pub fn configuration(directory: impl Into<PathBuf>) -> Result<Configuration, Failure> {
-    Configuration::new(directory, &schema()?)
+    Ok(Configuration::new(directory, &schema()?)?)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,7 +209,7 @@ impl Todos {
         let rows = match query {
             Ok(rows) => rows.collect().await?,
             Err(_) if partial => return Ok(Vec::new()),
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         rows.iter()
             .map(|row| {

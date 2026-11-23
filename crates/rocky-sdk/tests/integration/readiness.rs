@@ -25,10 +25,10 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     assert_eq!(device.titles().await, ["apples"]);
     let (ended, closed) = tokio::join!(changes.next(), device.database.close());
     closed?;
-    assert!(matches!(
-        ended.unwrap_err().downcast_ref::<rocky_sdk::ServiceError>(),
-        Some(rocky_sdk::ServiceError::Closed("database"))
-    ));
+    assert_eq!(
+        ended.unwrap_err().kind,
+        rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::Closed("database"))
+    );
     let hub = Arc::new(Hub::default());
     let issuer = Device::create(
         &root.path().join("issuer"),

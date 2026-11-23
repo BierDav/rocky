@@ -2256,14 +2256,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
     if let Some(error) = error.downcast_ref::<crate::Error>() {
         return error.clone();
     }
-    if let Some(error) = error.downcast_ref::<crate::CallFailure>() {
-        return crate::Error {
-            kind: crate::ErrorKind::Other(error.code.clone()),
-            retryable: error.retryable,
-            detail: error.detail.clone(),
-            blockers: error.blockers.clone(),
-        };
-    }
     if let Some(peer) = error.downcast_ref::<crate::peer::PeerError>() {
         return crate::Error {
             kind: crate::ErrorKind::Other(peer.code.clone()),
@@ -2288,9 +2280,20 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::MigrationPending, false)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
         (
-            crate::ErrorKind::Service(service.code().to_owned()),
+            crate::ErrorKind::Service(service.clone()),
             service.retryable(),
         )
+    } else if let Some(schema) = error.downcast_ref::<crate::SchemaError>() {
+        (crate::ErrorKind::Schema(Box::new(schema.clone())), false)
+    } else if let Some(refusal) = error.downcast_ref::<crate::StoreOnlyRefusal>() {
+        (crate::ErrorKind::StoreOnly(*refusal), false)
+    } else if let Some(required) = error.downcast_ref::<crate::RolloutConfirmationRequired>() {
+        (
+            crate::ErrorKind::RolloutConfirmation(Box::new(required.clone())),
+            false,
+        )
+    } else if let Some(failure) = error.downcast_ref::<crate::SqlFailure>() {
+        return failure.clone().into();
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
         match credentials {
             rocky_credentials::Error::Provider(_) => (crate::ErrorKind::Storage, false),
@@ -2306,7 +2309,7 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
                 SqlError::Capture(_) | SqlError::Statement { .. } | SqlError::Unsupported(_),
             )) => (crate::ErrorKind::Rejected, false),
             Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
-                Unavailable::Incomplete | Unavailable::KeyMissing => {
+                Unavailable::Incomplete { .. } | Unavailable::KeyMissing => {
                     (crate::ErrorKind::MissingDependencies, true)
                 }
                 Unavailable::NotHeld => (crate::ErrorKind::Rejected, false),
@@ -2318,7 +2321,13 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         }
     };
     let blockers = match error.downcast_ref::<Error>() {
-        Some(Error::Blocked(blockers)) => blockers.clone(),
+        Some(
+            Error::Blocked(blockers)
+            | Error::Sql(SqlError::Unavailable {
+                reason: Unavailable::Incomplete { blockers },
+                ..
+            }),
+        ) => blockers.clone(),
         _ => Vec::new(),
     };
     crate::Error {
@@ -2328,13 +2337,10 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         blockers,
     }
 }
-pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
-    typed_error(error).into()
-}
 #[cfg(test)]
 pub(crate) fn error(error: &Failure) -> serde_json::Value {
-    let failure = call_failure(error);
-    let mut value = serde_json::json!({"code": failure.code, "retryable": failure.retryable, "message": failure.detail});
+    let failure = typed_error(error);
+    let mut value = serde_json::json!({"code": failure.code(), "retryable": failure.retryable, "message": failure.detail});
     if !failure.blockers.is_empty() {
         value["blockers"] = serde_json::json!(failure.blockers);
     }

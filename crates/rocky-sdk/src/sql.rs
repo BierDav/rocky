@@ -376,7 +376,11 @@ impl Drop for Rows<'_> {
 }
 
 impl Database {
-    pub async fn query(&self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'static>, Failure> {
+    pub async fn query(
+        &self,
+        sql: &str,
+        params: Vec<SqlValue>,
+    ) -> Result<Rows<'static>, crate::Error> {
         let (page, connection) = self.query_once(sql.into(), params).await?;
         let source = match connection {
             Some(connection) => Source::Owned(connection),
@@ -384,7 +388,7 @@ impl Database {
         };
         Ok(Rows::from_page(source, 1, page))
     }
-    pub async fn transaction(&self) -> Result<Transaction, Failure> {
+    pub async fn transaction(&self) -> Result<Transaction, crate::Error> {
         let connection = self
             .connect(ConnectionOptions {
                 read_only: false,

@@ -221,7 +221,7 @@ impl Peer {
                 .database
                 .add_peer(&(snap::text(&(contact["uri"]))))
                 .await?;
-            Ok(json!({"node":value}))
+            Ok::<_, rocky_sdk::Error>(json!({"node":value}))
         })
         .await?;
         snap::string(self.database.sync_now()).await
@@ -826,7 +826,7 @@ async fn introduce(left: &Peer, right: &Peer) {
                 .database
                 .add_peer(&(snap::text(&(contact["uri"]))))
                 .await?;
-            Ok(json!({"node":value}))
+            Ok::<_, rocky_sdk::Error>(json!({"node":value}))
         })
         .await;
     }

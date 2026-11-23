@@ -427,5 +427,5 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
         sides.len() >= committed,
         "each pair the child reported committed is present"
     );
-    todos.database().close().await
+    Ok(todos.database().close().await?)
 }

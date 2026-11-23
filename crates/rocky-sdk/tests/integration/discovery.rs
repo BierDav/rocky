@@ -25,7 +25,7 @@ fn starter(lookup: Option<&str>, local: bool) -> Network {
 async fn discovered(device: &Device) -> Option<Value> {
     let peers = snap::ok(async {
         let network = device.database.status().await?.network;
-        Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+        Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await;
     peers["peers"]
@@ -58,7 +58,7 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
         snap::ok(member.database.remove_peer(snap::public_key(&(node)))).await;
         let peers = snap::ok(async {
             let network = member.database.status().await?.network;
-            Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;
         assert!(
@@ -167,7 +167,9 @@ async fn simulator_peer() -> Result<(), Failure> {
         loop {
             let peers = snap::ok(async {
                 let network = host.database.status().await?.network;
-                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+                Ok::<_, rocky_sdk::Error>(
+                    json!({"peers":network.peers,"discovery":network.discovery}),
+                )
             })
             .await;
             let local = peers["peers"]

@@ -3,9 +3,9 @@ pub(crate) use rocky_credentials::{
     PeerRequestFrame as RequestFrame,
 };
 pub(crate) fn failure(error: &crate::Failure) -> PeerError {
-    let failure = crate::node::call_failure(error);
+    let failure = crate::node::typed_error(error);
     PeerError {
-        code: failure.code,
+        code: failure.code().to_owned(),
         message: failure.detail,
         retryable: failure.retryable,
     }

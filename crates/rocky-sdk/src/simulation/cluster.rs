@@ -98,7 +98,7 @@ impl Member {
             .ok_or("the node is not running")?
             .database)
     }
-    pub(super) async fn sync(&self) -> Result<crate::SyncReport, Failure> {
+    pub(super) async fn sync(&self) -> Result<crate::SyncReport, crate::Error> {
         match &self.root {
             Some(root) => {
                 self.database()?

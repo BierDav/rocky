@@ -73,7 +73,7 @@ impl Peer {
         self
     }
 
-    async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, Failure> {
+    async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, rocky_sdk::Error> {
         match &self.identity {
             Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
             None => self.database.sync_now().await,

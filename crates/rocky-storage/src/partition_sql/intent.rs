@@ -608,7 +608,9 @@ impl<E> Split<'_, E> {
         Err(IntentRefusal::Unavailable {
             table: self.name.clone(),
             reason: if self.waiting.contains(&tuple) {
-                Unavailable::Incomplete
+                Unavailable::Incomplete {
+                    blockers: Vec::new(),
+                }
             } else {
                 Unavailable::NotHeld
             },
@@ -655,7 +657,9 @@ impl<E> Split<'_, E> {
         if self.waiting.iter().any(|tuple| matches(&tuple)) {
             return Err(IntentRefusal::Unavailable {
                 table: self.name.clone(),
-                reason: Unavailable::Incomplete,
+                reason: Unavailable::Incomplete {
+                    blockers: Vec::new(),
+                },
             });
         }
         let reached: Reached = self

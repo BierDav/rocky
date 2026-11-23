@@ -333,9 +333,12 @@ impl<A: RowApplication> SecureSql<A> {
                 || (inner.partitions.contains_key(&scope)
                     && !self.session.status.scopes.contains(&scope));
             if may_become_writable {
+                let readiness = inner.readiness(scope.domain).await?;
                 return Err(Error::Sql(SqlError::Unavailable {
                     table: table.table.sql_name.clone(),
-                    reason: crate::sql::Unavailable::Incomplete,
+                    reason: crate::sql::Unavailable::Incomplete {
+                        blockers: inner.incomplete_blockers(&readiness, scope).await?,
+                    },
                 }));
             }
             return Err(denied("identity allocation requires a writable table"));

@@ -37,6 +37,14 @@ the named tables (an empty list means all), `flush` makes every returned commit
 durable, and `status` with `status_changes` reports progress, blockers and the
 network.
 
+Every call returns a typed `rocky_sdk::Error`: an `ErrorKind` (which keeps
+typed causes such as `ServiceError`, `AwaitingLink` or
+`RolloutConfirmationRequired`), whether a retry can succeed, a detail and the
+blockers in the way. SQL calls return a `SqlFailure` whose `SqlReason` says why
+a table could not be read: `Unavailable { table, reason }`, where `Incomplete
+{ blockers }` names the scope that still waits and what clears it. `status`
+lists the same blockers until the missing data arrives.
+
 A database's authority is an offline root key: `Configuration::create`
 returns it once as a 24-word phrase (`Created::root`), or
 `create_with_root` takes a passkey-backed signer. Rocky never stores it.

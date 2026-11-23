@@ -747,7 +747,8 @@ impl Simulation {
                 .expect("running crash fixture")
                 .compact(0)
                 .await
-                .map(drop),
+                .map(drop)
+                .map_err(Failure::from),
             GroupBeforeCommit | GroupAfterCommit if self.fixture == Fixture::Relational => {
                 let change = Change::Board {
                     list: LISTS[index % 2].into(),
@@ -1266,7 +1267,9 @@ impl Simulation {
             .collect()
     }
     async fn invariants(&mut self, live: &[usize]) -> Result<(), String> {
-        let text = |error: Failure| error.to_string();
+        fn text(error: impl std::fmt::Display) -> String {
+            error.to_string()
+        }
         let mut outcomes: BTreeMap<(usize, TransactionToken), Option<TransactionOutcome>> =
             BTreeMap::new();
         for node in live {

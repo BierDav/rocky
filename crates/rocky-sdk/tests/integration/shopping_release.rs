@@ -173,12 +173,12 @@ async fn introduce(left: &Peer, right: &Peer) -> Result<(), Failure> {
     let r = snap::value(right.database.contact()).await?["uri"].clone();
     snap::value(async {
         let value = left.database.add_peer(&(snap::text(&(r)))).await?;
-        Ok(json!({"node":value}))
+        Ok::<_, rocky_sdk::Error>(json!({"node":value}))
     })
     .await?;
     snap::value(async {
         let value = right.database.add_peer(&(snap::text(&(l)))).await?;
-        Ok(json!({"node":value}))
+        Ok::<_, rocky_sdk::Error>(json!({"node":value}))
     })
     .await?;
     Ok(())

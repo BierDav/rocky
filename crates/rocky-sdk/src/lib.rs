@@ -55,7 +55,9 @@ pub mod transport;
 pub use access::Access;
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use configuration::Configuration;
-pub use connection::{ChangeCause, SqlFailure, TableChange, TableEvents};
+pub use connection::{
+    ChangeCause, SqlFailure, SqlReason, TableChange, TableEvents, Unavailability,
+};
 pub use database::{Created, Database, Joined};
 pub use delivery::State as DeliveryState;
 pub use enrollment::PublisherRequired;

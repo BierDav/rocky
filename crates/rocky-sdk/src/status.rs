@@ -490,35 +490,3 @@ pub struct SyncReport {
     pub skip: Option<SkipReason>,
     pub peers: Vec<PeerReconciliation>,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CallFailure {
-    pub code: String,
-    pub retryable: bool,
-    pub detail: String,
-    pub blockers: Vec<rocky_core::Blocker>,
-}
-impl CallFailure {
-    pub fn from_failure(error: &crate::Failure) -> Self {
-        crate::node::call_failure(error)
-    }
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-    pub fn retryable(&self) -> bool {
-        self.retryable
-    }
-    pub(crate) fn boxed(error: crate::Failure) -> crate::Failure {
-        if error.is::<crate::ServiceError>() {
-            error
-        } else {
-            Box::new(Self::from_failure(&error))
-        }
-    }
-}
-impl std::fmt::Display for CallFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.detail)
-    }
-}
-impl std::error::Error for CallFailure {}

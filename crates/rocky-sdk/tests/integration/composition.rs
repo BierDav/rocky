@@ -26,8 +26,11 @@ fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration 
         network,
     )
 }
-fn service(error: &Failure) -> Option<&ServiceError> {
-    error.downcast_ref()
+fn service(error: &rocky_sdk::Error) -> Option<&ServiceError> {
+    match &error.kind {
+        rocky_sdk::ErrorKind::Service(service) => Some(service),
+        _ => None,
+    }
 }
 
 async fn add(database: &Database, handle: u8, title: &str) {

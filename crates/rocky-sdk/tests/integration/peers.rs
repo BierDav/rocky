@@ -69,7 +69,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     let creator = snap::ok(c.database.info()).await;
     let creators: Vec<Value> = snap::ok(async {
         let network = c.database.status().await?.network;
-        Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+        Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await["peers"]
         .as_array()

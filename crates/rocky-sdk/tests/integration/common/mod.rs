@@ -251,7 +251,7 @@ impl Device {
             .filter_map(|item| item.split('/').next().map(String::from))
             .collect()
     }
-    pub async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, Failure> {
+    pub async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, rocky_sdk::Error> {
         match self.signer.clone() {
             Some(identity) => self.database.sync_now_with_identity(identity).await,
             None => self.database.sync_now().await,
@@ -300,14 +300,14 @@ impl Device {
     pub async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {
             let value = self.database.add_peer(&(snap::text(&(contact)))).await?;
-            Ok(json!({"node":value}))
+            Ok::<_, rocky_sdk::Error>(json!({"node":value}))
         })
         .await
     }
     pub async fn peer(&self, node: &str) -> Value {
         let peers = snap::ok(async {
             let network = self.database.status().await?.network;
-            Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;
         peers["peers"]
@@ -351,13 +351,17 @@ pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
 }
 
 pub async fn confirmed(configuration: Configuration) -> Result<Database, Failure> {
-    let report = configuration
+    let error = configuration
         .open()
         .await
         .err()
-        .ok_or("expected removal confirmation")?
-        .downcast::<rocky_sdk::RolloutConfirmationRequired>()?;
-    configuration.open_confirmed(&report.report.digest).await
+        .ok_or("expected removal confirmation")?;
+    let rocky_sdk::ErrorKind::RolloutConfirmation(required) = error.kind else {
+        return Err(format!("expected removal confirmation, found {error}").into());
+    };
+    Ok(configuration
+        .open_confirmed(&required.report.digest)
+        .await?)
 }
 
 pub async fn link(
@@ -370,11 +374,9 @@ pub async fn link(
         Ok(_) => return Err("unconfirmed link succeeded".into()),
         Err(error) => error,
     };
-    let pending = Arc::new(
-        *error
-            .downcast::<rocky_sdk::AwaitingLink>()
-            .map_err(|error| error.to_string())?,
-    );
+    let rocky_sdk::ErrorKind::AwaitingLink(pending) = error.kind else {
+        return Err(format!("expected a pending link, found {error}").into());
+    };
     let shown = responder
         .discovered()
         .await?
@@ -385,7 +387,7 @@ pub async fn link(
     assert_eq!(shown.code, pending.code);
     assert!(!shown.confirmed);
     responder.confirm_link(pending.node, &shown.code).await?;
-    config
+    Ok(config
         .confirm_link(contact, identity, pending.clone(), &shown.code)
-        .await
+        .await?)
 }

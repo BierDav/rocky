@@ -52,8 +52,8 @@ async fn closing_the_database_ends_an_activity_wait_and_keeps_binary_identity_la
         .await?;
     closed?;
     assert_eq!(
-        ended.unwrap_err().downcast_ref::<ServiceError>(),
-        Some(&ServiceError::Closed("database"))
+        ended.unwrap_err().kind,
+        rocky_sdk::ErrorKind::Service(ServiceError::Closed("database"))
     );
     Ok(())
 }

@@ -271,11 +271,11 @@ impl Worker {
 }
 impl Database {
     #[cfg(feature = "qualification")]
-    pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
+    pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, crate::Error> {
         Ok(self.shared.request(Command::LockMeasurements).await?)
     }
     #[cfg(feature = "qualification")]
-    pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, Failure> {
+    pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, crate::Error> {
         self.shared
             .request(Command::ReactorMeasurements)
             .await?
@@ -285,12 +285,12 @@ impl Database {
         configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
-    ) -> Result<Self, Failure> {
+    ) -> Result<Self, crate::Error> {
         #[cfg(not(target_family = "wasm"))]
         let place = Worker::serving_thread;
         #[cfg(target_family = "wasm")]
         let place = Worker::local;
-        Self::launch_in(configuration, install, confirmation, place).await
+        Ok(Self::launch_in(configuration, install, confirmation, place).await?)
     }
     async fn launch_in(
         configuration: &Configuration,
@@ -318,7 +318,7 @@ impl Database {
         configuration: &Configuration,
         provisioning: &str,
         single_use: bool,
-    ) -> Result<(Self, Option<String>), Failure> {
+    ) -> Result<(Self, Option<String>), crate::Error> {
         let (install, phrase) = Install::join(provisioning, single_use);
         let database = Self::launch(configuration, install, None).await?;
         let phrase = phrase.lock().ok().and_then(|mut guard| guard.take());
@@ -409,14 +409,14 @@ impl Database {
     pub(crate) async fn send<T>(
         &self,
         request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
+    ) -> Result<T, crate::Error> {
         self.send_lending(None, |_, reply| request(reply)).await
     }
     pub(crate) async fn send_signed<T>(
         &self,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
         request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
+    ) -> Result<T, crate::Error> {
         self.send_lending(identity, |loan, reply| match loan {
             Some(loan) => crate::request::Request::WithIdentity(loan, Box::new(request(reply))),
             None => request(reply),
@@ -427,7 +427,7 @@ impl Database {
         &self,
         root: Option<Arc<dyn crate::IdentityProvider>>,
         request: impl FnOnce(node::Root, oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
+    ) -> Result<T, crate::Error> {
         self.send_lending(root, |loan, reply| request(node::Root::lent(loan), reply))
             .await
     }
@@ -438,15 +438,15 @@ impl Database {
             Option<crate::identities::Loan>,
             oneshot::Sender<Result<T, Failure>>,
         ) -> crate::request::Request,
-    ) -> Result<T, Failure> {
+    ) -> Result<T, crate::Error> {
         if self.shared.closed.load(Ordering::SeqCst) {
-            return Err(ServiceError::Closed("database").into());
+            return Err(Failure::from(ServiceError::Closed("database")).into());
         }
         let _permit = self
             .shared
             .budget
             .try_acquire()
-            .map_err(|_| "pending call quota")?;
+            .map_err(|_| Failure::from("pending call quota"))?;
         let (loan, returned) = provider.map(crate::identities::lend).unzip();
         let result = self
             .shared
@@ -455,14 +455,15 @@ impl Database {
         if let Some(returned) = returned {
             returned.released().await;
         }
-        result?.map_err(crate::CallFailure::boxed)
+        result.map_err(Failure::from)?.map_err(crate::Error::from)
     }
-    pub async fn attach(&self, network: Network) -> Result<(), Failure> {
+    pub async fn attach(&self, network: Network) -> Result<(), crate::Error> {
         self.shared
             .request(|reply| Command::Attach(network, reply))
             .await?
+            .map_err(crate::Error::from)
     }
-    pub async fn detach(&self) -> Result<(), Failure> {
+    pub async fn detach(&self) -> Result<(), crate::Error> {
         Ok(self.shared.request(Command::Detach).await?)
     }
     pub(crate) async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
@@ -493,15 +494,19 @@ impl Database {
     pub async fn transaction_outcome(
         &self,
         token: rocky_core::TransactionToken,
-    ) -> Result<Option<rocky_core::replay::TransactionOutcome>, Failure> {
+    ) -> Result<Option<rocky_core::replay::TransactionOutcome>, crate::Error> {
         self.shared
             .request(|reply| Command::Outcome(token, reply))
             .await?
+            .map_err(crate::Error::from)
     }
-    pub async fn flush(&self) -> Result<(), Failure> {
-        self.shared.request(Command::Flush).await?
+    pub async fn flush(&self) -> Result<(), crate::Error> {
+        self.shared
+            .request(Command::Flush)
+            .await?
+            .map_err(crate::Error::from)
     }
-    pub async fn observe(&self, tables: &[&str]) -> Result<TableEvents, Failure> {
+    pub async fn observe(&self, tables: &[&str]) -> Result<TableEvents, crate::Error> {
         let tables = tables.iter().map(|table| (*table).to_owned()).collect();
         let observer = self
             .shared
@@ -509,7 +514,7 @@ impl Database {
             .await??;
         Ok(TableEvents::new(observer))
     }
-    pub async fn close(&self) -> Result<(), Failure> {
+    pub async fn close(&self) -> Result<(), crate::Error> {
         let mut worker = self.shared.worker.lock().await;
         if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
@@ -1787,7 +1792,7 @@ mod tests {
                     .map_err(|error| -> Failure {
                         format!("closed, yet the file is still held: {error}").into()
                     })?;
-                reopened.close().await
+                Ok(reopened.close().await?)
             })
             .await
     }
@@ -1819,7 +1824,7 @@ mod tests {
         let database = reopened.map_err(|error| -> Failure {
             format!("a reopen racing the dropped database's teardown failed: {error}").into()
         })?;
-        database.close().await
+        Ok(database.close().await?)
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -1858,7 +1863,7 @@ mod tests {
             1,
             "settings, format checks and the replica share one recovery"
         );
-        reopened.close().await
+        Ok(reopened.close().await?)
     }
 
     #[cfg(feature = "qualification")]
@@ -2013,7 +2018,7 @@ mod tests {
         let stopped = config.create().await.err().ok_or("created past the stop")?;
         assert!(stopped.to_string().contains("injected stop"), "{stopped}");
         assert_eq!(installed_files(directory.path()), Vec::<&str>::new());
-        config.create().await?.database.close().await
+        Ok(config.create().await?.database.close().await?)
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -2154,7 +2159,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn pooled_queries_preserve_sql_errors_and_reset_query_only() -> Result<(), Failure> {
-        use crate::{SqlFailure, SqlValue};
+        use crate::SqlValue;
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
             r#"{"application":"poolcheck","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
@@ -2192,7 +2197,7 @@ mod tests {
             .await
             .err()
             .expect("invalid table should fail");
-        assert!(err.downcast_ref::<SqlFailure>().is_some());
+        assert!(matches!(err.kind, crate::ErrorKind::Sql(_)), "{err}");
 
         let rows = database
             .query(

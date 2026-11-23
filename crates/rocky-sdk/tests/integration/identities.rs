@@ -920,11 +920,11 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
     let contact = owner.contact().await;
     let pending = match config.link(&contact, key.clone()).await {
         Ok(_) => return Err("unconfirmed link installed credentials".into()),
-        Err(error) => Arc::new(
-            *error
-                .downcast::<rocky_sdk::AwaitingLink>()
-                .map_err(|error| error.to_string())?,
-        ),
+        Err(rocky_sdk::Error {
+            kind: rocky_sdk::ErrorKind::AwaitingLink(pending),
+            ..
+        }) => pending,
+        Err(error) => return Err(format!("expected a pending link, found {error}").into()),
     };
     assert_eq!(pending.code.len(), 6);
     assert!(pending.code.bytes().all(|digit| digit.is_ascii_digit()));
@@ -1254,9 +1254,9 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     Ok(())
 }
 
-async fn outcome<T>(
-    operation: impl std::future::Future<Output = Result<T, Failure>>,
+async fn outcome<T, E: Into<Failure>>(
+    operation: impl std::future::Future<Output = Result<T, E>>,
 ) -> Result<(String, String), Failure> {
-    operation.await?;
+    operation.await.map_err(Into::into)?;
     Ok(("ok".into(), String::new()))
 }

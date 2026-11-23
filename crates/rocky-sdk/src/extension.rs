@@ -1,4 +1,4 @@
-use crate::{Database, Failure, request::Request};
+use crate::{Database, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey, RevocationSet, Signature};
 
 #[derive(Clone, Debug)]
@@ -12,10 +12,14 @@ pub struct DeviceCredential {
 }
 
 impl Database {
-    pub async fn device_credential(&self) -> Result<DeviceCredential, Failure> {
+    pub async fn device_credential(&self) -> Result<DeviceCredential, crate::Error> {
         self.send(Request::DeviceCredential).await
     }
-    pub async fn sign_extension(&self, label: &str, message: &[u8]) -> Result<Signature, Failure> {
+    pub async fn sign_extension(
+        &self,
+        label: &str,
+        message: &[u8],
+    ) -> Result<Signature, crate::Error> {
         let signing = rocky_credentials::extension_message(label, message)?;
         self.send(|reply| Request::SignExtension(signing, reply))
             .await

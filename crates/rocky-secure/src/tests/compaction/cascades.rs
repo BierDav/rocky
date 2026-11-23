@@ -1147,7 +1147,7 @@ async fn frames_a_cancelled_direct_import_held_back_read_incomplete_until_they_a
         matches!(
             session(&b).await.run("SELECT key FROM items", vec![]).await,
             Err(Error::Sql(crate::sql::SqlError::Unavailable {
-                reason: crate::sql::Unavailable::Incomplete,
+                reason: crate::sql::Unavailable::Incomplete { .. },
                 ..
             }))
         ),

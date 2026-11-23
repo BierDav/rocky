@@ -1,7 +1,7 @@
-use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
+use rocky_sdk::{Affinity, Column, Configuration, Error, Schema, Table, params};
 
 #[tokio::main]
-async fn main() -> Result<(), Failure> {
+async fn main() -> Result<(), Error> {
     let schema = Schema::builder("notes", 1)
         .table(
             Table::replayed("notes")

@@ -49,7 +49,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
     assert!(rows[0].get::<String>("optional").is_err());
     assert!(rows[0].get::<i64>("body").is_err());
     assert!(rows[0].get::<i64>("missing").is_err());
-    db.close().await
+    Ok(db.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -104,7 +104,7 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
         "the next write waits for the cancelled transaction's rollback"
     );
     assert_eq!(rows[0].get::<String>("body")?, "kept");
-    db.close().await
+    Ok(db.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -156,7 +156,7 @@ async fn paged_reads_hold_a_snapshot_and_decode_aliases() -> Result<(), Failure>
     assert_eq!(row.get::<Option<i64>>("optional")?, None);
     assert!(row.get::<bool>("bad_boolean").is_err());
     drop(rows);
-    db.close().await
+    Ok(db.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = test)]
@@ -220,7 +220,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         1
     );
     reopened.close().await?;
-    issuer.close().await
+    Ok(issuer.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -257,7 +257,7 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
     db.close().await?;
     let db = configuration.open().await?;
     assert_eq!(db.tip_status().await?.bookmark.as_deref(), Some("main"));
-    db.close().await
+    Ok(db.close().await?)
 }
 
 fn outbox_schema() -> Result<Schema, Failure> {
@@ -325,7 +325,7 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
         None,
         "a rolled-back transaction's token never gets an outcome"
     );
-    db.close().await
+    Ok(db.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -355,7 +355,7 @@ async fn flush_persists_every_commit_returned_before_it() -> Result<(), Failure>
         );
     }
     assert!(db.flush().await.is_ok());
-    db.close().await
+    Ok(db.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -381,7 +381,7 @@ async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Fai
     let row = rows.next().await?.ok_or("the note was written")?;
     assert_eq!(row.get::<String>("body")?, "Hello Rocky");
     drop(rows);
-    database.close().await
+    Ok(database.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -409,7 +409,7 @@ async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure
         .join(&provisioning.uri)
         .await?;
     joined.close().await?;
-    issuer.close().await
+    Ok(issuer.close().await?)
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -428,5 +428,5 @@ async fn trusted_staleness_is_set_between_a_minute_and_ten_years() -> Result<(),
     }
     database.set_trusted_stale_after(60).await?;
     database.set_trusted_stale_after(ten_years).await?;
-    database.close().await
+    Ok(database.close().await?)
 }

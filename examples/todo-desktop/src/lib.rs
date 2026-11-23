@@ -72,7 +72,7 @@ impl Workspace {
                 result = Err(error);
             }
         }
-        result
+        Ok(result?)
     }
 }
 

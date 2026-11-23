@@ -136,7 +136,7 @@ impl Device {
         Mailbox::open(&self.directory.join("mailbox.json"))
     }
     async fn close(self) -> Result<(), Failure> {
-        self.database.close().await
+        Ok(self.database.close().await?)
     }
 }
 fn values() -> Vec<rocky_sdk::SqlValue> {
@@ -150,7 +150,7 @@ async fn introduce(left: &Device, right: &Device) -> Result<(), Failure> {
                 .database
                 .add_peer(&(snap::text(&(contact["uri"]))))
                 .await?;
-            Ok(json!({"node":value}))
+            Ok::<_, crate::Error>(json!({"node":value}))
         })
         .await?;
     }

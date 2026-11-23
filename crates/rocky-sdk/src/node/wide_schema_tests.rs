@@ -37,7 +37,7 @@ impl Device {
     async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {
             let value = self.database.add_peer(&(snap::text(&(contact)))).await?;
-            Ok(json!({"node":value}))
+            Ok::<_, crate::Error>(json!({"node":value}))
         })
         .await
     }
@@ -222,17 +222,17 @@ async fn exercise(count: usize) -> Result<(), Failure> {
             "writer peers: {}; owner peers: {}; reader peers: {}",
             snap::ok(async {
                 let network = writer.database.status().await?.network;
-                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+                Ok::<_, crate::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await,
             snap::ok(async {
                 let network = owner.database.status().await?.network;
-                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+                Ok::<_, crate::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await,
             snap::ok(async {
                 let network = members[1].0.database.status().await?.network;
-                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+                Ok::<_, crate::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await
         );

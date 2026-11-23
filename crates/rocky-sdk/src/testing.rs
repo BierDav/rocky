@@ -34,27 +34,27 @@ impl Probe {
 }
 
 impl Database {
-    pub async fn tip_status(&self) -> Result<TipStatus, Failure> {
+    pub async fn tip_status(&self) -> Result<TipStatus, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Status(reply)))
             .await
     }
-    pub async fn inspect_tips(&self) -> Result<TipInspection, Failure> {
+    pub async fn inspect_tips(&self) -> Result<TipInspection, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Inspect(reply)))
             .await
     }
-    pub async fn seal(&self) -> Result<TipStatus, Failure> {
+    pub async fn seal(&self) -> Result<TipStatus, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Seal(reply)))
             .await
     }
-    pub async fn compact(&self, keep: usize) -> Result<TipCompaction, Failure> {
+    pub async fn compact(&self, keep: usize) -> Result<TipCompaction, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Compact(keep, reply)))
             .await
     }
-    pub async fn compaction(&self) -> Result<TipCompaction, Failure> {
+    pub async fn compaction(&self) -> Result<TipCompaction, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Compaction(reply)))
             .await
     }
-    pub async fn discovery_topic(&self) -> Result<[u8; 32], Failure> {
+    pub async fn discovery_topic(&self) -> Result<[u8; 32], crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::DiscoveryTopic(reply)))
             .await
     }

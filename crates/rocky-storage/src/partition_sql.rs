@@ -344,7 +344,9 @@ impl Checker<'_> {
             propagate(&mut effective);
             let incomplete = || Refusal::Unavailable {
                 table: name.clone(),
-                reason: crate::sql::Unavailable::Incomplete,
+                reason: crate::sql::Unavailable::Incomplete {
+                    blockers: Vec::new(),
+                },
             };
             let mut tuples = vec![Vec::new()];
             for column in &rule.columns {
@@ -1058,7 +1060,7 @@ mod tests {
             matches!(
                 check(sql, &[], &rules),
                 Err(Refusal::Unavailable {
-                    reason: crate::sql::Unavailable::Incomplete,
+                    reason: crate::sql::Unavailable::Incomplete { .. },
                     ..
                 })
             )

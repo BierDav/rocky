@@ -69,6 +69,12 @@ impl std::fmt::Display for AwaitingLink {
     }
 }
 impl std::error::Error for AwaitingLink {}
+impl PartialEq for AwaitingLink {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code && self.node == other.node
+    }
+}
+impl Eq for AwaitingLink {}
 
 pub(crate) use rocky_credentials::IdentityEnrollmentRequest as LinkRequest;
 

@@ -1,4 +1,4 @@
-use crate::{Database, Failure, request::Request};
+use crate::{Database, request::Request};
 use rocky_core::Commitment;
 use rocky_credentials::PublicKey;
 
@@ -40,24 +40,24 @@ pub struct RetentionStatus {
     pub checkpoint: crate::CheckpointStatus,
 }
 impl Database {
-    pub async fn identities(&self) -> Result<Vec<IdentityInfo>, Failure> {
+    pub async fn identities(&self) -> Result<Vec<IdentityInfo>, crate::Error> {
         self.send(Request::Identities).await
     }
     pub async fn set_identity_label(
         &self,
         identity: PublicKey,
         label: Vec<u8>,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), crate::Error> {
         self.send(|reply| Request::IdentityLabel(identity, label, reply))
             .await
     }
-    pub async fn held_changes(&self) -> Result<Vec<crate::HeldChange>, Failure> {
+    pub async fn held_changes(&self) -> Result<Vec<crate::HeldChange>, crate::Error> {
         self.send(Request::HeldChanges).await
     }
-    pub async fn drop_held(&self, id: Commitment) -> Result<(), Failure> {
+    pub async fn drop_held(&self, id: Commitment) -> Result<(), crate::Error> {
         self.send(|reply| Request::DropHeld(id, reply)).await
     }
-    pub async fn retention(&self, collection: &str) -> Result<RetentionStatus, Failure> {
+    pub async fn retention(&self, collection: &str) -> Result<RetentionStatus, crate::Error> {
         self.send(|reply| Request::Retention(collection.into(), None, false, reply))
             .await
     }
@@ -65,33 +65,36 @@ impl Database {
         &self,
         collection: &str,
         policy: crate::RetentionPolicy,
-    ) -> Result<RetentionStatus, Failure> {
+    ) -> Result<RetentionStatus, crate::Error> {
         self.send(|reply| Request::Retention(collection.into(), Some(policy), false, reply))
             .await
     }
-    pub async fn maintain_retention(&self, collection: &str) -> Result<RetentionStatus, Failure> {
+    pub async fn maintain_retention(
+        &self,
+        collection: &str,
+    ) -> Result<RetentionStatus, crate::Error> {
         self.send(|reply| Request::Retention(collection.into(), None, true, reply))
             .await
     }
-    pub async fn retention_limits(&self) -> Result<crate::RetentionLimits, Failure> {
+    pub async fn retention_limits(&self) -> Result<crate::RetentionLimits, crate::Error> {
         self.send(|reply| Request::RetentionLimits(None, reply))
             .await
     }
     pub async fn set_retention_limits(
         &self,
         limits: crate::RetentionLimits,
-    ) -> Result<crate::RetentionLimits, Failure> {
+    ) -> Result<crate::RetentionLimits, crate::Error> {
         self.send(|reply| Request::RetentionLimits(Some(limits), reply))
             .await
     }
-    pub async fn set_trusted_stale_after(&self, seconds: u64) -> Result<(), Failure> {
+    pub async fn set_trusted_stale_after(&self, seconds: u64) -> Result<(), crate::Error> {
         self.send(|reply| Request::TrustedStaleAfter(seconds, reply))
             .await
     }
-    pub async fn activity(&self, after: u64) -> Result<crate::ActivityPage, Failure> {
+    pub async fn activity(&self, after: u64) -> Result<crate::ActivityPage, crate::Error> {
         self.send(|reply| Request::Activity(after, reply)).await
     }
-    pub async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, Failure> {
+    pub async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, crate::Error> {
         self.send(|reply| Request::ActivityNext(after, reply)).await
     }
 }

@@ -353,13 +353,12 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
 }
 
 fn confirmation(
-    result: Result<rocky_sdk::Database, Failure>,
+    result: Result<rocky_sdk::Database, rocky_sdk::Error>,
 ) -> rocky_sdk::RolloutConfirmationRequired {
-    *result
-        .err()
-        .expect("confirmation required")
-        .downcast::<rocky_sdk::RolloutConfirmationRequired>()
-        .expect("structured report")
+    match result.err().expect("confirmation required").kind {
+        rocky_sdk::ErrorKind::RolloutConfirmation(required) => *required,
+        other => panic!("expected a structured removal report, found {other:?}"),
+    }
 }
 
 struct NeverStarts(std::sync::atomic::AtomicBool);

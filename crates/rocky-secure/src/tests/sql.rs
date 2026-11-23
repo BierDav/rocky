@@ -348,6 +348,25 @@ fn sql_error(result: Result<SecureRows, Error>) -> SqlError {
     }
 }
 
+fn incomplete(error: SqlError, rule: &str) -> Vec<rocky_core::Blocker> {
+    match error {
+        SqlError::Unavailable {
+            table,
+            reason: crate::sql::Unavailable::Incomplete { blockers },
+        } if table == "items" => blockers,
+        other => panic!("{rule}: expected items to be incomplete, found {other:?}"),
+    }
+}
+
+fn assert_pending_in(blockers: &[rocky_core::Blocker], scope: ResourceScope) {
+    let label = rocky_core::scope_label(&scope);
+    assert!(
+        blockers.iter().any(|blocker| blocker.scope == label
+            && matches!(blocker.kind, rocky_core::BlockerKind::PendingFrames { .. })),
+        "an incomplete read names the pending frames of its scope: {blockers:?}"
+    );
+}
+
 async fn insert(
     session: &SecureSql<TypedRows>,
     sql: &str,
@@ -528,14 +547,11 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
     let mut ordered = frames.clone();
     ordered.sort_by_key(|frame| frame.scope().unwrap() != t.items);
     carol.receive(ordered[0].clone()).await.unwrap();
-    assert_eq!(
+    let blockers = incomplete(
         sql_error(full.run("SELECT count(*) FROM items", vec![]).await),
-        SqlError::Unavailable {
-            table: "items".into(),
-            reason: crate::sql::Unavailable::Incomplete
-        },
-        "a full reader refuses the read as incomplete, not empty, until the bundle is whole"
+        "a full reader refuses the read as incomplete, not empty, until the bundle is whole",
     );
+    assert_pending_in(&blockers, t.items);
     carol.receive(ordered[1].clone()).await.unwrap();
     assert_eq!(
         select(
@@ -623,19 +639,16 @@ async fn applied_rows_stay_readable_while_later_frames_await_their_predecessors(
         fresh.receive(third.clone()).await.unwrap(),
         ReceiveStatus::PendingDependencies
     );
-    assert_eq!(
+    let blockers = incomplete(
         sql_error(
             sql(&fresh, &[t.items])
                 .await
                 .run("SELECT count(*) FROM items", vec![])
-                .await
+                .await,
         ),
-        SqlError::Unavailable {
-            table: "items".into(),
-            reason: crate::sql::Unavailable::Incomplete
-        },
-        "a reader that applied nothing yet refuses as incomplete, not empty"
+        "a reader that applied nothing yet refuses as incomplete, not empty",
     );
+    assert_pending_in(&blockers, t.items);
 
     let bob = t
         .open(

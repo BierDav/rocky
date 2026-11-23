@@ -40,11 +40,11 @@ impl SqlOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unavailable {
     NotHeld,
     KeyMissing,
-    Incomplete,
+    Incomplete { blockers: Vec<rocky_core::Blocker> },
     Revoked,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

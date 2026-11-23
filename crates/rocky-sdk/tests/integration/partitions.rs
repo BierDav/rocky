@@ -99,7 +99,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let contact = snap::ok(db.contact()).await;
     snap::ok(async {
         let value = reader.add_peer(&(snap::text(&(contact["uri"])))).await?;
-        Ok(json!({"node":value}))
+        Ok::<_, rocky_sdk::Error>(json!({"node":value}))
     })
     .await;
     snap::ok(reader.sync_now()).await;
@@ -134,7 +134,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     assert!(
         !snap::ok(async {
             let value = reader.partition_complete("items").await?;
-            Ok(json!({"complete":value}))
+            Ok::<_, rocky_sdk::Error>(json!({"complete":value}))
         })
         .await["complete"]
             .as_bool()

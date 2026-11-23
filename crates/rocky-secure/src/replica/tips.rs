@@ -213,10 +213,17 @@ impl<A: RowApplication> Inner<A> {
         mut context: Option<&mut refresh::RefreshGraphContext<'_>>,
     ) -> Result<FrameReach, Error> {
         let graph = self.graph_for(scope)?;
-        let active = match context.as_mut() {
+        let mut active = match context.as_mut() {
             Some(context) => context.schema_ok(scope, tip, true)?,
             None => graph.schema(tip).is_ok(),
         };
+        let mut tip = tip;
+        if !active {
+            let anchor = graph.late_anchor(tip).map_err(credential)?;
+            if anchor != tip {
+                (tip, active) = (anchor, true);
+            }
+        }
         if !active
             && match context.as_mut() {
                 Some(context) => context.schema_ok(scope, tip, false)?,
@@ -412,8 +419,9 @@ impl<A: RowApplication> Inner<A> {
         bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
         canonical: bool,
     ) -> Result<FramePath, Error> {
+        let anchor = graph.late_anchor(source).map_err(credential)?;
         Self::walk_back(graph, target, bounds, canonical, |cursor, _| {
-            cursor == source
+            cursor == source || cursor == anchor
         })
     }
     pub(super) fn ledger_view(

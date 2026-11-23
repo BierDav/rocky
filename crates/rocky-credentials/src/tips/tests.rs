@@ -386,3 +386,69 @@ fn seal_lookups_use_the_index() {
         "three lookups at the seal list's last item each, plus the two IDs compared; {warm} IDs computed"
     );
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_losing_continuation_anchors_its_line_at_the_tip_both_seals_continue() {
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    let mut graph = TipGraph::new(scope, [4; 32]);
+    let owner = PrivateKey::new();
+    let continue_at = |tip: TipId, sequence: u64, schema: Commitment| {
+        SignedSeal::sign(
+            SealStatement {
+                format: SEAL_FORMAT,
+                scope,
+                tip,
+                frontier: vec![crate::AuthorMark {
+                    author: rocky_core::WriterId::from_bytes([1; 32]),
+                    sequence,
+                }],
+                action: SealAction::Continue { schema },
+            },
+            &owner,
+        )
+        .unwrap()
+    };
+    let genesis = graph.genesis();
+    let schema = graph.genesis_schema;
+    graph.seals.push(continue_at(genesis, 0, schema));
+    graph.seals.push(continue_at(genesis, 1, schema));
+    let winning = graph.seal(genesis).unwrap().unwrap().clone();
+    let won = winning.successor().unwrap().unwrap();
+    let losing = graph
+        .seals
+        .iter()
+        .find(|seal| seal.id().unwrap() != winning.id().unwrap())
+        .unwrap()
+        .clone();
+    let lost = losing.successor().unwrap().unwrap();
+    assert_eq!(graph.late_anchor(won).unwrap(), won);
+    assert_eq!(graph.late_anchor(genesis).unwrap(), genesis);
+    assert_eq!(graph.late_anchor(lost).unwrap(), genesis);
+    let beyond = continue_at(lost, 2, schema);
+    let further = beyond.successor().unwrap().unwrap();
+    graph.seals.push(beyond);
+    assert_eq!(
+        graph.late_anchor(further).unwrap(),
+        genesis,
+        "a later seal on the losing line anchors at the same tip"
+    );
+    let changed = continue_at(lost, 3, [5; 32]);
+    let other_schema = changed.successor().unwrap().unwrap();
+    graph.seals.push(changed);
+    assert_eq!(
+        graph.late_anchor(other_schema).unwrap(),
+        other_schema,
+        "a losing line under another schema keeps its own tip"
+    );
+    let mut revoked = graph.clone();
+    revoked.revoked.insert(losing.id().unwrap());
+    assert_eq!(
+        revoked.late_anchor(lost).unwrap(),
+        lost,
+        "a revoked losing seal does not carry its line"
+    );
+}

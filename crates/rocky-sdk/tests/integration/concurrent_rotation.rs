@@ -180,7 +180,6 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
     Ok(())
 }
 
-#[ignore = "both issuers seal main for members on revocation; the lower-precedence issuer's row written after its own seal stays held on its losing line (a replayed intent, so no held change), and its single-use identity cannot mint the line node it needs to write on the winning line"]
 #[tokio::test]
 async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_renews_once()
 -> Result<(), Failure> {
@@ -218,6 +217,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     b.add(2, "b sibling").await;
     a.sync().await.map_err(|e| e.to_string())?;
     b.sync().await.map_err(|e| e.to_string())?;
+    a.sync().await.map_err(|e| e.to_string())?;
     let current = winner(root, "b", "items");
     assert_eq!(current.generation, 3);
     assert_eq!(winner(root, "a", "items"), current);
@@ -241,6 +241,92 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     assert_eq!(winner(root, "offline", "items"), current);
     offline.add(3, "after renewal").await;
     for device in [&a, &b, &offline] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let root = root.path();
+    let hub = Arc::new(Hub::default());
+    let directory = root.join("a");
+    let options = open_with(&directory, &hub, "a", common::SCHEMA);
+    let a = Device::new(options.create().await?)?;
+    let b = join_admin(root, &hub, "b", &a, common::SCHEMA).await?;
+    let writer = join(
+        root,
+        &hub,
+        "writer",
+        &a,
+        rocky_sdk::Access::Full,
+        common::SCHEMA,
+    )
+    .await?;
+    common::introduce(&writer, &b).await;
+    a.add(1, "common").await;
+    for device in [&b, &writer] {
+        device.sync().await.map_err(|e| e.to_string())?;
+    }
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    for device in [&a, &b] {
+        snap::ok(
+            device
+                .database
+                .revoke_identity(PrivateKey::new().public_key()),
+        )
+        .await;
+    }
+    assert_ne!(winner(root, "a", "items"), winner(root, "b", "items"));
+    a.add(2, "a after its seal").await;
+    b.add(3, "b after its seal").await;
+    snap::ok(async {
+        writer.database.renew().await?;
+        writer.database.info().await
+    })
+    .await;
+    writer.sync().await.map_err(|e| e.to_string())?;
+    assert_eq!(
+        winner(root, "writer", "items"),
+        winner(root, "b", "items"),
+        "the writer follows the line that later loses"
+    );
+    writer.add(4, "writer on the losing line").await;
+    snap::ok(writer.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
+    a.sync().await.map_err(|e| e.to_string())?;
+    b.sync().await.map_err(|e| e.to_string())?;
+    snap::ok(writer.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
+    let every_row = [
+        "a after its seal",
+        "b after its seal",
+        "common",
+        "writer on the losing line",
+    ];
+    for _ in 0..3 {
+        for device in [&writer, &a, &b] {
+            device.sync().await.map_err(|e| e.to_string())?;
+        }
+    }
+    snap::ok(async {
+        writer.database.renew().await?;
+        writer.database.info().await
+    })
+    .await;
+    let current = winner(root, "a", "items");
+    for (name, device) in [("a", &a), ("b", &b), ("writer", &writer)] {
+        let mut titles = device.titles().await;
+        titles.sort();
+        assert_eq!(titles, every_row, "{name} has every row");
+        assert_eq!(winner(root, name, "items"), current, "{name} converged");
+        assert_eq!(
+            snap::ok(device.database.held_changes()).await["count"],
+            0,
+            "{name} holds nothing"
+        );
+    }
+    for device in [&a, &b, &writer] {
         device.close().await;
     }
     Ok(())

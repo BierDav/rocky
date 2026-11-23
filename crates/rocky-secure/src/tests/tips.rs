@@ -614,7 +614,7 @@ async fn offline_writes_cross_two_continue_seals_without_changing_their_author()
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device() {
+async fn concurrent_issuer_seals_choose_the_lower_continuation_and_carry_the_losing_write() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let a = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
@@ -674,13 +674,17 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
         a.snapshot(f.public).await.unwrap().rows,
         b.snapshot(f.public).await.unwrap().rows
     );
-    assert_eq!(a.snapshot(f.public).await.unwrap().rows.len(), 2);
-    assert_eq!(a.held_changes().await.unwrap().len(), 1);
-    assert_eq!(b.held_changes().await.unwrap().len(), 1);
+    assert_eq!(
+        a.snapshot(f.public).await.unwrap().rows.len(),
+        3,
+        "the write on the losing continuation applies on the winning line"
+    );
+    assert!(a.held_changes().await.unwrap().is_empty());
+    assert!(b.held_changes().await.unwrap().is_empty());
     let loser = if a_write.operation().unwrap().header.extensions.tip == expected {
-        b_write
+        b_write.clone()
     } else {
-        a_write
+        a_write.clone()
     };
     let third = open(&f, &dir.path().join("third.db"), &PrivateKey::new()).await;
     third.receive(common).await.unwrap();
@@ -693,8 +697,18 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
         .await
         .unwrap();
     let losing_tip = loser.operation().unwrap().header.extensions.tip;
-    third.receive_held_frames(vec![loser]).await.unwrap();
-    assert_eq!(third.held_changes().await.unwrap().len(), 1);
+    assert!(
+        third.receive_held_frames(vec![loser]).await.is_err(),
+        "a losing continuation's write is a late write, not a held transfer"
+    );
+    for write in [a_write, b_write] {
+        third.receive(write).await.unwrap();
+    }
+    assert_eq!(
+        third.snapshot(f.public).await.unwrap().rows,
+        a.snapshot(f.public).await.unwrap().rows
+    );
+    assert!(third.held_changes().await.unwrap().is_empty());
     let (losing_replica, winning_replica) =
         if variants[0].0.successor().unwrap().unwrap() == losing_tip {
             (&a, &b)

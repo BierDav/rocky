@@ -1111,6 +1111,30 @@ impl TipGraph {
             cursor = parent.ok_or_else(|| denied("unknown tip"))?;
         }
     }
+    pub fn late_anchor(&self, tip: TipId) -> Result<TipId, Error> {
+        if self.schema(tip).is_ok() {
+            return Ok(tip);
+        }
+        let Ok(schema) = self.schema_any(tip) else {
+            return Ok(tip);
+        };
+        let continuations = self.seals_by_continuation();
+        let mut cursor = tip;
+        let mut visited = BTreeSet::new();
+        while visited.insert(cursor) {
+            let Some(seal) = continuations.get(&cursor) else {
+                return Ok(tip);
+            };
+            if self.revoked.contains(&seal.id()?) {
+                return Ok(tip);
+            }
+            cursor = seal.statement.tip;
+            if let Ok(active) = self.schema(cursor) {
+                return Ok(if active == schema { cursor } else { tip });
+            }
+        }
+        Err(denied("cyclic tip graph"))
+    }
     pub fn continues(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema(from)?;
         self.schema(to)?;

@@ -76,17 +76,22 @@ impl Device {
         .await
         .map(drop)
     }
-    async fn restart(self) -> Result<Self, Failure> {
+    async fn stop(self) -> Result<Stopped, Failure> {
         let Self {
             database,
             directory,
             name,
             hub,
-            ..
         } = self;
         database.close().await?;
-        let database = open(&directory, &hub, &name)?.open().await?;
-        Ok(Self::new(database, directory, &name, &hub))
+        Ok(Stopped {
+            directory,
+            name,
+            hub,
+        })
+    }
+    async fn restart(self) -> Result<Self, Failure> {
+        self.stop().await?.start().await
     }
     async fn invite(&self, profile: crate::Access) -> Result<String, Failure> {
         Ok(self.database.provision(profile, None).await?.uri)
@@ -139,6 +144,17 @@ impl Device {
         Ok(self.database.close().await?)
     }
 }
+struct Stopped {
+    directory: PathBuf,
+    name: String,
+    hub: Arc<Hub>,
+}
+impl Stopped {
+    async fn start(self) -> Result<Device, Failure> {
+        let database = open(&self.directory, &self.hub, &self.name)?.open().await?;
+        Ok(Device::new(database, self.directory, &self.name, &self.hub))
+    }
+}
 fn values() -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(snap::text(&(LIST)))]
 }
@@ -168,6 +184,11 @@ impl Mesh {
         Self::with_root(tempfile::tempdir()?.into()).await
     }
     async fn with_root(root: crate::test_directory::Directory) -> Result<Self, Failure> {
+        let mesh = Self::unpartitioned(root).await?;
+        create_list(&mesh.a).await?;
+        Ok(mesh)
+    }
+    async fn unpartitioned(root: crate::test_directory::Directory) -> Result<Self, Failure> {
         let hub = Arc::new(Hub::default());
         let directory = root.path().join("a");
         let a = Device::new(
@@ -180,14 +201,6 @@ impl Mesh {
         let b = join(&root, &hub, &a, "b", crate::Access::Full).await?;
         introduce(&a, &custody).await?;
         introduce(&b, &custody).await?;
-        snap::value(
-            a.database
-                .create_partition(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values()).clone(),
-                }),
-        )
-        .await?;
         Ok(Self {
             root,
             hub,
@@ -207,6 +220,18 @@ impl Mesh {
         }
         Ok(())
     }
+}
+async fn create_list(issuer: &Device) -> Result<(), Failure> {
+    snap::value(
+        issuer
+            .database
+            .create_partition(crate::PartitionTarget::Group {
+                group: "list".into(),
+                values: values(),
+            }),
+    )
+    .await
+    .map(drop)
 }
 async fn join(
     root: &tempfile::TempDir,
@@ -502,11 +527,13 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         a,
         custody,
         b,
-    } = Mesh::new().await?;
+    } = Mesh::unpartitioned(tempfile::tempdir()?.into()).await?;
     let node = b.node().await?;
-    b.online(false).await?;
+    let identity = b.identity().await?;
+    let b = b.stop().await?;
+    create_list(&a).await?;
     share(&a, &[&node]).await?;
-    relay(&a, &b).await?;
+    snap::value(a.database.sync_now()).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     let custody = custody.restart_with(|_| Ok(())).await?;
     assert_eq!(
@@ -514,7 +541,7 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         1,
         "a restarted mailbox keeps the deposit"
     );
-    snap::value(a.database.revoke_identity(b.identity().await?.parse()?)).await?;
+    snap::value(a.database.revoke_identity(identity.parse()?)).await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     snap::value(a.database.sync_now()).await?;
     assert_eq!(
@@ -522,7 +549,13 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         0,
         "custody learns the statement from A and removes B's deposit"
     );
+    let b = b.start().await?;
     let _ = relay(&b, &a).await;
+    assert_eq!(
+        b.events("identity_revoked").await?.len(),
+        1,
+        "B reached custody, which answered with B's revocation"
+    );
     assert_eq!(b.epochs().await?, Vec::<Value>::new(), "B received nothing");
     for device in [a, custody, b] {
         device.close().await?;
@@ -536,19 +569,11 @@ impl Device {
         self,
         change: impl FnOnce(&mut Mailbox) -> Result<(), Failure>,
     ) -> Result<Self, Failure> {
-        let Self {
-            database,
-            directory,
-            name,
-            hub,
-            ..
-        } = self;
-        database.close().await?;
-        let mut mailbox = Mailbox::open(&directory.join("mailbox.json"))?;
+        let stopped = self.stop().await?;
+        let mut mailbox = Mailbox::open(&stopped.directory.join("mailbox.json"))?;
         change(&mut mailbox)?;
         mailbox.save()?;
-        let database = open(&directory, &hub, &name)?.open().await?;
-        Ok(Self::new(database, directory, &name, &hub))
+        stopped.start().await
     }
 }
 

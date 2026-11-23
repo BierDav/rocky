@@ -137,7 +137,7 @@ pub use checkpoint::{
 };
 pub use evict::EvictReport;
 pub use generation::{EngineStatus, GenerationStatus};
-pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};
+pub use held::{CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, SignedVoid};
 pub use migrate::ProjectionPlan;
 pub use offload::RemotePage;
 use p2panda_core::validate_backlink;

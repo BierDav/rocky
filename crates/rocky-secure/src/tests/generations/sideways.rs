@@ -284,9 +284,15 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
         note_rows(&[("0001", "title", Some("old"))]),
         "{rebuild:?}"
     );
-    assert!(
-        alice.held_changes().await.unwrap().is_empty(),
-        "intents have no rows to re-author, so the unsent write goes with its line: {rebuild:?}"
+    let held = alice.held_changes().await.unwrap();
+    assert_eq!(
+        held.iter()
+            .flat_map(|change| &change.intents)
+            .flat_map(|intent| &intent.statements)
+            .map(|statement| statement.sql.as_str())
+            .collect::<Vec<_>>(),
+        ["UPDATE items SET title = 'at B' WHERE key = '0001'"],
+        "the unsent write leaves with its line and is listed as held: {rebuild:?}"
     );
     alice.audit(lineage.scope("items")).await.unwrap();
 }

@@ -544,8 +544,12 @@ mod races {
         }
         let held = snap::ok(member.database.held_changes()).await;
         assert_eq!(
-            held["count"], 0,
-            "the write on the revoked continuation goes with it: {held}"
+            (
+                held["count"].clone(),
+                held["changes"][0]["intents"][0]["statements"][0]["params"][2]["value"].clone()
+            ),
+            (json!(1), json!("on the winner")),
+            "the write on the revoked continuation leaves the rows and is listed as held: {held}"
         );
         Ok(())
     }

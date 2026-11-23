@@ -102,6 +102,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 };
                 after = id.clone();
                 let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
+                let intents = {
+                    let inner = self.inner.lock(Class::Background).await;
+                    source.check(&inner)?;
+                    let mut lost = Vec::with_capacity(stored.intents.len());
+                    for held in stored.intents {
+                        if !inner.replays_held_intent(&held)? {
+                            lost.push(held.intent);
+                        }
+                    }
+                    lost
+                };
+                if stored.rows.is_empty() && intents.is_empty() {
+                    continue;
+                }
                 let mut rows = Vec::with_capacity(stored.rows.len());
                 for row in stored.rows {
                     rocky_platform::task::yield_now().await;
@@ -121,6 +135,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .map_err(|_| Error::Corrupt("held change".into()))?,
                     time: stored.time,
                     rows,
+                    intents,
                 });
             }
         }
@@ -133,5 +148,25 @@ impl<A: RowApplication> EncryptedReplica<A> {
         resume: tokio::sync::oneshot::Receiver<()>,
     ) {
         self.inner.lock(Class::Background).await.held_listing_pause = Some((reached, resume));
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    fn replays_held_intent(&self, held: &StoredIntent) -> Result<bool, Error> {
+        let domain = held.intent.scope.domain;
+        let Some(graph) = self.graphs.get(&domain) else {
+            return Ok(false);
+        };
+        let author = rocky_core::WriterId::from_bytes(held.author);
+        let continued = match &self.workspace.followed {
+            Some((scope, name)) if *scope == domain => graph.bookmark(name).map_err(credential)?,
+            _ => None,
+        };
+        for target in std::iter::once(self.workspace.tip).chain(continued) {
+            if self.visible_frame(graph, held.tip, author, held.sequence, target)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

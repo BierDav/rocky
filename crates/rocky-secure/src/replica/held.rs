@@ -93,6 +93,13 @@ pub struct HeldChange {
     pub id: Commitment,
     pub time: u64,
     pub rows: Vec<HeldRow>,
+    pub intents: Vec<HeldIntent>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldIntent {
+    pub scope: ResourceScope,
+    pub table: String,
+    pub statements: Vec<rocky_core::replay::IntentStatement>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeldKind {
@@ -129,6 +136,25 @@ pub struct CurrentValue {
 struct Stored {
     time: u64,
     rows: Vec<StoredRow>,
+    intents: Vec<StoredIntent>,
+}
+#[derive(Serialize, Deserialize)]
+struct StoredIntent {
+    intent: HeldIntent,
+    tip: TipId,
+    author: [u8; 32],
+    sequence: u64,
+}
+impl Stored {
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.intents.is_empty()
+    }
+    fn scopes(&self) -> impl Iterator<Item = ResourceScope> + '_ {
+        self.rows
+            .iter()
+            .map(|row| row.scope)
+            .chain(self.intents.iter().map(|stored| stored.intent.scope))
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct StoredRow {
@@ -410,6 +436,7 @@ impl<A: RowApplication> Inner<A> {
                     .min()
                     .unwrap_or(0),
                 rows: Vec::new(),
+                intents: Vec::new(),
             };
             for frame in &members {
                 for (write, row) in &frame.writes {
@@ -1021,6 +1048,13 @@ fn whole_bundles(frames: &[Unoffered]) -> BTreeMap<Vec<u8>, Vec<usize>> {
     bundles
 }
 
+fn item_name(id: &Commitment, names: &BTreeMap<Commitment, String>) -> String {
+    names
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| id.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn stored_row(
     write: &RowWrite,
     row: Commitment,
@@ -1034,12 +1068,7 @@ fn stored_row(
     };
     let written = write.published_fields();
     let image = change.after.as_ref().or(change.before.as_ref());
-    let name = |id: &Commitment| {
-        names
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.iter().map(|byte| format!("{byte:02x}")).collect())
-    };
+    let name = |id: &Commitment| item_name(id, names);
     StoredRow {
         scope: change.scope,
         table: name(&change.scope.table),

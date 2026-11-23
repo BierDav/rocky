@@ -76,3 +76,69 @@ async fn a_late_write_of_a_removed_column_drops_as_schema_in_the_successor() {
         );
     }
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_intent_on_an_abandoned_line_is_listed_as_a_held_change() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let key = PrivateKey::new();
+    let alice = lineage
+        .open(
+            &dir.path().join("alice.db"),
+            &key,
+            3,
+            Some(lineage.projection(3)),
+        )
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items VALUES('0001','one',NULL,NULL)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    super::compaction::follow_main(&lineage, &alice).await;
+    let kept = alice.followed_tip().await;
+    lineage
+        .advance(&alice, lineage.config(3, &key), 3)
+        .await
+        .unwrap();
+    let abandoned = "UPDATE items SET title='abandoned' WHERE key='0001'";
+    write(&alice, abandoned).await;
+    let old = alice.followed_tip().await;
+    assert_ne!(old, kept);
+    let seal = super::compaction::sign_seal(
+        &lineage,
+        old,
+        alice.seal_frontier(lineage.domain, false).await.unwrap(),
+    );
+    alice
+        .receive_tip_statements(&[
+            crate::TipStatement::Seal(seal),
+            super::compaction::bookmark(&lineage, Some(old), kept),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(alice.followed_tip().await, kept);
+    assert_eq!(
+        select(&alice, "SELECT title FROM items").await,
+        vec![vec![text("one")]]
+    );
+    let held = alice.held_changes().await.unwrap();
+    assert_eq!(
+        held.len(),
+        1,
+        "the abandoned intent is not dropped silently"
+    );
+    assert!(held[0].rows.is_empty());
+    assert_eq!(held[0].intents.len(), 1);
+    assert_eq!(held[0].intents[0].table, "items");
+    assert_eq!(held[0].intents[0].scope, lineage.scope("items"));
+    assert_eq!(
+        held[0].intents[0].statements[0].sql,
+        "UPDATE items SET title = 'abandoned' WHERE key = '0001'"
+    );
+    alice.drop_held(held[0].id).await.unwrap();
+    assert!(alice.held_changes().await.unwrap().is_empty());
+}

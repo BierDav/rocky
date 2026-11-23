@@ -978,7 +978,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
             json!([[snap::cell(text("dairy"))]])
         ]
         .contains(&survivor),
-        "an unsent write on the losing tip goes with it: an intent has no rows to re-author: {survivor}"
+        "an unsent write on the losing tip leaves with it: {survivor}"
     );
     let a_won = survivor == json!([[snap::cell(text("fruit"))]]);
     let titles: &[&str] = if a_won {
@@ -996,8 +996,13 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
         assert_eq!(status["manifest"], left["manifest"]);
         assert_eq!(status["current"]["schema"], 2);
     }
+    let unsent_on_the_losing_tip = if a_won { 1 } else { 2 };
     for device in [&a, &b] {
-        assert_eq!(snap::ok(device.database.held_changes()).await["count"], 0);
+        let held = snap::ok(device.database.held_changes()).await;
+        assert_eq!(
+            held["count"], unsent_on_the_losing_tip,
+            "each unsent write on the losing tip is listed as held: {held}"
+        );
     }
     assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     b.close().await;

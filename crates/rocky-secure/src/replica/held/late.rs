@@ -79,6 +79,7 @@ impl<A: RowApplication> Inner<A> {
         let mut stored = Stored {
             time: first.operation_ref()?.header.timestamp,
             rows: Vec::new(),
+            intents: Vec::new(),
         };
         for (frame, payload) in frames {
             let operation = frame.operation_ref()?;
@@ -87,8 +88,25 @@ impl<A: RowApplication> Inner<A> {
             if !self.can_read_key(scope, &local) || !self.holds(scope).await? {
                 return Err(denied("held change requires a readable held scope"));
             }
-            let has_no_rows_to_reauthor = payload.intent().is_some() || payload.outcome().is_some();
-            if has_no_rows_to_reauthor {
+            if payload.outcome().is_some() {
+                continue;
+            }
+            if let Some(intent) = payload.intent() {
+                let extension = &operation.header.extensions;
+                stored.intents.push(StoredIntent {
+                    intent: HeldIntent {
+                        scope,
+                        table: item_name(&scope.table, &names),
+                        statements: intent.statements.clone(),
+                    },
+                    tip: extension.tip,
+                    author: *extension
+                        .author(&operation.header.public_key)
+                        .ok_or_else(|| denied("node author missing"))?
+                        .as_bytes(),
+                    sequence: extension.author_sequence,
+                });
+                stored.time = stored.time.min(operation.header.timestamp);
                 continue;
             }
             let writes = payload.clone().into_writes();
@@ -213,14 +231,13 @@ impl<A: RowApplication> Inner<A> {
             Some([SqlValue::Blob(bytes)]) => {
                 let grants: Vec<rocky_core::ResourceGrant> = decode(bytes)?;
                 stored
-                    .rows
-                    .iter()
-                    .all(|row| self.can_read_key(row.scope, &grants))
+                    .scopes()
+                    .all(|scope| self.can_read_key(scope, &grants))
             }
             None => false,
             _ => return Err(Error::Corrupt("held resolution authority".into())),
         };
-        if !resolved && !migration && !stored.rows.is_empty() {
+        if !resolved && !migration && !stored.is_empty() {
             self.conn
                 .execute(
                     "INSERT OR REPLACE INTO secure_held VALUES(?,?)",
@@ -602,9 +619,8 @@ impl<A: RowApplication> Inner<A> {
         if let Some([SqlValue::Blob(bytes)]) = held.first().map(Vec::as_slice) {
             let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
             if stored
-                .rows
-                .iter()
-                .any(|row| !self.can_read_key(row.scope, authority))
+                .scopes()
+                .any(|scope| !self.can_read_key(scope, authority))
             {
                 return Err(denied(
                     "held resolution requires read authority for every held scope",

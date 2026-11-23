@@ -76,7 +76,7 @@ pub use people::{
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use registry::{Grant as RecordedPartitionGrant, Kind as IdentityOrigin};
-pub use rocky_core::replay::{DropReason, TransactionOutcome};
+pub use rocky_core::replay::{DropReason, IntentStatement, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, DeleteAction, ForeignKeyDefinition, IndexColumn,
     IndexDefinition, LogicalAssertion, LogicalRestriction, LogicalView, TableClass,
@@ -92,7 +92,7 @@ pub use rocky_credentials::{
     RevocationMode, RootKey,
 };
 pub use rocky_secure::{
-    CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,
+    CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, Holding,
     RetentionLimits, RetentionPolicy,
 };
 pub use rocky_secure::{PageCache, PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};

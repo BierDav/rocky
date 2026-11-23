@@ -310,9 +310,14 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         lineage.definition(4).hash()
     );
     target.receive_held_frames(frames.clone()).await.unwrap();
-    assert!(
-        target.held_changes().await.unwrap().is_empty(),
-        "an intent is held whole, with no rows to re-author"
+    let held = target.held_changes().await.unwrap();
+    assert_eq!(
+        held.iter()
+            .map(|change| (change.rows.len(), change.intents.len()))
+            .collect::<Vec<_>>(),
+        [(0, 1)],
+        "an intent is held whole and listed with no rows to re-author"
     );
+    assert_eq!(held[0].intents[0].table, "items");
     target.audit(lineage.scope("items")).await.unwrap();
 }

@@ -1151,16 +1151,28 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     async fn require_held_start(&self, domain: Scope, target: TipId) -> Result<(), Error> {
+        match self.missing_start(domain, target).await? {
+            None => Ok(()),
+            Some(_) => Err(denied(
+                "this node does not hold the seal the tip starts from; pull it from a node that keeps it",
+            )),
+        }
+    }
+    async fn missing_start(
+        &self,
+        domain: Scope,
+        target: TipId,
+    ) -> Result<Option<Commitment>, Error> {
         let graph = self.graph_for(domain)?;
         if target == self.workspace.tip
             || graph
                 .continues(self.workspace.tip, target)
                 .is_ok_and(|continues| continues)
         {
-            return Ok(());
+            return Ok(None);
         }
         let Some(start) = history::bookmark_seal(graph, target)? else {
-            return Ok(());
+            return Ok(None);
         };
         let path = compaction::tip_path_seals(graph, target)?
             .iter()
@@ -1177,11 +1189,9 @@ impl<A: RowApplication> Inner<A> {
                 || !self.listed_at(graph, scope, &path)?.is_empty();
         }
         if based || self.held_seal(domain, start).await?.is_some() {
-            return Ok(());
+            return Ok(None);
         }
-        Err(denied(
-            "this node does not hold the seal the tip starts from; pull it from a node that keeps it",
-        ))
+        Ok(Some(start))
     }
     pub(super) async fn rebind_node_tips(
         &self,
@@ -1952,6 +1962,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 _ => Err(Error::Corrupt("tip statement".into())),
             })
             .collect()
+    }
+    pub async fn missing_bookmark_start(
+        &self,
+        scope: Scope,
+        name: &str,
+    ) -> Result<Option<Commitment>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let target = inner
+            .graph_for(scope)?
+            .bookmark(name)
+            .map_err(credential)?
+            .ok_or_else(|| denied("bookmark does not exist"))?;
+        inner.missing_start(scope, target).await
     }
     pub async fn follow_bookmark(&self, scope: Scope, name: &str) -> Result<TipId, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;

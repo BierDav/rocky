@@ -102,6 +102,7 @@ impl Node {
             Bootstrap::Interrupted { importing } => (None, importing, PeerWork::Owed),
         };
         self.sync_state.send_replace(SyncActivityState::Syncing);
+        self.follow_main_when_held().await?;
         let scopes = self.reconciliation_scopes(peer, &importing).await?;
         let reconciled = sync::reconcile(
             &self.replica,

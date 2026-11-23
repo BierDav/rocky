@@ -156,8 +156,7 @@ impl Node {
         {
             return Ok(());
         }
-        let start = self.replica.bookmark_seal(scope, BOOKMARK).await?;
-        if self.replica.held_seal(scope, start).await?.is_none() {
+        if let Some(start) = self.replica.missing_bookmark_start(scope, BOOKMARK).await? {
             self.replica.want_seal(scope, start).await?;
             self.wake_sync();
             return Ok(());

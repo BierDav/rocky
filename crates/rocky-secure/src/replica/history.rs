@@ -1125,15 +1125,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.graph_for(domain)?;
         inner.held_seal(domain, seal).await
     }
-    pub async fn bookmark_seal(&self, domain: Scope, bookmark: &str) -> Result<Commitment, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let graph = inner.graph_for(domain)?;
-        let tip = graph
-            .bookmark(bookmark)
-            .map_err(credential)?
-            .ok_or_else(|| denied("no such bookmark"))?;
-        bookmark_seal(graph, tip)?.ok_or_else(|| denied("the bookmark's tip starts from no seal"))
-    }
     pub async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
         self.inner
             .lock(crate::replica::Class::Background)

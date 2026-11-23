@@ -4,7 +4,8 @@ use rocky_core::{
     Scope, TipId,
 };
 use rocky_credentials::{
-    Extended, Extension, SealFinality, SignedCapability, TerminalAck, TerminalAckStatement,
+    AuthorMark, Extended, Extension, SEAL_FORMAT, SealAction, SealStatement, SignedCapability,
+    SignedSeal,
 };
 
 fn scope(index: u8) -> ResourceScope {
@@ -51,35 +52,27 @@ fn eight_links(grants: usize) -> CredentialChain {
             .collect(),
     )
 }
-fn ack(credentials: CredentialChain) -> Result<TerminalAck, rocky_credentials::Error> {
-    TerminalAck::sign(
-        TerminalAckStatement {
-            format: rocky_credentials::TERMINAL_ACK_FORMAT,
-            coordinator: rocky_core::CoordinatorIdentity {
-                root: [255; 32],
-                mesh: MeshId([255; 16]),
-                genesis: [255; 32],
-            },
+fn seal(links: &CredentialChain) -> Result<SignedSeal, rocky_credentials::Error> {
+    let node = PrivateKey::from_bytes(&[8; 32]);
+    let credentials = links
+        .clone()
+        .certify(&PrivateKey::from_bytes(&[7; 32]), &node)?;
+    SignedSeal::endorse(
+        SealStatement {
+            format: SEAL_FORMAT,
             scope: scope(1).domain,
             tip: TipId([255; 32]),
-            position: u64::MAX,
-            running: [255; 32],
-            seal: [255; 32],
-            continuation: Some(TipId([255; 32])),
-            confirms: true,
+            frontier: (0..=u8::MAX)
+                .map(|index| AuthorMark {
+                    author: rocky_core::WriterId::from_bytes([index; 32]),
+                    sequence: i64::MAX as u64,
+                })
+                .collect(),
+            action: SealAction::Continue { schema: [255; 32] },
         },
-        &PrivateKey::from_bytes(&[7; 32]),
-        credentials,
-        longest_chain_link(),
+        rocky_credentials::Signer::node(&node, &credentials)?,
+        links,
     )
-}
-fn longest_chain_link() -> rocky_credentials::ChainLink {
-    rocky_credentials::ChainLink {
-        lane: PrivateKey::from_bytes(&[7; 32]).public_key(),
-        sequence: u64::MAX - 1,
-        previous: Some([255; 32]),
-        stage: None,
-    }
 }
 pub(super) fn fits_one_frame(message: Message) {
     let key = PrivateKey::from_bytes(&[7; 32]);
@@ -99,26 +92,16 @@ pub(super) fn fits_one_frame(message: Message) {
     assert!(frame.len() <= MAX_SECURE_FRAME);
 }
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledgment() {
+fn tip_pages_fit_the_largest_permitted_eight_link_seal() {
     let mut largest = None;
     for grants in 1..=rocky_credentials::MAX_GRANTS {
-        match ack(eight_links(grants)) {
-            Ok(ack) => largest = Some(ack),
-            Err(_) => break,
+        match seal(&eight_links(grants)).map(crate::TipStatement::Seal) {
+            Ok(statement) if statement.id().is_ok() => largest = Some(statement),
+            _ => break,
         }
     }
-    let ack = largest.unwrap();
-    let ack_bytes = ack.to_bytes().unwrap().len();
-    assert!(ack_bytes <= rocky_credentials::MAX_TERMINAL_ACK_BYTES);
-    let finality = SealFinality {
-        format: rocky_credentials::SEAL_FINALITY_FORMAT,
-        scope: scope(1).domain,
-        seal: [255; 32],
-        acknowledgments: vec![ack; rocky_credentials::MAX_FINALITY_ACKS],
-    };
-    let statement = crate::TipStatement::Finality(finality);
-    assert!(statement.id().is_ok());
-    let input = vec![statement.clone(); 32];
+    let statement = largest.unwrap();
+    let input = vec![statement; 32];
     let pages = tips::statement_pages(input.clone()).unwrap();
     assert!(pages.len() > 1);
     assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), input.len());
@@ -138,29 +121,6 @@ fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledg
             .into(),
         );
     }
-    let candidates = tips::candidate_pages(vec![input]).unwrap();
-    assert_eq!(candidates.iter().filter(|(_, last)| *last).count(), 1);
-    for (statements, last) in candidates {
-        fits_one_frame(tips::TipMessage::CandidatePush { statements, last }.into());
-    }
-    let mut oversized = statement;
-    let crate::TipStatement::Finality(ref mut finality) = oversized else {
-        unreachable!()
-    };
-    finality
-        .acknowledgments
-        .resize(64, finality.acknowledgments[0].clone());
-    assert!(matches!(
-        oversized.id(),
-        Err(Error::Quota {
-            resource: "tip statement",
-            ..
-        })
-    ));
-    eprintln!(
-        "eight-link ack={ack_bytes}; finality bound={}; message budget={SECURE_MESSAGE_BYTES}",
-        rocky_credentials::MAX_FINALITY_BYTES
-    );
 }
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn maximal_frontier_batches_are_split_in_both_directions() {

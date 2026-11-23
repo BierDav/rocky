@@ -127,18 +127,8 @@ impl Bootstrap {
         for movement in &self.graph.moves {
             movement.verify_historic(settings.publisher, &self.graph)?;
         }
-        for minimum in &self.graph.genesis_lines {
-            minimum.verify_historic(settings.publisher, &self.graph)?;
-        }
-        for finality in &self.graph.finalities {
-            self.graph
-                .verify_finality(finality, settings.publisher, None)?;
-        }
         for checkpoint in &self.graph.checkpoints {
             checkpoint.verify_historic(settings.publisher, &self.graph)?;
-        }
-        for signed in &self.graph.settings {
-            signed.verify_historic(settings.publisher, &self.graph)?;
         }
         let mut graph = self.graph.clone();
         graph.exclude_revoked(&settings.revocations)?;

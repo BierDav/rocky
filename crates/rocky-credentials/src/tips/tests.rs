@@ -73,7 +73,6 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
                 sequence: 0,
                 id: cut[0].id().unwrap(),
             }],
-            acknowledgments: None,
         }],
         mode: crate::RevocationMode::Lost,
     };
@@ -350,7 +349,7 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn seal_and_finality_lookups_use_the_index() {
+fn seal_lookups_use_the_index() {
     let scope = Scope {
         mesh: MeshId([1; 16]),
         app: AppId([2; 16]),
@@ -370,38 +369,20 @@ fn seal_and_finality_lookups_use_the_index() {
             action: SealAction::Continue {
                 schema: graph.genesis_schema,
             },
-            recovery: None,
         };
         graph
             .seals
             .push(SignedSeal::sign(statement, &owner).unwrap());
     }
     let (first, last) = (graph.seals[0].id().unwrap(), graph.seals[39].id().unwrap());
-    for format in 0..40 {
-        let record = SealFinality {
-            format,
-            ..SealFinality::new(scope, last, Vec::new())
-        };
-        if format < 39 {
-            graph.revoked.insert(record.id().unwrap());
-        }
-        graph.finalities.push(record);
-    }
-    assert!(
-        graph.is_final(last).unwrap(),
-        "only the newest of distinct finality records of last is unrevoked"
-    );
-    assert!(!graph.is_final(first).unwrap());
+    assert_eq!(graph.seal_by_id(last).unwrap().id().unwrap(), last);
     let before = ids_computed();
     assert_eq!(graph.seal_by_id(last).unwrap().id().unwrap(), last);
     assert_eq!(graph.seal_by_id(first).unwrap().id().unwrap(), first);
     assert!(graph.seal_by_id([9; 32]).is_err());
-    assert!(graph.is_final(last).unwrap());
     let warm = ids_computed() - before;
     assert!(
-        warm <= 4 * 2 + 2,
-        "four lookups at two lists' last items each, plus the two IDs compared; {warm} IDs computed"
+        warm <= 3 + 2,
+        "three lookups at the seal list's last item each, plus the two IDs compared; {warm} IDs computed"
     );
-    graph.revoked.insert(graph.finalities[39].id().unwrap());
-    assert!(!graph.is_final(last).unwrap());
 }

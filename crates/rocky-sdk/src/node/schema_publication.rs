@@ -60,19 +60,14 @@ impl Node {
                     schema: domain.manifest().hash(),
                 }
             },
-            recovery: None,
         })?;
         let mut statements = vec![TipStatement::Seal(seal.clone())];
         let target = if migrates {
-            let minimum = graph
-                .line_minimum(source)?
-                .ok_or("set the source line's signed minimum before migration")?;
             let opening = signer.endorse::<SignedTipOpening>(TipOpeningStatement {
                 format: TIP_OPENING_FORMAT,
                 scope,
                 seal: seal.id()?,
                 schema: domain.manifest().hash(),
-                minimum_in_sync: u32::try_from(minimum)?,
             })?;
             let target = opening.tip()?;
             statements.push(TipStatement::Opening(opening));
@@ -117,7 +112,6 @@ impl Node {
                 source,
                 target,
                 from_version: settings.generation,
-                coordinated: false,
                 statements,
                 program: serde_json::to_vec(&self.declared)?,
                 parents: parents.into_iter().collect(),
@@ -292,6 +286,17 @@ impl Node {
         self.endorse_migration(&stage).await
     }
 
+    pub(super) async fn release_committed_stage(&self) -> Result<bool, Failure> {
+        match self.replica.staged_schema().await? {
+            None => Ok(true),
+            Some((stage, true)) => {
+                self.endorse_migration(&stage).await?;
+                Ok(true)
+            }
+            Some((_, false)) => Ok(false),
+        }
+    }
+
     async fn endorse_migration(&self, stage: &SchemaStage) -> Result<(), Failure> {
         if let Some((statement, writer)) = self.replica.migration_intent(stage.publication).await? {
             let signer = self.tip_signer(stage.scope).await?;
@@ -304,7 +309,7 @@ impl Node {
             self.replica.admit_migration_publication(signed).await?;
         }
         self.replica
-            .release_uncoordinated_schema(stage.publication)
+            .release_committed_schema(stage.publication)
             .await?;
         self.finalize_seals().await;
         Ok(())

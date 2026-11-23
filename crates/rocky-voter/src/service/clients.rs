@@ -95,7 +95,7 @@ impl VoterService {
             Ok(Err(error)) => return self.refuse(error),
             Err(_) => {
                 self.counters.busy.fetch_add(1, Ordering::Relaxed);
-                return self.refuse(busy_refusal(&request.operation));
+                return self.refuse(CoordinationError::Backpressure);
             }
         };
         let tenant = lane.as_ref().map(|lane| lane.try_acquire()).transpose();
@@ -103,7 +103,7 @@ impl VoterService {
             (self.admission.client_lanes.try_acquire(), tenant)
         else {
             self.counters.busy.fetch_add(1, Ordering::Relaxed);
-            return self.refuse(busy_refusal(&request.operation));
+            return self.refuse(CoordinationError::Backpressure);
         };
         drop(unadmitted);
         self.answer(request).await
@@ -114,7 +114,7 @@ impl VoterService {
         }
         let Ok(_administrative_lane) = self.admission.administrative_lanes.try_acquire() else {
             self.counters.busy.fetch_add(1, Ordering::Relaxed);
-            return self.refuse(busy_refusal(&request.operation));
+            return self.refuse(CoordinationError::Backpressure);
         };
         self.answer(request).await
     }
@@ -156,15 +156,6 @@ async fn read_client_request(
         return Err(CoordinationError::Denied);
     }
     Ok((envelope.nonce, *request))
-}
-fn busy_refusal(operation: &Operation) -> CoordinationError {
-    match operation {
-        Operation::Coordinated {
-            action: rocky_coordinator::coordinated::Action::Append { .. },
-            ..
-        } => CoordinationError::Unavailable,
-        _ => CoordinationError::Backpressure,
-    }
 }
 
 #[cfg(test)]

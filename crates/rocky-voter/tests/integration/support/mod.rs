@@ -2,6 +2,7 @@ pub mod public;
 use p2panda_core::PrivateKey;
 use rocky_coordinator::{certified::*, service::*};
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -10,12 +11,6 @@ use std::{
 };
 use tempfile::TempDir;
 
-pub fn log(scope: Scope) -> TipLog {
-    TipLog {
-        scope,
-        tip: TipId([9; 32]),
-    }
-}
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let database = rocky_credentials::DatabaseContext {
@@ -273,34 +268,17 @@ pub fn timestamp() -> u64 {
         .unwrap()
         .as_secs()
 }
-pub async fn join(client: &NetworkCoordinator, scope: Scope, sequence: u64) {
-    let head = client.coordinated_head(log(scope)).await.unwrap();
-    client
-        .coordinated(
-            log(scope),
-            rocky_coordinator::coordinated::Action::Join {
-                position: head.commit,
-                running_hash: head.running_hash,
-                sequence,
-            },
-        )
-        .await
-        .unwrap();
+pub fn invoices() -> rocky_coordinator::counters::Name {
+    rocky_coordinator::counters::Name::new("invoices").unwrap()
 }
-pub async fn append(
-    client: &NetworkCoordinator,
-    scope: Scope,
-    hash: u8,
-    sequence: u64,
-) -> rocky_coordinator::coordinated::Action {
-    let head = client.coordinated_head(log(scope)).await.unwrap();
-    rocky_coordinator::coordinated::Action::Append {
-        expected: head.head,
-        epoch: head.epoch,
-        hash: [hash; 32],
-        duration: 30,
-        sequence,
+pub fn fresh_claim(n: u8) -> rocky_coordinator::counters::Claim {
+    rocky_coordinator::counters::Claim {
+        id: [n; 32],
+        issued: timestamp(),
     }
+}
+pub async fn reading(client: &NetworkCoordinator, scope: Scope) -> Result<u64, CoordinationError> {
+    Ok(client.counter(scope, invoices(), None).await?.value)
 }
 
 pub async fn membership_after_election(

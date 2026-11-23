@@ -1,5 +1,6 @@
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
+use rocky_credentials::{Configuration, CoordinationError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
@@ -63,7 +64,7 @@ impl ControlCertificate {
         if c.configuration != genesis.configuration
             || c.revision == 0
             || c.trusted.is_empty()
-            || c.trusted.len() > crate::coordinated::TRUSTED_NODES
+            || c.trusted.len() > crate::machine::TRUSTED_NODES
             || c.not_before > time
             || c.expires <= time
             || c.expires - c.not_before > genesis.max_control_lifetime

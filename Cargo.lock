@@ -6135,7 +6135,6 @@ dependencies = [
  "p2panda-core",
  "p2panda-store",
  "rand 0.8.8",
- "rocky-coordinator",
  "rocky-core",
  "rocky-credentials",
  "rocky-platform",

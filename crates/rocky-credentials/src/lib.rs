@@ -18,17 +18,16 @@ mod claims;
 mod coordination;
 mod coordinator;
 pub mod counters;
-pub use coordinator::{CoordinationObserver, Coordinator, CoordinatorConnector};
-pub use settings::{
-    Coordination, CoordinatorBundle, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement,
-    MAX_BUNDLE_URL, MAX_COORDINATOR_BUNDLE, SignedDatabaseSettings,
+pub use coordinator::{
+    Configuration, CoordinationError, CoordinationFuture, CoordinationObserver, Coordinator,
+    CoordinatorBundle, CoordinatorConnector, CoordinatorIdentity, MAX_BUNDLE_URL,
+    MAX_COORDINATOR_BUNDLE, NodeKey, genesis,
 };
 mod delivery;
 mod discovery;
 mod enroll;
 mod extension;
 mod families;
-mod finality;
 mod group;
 mod identity;
 mod identity_key;
@@ -46,7 +45,6 @@ mod phrase_key;
 mod possession;
 mod revocation;
 mod root;
-mod settings;
 mod signed;
 mod tips;
 
@@ -66,11 +64,6 @@ pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
-pub use finality::{
-    MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, NamedFormat,
-    SEAL_FINALITY_FORMAT, SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
-    unsupported_finality,
-};
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
 pub use identity::{
     CoordinatorControl, FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose,
@@ -86,7 +79,7 @@ pub use peer_rpc::{
     EpochRequest, IdentityEnrollment, IdentityEnrollmentRequest, IdentityReply,
     InvitedEnrollmentRequest, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission, PeerError,
     PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame, PeerResolutionProof,
-    PeerResolutionRequest, PeerTrust, StagedCloseStatus, UnlinkReply, VERSION as PEER_RPC_VERSION,
+    PeerResolutionRequest, PeerTrust, UnlinkReply, VERSION as PEER_RPC_VERSION,
 };
 pub use possession::NodePossession;
 pub use revocation::{
@@ -102,9 +95,8 @@ pub use signed::{
 
 pub use tips::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, ChainLink, Equivocation,
-    GENESIS_LINE_FORMAT, GenesisLineStatement, LogPoint, MAX_BOOKMARK_NAME, OpensStage, PastCut,
-    Recovery, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedGenesisLine,
-    SignedSeal, SignedTipOpening, StrippedFinality, TIP_OPENING_FORMAT, TipAuthority, TipGraph,
+    MAX_BOOKMARK_NAME, OpensStage, PastCut, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT, TipAuthority, TipGraph,
     TipOpeningStatement, genesis_tip,
 };
 

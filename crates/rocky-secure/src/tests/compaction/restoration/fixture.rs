@@ -60,7 +60,6 @@ impl HeldPrefix {
                 tip: replica.followed_tip().await,
                 frontier: replica.seal_frontier(lineage.domain, true).await.unwrap(),
                 action: SealAction::Close,
-                recovery: None,
             },
             lineage.publisher(),
         )
@@ -92,7 +91,6 @@ impl HeldPrefix {
                 scope: lineage.domain,
                 seal: earlier.id().unwrap(),
                 schema: lineage.definition(3).hash(),
-                minimum_in_sync: 1,
             },
             lineage.publisher(),
         )

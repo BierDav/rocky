@@ -141,30 +141,32 @@ fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
     }
 }
 
+fn invoices() -> rocky_coordinator::counters::Name {
+    rocky_coordinator::counters::Name::new("invoices").unwrap()
+}
+fn reading(scope: Scope) -> Operation {
+    Operation::Counter {
+        scope,
+        counter: invoices(),
+        claim: None,
+    }
+}
+
 #[tokio::test]
-async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
+async fn claims_recover_from_logs_and_snapshot_and_retry_identically() {
     use openraft::storage::RaftLogStorageExt;
-    use rocky_coordinator::coordinated::{Action, Result as LogResult};
     use rocky_coordinator::service::Outcome;
     let (genesis, executor, scope, authority) = certified();
-    let voter = PrivateKey::new();
-    let root = PrivateKey::new();
-    let mut definition = genesis.genesis;
-    definition.voters[0].key = voter.public_key();
-    let genesis = CertifiedGenesis::sign(definition, &root).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();
     register_control(&mut store, &genesis, scope, &authority, &executor, 0, time).await;
-    let request = |key: &PrivateKey, action| {
+    let request = |operation| {
         self_certified(
             genesis.id().unwrap(),
-            crate::transport::nonce(),
-            Operation::Coordinated {
-                log: tip_log(scope),
-                action,
-            },
-            key,
+            rocky_coordinator::protocol::nonce(),
+            operation,
+            &executor,
             time,
         )
         .unwrap()
@@ -183,159 +185,38 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         store.apply([entry]).await.unwrap().remove(0)
     }
-    let head = store.log_head(tip_log(scope)).await.unwrap();
-    write(
-        &mut store,
-        request(
-            &executor,
-            Action::Join {
-                position: 0,
-                running_hash: head.running_hash,
-                sequence: 1,
-            },
-        ),
-        1,
-        time,
-    )
-    .await
-    .unwrap();
-    let head = store.log_head(tip_log(scope)).await.unwrap();
-    let append = request(
-        &executor,
-        Action::Append {
-            expected: 0,
-            epoch: head.epoch,
-            hash: [7; 32],
-            duration: 30,
-            sequence: 2,
+    let claim = Operation::Claim {
+        scope,
+        counter: invoices(),
+        claim: rocky_coordinator::counters::Claim {
+            id: [7; 32],
+            issued: time,
         },
-    );
-    let assigned = write(&mut store, append.clone(), 2, time).await.unwrap();
-    let Outcome::Coordinated(LogResult::Assigned(pending)) = &assigned else {
-        panic!("assignment")
     };
-    let pending = pending.as_ref();
+    let claimed = write(&mut store, request(claim.clone()), 1, time)
+        .await
+        .unwrap();
+    assert_eq!(claimed, Outcome::Claimed(1));
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    replay_committed_entries_as_openraft_does_on_startup(&mut store, 0..=2).await;
+    replay_committed_entries_as_openraft_does_on_startup(&mut store, 0..=1).await;
     assert_eq!(
-        store
-            .log_head(tip_log(scope))
-            .await
-            .unwrap()
-            .pending
-            .as_ref(),
-        Some(pending)
+        write(&mut store, request(claim.clone()), 2, time).await,
+        Ok(claimed.clone())
     );
-    assert_eq!(write(&mut store, append, 3, time).await.unwrap(), assigned);
-    let resolve = request(
-        &voter,
-        Action::Resolve {
-            pending: pending.clone(),
-            acknowledgments: vec![request(
-                &executor,
-                Action::Acknowledge {
-                    pending: pending.clone(),
-                },
-            )],
-        },
-    );
-    let committed = write(&mut store, resolve.clone(), 4, time).await.unwrap();
+    store.build_snapshot().await.unwrap();
+    drop(store);
+    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
     assert!(matches!(
-        committed,
-        Outcome::Coordinated(LogResult::Committed { position: 1, .. })
+        store.read(&request(reading(scope))).await,
+        Ok(Outcome::Counter(rocky_coordinator::counters::Reading {
+            value: 1,
+            ..
+        }))
     ));
-    store.build_snapshot().await.unwrap();
-    drop(store);
-    store = Store::open(dir.path(), genesis, false, Limits::default()).unwrap();
-    assert_eq!(store.log_head(tip_log(scope)).await.unwrap().commit, 1);
     assert_eq!(
-        write(&mut store, resolve, 5, time).await,
-        Err(CoordinationError::StaleHead)
-    );
-    assert_eq!(
-        store.log_head(tip_log(scope)).await.unwrap().hashes.len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
-    use openraft::storage::RaftLogStorageExt;
-    use rocky_coordinator::coordinated::{Action, Result as LogResult};
-    use rocky_coordinator::service::Outcome;
-    use rocky_credentials::{
-        LogPoint, Recovery, SEAL_FORMAT, SealAction, SealStatement, SignedSeal,
-    };
-    let (genesis, executor, scope, authority) = certified();
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
-    let time = now().unwrap();
-    register_control(&mut store, &genesis, scope, &authority, &executor, 0, time).await;
-    let request = |key: &PrivateKey, action| {
-        self_certified(
-            genesis.id().unwrap(),
-            crate::transport::nonce(),
-            Operation::Coordinated {
-                log: tip_log(scope),
-                action,
-            },
-            key,
-            time,
-        )
-        .unwrap()
-    };
-    async fn write(store: &mut Store, request: Request, index: u64, time: u64) -> Outcome {
-        let entry = Entry::<Types> {
-            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
-            payload: EntryPayload::Normal(Proposal { time, request }),
-        };
-        store.blocking_append([entry.clone()]).await.unwrap();
-        store.save_committed(Some(entry.log_id)).await.unwrap();
-        store.apply([entry]).await.unwrap().remove(0).unwrap()
-    }
-    let head = store.log_head(tip_log(scope)).await.unwrap();
-    let anchor = LogPoint {
-        position: 0,
-        running: head.genesis,
-    };
-    let seal = SignedSeal::sign(
-        SealStatement {
-            format: SEAL_FORMAT,
-            scope: tip_log(scope).scope,
-            tip: tip_log(scope).tip,
-            frontier: Vec::new(),
-            action: SealAction::Continue { schema: [5; 32] },
-            recovery: Some(Recovery {
-                retained: anchor,
-                replaced: anchor,
-            }),
-        },
-        &authority,
-    )
-    .unwrap();
-    let recover = Action::Recover {
-        seal: seal.to_bytes().unwrap(),
-    };
-    let admitted = write(&mut store, request(&executor, recover.clone()), 1, time).await;
-    let Outcome::Coordinated(LogResult::Committed { position: 1, .. }) = admitted else {
-        panic!("recovery {admitted:?}")
-    };
-    let after = store.log_head(tip_log(scope)).await.unwrap();
-    drop(store);
-    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    let entries = store.try_get_log_entries(0..=1).await.unwrap();
-    store.apply(entries).await.unwrap();
-    assert_eq!(store.log_head(tip_log(scope)).await.unwrap(), after);
-    store.build_snapshot().await.unwrap();
-    drop(store);
-    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    let head = store.log_head(tip_log(scope)).await.unwrap();
-    assert_eq!(head, after);
-    assert_eq!(head.terminal.unwrap().digest, seal.id().unwrap());
-    assert_eq!(
-        write(&mut store, request(&executor, recover), 2, time).await,
-        admitted
+        write(&mut store, request(claim), 3, time).await,
+        Ok(claimed)
     );
 }
 
@@ -355,10 +236,7 @@ async fn requests_authorize_while_a_log_write_holds_the_image() {
     let request = self_certified(
         genesis.id().unwrap(),
         [1; 32],
-        Operation::Coordinated {
-            log: tip_log(scope),
-            action: rocky_coordinator::coordinated::Action::Head,
-        },
+        reading(scope),
         &executor,
         now().unwrap(),
     )
@@ -388,11 +266,8 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
     for index in 1..16 {
         let request = self_certified(
             genesis.id().unwrap(),
-            crate::transport::nonce(),
-            Operation::Coordinated {
-                log: tip_log(scope),
-                action: rocky_coordinator::coordinated::Action::Head,
-            },
+            rocky_coordinator::protocol::nonce(),
+            reading(scope),
             &executor,
             time,
         )
@@ -405,7 +280,7 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         assert!(matches!(
             store.apply([entry]).await.unwrap().remove(0),
-            Ok(Outcome::CoordinatedHead(_))
+            Ok(Outcome::Counter(_))
         ));
     }
     store.save_vote(&Vote::new(2, 1)).await.unwrap();
@@ -421,21 +296,17 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
 }
 
 #[tokio::test]
-async fn head_and_preflight_do_not_wait_for_a_blocked_log_sync() {
+async fn reads_and_preflight_do_not_wait_for_a_blocked_log_sync() {
     use openraft::storage::RaftLogStorageExt;
     let (genesis, executor, scope, authority) = certified();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();
     register_control(&mut store, &genesis, scope, &authority, &executor, 0, time).await;
-    let log = tip_log(scope);
     let request = self_certified(
         genesis.id().unwrap(),
         [1; 32],
-        Operation::Coordinated {
-            log,
-            action: rocky_coordinator::coordinated::Action::Head,
-        },
+        reading(scope),
         &executor,
         time,
     )
@@ -456,15 +327,18 @@ async fn head_and_preflight_do_not_wait_for_a_blocked_log_sync() {
     let started = std::time::Instant::now();
     let read = tokio::time::timeout(std::time::Duration::from_millis(100), async {
         store.preflight(&request).await.unwrap();
-        store.log_head(log).await.unwrap()
+        store.read(&request).await.unwrap()
     })
     .await;
     let elapsed = started.elapsed();
     assert!(!write.is_finished());
     release.send(()).unwrap();
     write.await.unwrap().unwrap();
-    assert_eq!(read.unwrap().commit, 0);
-    println!("head + preflight during blocked disk sync: {elapsed:?}");
+    assert!(matches!(
+        read.unwrap(),
+        Outcome::Counter(rocky_coordinator::counters::Reading { value: 0, .. })
+    ));
+    println!("read + preflight during blocked disk sync: {elapsed:?}");
 }
 
 #[tokio::test]
@@ -565,13 +439,6 @@ pub(crate) fn self_certified(
     )
 }
 
-fn tip_log(scope: Scope) -> TipLog {
-    TipLog {
-        scope,
-        tip: TipId([9; 32]),
-    }
-}
-
 async fn register_control(
     store: &mut Store,
     genesis: &CertifiedGenesis,
@@ -597,7 +464,7 @@ async fn register_control(
     .unwrap();
     let request = self_certified(
         genesis.id().unwrap(),
-        crate::transport::nonce(),
+        rocky_coordinator::protocol::nonce(),
         Operation::Control(certificate),
         authority,
         time,

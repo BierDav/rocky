@@ -62,7 +62,6 @@ pub(in crate::tests) fn open_dev(
             schema: lineage.definition(version).hash(),
             scope: lineage.domain,
             seal,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -319,7 +318,6 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
             tip: b,
             frontier: alice.seal_frontier(lineage.domain, false).await.unwrap(),
             action: SealAction::Close,
-            recovery: None,
         },
         lineage.publisher(),
     )

@@ -120,7 +120,6 @@ pub struct TipOpening {
     pub id: String,
     pub seal: String,
     pub schema: String,
-    pub minimum_in_sync: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookmarkMove {

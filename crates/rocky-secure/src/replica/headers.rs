@@ -38,18 +38,17 @@ pub(super) struct HeaderScan {
     versions: Vec<u64>,
     authority: u64,
     tip: TipId,
-    graph: [usize; 6],
+    graph: [usize; 5],
     table: usize,
     after: Vec<u8>,
 }
 
-fn graph_shape(graph: Option<&TipGraph>) -> [usize; 6] {
-    graph.map_or([usize::MAX; 6], |graph| {
+fn graph_shape(graph: Option<&TipGraph>) -> [usize; 5] {
+    graph.map_or([usize::MAX; 5], |graph| {
         [
             graph.seals.len(),
             graph.openings.len(),
             graph.moves.len(),
-            graph.finalities.len(),
             graph.checkpoints.len(),
             graph.revoked.len(),
         ]

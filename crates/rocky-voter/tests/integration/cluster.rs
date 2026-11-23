@@ -1,15 +1,15 @@
 use crate::support;
 use rocky_coordinator::{
-    coordinated::{Action, Result as LogResult},
     counters::{Claim, Lookup, Name},
     service::{NetworkCoordinator, Operation, Outcome},
 };
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
+async fn three_persistent_voters_keep_controls_and_counters_across_restarts() {
     let mut cluster = Cluster::start().await;
     let admin = cluster.client(&cluster.admin);
     let issuer = cluster.client(&cluster.issuer);
@@ -19,68 +19,18 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         .call([1; 32], Operation::Control(cluster.app_control(1)))
         .await
         .unwrap();
-    join(&alice, cluster.scope, 1).await;
-    let first = append(&alice, cluster.scope, 1, 2).await;
-    let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
-        .coordinated(log(cluster.scope), first.clone())
-        .await
-        .unwrap()
-    else {
-        panic!("assignment")
-    };
+    let first = fresh_claim(1);
+    let taken = alice.claim(cluster.scope, invoices(), first).await.unwrap();
     assert_eq!(
-        alice
-            .coordinated(log(cluster.scope), first.clone())
-            .await
-            .unwrap(),
-        Outcome::Coordinated(LogResult::Assigned(pending.clone())),
-        "a retried append returns its first answer"
+        alice.claim(cluster.scope, invoices(), first).await,
+        Ok(taken),
+        "a retried claim returns its first answer"
     );
-    let Action::Append {
-        expected,
-        epoch,
-        duration,
-        sequence,
-        ..
-    } = first
-    else {
-        unreachable!()
-    };
-    assert_eq!(
-        alice
-            .coordinated(
-                log(cluster.scope),
-                Action::Append {
-                    expected,
-                    epoch,
-                    hash: [9; 32],
-                    duration,
-                    sequence,
-                }
-            )
-            .await,
-        Err(CoordinationError::RequestConflict),
-        "another append with the same sequence conflicts"
-    );
-    assert!(matches!(
-        alice
-            .coordinated(
-                log(cluster.scope),
-                Action::Acknowledge { pending: *pending }
-            )
-            .await
-            .unwrap(),
-        Outcome::Coordinated(LogResult::Committed { position: 1, .. })
-    ));
     let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
     let next = cluster.wait_unfenced_leader(&admin).await;
     assert_ne!(next, leader);
-    let head = alternate
-        .coordinated_head(log(cluster.scope))
-        .await
-        .unwrap();
-    assert_eq!((head.commit, head.hashes.len()), (1, 1));
+    assert_eq!(reading(&alternate, cluster.scope).await, Ok(taken));
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
     membership_after_election(
@@ -149,13 +99,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         cluster.wait_online(id, &admin).await;
     }
     cluster.wait_unfenced_leader(&admin).await;
-    assert_eq!(
-        alternate
-            .coordinated_head(log(cluster.scope))
-            .await
-            .unwrap(),
-        head
-    );
+    assert_eq!(reading(&alternate, cluster.scope).await, Ok(taken));
     let mut invalid = cluster.app_control(2);
     invalid.control.configuration = [0; 16];
     assert!(
@@ -164,33 +108,16 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
             .await
             .is_err()
     );
-    let mut narrowed = cluster.app_control(2);
-    narrowed.control.trusted = vec![cluster.alternate.public_key()];
-    let narrowed =
-        rocky_coordinator::certified::ControlCertificate::sign(narrowed.control, &cluster.issuer)
-            .unwrap();
-    assert_eq!(
-        issuer.call([8; 32], Operation::Control(narrowed)).await,
-        Err(CoordinationError::Backpressure),
-        "a revision cannot drop a trusted node the in-sync set still holds"
-    );
     issuer
         .call([9; 32], Operation::Control(cluster.app_control(2)))
         .await
         .unwrap();
-    assert_eq!(
-        alice
-            .coordinated_head(log(cluster.scope))
-            .await
-            .unwrap()
-            .commit,
-        1
-    );
+    assert_eq!(reading(&alice, cluster.scope).await, Ok(taken));
     for id in 1..=3 {
         cluster.stop(id);
     }
     assert_eq!(
-        alternate.coordinated_head(log(cluster.scope)).await,
+        reading(&alternate, cluster.scope).await,
         Err(CoordinationError::Unavailable)
     );
     std::fs::remove_file(cluster.store_path(1)).unwrap();
@@ -213,7 +140,6 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         .call([1; 32], Operation::Control(cluster.app_control(1)))
         .await
         .unwrap();
-    join(&alice, cluster.scope, 1).await;
     let mut last = None;
     for (index, stage) in [
         "log.before_sync",
@@ -226,76 +152,49 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     .enumerate()
     {
         let leader = cluster.wait_unfenced_leader(&admin).await;
-        let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
-        let action = append(&alice, cluster.scope, index as u8 + 1, index as u64 + 2).await;
+        let before = reading(&alice, cluster.scope).await.unwrap();
+        let claim = fresh_claim(index as u8 + 1);
         cluster.arm(leader, stage);
-        let _ = alice.coordinated(log(cluster.scope), action.clone()).await;
+        let _ = alice.claim(cluster.scope, invoices(), claim).await;
         cluster.wait_exit(leader).await;
         cluster.wait_unfenced_leader(&admin).await;
-        let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
-            .coordinated(log(cluster.scope), action.clone())
-            .await
-            .unwrap()
-        else {
-            panic!("{stage}: assignment")
-        };
         assert_eq!(
-            pending.position,
-            before.commit + 1,
+            claim_definitely(&alice, cluster.scope, &invoices(), claim).await,
+            Ok(before + 1),
             "{stage}: the retry answers what the crashed call may have applied, once"
         );
         assert_eq!(
-            alice
-                .coordinated(log(cluster.scope), action.clone())
-                .await
-                .unwrap(),
-            Outcome::Coordinated(LogResult::Assigned(pending.clone()))
+            alice.claim(cluster.scope, invoices(), claim).await,
+            Ok(before + 1)
         );
-        assert!(matches!(
-            alice
-                .coordinated(
-                    log(cluster.scope),
-                    Action::Acknowledge { pending: *pending }
-                )
-                .await
-                .unwrap(),
-            Outcome::Coordinated(LogResult::Committed { .. })
-        ));
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
         assert_eq!(
-            alice
-                .coordinated_head(log(cluster.scope))
-                .await
-                .unwrap()
-                .commit,
-            before.commit + 1,
+            reading(&alice, cluster.scope).await,
+            Ok(before + 1),
             "{stage}"
         );
-        last = Some(action);
+        last = Some(claim);
     }
     for stage in ["snapshot.before_rename", "snapshot.after_sync"] {
         let leader = cluster.wait_unfenced_leader(&admin).await;
-        let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
+        let before = reading(&alice, cluster.scope).await.unwrap();
         cluster.arm(leader, stage);
         let _ = admin.snapshot(leader).await;
         cluster.wait_exit(leader).await;
         cluster.wait_unfenced_leader(&admin).await;
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
-        assert_eq!(
-            alice.coordinated_head(log(cluster.scope)).await.unwrap(),
-            before
-        );
+        assert_eq!(reading(&alice, cluster.scope).await, Ok(before));
     }
     let leader = cluster.wait_unfenced_leader(&admin).await;
     let lagging = if leader == 1 { 2 } else { 1 };
     let lagging_applied = admin.status(lagging).await.unwrap().applied.unwrap();
     cluster.stop(lagging);
-    let decided_append = last.unwrap();
+    let decided_claim = last.unwrap();
     for _ in 0..RETRIES_PAST_THE_LAGGING_LOG {
         alice
-            .coordinated(log(cluster.scope), decided_append.clone())
+            .claim(cluster.scope, invoices(), decided_claim)
             .await
             .unwrap();
     }
@@ -343,7 +242,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     }
     let status = admin.status(leader).await.unwrap();
     println!(
-        "crash exercise: 5 append boundaries, 2 snapshot boundaries plus interrupted snapshot transfer; leader disk bytes={} logs={} snapshots={}",
+        "crash exercise: 5 claim boundaries, 2 snapshot boundaries plus interrupted snapshot transfer; leader disk bytes={} logs={} snapshots={}",
         status.disk_bytes, status.logs, status.snapshots
     );
 }

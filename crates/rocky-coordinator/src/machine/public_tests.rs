@@ -1,5 +1,5 @@
 use super::*;
-use crate::coordinated::Action;
+use crate::counters::{Claim, Name};
 use crate::transport::nonce;
 use p2panda_core::PrivateKey;
 use rocky_credentials::{
@@ -209,47 +209,34 @@ impl Service {
             time,
         )
     }
-    fn log(
-        &self,
-        metadata: &mut Metadata,
-        key: &PrivateKey,
-        scope: Scope,
-        action: Action,
-        time: u64,
-    ) -> Result<Outcome, CoordinationError> {
-        self.apply(
-            metadata,
-            key,
-            Operation::Coordinated {
-                log: tip_log(scope),
-                action,
-            },
-            time,
-        )
-    }
-    fn head(
-        &self,
-        metadata: &Metadata,
-        key: &PrivateKey,
-        scope: Scope,
-    ) -> crate::coordinated::Head {
-        let head = Operation::Coordinated {
-            log: tip_log(scope),
-            action: Action::Head,
-        };
-        match self.read(metadata, key, head) {
-            Ok(Outcome::CoordinatedHead(head)) => *head,
-            other => panic!("head: {other:?}"),
+    fn claim(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope) -> u64 {
+        match self.apply(metadata, key, claim(scope), T) {
+            Ok(Outcome::Claimed(value)) => value,
+            other => panic!("claim: {other:?}"),
         }
     }
-    fn join(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope, sequence: u64) {
-        let head = self.head(metadata, key, scope);
-        let join = Action::Join {
-            position: head.commit,
-            running_hash: head.running_hash,
-            sequence,
-        };
-        self.log(metadata, key, scope, join, T).unwrap();
+    fn reading(&self, metadata: &Metadata, key: &PrivateKey, scope: Scope) -> u64 {
+        match self.read(metadata, key, read(scope)) {
+            Ok(Outcome::Counter(reading)) => reading.value,
+            other => panic!("reading: {other:?}"),
+        }
+    }
+}
+fn read(scope: Scope) -> Operation {
+    Operation::Counter {
+        scope,
+        counter: Name::new("invoices").unwrap(),
+        claim: None,
+    }
+}
+fn claim(scope: Scope) -> Operation {
+    Operation::Claim {
+        scope,
+        counter: Name::new("invoices").unwrap(),
+        claim: Claim {
+            id: nonce(),
+            issued: T,
+        },
     }
 }
 
@@ -271,26 +258,12 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
         .register(&mut m, &b, b.control(sb, 1, &[&b.executor]), T)
         .unwrap();
     for (tenant, scope) in [(&a, sa), (&b, sb)] {
-        service.join(&mut m, &tenant.executor, scope, 1);
+        service.claim(&mut m, &tenant.executor, scope);
     }
 
-    let head = service.head(&m, &a.executor, sa);
-    let log_head = Operation::Coordinated {
-        log: tip_log(sa),
-        action: Action::Head,
-    };
+    let log_head = read(sa);
     for (key, operation) in [
-        (
-            &b.executor,
-            Operation::Coordinated {
-                log: tip_log(sa),
-                action: Action::Join {
-                    position: head.commit,
-                    running_hash: head.running_hash,
-                    sequence: 1,
-                },
-            },
-        ),
+        (&b.executor, claim(sa)),
         (&b.executor, log_head.clone()),
         (&b.key, log_head.clone()),
         (&b.key, Operation::Control(b.control(sa, 2, &[&b.executor]))),
@@ -351,7 +324,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     assert_eq!(
         service.read(&m, &a.executor, log_head.clone()).unwrap(),
         service.apply(&mut m, &a.executor, log_head, T).unwrap(),
-        "linearizable reads answer as the log would"
+        "linearizable reads answer as the counter would"
     );
     assert_eq!(
         service.read(&m, &a.key, Operation::Usage).unwrap(),
@@ -369,7 +342,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn owners_change_trusted_nodes_and_keep_the_log() {
+fn owners_change_trusted_nodes_and_keep_the_counters() {
     let service = Service::with(false, log_limits());
     let mut m = service.open();
     let a = Tenant::new();
@@ -377,33 +350,22 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
     service
         .register(&mut m, &a, a.control(scope, 1, &[&a.executor]), T)
         .unwrap();
-    service.join(&mut m, &a.executor, scope, 1);
-    let before = service.head(&m, &a.executor, scope);
-    assert_eq!(
-        service.apply(
-            &mut m,
-            &a.key,
-            Operation::Control(a.control(scope, 2, &[&a.alternate])),
-            T,
-        ),
-        Err(CoordinationError::Backpressure),
-        "a node of the in-sync set cannot be dropped"
-    );
+    let taken = service.claim(&mut m, &a.executor, scope);
     service
         .apply(
             &mut m,
             &a.key,
-            Operation::Control(a.control(scope, 2, &[&a.executor, &a.alternate])),
+            Operation::Control(a.control(scope, 2, &[&a.alternate])),
             T,
         )
         .unwrap();
-    service.join(&mut m, &a.alternate, scope, 1);
-    let after = service.head(&m, &a.alternate, scope);
+    assert_eq!(service.reading(&m, &a.alternate, scope), taken);
     assert_eq!(
-        (after.commit, after.running_hash),
-        (before.commit, before.running_hash)
+        service.apply(&mut m, &a.executor, claim(scope), T),
+        Err(CoordinationError::Denied),
+        "a node the owner dropped claims nothing"
     );
-    assert_eq!(after.members.len(), 2);
+    assert_eq!(service.claim(&mut m, &a.alternate, scope), taken + 1);
     assert_eq!(
         service.apply(
             &mut m,
@@ -596,10 +558,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
         let request = crate::machine::self_certified(
             service.genesis.id().unwrap(),
             nonce(),
-            Operation::Coordinated {
-                log: tip_log(scope),
-                action: Action::Head,
-            },
+            read(scope),
             &b.executor,
             T,
         )

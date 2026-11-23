@@ -55,20 +55,6 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
         .await
         .unwrap();
     follow_main(&l, &replica).await;
-    replica
-        .publish_tip_statements(&[TipStatement::GenesisLine(
-            SignedGenesisLine::sign(
-                GenesisLineStatement {
-                    format: rocky_credentials::GENESIS_LINE_FORMAT,
-                    scope: l.domain,
-                    minimum_in_sync: 2,
-                },
-                l.publisher(),
-            )
-            .unwrap(),
-        )])
-        .await
-        .unwrap();
     let source = replica.followed_tip().await;
     let close = SignedSeal::sign(
         SealStatement {
@@ -77,7 +63,6 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
             tip: source,
             frontier: vec![],
             action: SealAction::Close,
-            recovery: None,
         },
         l.publisher(),
     )
@@ -88,7 +73,6 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
             scope: l.domain,
             seal: close.id().unwrap(),
             schema: l.definition(3).hash(),
-            minimum_in_sync: 2,
         },
         if issuer.is_some() {
             rocky_credentials::testing::lane_for(signer, &endorsement)
@@ -108,7 +92,6 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
             source,
             target,
             from_version: 2,
-            coordinated: false,
             statements: vec![
                 TipStatement::Seal(close),
                 TipStatement::Opening(opening),
@@ -208,7 +191,7 @@ pub(super) async fn release(
         .await
         .unwrap();
     replica
-        .release_uncoordinated_schema(signed.statement.publication)
+        .release_committed_schema(signed.statement.publication)
         .await
         .unwrap();
 }

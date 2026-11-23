@@ -342,7 +342,6 @@ pub struct Alert {
 pub enum SealSkip {
     NoFollowedBookmark,
     NoTipAuthority(String),
-    SealPending(String),
     Failed(String),
 }
 impl SealSkip {
@@ -350,7 +349,6 @@ impl SealSkip {
         match self {
             Self::NoFollowedBookmark => "no_followed_bookmark",
             Self::NoTipAuthority(_) => "no_tip_authority",
-            Self::SealPending(_) => "seal_pending",
             Self::Failed(_) => "failed",
         }
     }
@@ -359,7 +357,7 @@ impl std::fmt::Display for SealSkip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoFollowedBookmark => f.write_str(self.code()),
-            Self::NoTipAuthority(detail) | Self::SealPending(detail) | Self::Failed(detail) => {
+            Self::NoTipAuthority(detail) | Self::Failed(detail) => {
                 write!(f, "{}: {detail}", self.code())
             }
         }
@@ -401,13 +399,11 @@ pub enum AlertKind {
         signer: String,
         node: String,
         statements: u64,
-        acknowledgments: u64,
     },
     TipChainEquivocation {
         signer: String,
         node: String,
         sequence: u64,
-        acknowledgment: bool,
     },
 }
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
@@ -500,7 +496,6 @@ pub struct CallFailure {
     pub code: String,
     pub retryable: bool,
     pub detail: String,
-    pub coordinator_time: Option<u64>,
     pub blockers: Vec<rocky_core::Blocker>,
 }
 impl CallFailure {

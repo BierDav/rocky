@@ -6,6 +6,7 @@ use crate::{
 };
 use p2panda_core::PrivateKey;
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 use std::{collections::BTreeSet, sync::Arc};
 
 fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {

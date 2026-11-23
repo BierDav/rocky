@@ -83,7 +83,7 @@ impl SignedMigrationPublication {
             }
             None => opening.verify_historic(publisher, graph)?,
         }
-        if !graph.migration_opening(opening, false)?
+        if !graph.migration_opening(opening)?
             || opening.tip()? != s.tip
             || opening.statement.seal != s.parent
             || opening.statement.schema != s.schema
@@ -119,7 +119,7 @@ impl SignedMigrationPublication {
             .iter()
             .find(|opening| opening.id().ok() == Some(self.statement.opening))
             .ok_or_else(|| denied("migration opening missing"))?;
-        if !graph.migration_opening(opening, true)? {
+        if !graph.migration_opening(opening)? {
             return Err(denied("migration minimum is no longer eligible"));
         }
         Ok(())

@@ -2303,9 +2303,6 @@ impl Node {
                     self.replica.tip_schema(manifest).await?
                 },
             )),
-            PeerRequest::StagedClose(close) => Ok(PeerReply::StagedClose(
-                self.replica.relay_staged_close(&close.to_bytes()?).await?,
-            )),
         }
     }
 }
@@ -2328,11 +2325,11 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
         _ => None,
     }
 }
-fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
-    match error.downcast_ref::<Error>()? {
-        Error::Application(error) => error.downcast_ref(),
-        _ => None,
-    }
+fn migration_pending(error: &Failure) -> bool {
+    matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::Application(cause)) if cause.is::<rocky_secure::MigrationPending>()
+    )
 }
 fn renewal_cannot_repair(error: &Failure) -> bool {
     match error.downcast_ref::<Error>() {
@@ -2357,7 +2354,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
             kind: crate::ErrorKind::Other(error.code.clone()),
             retryable: error.retryable,
             detail: error.detail.clone(),
-            coordinator_time: error.coordinator_time,
             blockers: error.blockers.clone(),
         };
     }
@@ -2366,7 +2362,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
             kind: crate::ErrorKind::Other(peer.code.clone()),
             retryable: peer.retryable,
             detail: peer.message.clone(),
-            coordinator_time: None,
             blockers: Vec::new(),
         };
     }
@@ -2382,10 +2377,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {
         (crate::ErrorKind::Rejected, false)
-    } else if let Some(refusal) = replica_refusal(error) {
-        (crate::ErrorKind::from_refusal(refusal), refusal.retryable())
-    } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
-        coordination_kind(coordination)
+    } else if migration_pending(error) {
+        (crate::ErrorKind::MigrationPending, false)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
         (
             crate::ErrorKind::Service(service.code().to_owned()),
@@ -2415,20 +2408,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
             },
             Some(Error::Conflict) => (crate::ErrorKind::Conflict, true),
             Some(Error::Backpressure) => (crate::ErrorKind::Quota, true),
-            Some(Error::Coordination(coordination)) => coordination_kind(coordination),
             _ => (crate::ErrorKind::Storage, true),
         }
-    };
-    let clock = match error
-        .downcast_ref::<rocky_core::CoordinationError>()
-        .or_else(|| match error.downcast_ref::<Error>() {
-            Some(Error::Coordination(error)) => Some(error),
-            _ => None,
-        }) {
-        Some(rocky_core::CoordinationError::ClockSkew { coordinator_time }) => {
-            Some(*coordinator_time)
-        }
-        _ => None,
     };
     let blockers = match error.downcast_ref::<Error>() {
         Some(Error::Blocked(blockers)) => blockers.clone(),
@@ -2438,7 +2419,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         kind,
         retryable,
         detail: error.to_string(),
-        coordinator_time: clock,
         blockers,
     }
 }
@@ -2449,24 +2429,10 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
 pub(crate) fn error(error: &Failure) -> serde_json::Value {
     let failure = call_failure(error);
     let mut value = serde_json::json!({"code": failure.code, "retryable": failure.retryable, "message": failure.detail});
-    if let Some(time) = failure.coordinator_time {
-        value["coordinator_time"] = serde_json::json!(time);
-    }
     if !failure.blockers.is_empty() {
         value["blockers"] = serde_json::json!(failure.blockers);
     }
     value
-}
-fn coordination_kind(error: &rocky_core::CoordinationError) -> (crate::ErrorKind, bool) {
-    use rocky_core::CoordinationError::{Backpressure, Denied, Sealed, Unavailable};
-    match error {
-        Unavailable => (crate::ErrorKind::CoordinatorUnavailable, true),
-        rocky_core::CoordinationError::ClockSkew { .. } => (crate::ErrorKind::ClockSkew, false),
-        Backpressure => (crate::ErrorKind::Quota, true),
-        Denied => (crate::ErrorKind::Denied, false),
-        Sealed => (crate::ErrorKind::Sealed, false),
-        _ => (crate::ErrorKind::Rejected, false),
-    }
 }
 
 type RevocationCut = (
@@ -2484,57 +2450,13 @@ mod error_tests {
             value["retryable"].as_bool().unwrap_or_default(),
         )
     }
-    fn refusal(refusal: rocky_secure::Refusal) -> Failure {
-        Box::new(Error::Application(Box::new(refusal)))
-    }
-
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn clock_skew_reports_authority_time_through_every_error_path() {
-        let time = 1_900_000_000;
-        let errors: [Failure; 2] = [
-            Box::new(rocky_core::CoordinationError::ClockSkew {
-                coordinator_time: time,
-            }),
-            Box::new(Error::Coordination(
-                rocky_core::CoordinationError::ClockSkew {
-                    coordinator_time: time,
-                },
-            )),
-        ];
-        for failure in errors {
-            let reported = error(&failure);
-            assert_eq!(reported["code"], "clock_skew");
-            assert_eq!(reported["coordinator_time"], time);
-            assert_eq!(reported["retryable"], false);
-        }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn replica_refusals_keep_their_codes() {
-        let sealed_refusal = refusal(rocky_secure::Refusal::Sealed("refused".into()));
-        let typed_sealed = crate::Error::from_failure(&sealed_refusal);
-        assert_eq!(typed_sealed.kind(), &crate::ErrorKind::Sealed);
-        assert_eq!(typed_sealed.code(), "sealed");
-        assert!(!typed_sealed.retryable());
-        assert_eq!(code(sealed_refusal), ("sealed".into(), false));
-
-        let unavailable_refusal = refusal(rocky_secure::Refusal::CoordinatorUnavailable(
-            "refused".into(),
-        ));
-        let typed_unavailable = crate::Error::from_failure(&unavailable_refusal);
-        assert_eq!(
-            typed_unavailable.kind(),
-            &crate::ErrorKind::CoordinatorUnavailable
-        );
-        assert_eq!(typed_unavailable.code(), "coordinator_unavailable");
-        assert!(typed_unavailable.retryable());
-        assert_eq!(
-            code(unavailable_refusal),
-            ("coordinator_unavailable".into(), true)
-        );
-
-        let sealed: Failure = Box::new(rocky_core::CoordinationError::Sealed);
-        assert_eq!(code(sealed), ("sealed".into(), false));
+    fn a_pending_migration_refusal_is_typed() {
+        let pending: Failure =
+            Box::new(Error::Application(Box::new(rocky_secure::MigrationPending)));
+        let typed = crate::Error::from_failure(&pending);
+        assert_eq!(typed.kind(), &crate::ErrorKind::MigrationPending);
+        assert_eq!(code(pending), ("migration_pending".into(), false));
     }
 }
 #[cfg(all(test, not(target_family = "wasm")))]

@@ -80,7 +80,6 @@ pub(in crate::tests) fn closed_statements(
             tip: source,
             frontier: vec![],
             action: SealAction::Close,
-            recovery: None,
         },
         publisher,
     )
@@ -91,7 +90,6 @@ pub(in crate::tests) fn closed_statements(
             scope,
             seal: close.id().unwrap(),
             schema: manifest,
-            minimum_in_sync: 1,
         },
         publisher,
     )

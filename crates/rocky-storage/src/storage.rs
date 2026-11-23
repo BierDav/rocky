@@ -45,7 +45,6 @@ pub enum Error {
         resource: &'static str,
         limit: usize,
     },
-    Coordination(rocky_core::CoordinationError),
     Rejected(String),
     Blocked(Vec<rocky_core::Blocker>),
     RetryExhausted,
@@ -71,7 +70,6 @@ impl Error {
             Self::Durability(_) => "durability",
             Self::Backpressure => "backpressure",
             Self::Quota { .. } => "quota",
-            Self::Coordination(_) => "coordination",
             Self::Rejected(_) => "rejected",
             Self::Blocked(_) => "blocked",
             Self::RetryExhausted => "retry_exhausted",
@@ -88,14 +86,11 @@ impl Error {
             Self::Application(_)
             | Self::Rejected(_)
             | Self::Blocked(_)
-            | Self::Sql(crate::sql::SqlError::Denied)
-            | Self::Coordination(rocky_core::CoordinationError::Denied) => FailureReason::Denial,
+            | Self::Sql(crate::sql::SqlError::Denied) => FailureReason::Denial,
             Self::Incompatible(_) => FailureReason::UnsupportedGeneration,
             Self::Quota { .. } | Self::Backpressure => FailureReason::Quota,
             Self::Corrupt(_) | Self::Rollback { .. } => FailureReason::Corruption,
-            Self::Conflict | Self::Coordination(rocky_core::CoordinationError::RequestConflict) => {
-                FailureReason::Conflict
-            }
+            Self::Conflict => FailureReason::Conflict,
             Self::Closed => FailureReason::Closed,
             _ => FailureReason::Storage,
         }
@@ -108,15 +103,7 @@ impl Error {
                     source: sqlite::Error::Deadline
                 })
             )
-            || matches!(
-                self,
-                Self::Backpressure
-                    | Self::RetryExhausted
-                    | Self::Coordination(
-                        rocky_core::CoordinationError::Unavailable
-                            | rocky_core::CoordinationError::StaleEpoch
-                    )
-            )
+            || matches!(self, Self::Backpressure | Self::RetryExhausted)
     }
 }
 impl std::fmt::Display for Error {
@@ -131,7 +118,6 @@ impl std::fmt::Display for Error {
             Self::Durability(e) => write!(f, "required durability setting unavailable: {e}"),
             Self::Rejected(e) => write!(f, "replication data rejected: {e}"),
             Self::Blocked(blockers) => f.write_str(&rocky_core::describe_blockers(blockers)),
-            Self::Coordination(e) => write!(f, "coordination: {e}"),
             Self::Quota { resource, limit } => write!(f, "{resource} quota reached ({limit})"),
             Self::Backpressure => {
                 write!(f, "storage queue is full; retry when pending work finishes")
@@ -161,7 +147,6 @@ impl std::error::Error for Error {
             Self::Storage(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Application(error) => Some(error.as_ref()),
-            Self::Coordination(error) => Some(error),
             Self::Rollback { rollback, .. } => Some(rollback),
             _ => None,
         }
@@ -251,12 +236,6 @@ pub async fn finish<T>(conn: &sqlite::Connection, result: Result<T, Error>) -> R
             cause: cause.to_string(),
             rollback: rollback.into(),
         }),
-    }
-}
-
-impl From<rocky_core::CoordinationError> for Error {
-    fn from(e: rocky_core::CoordinationError) -> Self {
-        Self::Coordination(e)
     }
 }
 

@@ -201,10 +201,6 @@ pub enum ActivityKind {
         peer: PublicKey,
         error: String,
     },
-    SchemaPublicationConflict {
-        publication: rocky_core::Commitment,
-        terminal: rocky_core::Commitment,
-    },
 }
 impl ActivityKind {
     fn same_kind(&self, other: &Self) -> bool {

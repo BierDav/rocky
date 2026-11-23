@@ -1,9 +1,9 @@
 use rocky_core::{AppId, DomainId, MeshId, PrincipalKind, Scope, TipId};
 use rocky_credentials::{
     AuthorMark, Authority, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, Extended,
-    Extension, LogPoint, PrivateKey, Recovery, RevocationSet, SEAL_FORMAT, SealAction,
-    SealStatement, SignedBookmarkMove, SignedCapability, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, encode, genesis_tip,
+    Extension, PrivateKey, RevocationSet, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedCapability, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
+    TipGraph, TipOpeningStatement, encode, genesis_tip,
 };
 
 fn graph() -> TipGraph {
@@ -29,7 +29,6 @@ fn seal(graph: &TipGraph, tip: TipId, sequence: u64, owner: &PrivateKey) -> Sign
             action: SealAction::Continue {
                 schema: graph.genesis_schema,
             },
-            recovery: None,
         },
         owner,
     )
@@ -61,7 +60,6 @@ fn opening(graph: &TipGraph, seal: &SignedSeal, owner: &PrivateKey) -> SignedTip
             schema: graph.schema_any(seal.statement.tip).unwrap(),
             scope: graph.scope,
             seal: seal.id().unwrap(),
-            minimum_in_sync: 2,
         },
         owner,
     )
@@ -830,171 +828,6 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
     );
 }
 
-fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, CredentialChain) {
-    let identity = PrivateKey::new();
-    let node = PrivateKey::new();
-    let root = Authority::owner_in(
-        owner,
-        rocky_credentials::DatabaseContext {
-            publisher: owner.public_key(),
-            scope: Scope {
-                mesh: MeshId([1; 16]),
-                app: AppId([2; 16]),
-                domain: DomainId([3; 16]),
-            },
-        },
-    )
-    .unwrap()
-    .issue_trusted(identity.public_key(), graph.scope, 100)
-    .unwrap();
-    let chain = rocky_credentials::device_chain(root, &identity, &node).unwrap();
-    (node, chain)
-}
-fn ack(
-    graph: &TipGraph,
-    seal: &SignedSeal,
-    (node, chain): &(PrivateKey, CredentialChain),
-) -> rocky_credentials::TerminalAck {
-    rocky_credentials::TerminalAck::sign(
-        rocky_credentials::TerminalAckStatement {
-            format: rocky_credentials::TERMINAL_ACK_FORMAT,
-            coordinator: rocky_core::CoordinatorIdentity {
-                root: [1; 32],
-                mesh: rocky_core::MeshId([0; 16]),
-                genesis: [2; 32],
-            },
-            scope: graph.scope,
-            tip: seal.statement.tip,
-            position: 4,
-            running: [9; 32],
-            seal: seal.id().unwrap(),
-            continuation: seal.successor().unwrap(),
-            confirms: false,
-        },
-        node,
-        chain.clone(),
-        rocky_credentials::ChainLink::first(node.public_key()),
-    )
-    .unwrap()
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again() {
-    let owner = PrivateKey::new();
-    let issuer = PrivateKey::new();
-    let mut graph = graph();
-    let tip = graph.genesis();
-    let committed = endorsed(
-        &graph,
-        &owner,
-        tip,
-        1,
-        &issuer,
-        &issuer_chain(&owner, &issuer),
-    );
-    let owner_seal = seal(&graph, tip, 2, &owner);
-    graph.seals = vec![committed.clone(), owner_seal.clone()];
-    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
-
-    let nodes = [trusted_node(&graph, &owner), trusted_node(&graph, &owner)];
-    let record = rocky_credentials::SealFinality::new(
-        graph.scope,
-        committed.id().unwrap(),
-        nodes
-            .iter()
-            .map(|node| ack(&graph, &committed, node))
-            .collect(),
-    );
-    let current = RevocationSet::new();
-    assert!(
-        graph
-            .verify_finality(&record, owner.public_key(), Some((&current, 200)))
-            .is_err(),
-        "without the owner's signed minimum the genesis line has no final seal"
-    );
-    let line = |minimum| {
-        rocky_credentials::SignedGenesisLine::sign(
-            rocky_credentials::GenesisLineStatement {
-                format: rocky_credentials::GENESIS_LINE_FORMAT,
-                scope: graph.scope,
-                minimum_in_sync: minimum,
-            },
-            &owner,
-        )
-        .unwrap()
-    };
-    graph.genesis_lines.push(line(3));
-    assert!(
-        graph
-            .verify_finality(&record, owner.public_key(), Some((&current, 200)))
-            .is_err()
-    );
-    graph.genesis_lines = vec![line(2)];
-    graph
-        .verify_finality(&record, owner.public_key(), Some((&current, 200)))
-        .unwrap();
-    assert!(
-        rocky_credentials::SignedGenesisLine::endorse_linked(
-            line(1).statement,
-            rocky_credentials::testing::lane_for(&issuer, &issuer_chain(&owner, &issuer)),
-            &issuer_chain(&owner, &issuer),
-            link(&graph, &issuer, &issuer_chain(&owner, &issuer))
-        )
-        .unwrap()
-        .verify_historic(owner.public_key(), &graph)
-        .is_err(),
-        "an issuer cannot sign the genesis line's minimum"
-    );
-    let mut forged = record.clone();
-    forged.seal = owner_seal.id().unwrap();
-    assert!(
-        graph
-            .verify_finality(&forged, owner.public_key(), Some((&current, 200)))
-            .is_err(),
-        "acknowledgments of another seal do not make this one final"
-    );
-
-    graph.finalities.push(record.clone());
-    assert!(graph.is_final(committed.id().unwrap()).unwrap());
-    assert_eq!(graph.seal(tip).unwrap(), Some(&committed));
-    assert_eq!(
-        graph
-            .canonical_tip(committed.successor().unwrap().unwrap())
-            .unwrap(),
-        committed.successor().unwrap().unwrap()
-    );
-    assert_eq!(
-        graph
-            .canonical_tip(owner_seal.successor().unwrap().unwrap())
-            .unwrap(),
-        committed.successor().unwrap().unwrap()
-    );
-
-    let identity = nodes[0].1.0[0].capability.subject;
-    assert!(
-        graph
-            .exclude_revoked(&revoking(&owner, &[identity]))
-            .unwrap()
-    );
-    assert!(
-        !graph.is_final(committed.id().unwrap()).unwrap(),
-        "revoking one acknowledger's identity leaves the record below the minimum"
-    );
-    assert_eq!(
-        graph.seal(tip).unwrap(),
-        Some(&owner_seal),
-        "the owner's seal wins again"
-    );
-    for seal in [&committed, &owner_seal] {
-        assert_eq!(
-            graph
-                .canonical_tip(seal.successor().unwrap().unwrap())
-                .unwrap(),
-            owner_seal.successor().unwrap().unwrap()
-        );
-    }
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
     use rocky_credentials::{
@@ -1060,234 +893,7 @@ fn checkpoint_records_name_a_held_seal_and_revocation_unlists_them() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entries() {
-    let owner = PrivateKey::new();
-    let trusted = PrivateKey::new();
-    let mut graph = graph();
-    let point = |position, byte| LogPoint {
-        position,
-        running: [byte; 32],
-    };
-    let recovered = |recovery| SealStatement {
-        recovery: Some(recovery),
-        ..seal(&graph, graph.genesis(), 3, &owner).statement
-    };
-    let recovery = Recovery {
-        retained: point(2, 1),
-        replaced: point(5, 2),
-    };
-    let signed = SignedSeal::sign(recovered(recovery), &owner).unwrap();
-    signed.verify_historic(owner.public_key(), &graph).unwrap();
-    assert_eq!(
-        signed.verify_recovery(owner.public_key()).unwrap(),
-        &recovery
-    );
-    assert!(signed.verify_recovery(trusted.public_key()).is_err());
-    assert!(
-        seal(&graph, graph.genesis(), 3, &owner)
-            .verify_recovery(owner.public_key())
-            .is_err()
-    );
-    for chain in [
-        trusted_chain(&graph, &owner, &trusted),
-        issuer_chain(&owner, &trusted),
-    ] {
-        let other = SignedSeal::endorse_linked(
-            recovered(recovery),
-            rocky_credentials::testing::lane_for(&trusted, &chain),
-            &chain,
-            link(&graph, &trusted, &chain),
-        )
-        .unwrap();
-        assert!(
-            other.verify_historic(owner.public_key(), &graph).is_err(),
-            "a trusted identity's or an issuer's recovery is refused"
-        );
-        assert!(other.verify_recovery(owner.public_key()).is_err());
-    }
-    for invalid in [
-        Recovery {
-            retained: point(6, 1),
-            replaced: point(5, 2),
-        },
-        Recovery {
-            retained: point(5, 1),
-            replaced: point(5, 2),
-        },
-    ] {
-        assert!(
-            SignedSeal::sign(recovered(invalid), &owner).is_err(),
-            "a recovery keeps a prefix of the commit it ends"
-        );
-    }
-    let closing = SealStatement {
-        action: SealAction::Close,
-        ..recovered(recovery)
-    };
-    assert!(SignedSeal::sign(closing, &owner).is_err());
-
-    graph.seals.push(signed);
-    for (position, abandoned) in [(2, false), (3, true), (5, true), (6, false)] {
-        assert_eq!(
-            graph.abandons(graph.genesis(), position).unwrap(),
-            abandoned
-        );
-    }
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn bookmarks_on_a_recovered_tip_follow_the_recovery_and_explicit_moves_come_first() {
-    let owner = PrivateKey::new();
-    let mut graph = graph();
-    let genesis = graph.genesis();
-    for name in ["main", "release", "dev"] {
-        graph
-            .moves
-            .push(movement(&graph, name, None, Some(genesis), &owner));
-    }
-    let base = seal(&graph, genesis, 1, &owner);
-    graph.seals.push(base.clone());
-    let opened = opening(&graph, &base, &owner);
-    graph.openings.push(opened.clone());
-    let continued = base.successor().unwrap().unwrap();
-    graph.moves.push(movement(
-        &graph,
-        "dev",
-        Some(genesis),
-        Some(opened.tip().unwrap()),
-        &owner,
-    ));
-    assert_eq!(
-        graph.bookmark("main").unwrap(),
-        Some(genesis),
-        "an ordinary seal does not move a bookmark by itself"
-    );
-    graph.moves.push(movement(
-        &graph,
-        "main",
-        Some(genesis),
-        Some(continued),
-        &owner,
-    ));
-    graph.moves.push(movement(
-        &graph,
-        "release",
-        Some(genesis),
-        Some(continued),
-        &owner,
-    ));
-    let point = |position| LogPoint {
-        position,
-        running: [position as u8; 32],
-    };
-    let recovered = SignedSeal::sign(
-        SealStatement {
-            recovery: Some(Recovery {
-                retained: point(1),
-                replaced: point(2),
-            }),
-            ..seal(&graph, continued, 2, &owner).statement
-        },
-        &owner,
-    )
-    .unwrap();
-    graph.seals.push(recovered.clone());
-    let resumed = recovered.successor().unwrap();
-    assert_eq!(graph.bookmark("main").unwrap(), resumed);
-    assert_eq!(graph.bookmark("release").unwrap(), resumed);
-    assert_eq!(graph.bookmark("dev").unwrap(), Some(opened.tip().unwrap()));
-    graph
-        .moves
-        .push(movement(&graph, "release", Some(continued), None, &owner));
-    assert_eq!(graph.bookmark("release").unwrap(), None);
-    assert_eq!(
-        graph.bookmark("main").unwrap(),
-        resumed,
-        "an explicit move off the recovered tip still resolves first"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn recovery_finality_binds_the_exact_replaced_head_and_keeps_the_signed_quorum() {
-    use rocky_credentials::{
-        GENESIS_LINE_FORMAT, GenesisLineStatement, SealFinality, SignedGenesisLine, TerminalAck,
-    };
-    let owner = PrivateKey::new();
-    let mut graph = graph();
-    let tip = graph.genesis();
-    let recovery = Recovery {
-        retained: LogPoint {
-            position: 1,
-            running: [1; 32],
-        },
-        replaced: LogPoint {
-            position: 3,
-            running: [3; 32],
-        },
-    };
-    let ordinary = seal(&graph, tip, 1, &owner);
-    let seal = SignedSeal::sign(
-        SealStatement {
-            recovery: Some(recovery),
-            ..ordinary.statement
-        },
-        &owner,
-    )
-    .unwrap();
-    let id = seal.id().unwrap();
-    graph.seals.push(seal.clone());
-    graph.genesis_lines.push(
-        SignedGenesisLine::sign(
-            GenesisLineStatement {
-                format: GENESIS_LINE_FORMAT,
-                scope: graph.scope,
-                minimum_in_sync: 2,
-            },
-            &owner,
-        )
-        .unwrap(),
-    );
-    let nodes = [trusted_node(&graph, &owner), trusted_node(&graph, &owner)];
-    let signed = |(position, running)| {
-        nodes
-            .iter()
-            .map(|node| {
-                let mut statement = ack(&graph, &seal, node).statement;
-                statement.position = position;
-                statement.running = running;
-                TerminalAck::sign(
-                    statement,
-                    &node.0,
-                    node.1.clone(),
-                    rocky_credentials::ChainLink::first(node.0.public_key()),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>()
-    };
-    for point in [(5, [9; 32]), (4, [9; 32])] {
-        let proof = SealFinality::new(graph.scope, id, signed(point));
-        assert!(
-            graph
-                .verify_finality(&proof, owner.public_key(), None)
-                .is_err()
-        );
-    }
-    let running = rocky_core::coordinated_chain(recovery.replaced.running, 4, id);
-    let mut proof = SealFinality::new(graph.scope, id, signed((4, running)));
-    graph
-        .verify_finality(&proof, owner.public_key(), None)
-        .unwrap();
-    proof.acknowledgments.pop();
-    assert!(
-        graph
-            .verify_finality(&proof, owner.public_key(), None)
-            .is_err()
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_seal_in_the_parent_format_without_recovery_is_refused() {
+fn a_seal_in_a_parent_format_is_refused() {
     #[derive(serde::Serialize)]
     struct ParentStatement {
         format: u32,
@@ -1328,7 +934,7 @@ fn a_seal_in_the_parent_format_without_recovery_is_refused() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority() {
+fn a_control_only_trusted_identity_certifies_nodes_without_row_authority() {
     let graph = graph();
     let owner = PrivateKey::new();
     let identity = PrivateKey::new();
@@ -1416,7 +1022,6 @@ fn cutting(
             sequence: head.link.unwrap().sequence,
             id: head.id().unwrap(),
         }],
-        acknowledgments: None,
     });
     let statement = rocky_credentials::Revocation {
         app: graph().scope.app,
@@ -1491,7 +1096,6 @@ fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
             identity: trusted.public_key(),
             lane: rocky_credentials::testing::lane_of(&trusted),
             sequence: 1,
-            acknowledgment: false,
         }]
     );
 
@@ -1619,7 +1223,6 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
                 sequence: 0,
                 id: head.id().unwrap(),
             }],
-            acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
     };
@@ -1683,7 +1286,6 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             identity: cut_identity.public_key(),
             lane: rocky_credentials::testing::lane_of(&cut_identity),
             statements: Vec::new(),
-            acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
     };
@@ -1959,131 +1561,6 @@ fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
-    let owner = PrivateKey::new();
-    let issuer = PrivateKey::new();
-    let mut graph = graph();
-    let committed = endorsed(
-        &graph,
-        &owner,
-        graph.genesis(),
-        1,
-        &issuer,
-        &issuer_chain(&owner, &issuer),
-    );
-    graph.seals.push(committed.clone());
-    graph.genesis_lines.push(
-        rocky_credentials::SignedGenesisLine::sign(
-            rocky_credentials::GenesisLineStatement {
-                format: rocky_credentials::GENESIS_LINE_FORMAT,
-                scope: graph.scope,
-                minimum_in_sync: 2,
-            },
-            &owner,
-        )
-        .unwrap(),
-    );
-    let revoked = trusted_node(&graph, &owner);
-    let others: Vec<_> = (0..3).map(|_| trusted_node(&graph, &owner)).collect();
-    let kept = ack(&graph, &committed, &revoked);
-    let late = rocky_credentials::TerminalAck::sign(
-        kept.statement.clone(),
-        &revoked.0,
-        revoked.1.clone(),
-        kept.link.next(kept.id().unwrap()),
-    )
-    .unwrap();
-    let record = |acks: Vec<rocky_credentials::TerminalAck>| {
-        rocky_credentials::SealFinality::new(graph.scope, committed.id().unwrap(), acks)
-    };
-    let before = record(vec![kept.clone(), ack(&graph, &committed, &others[0])]);
-    let enough = record(vec![
-        late.clone(),
-        ack(&graph, &committed, &others[1]),
-        ack(&graph, &committed, &others[2]),
-    ]);
-    let short = record(vec![late.clone(), ack(&graph, &committed, &others[2])]);
-    graph.finalities = vec![before.clone(), enough.clone(), short.clone()];
-    let identity = revoked.1.0[0].capability.subject;
-    let statement = rocky_credentials::Revocation {
-        app: graph.scope.app,
-        issuer: owner.public_key(),
-        time: 200,
-        nodes: Default::default(),
-        identities: [identity].into(),
-        capabilities: Default::default(),
-        cut: vec![rocky_credentials::Cut {
-            identity,
-            lane: revoked.0.public_key(),
-            statements: Vec::new(),
-            acknowledgments: Some(rocky_credentials::Head {
-                sequence: 0,
-                id: kept.id().unwrap(),
-            }),
-        }],
-        mode: rocky_credentials::RevocationMode::Lost,
-    };
-    let revocations = RevocationSet::try_from(vec![
-        Authority::owner_in(
-            &owner,
-            rocky_credentials::DatabaseContext {
-                publisher: owner.public_key(),
-                scope: Scope {
-                    mesh: MeshId([1; 16]),
-                    app: AppId([2; 16]),
-                    domain: DomainId([3; 16]),
-                },
-            },
-        )
-        .unwrap()
-        .revoke(statement)
-        .unwrap(),
-    ])
-    .unwrap();
-    assert!(!graph.ack_beyond_cut(&revocations, &kept).unwrap());
-    assert!(graph.ack_beyond_cut(&revocations, &late).unwrap());
-
-    let (stripped, acks) = graph.strip_past_cut(&revocations, &enough).unwrap();
-    assert!(
-        acks == [late.clone()],
-        "an arriving record loses the late acknowledgment and still counts"
-    );
-    assert!(
-        stripped.acknowledgments
-            == enough
-                .acknowledgments
-                .iter()
-                .filter(|ack| **ack != late)
-                .cloned()
-                .collect::<Vec<_>>()
-    );
-    assert!(graph.meets_minimum(&stripped));
-    graph
-        .verify_finality(&stripped, owner.public_key(), Some((&revocations, 300)))
-        .unwrap();
-    let (stripped_short, _) = graph.strip_past_cut(&revocations, &short).unwrap();
-    assert!(!graph.meets_minimum(&stripped_short));
-
-    let changed = graph.strip_finalities(&revocations).unwrap();
-    assert!(
-        changed
-            .iter()
-            .map(|change| (change.record, change.kept.clone()))
-            .collect::<Vec<_>>()
-            == [
-                (enough.id().unwrap(), Some(stripped)),
-                (short.id().unwrap(), None)
-            ],
-        "a holder strips its records: the one below the minimum goes"
-    );
-    assert_eq!(graph.finalities.len(), 2);
-    assert!(graph.finalities[0] == before);
-    graph.exclude_revoked(&revocations).unwrap();
-    assert!(graph.is_final(committed.id().unwrap()).unwrap());
-    assert!(graph.strip_finalities(&revocations).unwrap().is_empty());
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() {
     let owner = PrivateKey::new();
     let trusted = PrivateKey::new();
@@ -2153,231 +1630,4 @@ fn a_full_cut_leaves_out_the_oldest_stage_branches_and_refuses_too_many_forks() 
         forked.proposed_cut(&trusted.public_key(), &lanes).is_err(),
         "live forks are never left out: 65 of them refuse the cut"
     );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() {
-    let owner = PrivateKey::new();
-    let (honest, raiser) = (PrivateKey::new(), PrivateKey::new());
-    let mut graph = graph();
-    let line = |graph: &TipGraph, signer: &PrivateKey, minimum| {
-        let chain = trusted_chain(graph, &owner, signer);
-        let statement = rocky_credentials::GenesisLineStatement {
-            format: rocky_credentials::GENESIS_LINE_FORMAT,
-            scope: graph.scope,
-            minimum_in_sync: minimum,
-        };
-        let signed = rocky_credentials::SignedGenesisLine::endorse_linked(
-            statement,
-            rocky_credentials::testing::lane_for(signer, &chain),
-            &chain,
-            link(graph, signer, &chain),
-        )
-        .unwrap();
-        signed.verify_historic(owner.public_key(), graph).unwrap();
-        signed
-    };
-    let genesis = graph.genesis();
-    graph.genesis_lines.push(line(&graph, &honest, 2));
-    assert_eq!(graph.line_minimum(genesis).unwrap(), Some(2));
-    graph.genesis_lines.push(line(&graph, &raiser, 9));
-    assert_eq!(
-        graph.line_minimum(genesis).unwrap(),
-        Some(9),
-        "a trusted node may raise the minimum; the largest trusted minimum counts"
-    );
-    graph
-        .exclude_revoked(&revoking(&owner, &[raiser.public_key()]))
-        .unwrap();
-    assert_eq!(
-        graph.line_minimum(genesis).unwrap(),
-        Some(2),
-        "revoking the raiser lowers the minimum again"
-    );
-    graph.exclude_revoked(&RevocationSet::new()).unwrap();
-    graph.genesis_lines.push(
-        rocky_credentials::SignedGenesisLine::sign(
-            rocky_credentials::GenesisLineStatement {
-                format: rocky_credentials::GENESIS_LINE_FORMAT,
-                scope: graph.scope,
-                minimum_in_sync: 3,
-            },
-            &owner,
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        graph.line_minimum(genesis).unwrap(),
-        Some(3),
-        "without revoking anyone, the root's own minimum governs and trusted lines no longer count"
-    );
-}
-
-#[derive(serde::Serialize)]
-struct EarlierFinality {
-    format: u32,
-    seal: [u8; 32],
-    acknowledgments: Vec<EarlierAck>,
-}
-#[derive(serde::Serialize)]
-struct EarlierAck {
-    statement: EarlierAckStatement,
-}
-#[derive(serde::Serialize)]
-struct EarlierAckStatement {
-    format: u32,
-    position: u64,
-}
-
-#[test]
-fn records_another_release_wrote_are_refused_by_the_format_they_name() {
-    let ack = EarlierAck {
-        statement: EarlierAckStatement {
-            format: 2,
-            position: 1,
-        },
-    };
-    match rocky_credentials::TerminalAck::from_bytes(&encode(&ack).unwrap()) {
-        Err(rocky_credentials::Error::UnsupportedFormat {
-            record,
-            format: 2,
-            supported: rocky_credentials::TERMINAL_ACK_FORMAT,
-        }) => assert_eq!(record, "terminal acknowledgment"),
-        other => panic!("an earlier acknowledgment is refused by its format: {other:?}"),
-    }
-    let finality = EarlierFinality {
-        format: 1,
-        seal: [9; 32],
-        acknowledgments: vec![ack],
-    };
-    let refused =
-        rocky_credentials::SealFinality::from_bytes(&encode(&finality).unwrap()).unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            rocky_credentials::Error::UnsupportedFormat {
-                format: 1,
-                supported: rocky_credentials::SEAL_FINALITY_FORMAT,
-                ..
-            }
-        ),
-        "{refused}"
-    );
-    assert!(
-        refused
-            .to_string()
-            .contains("format 1, written by another release"),
-        "the refusal names the format and why: {refused}"
-    );
-    let unversioned = encode(&[1u8, 2, 3]).unwrap();
-    assert!(
-        matches!(
-            rocky_credentials::SealFinality::from_bytes(&unversioned),
-            Err(rocky_credentials::Error::Denied(_))
-        ),
-        "bytes naming no format stay an ordinary decoding refusal"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_finality_record_is_the_same_whatever_order_or_repeats_its_acknowledgments_arrive_in() {
-    let owner = PrivateKey::new();
-    let graph = graph();
-    let committed = seal(&graph, graph.genesis(), 1, &owner);
-    let acks: Vec<_> = (0..3)
-        .map(|_| ack(&graph, &committed, &trusted_node(&graph, &owner)))
-        .collect();
-    let record = |acks: Vec<rocky_credentials::TerminalAck>| {
-        rocky_credentials::SealFinality::new(graph.scope, committed.id().unwrap(), acks)
-    };
-    let forward = record(acks.clone());
-    forward.validate().unwrap();
-    let reversed = record(acks.iter().rev().cloned().collect());
-    assert_eq!(reversed, forward);
-    assert_eq!(reversed.id().unwrap(), forward.id().unwrap());
-    let mut repeated = acks.clone();
-    repeated.push(acks[1].clone());
-    assert_eq!(
-        record(repeated),
-        forward,
-        "a node's repeated acknowledgment counts once"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn settings_resolve_alike_in_every_order_and_keep_the_founding_coordinator() {
-    use rocky_credentials::{
-        Coordination, CoordinatorBundle, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement,
-        SignedDatabaseSettings,
-    };
-    let owner = PrivateKey::new();
-    let scope = graph().scope;
-    let bundle = |root: u8, url: Option<&str>| CoordinatorBundle {
-        identity: rocky_core::CoordinatorIdentity {
-            root: [root; 32],
-            mesh: MeshId([0; 16]),
-            genesis: [2; 32],
-        },
-        certified: vec![root],
-        url: url.map(str::to_owned),
-    };
-    let signed = |revision, coordination| {
-        SignedDatabaseSettings::sign(
-            DatabaseSettingsStatement {
-                format: DATABASE_SETTINGS_FORMAT,
-                scope,
-                revision,
-                coordination,
-            },
-            &owner,
-        )
-        .unwrap()
-    };
-    let founding = bundle(1, None);
-    let refreshed = bundle(1, Some("https://coordinator.example/bundle"));
-    let revisions = [
-        signed(1, Coordination::Coordinated { bundle: founding }),
-        signed(
-            2,
-            Coordination::Coordinated {
-                bundle: bundle(9, None),
-            },
-        ),
-        signed(3, Coordination::Uncoordinated),
-        signed(
-            2,
-            Coordination::Coordinated {
-                bundle: refreshed.clone(),
-            },
-        ),
-    ];
-    let orders = [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1], [1, 3, 0, 2]];
-    for order in orders {
-        let mut graph = graph();
-        graph.settings = order
-            .iter()
-            .map(|index| revisions[*index].clone())
-            .collect();
-        assert_eq!(
-            graph.coordinator().unwrap(),
-            Some(&refreshed),
-            "the highest revision naming the founding coordinator governs in order {order:?}"
-        );
-        assert!(graph.next_settings(Coordination::Uncoordinated).is_err());
-        assert!(
-            graph
-                .next_settings(Coordination::Coordinated {
-                    bundle: bundle(9, None)
-                })
-                .is_err()
-        );
-        assert_eq!(
-            graph
-                .next_settings(Coordination::Coordinated {
-                    bundle: refreshed.clone()
-                })
-                .unwrap(),
-            None
-        );
-    }
 }

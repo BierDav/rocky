@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 33;
+pub(super) const HANDSHAKE_VERSION: u32 = 34;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -429,22 +429,8 @@ pub async fn scope_token<A: RowApplication>(
             for movement in &graph.moves {
                 metadata.push(movement.id().map_err(credential)?);
             }
-            for line in &graph.genesis_lines {
-                metadata.push(line.id().map_err(credential)?);
-            }
-            for proof in &graph.finalities {
-                metadata.push(proof.id().map_err(credential)?);
-            }
             for checkpoint in &graph.checkpoints {
                 metadata.push(checkpoint.id().map_err(credential)?);
-            }
-            for settings in &graph.settings {
-                metadata.push(settings.id().map_err(credential)?);
-            }
-        }
-        for (_, batch) in inner.pending_tips(None).await? {
-            for statement in batch.iter().filter(|s| s.scope() == scope.domain) {
-                metadata.push(statement.id()?);
             }
         }
         metadata.sort_unstable();
@@ -792,7 +778,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v33",
+            "rocky.link.v34",
             "the cryptographic handshake accepts one current version"
         );
     }

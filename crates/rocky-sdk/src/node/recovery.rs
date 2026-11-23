@@ -70,18 +70,7 @@ impl Node {
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
-                match self.seal_followed(scope).await {
-                    Err(error)
-                        if crate::Error::from_failure(&error).kind()
-                            == &crate::ErrorKind::Sealed => {}
-                    Err(error)
-                        if crate::Error::from_failure(&error).kind()
-                            == &crate::ErrorKind::SealPending =>
-                    {
-                        return Ok(Some(crate::SealSkip::SealPending(error.to_string())));
-                    }
-                    sealed => sealed?,
-                }
+                self.seal_followed(scope).await?;
             }
             let awaiting = self.replica.awaiting_outcomes().await?;
             if !awaiting.is_empty() {

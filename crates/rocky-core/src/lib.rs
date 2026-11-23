@@ -1,7 +1,5 @@
 mod blocker;
 pub use blocker::*;
-mod coordinated;
-pub use coordinated::*;
 mod definition;
 pub use definition::*;
 mod generation;
@@ -34,8 +32,8 @@ pub use logical::*;
 pub use types::*;
 pub use value::{Real, SqlValue};
 
-mod coordination;
-pub use coordination::*;
+mod commitment;
+pub use commitment::*;
 mod tip;
 pub use tip::TipId;
 mod token;

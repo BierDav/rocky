@@ -6,7 +6,6 @@ use rocky_credentials::{SealAction, SignedSeal};
 mod employees;
 mod engine;
 #[cfg(not(target_family = "wasm"))]
-mod named_coordinator;
 mod source_availability;
 pub(in crate::tests) mod source_validation;
 mod staging;
@@ -50,7 +49,6 @@ async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers(
             source,
             target,
             from_version: 2,
-            coordinated: false,
             statements: statements.clone(),
             program: vec![],
             parents: vec![],
@@ -522,7 +520,6 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
         source,
         target,
         from_version: 2,
-        coordinated: false,
         statements: vec![TipStatement::Seal(seal), TipStatement::Bookmark(movement)],
         program: vec![],
         parents: vec![],

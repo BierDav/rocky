@@ -30,20 +30,6 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
         .await
         .unwrap();
     follow_main(&l, &replica).await;
-    replica
-        .publish_tip_statements(&[TipStatement::GenesisLine(
-            SignedGenesisLine::sign(
-                GenesisLineStatement {
-                    format: rocky_credentials::GENESIS_LINE_FORMAT,
-                    scope: l.domain,
-                    minimum_in_sync: 2,
-                },
-                l.publisher(),
-            )
-            .unwrap(),
-        )])
-        .await
-        .unwrap();
     let source = replica.followed_tip().await;
     let close = SignedSeal::sign(
         SealStatement {
@@ -52,7 +38,6 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             tip: source,
             frontier: vec![],
             action: SealAction::Close,
-            recovery: None,
         },
         l.publisher(),
     )
@@ -63,7 +48,6 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             scope: l.domain,
             seal: close.id().unwrap(),
             schema: l.definition(3).hash(),
-            minimum_in_sync: 2,
         },
         l.publisher(),
     )
@@ -78,7 +62,6 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             source,
             target,
             from_version: 2,
-            coordinated: false,
             statements: vec![
                 TipStatement::Seal(close),
                 TipStatement::Opening(opening),

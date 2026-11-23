@@ -1,5 +1,6 @@
 pub use retention::Limits;
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Retention {
@@ -30,7 +31,6 @@ pub mod protocol {
     };
 }
 
-pub mod coordinated;
 pub mod counters;
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -48,14 +48,16 @@ impl rocky_credentials::CoordinatorConnector for Connector {
     fn connect(
         &self,
         bundle: &rocky_credentials::CoordinatorBundle,
-    ) -> Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, rocky_core::CoordinationError>
-    {
+    ) -> Result<
+        std::sync::Arc<dyn rocky_credentials::Coordinator>,
+        rocky_credentials::CoordinationError,
+    > {
         let genesis = certified::CertifiedGenesis::from_bytes(&bundle.certified)?;
         let root = rocky_credentials::PublicKey::from_bytes(&bundle.identity.root)
-            .map_err(|_| rocky_core::CoordinationError::Denied)?;
+            .map_err(|_| rocky_credentials::CoordinationError::Denied)?;
         genesis.verify(root, bundle.identity.mesh)?;
         if genesis.id()? != bundle.identity.genesis {
-            return Err(rocky_core::CoordinationError::Denied);
+            return Err(rocky_credentials::CoordinationError::Denied);
         }
         Ok(std::sync::Arc::new(service::NetworkCoordinator::connect(
             &certified::TrustBundle::new(&genesis)?,
@@ -69,8 +71,10 @@ impl Client {
     pub fn connect(
         bundle: &certified::TrustBundle,
         transport: std::sync::Arc<dyn rocky_core::net::Transport>,
-    ) -> Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, rocky_core::CoordinationError>
-    {
+    ) -> Result<
+        std::sync::Arc<dyn rocky_credentials::Coordinator>,
+        rocky_credentials::CoordinationError,
+    > {
         Ok(std::sync::Arc::new(service::NetworkCoordinator::connect(
             bundle,
             rocky_credentials::PrivateKey::new(),

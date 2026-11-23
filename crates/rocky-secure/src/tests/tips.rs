@@ -396,7 +396,6 @@ async fn seal(f: &Fixture, replica: &Replica) -> SignedSeal {
             action: SealAction::Continue {
                 schema: f.app().definition().hash(),
             },
-            recovery: None,
         },
         &f.publisher,
     )
@@ -427,7 +426,6 @@ fn branch(f: &Fixture, seal: &SignedSeal) -> (TipId, Vec<TipStatement>) {
                 .hash(),
             scope: f.public.domain,
             seal: seal.id().unwrap(),
-            minimum_in_sync: 1,
         },
         &f.publisher,
     )
@@ -718,181 +716,6 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
         losing_replica.snapshot(f.public).await.unwrap().rows,
         winning_replica.snapshot(f.public).await.unwrap().rows
     );
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let key = PrivateKey::new();
-    let replica = open(&f, &dir.path().join("coordinated.db"), &key).await;
-    main(&f, &replica).await;
-    let tip = replica.followed_tip().await;
-    let log = rocky_core::TipLog {
-        scope: f.public.domain,
-        tip,
-    };
-    let signed = seal(&f, &replica).await;
-    let records = vec![
-        TipStatement::Seal(signed.clone()),
-        bookmark(&f, "main", Some(tip), signed.successor().unwrap()),
-    ];
-    let coordinator = rocky_coordinator::coordinated::MemoryLog::new();
-    replica.set_domain_log(Some(std::sync::Arc::new(
-        coordinator.client(key.public_key()),
-    )));
-    let mut forged = signed.statement.clone();
-    forged.frontier.clear();
-    let forged = SignedSeal::sign(forged, &PrivateKey::new()).unwrap();
-    assert!(
-        replica
-            .receive_tip_statements(&[TipStatement::Seal(forged)])
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        coordinator.head(log).unwrap().terminal,
-        None,
-        "a seal admission refuses never ends the log"
-    );
-    coordinator.set_available(false);
-    assert_eq!(
-        replica.receive_tip_statements(&records).await.unwrap(),
-        0,
-        "unconfirmed, a received seal and the move riding on it wait outside the graph"
-    );
-    let message = replica
-        .publish_tip_statements(&records)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        message.contains("did not confirm"),
-        "unconfirmed, this node's own publication fails: {message}"
-    );
-    assert!(
-        replica
-            .tip_graph(f.public.domain)
-            .await
-            .unwrap()
-            .seals
-            .is_empty()
-    );
-    assert_eq!(replica.followed_tip().await, tip);
-    coordinator.set_available(true);
-    assert_eq!(replica.publish_tip_statements(&records).await.unwrap(), 2);
-    let head = coordinator.head(log).unwrap();
-    let terminal = head.terminal.unwrap();
-    assert_eq!(
-        (terminal.digest, terminal.continuation),
-        (signed.id().unwrap(), signed.successor().unwrap())
-    );
-    assert_eq!(
-        replica.followed_tip().await,
-        signed.successor().unwrap().unwrap()
-    );
-    let mut late = signed.statement.clone();
-    late.action = SealAction::Close;
-    let late = SignedSeal::sign(late, &f.publisher).unwrap();
-    let message = replica
-        .publish_tip_statements(&[TipStatement::Seal(late.clone())])
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        message.contains("first"),
-        "once the log ended with a held seal, a concurrent own seal is not published: {message}"
-    );
-    assert_eq!(
-        replica
-            .tip_graph(f.public.domain)
-            .await
-            .unwrap()
-            .seals
-            .len(),
-        1
-    );
-    assert_eq!(
-        replica
-            .receive_tip_statements(&[TipStatement::Seal(late)])
-            .await
-            .unwrap(),
-        1,
-        "a concurrent received seal is admitted and the graph decides"
-    );
-    assert_eq!(coordinator.head(log).unwrap().terminal, Some(terminal));
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_arrives() {
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
-    let a = open(&f, &dir.path().join("a.db"), &a_key).await;
-    let b = open(&f, &dir.path().join("b.db"), &b_key).await;
-    main(&f, &a).await;
-    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
-        .await
-        .unwrap();
-    b.follow_bookmark(f.public.domain, "main").await.unwrap();
-    b.receive(insert(&f, &a, 1, "Common").await).await.unwrap();
-    let coordinator = rocky_coordinator::coordinated::MemoryLog::new();
-    a.set_domain_log(Some(std::sync::Arc::new(
-        coordinator.client(a_key.public_key()),
-    )));
-    b.set_domain_log(Some(std::sync::Arc::new(
-        coordinator.client(b_key.public_key()),
-    )));
-    let tip = a.followed_tip().await;
-    let won = seal(&f, &b).await;
-    let winner = vec![
-        TipStatement::Seal(won.clone()),
-        bookmark(&f, "main", Some(tip), won.successor().unwrap()),
-    ];
-    b.publish_tip_statements(&winner).await.unwrap();
-    let issuer = PrivateKey::new();
-    let chain = CredentialChain(vec![
-        Authority::owner_in(
-            &f.publisher,
-            rocky_credentials::DatabaseContext {
-                publisher: f.publisher.public_key(),
-                scope: f.public.domain,
-            },
-        )
-        .unwrap()
-        .issue_issuer(issuer.public_key(), validity())
-        .unwrap(),
-    ]);
-    let lost = SignedSeal::endorse(
-        won.statement.clone(),
-        rocky_credentials::testing::lane_for(&issuer, &chain),
-        &chain,
-    )
-    .unwrap();
-    assert_ne!(
-        lost.id().unwrap(),
-        won.id().unwrap(),
-        "the same seal endorsed by another signer has another digest"
-    );
-    let message = a
-        .publish_tip_statements(&[
-            TipStatement::Seal(lost.clone()),
-            bookmark(&f, "main", Some(tip), lost.successor().unwrap()),
-        ])
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(message.contains("first"), "{message}");
-    assert!(a.tip_graph(f.public.domain).await.unwrap().seals.is_empty());
-    assert_eq!(a.followed_tip().await, tip);
-    a.receive_tip_statements(&winner).await.unwrap();
-    assert_eq!(a.followed_tip().await, won.successor().unwrap().unwrap());
-    b.receive(insert(&f, &a, 2, "After the race").await)
-        .await
-        .expect("the node's author log continues on the winning line");
-    assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
 }
 
 async fn identity_replica(
@@ -1725,7 +1548,6 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
                 sequence: 0,
                 id: kept.id().unwrap(),
             }],
-            acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
     };
@@ -1755,7 +1577,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
         assert!(graph.past_cut.is_empty());
         assert_eq!(
             replica.past_cut_records(f.public.domain).await.unwrap(),
-            [(trusted.public_key(), trusted.public_key(), 1, 0)]
+            [(trusted.public_key(), trusted.public_key(), 1)]
         );
         let held = replica.tip_statements(None, 32).await.unwrap();
         assert!(!held.contains(&TipStatement::Bookmark(late.clone())));

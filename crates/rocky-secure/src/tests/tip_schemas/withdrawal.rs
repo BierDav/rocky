@@ -79,7 +79,6 @@ async fn stage(
             source,
             target,
             from_version: generations.source,
-            coordinated: false,
             statements: vec![
                 TipStatement::Seal(seal),
                 bookmark(lineage, Some(source), target),

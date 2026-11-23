@@ -1,4 +1,5 @@
-use rocky_core::{CoordinationError, MAX_COUNTER};
+use rocky_core::MAX_COUNTER;
+use rocky_credentials::CoordinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 

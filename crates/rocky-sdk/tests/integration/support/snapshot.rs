@@ -36,10 +36,10 @@ pub async fn observe<T: Snapshot>(
     future.await.map(Snapshot::snapshot).map_err(|error| {
         if let Some(sql) = error.downcast_ref::<sdk::SqlFailure>() {
             let retryable = matches!(sql.code, 5 | 6);
-            return json!({"code": if retryable { "busy" } else { "rejected" }, "retryable": retryable, "message": sql.message, "coordinator_time": Value::Null, "blockers": []});
+            return json!({"code": if retryable { "busy" } else { "rejected" }, "retryable": retryable, "message": sql.message, "blockers": []});
         }
         let failure = sdk::CallFailure::from_failure(&error);
-        json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.detail,"coordinator_time":failure.coordinator_time,"blockers":failure.blockers})
+        json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.detail,"blockers":failure.blockers})
     })
 }
 pub async fn ok<T: Snapshot>(future: impl Future<Output = Result<T, sdk::Failure>>) -> Value {
@@ -449,7 +449,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::LinkOpened { peer, reason } => json!({"kind":"link_opened","peer":peer,"reason":reason}),
                 sdk::ActivityKind::FinalizationFailed { error } => json!({"kind":"finalization_failed","error":error}),
                 sdk::ActivityKind::TipSchemaUnavailable { manifest, peer, error } => json!({"kind":"tip_schema_unavailable","manifest":data_encoding::HEXLOWER.encode(&manifest),"peer":peer,"error":error}),
-                sdk::ActivityKind::SchemaPublicationConflict { publication, terminal } => json!({"kind":"schema_publication_conflict","publication":data_encoding::HEXLOWER.encode(&publication),"terminal":data_encoding::HEXLOWER.encode(&terminal)}),
             };
             detail["sequence"]=json!(event.sequence.to_string());
             detail["at"]=json!(event.at_epoch_millis.to_string());
@@ -483,7 +482,6 @@ fn fixture_rejection(detail: &str) -> sdk::Failure {
         code: "rejected".into(),
         retryable: false,
         detail: detail.into(),
-        coordinator_time: None,
         blockers: Vec::new(),
     })
 }

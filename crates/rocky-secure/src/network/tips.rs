@@ -7,7 +7,7 @@ use diff::{graph_statements, ids_digest, range_ids};
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum TipMessage {
-    Digest(Commitment, usize),
+    Digest(Commitment),
     Statements {
         statements: Vec<TipStatement>,
         last: bool,
@@ -34,12 +34,6 @@ pub(super) enum TipMessage {
         last: bool,
     },
     Stored,
-    CandidateQuery,
-    CandidatePush {
-        statements: Vec<TipStatement>,
-        last: bool,
-    },
-    CandidateCount(usize),
 }
 
 impl NativeSession {
@@ -53,7 +47,6 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
         self.reconcile_graph(replica, None).await?;
-        self.sync_candidates(replica).await?;
         self.send(TipMessage::Followed(replica.followed_tip().await))
             .await?;
         let TipMessage::Followed(tip) = self.reply::<TipMessage>().await? else {
@@ -68,26 +61,6 @@ impl NativeSession {
         message: TipMessage,
     ) -> Result<(), Error> {
         match message {
-            TipMessage::CandidateQuery => {
-                let batches = candidate_pages(replica.pending_tip_candidates().await?)?;
-                self.send(TipMessage::CandidateCount(batches.len())).await?;
-                for (statements, last) in batches {
-                    self.send(TipMessage::CandidatePush { statements, last })
-                        .await?;
-                }
-                Ok(())
-            }
-            TipMessage::CandidatePush { statements, last } => {
-                if statements.len() > PAGE || (!last && statements.is_empty()) {
-                    return Err(denied("candidate page quota"));
-                }
-                self.tip_incoming.extend(statements);
-                if last {
-                    let batch = std::mem::take(&mut self.tip_incoming);
-                    replica.receive_tip_statements(&batch).await?;
-                }
-                self.send(TipMessage::Stored).await
-            }
             TipMessage::Range { prefix, depth } => {
                 let graph = graph_statements(replica).await?;
                 let ids = range_ids(&graph, prefix, depth)?;
@@ -164,42 +137,14 @@ impl NativeSession {
         let graph = graph_statements(replica).await?;
         let ids: Vec<_> = graph.iter().map(|(id, _)| *id).collect();
         let digest = ids_digest(&ids)?;
-        let batches = candidate_pages(replica.pending_tip_candidates().await?)?;
-        let TipMessage::Digest(theirs, count) = self
-            .swap_tips(initiator, TipMessage::Digest(digest, batches.len()))
+        let TipMessage::Digest(theirs) = self
+            .swap_tips(initiator, TipMessage::Digest(digest))
             .await?
         else {
             return Err(denied("unexpected tip graph digest"));
         };
         if theirs != digest {
             self.reconcile_graph(replica, Some(initiator)).await?;
-        }
-        let mut batches = batches.into_iter();
-        let mut candidate = Vec::new();
-        for index in 0..count.max(batches.len()) {
-            let (statements, last) = batches.next().unwrap_or((Vec::new(), true));
-            let TipMessage::CandidatePush { statements, last } = self
-                .swap_tips(initiator, TipMessage::CandidatePush { statements, last })
-                .await?
-            else {
-                return Err(denied("unexpected pending candidate"));
-            };
-            if index < count {
-                if statements.len() > PAGE || (!last && statements.is_empty()) {
-                    return Err(denied("candidate page quota"));
-                }
-                candidate.extend(statements);
-                if last {
-                    replica
-                        .receive_tip_statements(&std::mem::take(&mut candidate))
-                        .await?;
-                }
-            } else if !statements.is_empty() || !last {
-                return Err(denied("candidate beyond declared count"));
-            }
-        }
-        if !candidate.is_empty() {
-            return Err(denied("incomplete pending candidate"));
         }
         let TipMessage::Followed(tip) = self
             .swap_tips(
@@ -211,43 +156,6 @@ impl NativeSession {
             return Err(denied("unexpected followed tip"));
         };
         replica.admit_peer(self.peer, &self.credentials, tip).await
-    }
-
-    async fn sync_candidates<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-    ) -> Result<(), Error> {
-        self.send(TipMessage::CandidateQuery).await?;
-        let TipMessage::CandidateCount(count) = self.reply::<TipMessage>().await? else {
-            return Err(denied("unexpected pending candidate count"));
-        };
-        let mut candidate = Vec::new();
-        for _ in 0..count {
-            let TipMessage::CandidatePush { statements, last } = self.reply::<TipMessage>().await?
-            else {
-                return Err(denied("unexpected pending candidate"));
-            };
-            if statements.len() > PAGE || (!last && statements.is_empty()) {
-                return Err(denied("candidate page quota"));
-            }
-            candidate.extend(statements);
-            if last {
-                replica
-                    .receive_tip_statements(&std::mem::take(&mut candidate))
-                    .await?;
-            }
-        }
-        if !candidate.is_empty() {
-            return Err(denied("incomplete pending candidate"));
-        }
-        for (statements, last) in candidate_pages(replica.pending_tip_candidates().await?)? {
-            self.send(TipMessage::CandidatePush { statements, last })
-                .await?;
-            if !matches!(self.reply::<TipMessage>().await?, TipMessage::Stored) {
-                return Err(denied("unexpected pending candidate acknowledgment"));
-            }
-        }
-        Ok(())
     }
 
     async fn swap_tips(
@@ -295,20 +203,4 @@ pub(super) fn statement_pages(
         remaining = &remaining[count..];
     }
     Ok(pages)
-}
-pub(super) fn candidate_pages(
-    batches: Vec<Vec<TipStatement>>,
-) -> Result<Vec<(Vec<TipStatement>, bool)>, Error> {
-    let mut result = Vec::new();
-    for batch in batches {
-        let pages = statement_pages(batch)?;
-        let length = pages.len();
-        result.extend(
-            pages
-                .into_iter()
-                .enumerate()
-                .map(|(i, page)| (page, i + 1 == length)),
-        );
-    }
-    Ok(result)
 }

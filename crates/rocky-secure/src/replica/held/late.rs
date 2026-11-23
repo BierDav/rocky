@@ -309,11 +309,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    fn closed_held_generation(
-        &self,
-        scope: ResourceScope,
-        time: u64,
-    ) -> Result<(Commitment, bool), Error> {
+    fn closed_held_generation(&self, scope: ResourceScope, time: u64) -> Result<Commitment, Error> {
         let grants = self.local_grants(time)?;
         let graph = self.graph_for(scope.domain)?;
         let keys: Vec<_> = self
@@ -337,20 +333,11 @@ impl<A: RowApplication> Inner<A> {
                 graph.seals.len(),
                 graph.openings.len(),
                 graph.moves.len(),
-                graph.genesis_lines.len(),
-                graph.finalities.len(),
                 graph.checkpoints.len(),
-                graph.settings.len(),
                 &graph.revoked,
             ))?,
         );
-        Ok((
-            generation,
-            graph
-                .seals
-                .iter()
-                .any(|seal| seal.statement.recovery.is_some()),
-        ))
+        Ok(generation)
     }
     async fn refresh_closed_held_step(
         &self,
@@ -358,7 +345,7 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
         pass: &mut Refresh,
     ) -> Result<bool, Error> {
-        let (generation, recovery) = self.closed_held_generation(scope, time)?;
+        let generation = self.closed_held_generation(scope, time)?;
         if self
             .held_refresh
             .lock()
@@ -459,28 +446,26 @@ impl<A: RowApplication> Inner<A> {
             else {
                 return Err(Error::Corrupt("closed source frame".into()));
             };
-            if !recovery {
-                let scope: ResourceScope = decode(encoded_scope)?;
-                let tip = TipId(
-                    tip.as_slice()
-                        .try_into()
-                        .map_err(|_| Error::Corrupt("closed source tip".into()))?,
-                );
-                let author = rocky_core::WriterId::from_slice(author)
-                    .map_err(|_| Error::Corrupt("closed source author".into()))?;
-                let sequence = u64::try_from(*sequence)
-                    .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
-                if self.frame_reach_at_using(
-                    scope.domain,
-                    tip,
-                    author,
-                    sequence,
-                    0,
-                    Some(&mut context),
-                )? != tips::FrameReach::Held
-                {
-                    continue;
-                }
+            let scope: ResourceScope = decode(encoded_scope)?;
+            let tip = TipId(
+                tip.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("closed source tip".into()))?,
+            );
+            let author = rocky_core::WriterId::from_slice(author)
+                .map_err(|_| Error::Corrupt("closed source author".into()))?;
+            let sequence = u64::try_from(*sequence)
+                .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
+            if self.frame_reach_at_using(
+                scope.domain,
+                tip,
+                author,
+                sequence,
+                0,
+                Some(&mut context),
+            )? != tips::FrameReach::Held
+            {
+                continue;
             }
             #[cfg(any(test, feature = "qualification"))]
             self.flusher

@@ -434,9 +434,7 @@ impl NativeSession {
         #[cfg(test)]
         match &message {
             Message::Tips(
-                TipMessage::Statements { statements, .. }
-                | TipMessage::Push { statements, .. }
-                | TipMessage::CandidatePush { statements, .. },
+                TipMessage::Statements { statements, .. } | TipMessage::Push { statements, .. },
             ) => self.sent_counts.statements += statements.len(),
             Message::Rows(RowMessage::Range { .. }) => self.sent_counts.ranges += 1,
             Message::Rows(RowMessage::Held { .. }) => self.sent_counts.acknowledgments += 1,

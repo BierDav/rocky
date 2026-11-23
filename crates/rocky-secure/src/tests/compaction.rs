@@ -75,7 +75,6 @@ pub(super) fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>
             action: SealAction::Continue {
                 schema: lineage.definition(3).hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )

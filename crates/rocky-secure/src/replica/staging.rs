@@ -1,6 +1,5 @@
 use super::*;
 use rocky_core::Scope;
-use rocky_credentials::SealFinality;
 
 mod discarded_writes;
 
@@ -16,7 +15,6 @@ pub struct SchemaStage {
     pub source: TipId,
     pub target: TipId,
     pub from_version: u32,
-    pub coordinated: bool,
     pub statements: Vec<TipStatement>,
     pub program: Vec<u8>,
     pub parents: Vec<String>,
@@ -54,15 +52,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("schema publication does not advance its bookmark"));
         }
-        if stage.coordinated
-            && graph
-                .line_minimum(stage.source)
-                .map_err(credential)?
-                .is_none()
-        {
-            return Err(denied("source line requires an authenticated minimum"));
-        }
-        refuse_uncoordinated_stage(stage, graph)?;
 
         let close = stage
             .statements
@@ -132,24 +121,18 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         };
         let stage: SchemaStage = decode(bytes)?;
-        refuse_uncoordinated_stage(&stage, self.graph_for(stage.scope)?)?;
         self.conn.execute("UPDATE secure_staged_schema SET state='committed' WHERE publication=? AND state='staged'", [publication.to_vec()]).await?;
-        if !stage.coordinated
-            && !stage
-                .statements
-                .iter()
-                .any(|s| matches!(s, TipStatement::Opening(_)))
+        if !stage
+            .statements
+            .iter()
+            .any(|s| matches!(s, TipStatement::Opening(_)))
         {
-            self.release_schema_stage(&stage, None).await?;
+            self.release_schema_stage(&stage).await?;
         }
         self.drop_migration_parents(&stage).await?;
         Ok(())
     }
-    pub(super) async fn release_schema_stage(
-        &self,
-        stage: &SchemaStage,
-        proof: Option<&SealFinality>,
-    ) -> Result<(), Error> {
+    pub(super) async fn release_schema_stage(&self, stage: &SchemaStage) -> Result<(), Error> {
         if stage
             .statements
             .iter()
@@ -159,28 +142,9 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         let mut graph = Arc::unwrap_or_clone(self.scope_graph(stage.scope)?);
-        if let Some(proof) = proof {
-            graph
-                .verify_finality(
-                    proof,
-                    self.config.publisher,
-                    Some((&self.config.revocations, now()?)),
-                )
-                .map_err(credential)?;
-            graph.finalities.push(proof.clone());
-        }
         graph
             .exclude_revoked(&self.config.revocations)
             .map_err(credential)?;
-        if let Some(proof) = proof
-            && !graph.is_final(proof.seal).map_err(credential)?
-        {
-            return Err(super::coordinated::refusal(
-                super::coordinated::Refusal::CoordinatorMismatch(
-                    "the staged close's finality was acknowledged at another coordinator than the database's settings name: the close is not final".into(),
-                ),
-            ));
-        }
         for statement in &stage.statements {
             statement.verify(
                 self.config.publisher,
@@ -194,10 +158,6 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(credential)?
         {
             return Err(denied("staged schema no longer wins its bookmark"));
-        }
-        if let Some(proof) = proof {
-            let statement = TipStatement::Finality(proof.clone());
-            self.conn.execute("INSERT OR IGNORE INTO secure_tip_statements(digest,statement,staged) VALUES(?,?,0)", [statement.id()?.to_vec(), encode(&statement)?]).await?;
         }
         for statement in &stage.statements {
             self.conn
@@ -221,14 +181,10 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    pub(super) async fn release_and_reload(
-        &mut self,
-        stage: &SchemaStage,
-        proof: Option<&SealFinality>,
-    ) -> Result<(), Error> {
+    pub(super) async fn release_and_reload(&mut self, stage: &SchemaStage) -> Result<(), Error> {
         let (graphs, tip) = (self.graphs.clone(), self.workspace.tip);
         let result = transaction!(self, |inner| {
-            inner.release_schema_stage(stage, proof).await?;
+            inner.release_schema_stage(stage).await?;
             inner.load_tip_graphs().await?;
             inner.reseed_domain_ledgers(stage.scope).await
         });
@@ -243,13 +199,6 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn stage_schema(&self, stage: SchemaStage) -> Result<(), Error> {
-        let graph = self.tip_graph(stage.scope).await?;
-        if let Some(refused) = self.named_log_refusal(&graph)? {
-            return Err(refused);
-        }
-        if stage.coordinated && self.usable_log(&graph)?.is_none() {
-            return Err(denied("a coordinated schema stage needs a composed log"));
-        }
         self.inner
             .lock(crate::replica::Class::Background)
             .await
@@ -268,7 +217,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             pause.reached.send(()).map_err(|_| Error::InjectedFailure)?;
             pause.resume.await.map_err(|_| Error::InjectedFailure)?;
         }
-        self.admit_tips_with_stage(&stage.statements, None, &[], Some(&stage))
+        self.admit_tip_statements(&stage.statements, Some(&stage))
             .await?;
         Ok(())
     }
@@ -294,63 +243,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => Err(Error::Corrupt("staged schema publication".into())),
         }
     }
-    pub async fn release_staged_schema(
-        &self,
-        publication: Commitment,
-        finality: SealFinality,
-    ) -> Result<(), Error> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let records = collect_rows(
-            inner
-                .conn
-                .query(
-                    "SELECT stage,state FROM secure_staged_schema WHERE publication=?",
-                    [publication.to_vec()],
-                )
-                .await?,
-        )
-        .await?;
-        let Some([SqlValue::Blob(bytes), SqlValue::Text(state)]) =
-            records.first().map(Vec::as_slice)
-        else {
-            return Err(denied("unknown staged schema publication"));
-        };
-        let stage: SchemaStage = decode(bytes)?;
-        if state == "released" {
-            return Ok(());
-        }
-        if state != "committed" || !stage.coordinated {
-            return Err(denied("schema publication is not committed"));
-        }
-        let close = stage
-            .statements
-            .iter()
-            .find_map(|statement| match statement {
-                TipStatement::Seal(seal) => Some(seal),
-                _ => None,
-            })
-            .ok_or_else(|| denied("schema publication has no seal"))?;
-        if finality.seal != close.id().map_err(credential)? {
-            return Err(denied("finality names another schema publication"));
-        }
-        inner.release_and_reload(&stage, Some(&finality)).await?;
-        inner = flush_guard(inner, &self.inner).await?;
-        inner.publish_revision().await
-    }
-}
-
-pub(super) fn refuse_uncoordinated_stage(
-    stage: &SchemaStage,
-    graph: &rocky_credentials::TipGraph,
-) -> Result<(), Error> {
-    if !stage.coordinated && graph.coordinator().map_err(credential)?.is_some() {
-        return Err(super::coordinated::refusal(
-            super::coordinated::Refusal::CoordinatorRequired(
-                "the owner's database settings name a coordinator: a schema stage made without its log is never released unended".into(),
-            ),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

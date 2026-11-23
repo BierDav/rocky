@@ -136,7 +136,6 @@ impl Lineage {
                 action: rocky_credentials::SealAction::Continue {
                     schema: self.definition(version).hash(),
                 },
-                recovery: None,
             },
             self.publisher(),
         )
@@ -511,14 +510,6 @@ impl Lineage {
     ) -> CredentialChain {
         self.certified_as(generation, user, node, None)
     }
-    pub(super) fn trusted(
-        &self,
-        generation: u32,
-        user: &PrivateKey,
-        node: &PrivateKey,
-    ) -> CredentialChain {
-        self.certified_as(generation, user, node, Some(self.domain))
-    }
     fn certified_as(
         &self,
         generation: u32,
@@ -635,17 +626,6 @@ impl Lineage {
     ) -> Result<EncryptedReplica<TypedRows>, Error> {
         let mut config = self.config(generation, node);
         config.credentials = self.certified(generation, identity, node);
-        self.open_with(path, config, generation, upgrade).await
-    }
-    pub(super) async fn open_trusted(
-        &self,
-        path: &std::path::Path,
-        (identity, node): (&PrivateKey, &PrivateKey),
-        generation: u32,
-        upgrade: Option<(LogicalSchema, Scope, BTreeMap<String, Commitment>)>,
-    ) -> Result<EncryptedReplica<TypedRows>, Error> {
-        let mut config = self.config(generation, node);
-        config.credentials = self.trusted(generation, identity, node);
         self.open_with(path, config, generation, upgrade).await
     }
     pub(super) async fn open_scoped(

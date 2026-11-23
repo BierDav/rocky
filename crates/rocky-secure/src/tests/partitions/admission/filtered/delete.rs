@@ -117,7 +117,6 @@ async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_par
             action: SealAction::Continue {
                 schema: app.manifest().hash(),
             },
-            recovery: None,
         },
         &f.publisher,
     )

@@ -1,6 +1,7 @@
 use crate::certified::*;
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 

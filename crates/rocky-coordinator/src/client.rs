@@ -10,8 +10,8 @@ use rocky_core::{
     *,
 };
 use rocky_credentials::{
-    CredentialChain, RevocationSet, SignedCapability, SignedCoordinationGrant,
-    SignedTenantAdmission,
+    CoordinationError, CoordinationFuture, CoordinatorIdentity, CredentialChain, NodeKey,
+    RevocationSet, SignedCapability, SignedCoordinationGrant, SignedTenantAdmission,
 };
 use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -237,77 +237,6 @@ impl NetworkCoordinator {
         .await
         .map_err(|_| CoordinationError::Unavailable)?
     }
-    pub async fn coordinated(
-        &self,
-        log: TipLog,
-        action: crate::coordinated::Action,
-    ) -> Result<Outcome, CoordinationError> {
-        use tracing::Instrument;
-        let span = tracing::debug_span!(
-            "coordinated",
-            action = action.kind(),
-            outcome = tracing::field::Empty
-        );
-        let result = self
-            .call(
-                crate::transport::nonce(),
-                Operation::Coordinated { log, action },
-            )
-            .instrument(span.clone())
-            .await;
-        span.record(
-            "outcome",
-            match &result {
-                Ok(_) => "ok",
-                Err(error) => error.category(),
-            },
-        );
-        result
-    }
-    fn terminal(
-        &self,
-        log: TipLog,
-        action: crate::coordinated::Action,
-    ) -> CoordinationFuture<'_, LogResult> {
-        Box::pin(async move {
-            match self.coordinated(log, action).await? {
-                Outcome::Coordinated(crate::coordinated::Result::Committed {
-                    position,
-                    running_hash,
-                }) => Ok(LogResult::Committed {
-                    position,
-                    running_hash,
-                }),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-    pub async fn coordinated_head(
-        &self,
-        log: TipLog,
-    ) -> Result<crate::coordinated::Head, CoordinationError> {
-        match self
-            .coordinated(log, crate::coordinated::Action::Head)
-            .await?
-        {
-            Outcome::CoordinatedHead(head) => Ok(*head),
-            _ => Err(CoordinationError::Corrupt),
-        }
-    }
-    pub async fn configure(
-        &self,
-        scope: Scope,
-        minimum: usize,
-        id: Commitment,
-    ) -> Result<(), CoordinationError> {
-        match self
-            .call(id, Operation::Configure { scope, minimum })
-            .await?
-        {
-            Outcome::Coordinated(crate::coordinated::Result::Configured) => Ok(()),
-            _ => Err(CoordinationError::Corrupt),
-        }
-    }
     pub async fn register(
         &self,
         grant: SignedCoordinationGrant,
@@ -456,124 +385,16 @@ impl NetworkCoordinator {
         .await?
     }
 }
-impl DomainLog for NetworkCoordinator {
-    fn pending_status(
-        &self,
-        log: TipLog,
-        position: u64,
-        hash: Commitment,
-    ) -> CoordinationFuture<'_, LogStatus> {
-        Box::pin(async move {
-            match self
-                .coordinated(log, crate::coordinated::Action::Status { position, hash })
-                .await?
-            {
-                Outcome::CoordinatedStatus(status) => Ok(status),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
+#[cfg(test)]
+mod tests;
+
+impl rocky_credentials::Coordinator for NetworkCoordinator {
     fn node(&self) -> NodeKey {
         *self.key.public_key().as_bytes()
     }
     fn identity(&self) -> CoordinatorIdentity {
         self.identity
     }
-    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
-        Box::pin(async move { Ok(self.coordinated_head(log).await?.port()) })
-    }
-    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
-        Box::pin(async move {
-            match self
-                .coordinated(log, crate::coordinated::Action::Configure { minimum })
-                .await?
-            {
-                Outcome::Coordinated(crate::coordinated::Result::Configured) => Ok(()),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-    fn join(
-        &self,
-        log: TipLog,
-        position: u64,
-        running_hash: Commitment,
-        sequence: u64,
-    ) -> CoordinationFuture<'_, u64> {
-        Box::pin(async move {
-            let action = crate::coordinated::Action::Join {
-                position,
-                running_hash,
-                sequence,
-            };
-            match self.coordinated(log, action).await? {
-                Outcome::Coordinated(crate::coordinated::Result::Joined { epoch }) => Ok(epoch),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
-        Box::pin(async move {
-            let action = crate::coordinated::Action::Append {
-                expected: append.expected,
-                epoch: append.epoch,
-                hash: append.hash,
-                duration: append.duration,
-                sequence: append.sequence,
-            };
-            match self.coordinated(log, action).await? {
-                Outcome::Coordinated(crate::coordinated::Result::Assigned(pending)) => {
-                    Ok(pending.port())
-                }
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
-        Box::pin(async move {
-            let pending = crate::coordinated::Pending::from_port(&pending)?;
-            match self
-                .coordinated(log, crate::coordinated::Action::Acknowledge { pending })
-                .await?
-            {
-                Outcome::Coordinated(crate::coordinated::Result::Acknowledged) => {
-                    Ok(LogResult::Acknowledged)
-                }
-                Outcome::Coordinated(crate::coordinated::Result::Committed {
-                    position,
-                    running_hash,
-                }) => Ok(LogResult::Committed {
-                    position,
-                    running_hash,
-                }),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-    fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult> {
-        self.terminal(log, crate::coordinated::Action::Seal { terminal })
-    }
-    fn recover(&self, log: TipLog, seal: Vec<u8>) -> CoordinationFuture<'_, LogResult> {
-        self.terminal(log, crate::coordinated::Action::Recover { seal })
-    }
-    fn acknowledge_terminal(
-        &self,
-        log: TipLog,
-        acknowledgment: Vec<u8>,
-    ) -> CoordinationFuture<'_, ()> {
-        Box::pin(async move {
-            let action = crate::coordinated::Action::AcknowledgeTerminal { acknowledgment };
-            match self.coordinated(log, action).await? {
-                Outcome::Coordinated(crate::coordinated::Result::TerminalAcknowledged) => Ok(()),
-                _ => Err(CoordinationError::Corrupt),
-            }
-        })
-    }
-}
-#[cfg(test)]
-mod tests;
-
-impl rocky_credentials::Coordinator for NetworkCoordinator {
     fn bundle(&self) -> Result<rocky_credentials::CoordinatorBundle, CoordinationError> {
         Ok(rocky_credentials::CoordinatorBundle {
             identity: self.identity,

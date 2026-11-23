@@ -23,7 +23,6 @@ async fn open_on(
             action: SealAction::Continue {
                 schema: lineage.app(1).on_engine(engine).manifest().hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )

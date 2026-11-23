@@ -99,7 +99,6 @@ pub(crate) async fn seal_main<A: rocky_core::RowApplication>(
             tip,
             frontier: replica.seal_frontier(domain, false).await.unwrap(),
             action: SealAction::Continue { schema },
-            recovery: None,
         },
         owner,
     )
@@ -1631,7 +1630,6 @@ mod bundles;
 mod chains;
 mod compaction;
 #[cfg(not(target_family = "wasm"))]
-mod coordinated;
 mod delegation;
 mod delivery;
 mod failed_commit;

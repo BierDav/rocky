@@ -69,7 +69,7 @@ struct ReadinessContext {
     manifest: Commitment,
     tip: TipId,
     followed: Option<(Scope, String)>,
-    graph_sizes: Option<[usize; 6]>,
+    graph_sizes: Option<[usize; 5]>,
     custody: Vec<ResourceScope>,
 }
 impl Readiness {
@@ -149,7 +149,6 @@ impl<A: RowApplication> Inner<A> {
                 graph.seals.len(),
                 graph.openings.len(),
                 graph.moves.len(),
-                graph.finalities.len(),
                 graph.checkpoints.len(),
                 graph.revoked.len(),
             ]

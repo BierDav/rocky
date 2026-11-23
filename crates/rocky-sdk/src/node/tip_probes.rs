@@ -174,7 +174,6 @@ impl Node {
                     id: hex(&opening.id()?),
                     seal: hex(&opening.statement.seal),
                     schema: hex(&opening.statement.schema),
-                    minimum_in_sync: opening.statement.minimum_in_sync,
                 })
             })
             .collect::<Result<_, Failure>>()?;

@@ -122,8 +122,8 @@ pub async fn claim_contract(
     scope: rocky_core::Scope,
     elapse: impl AsyncFn(u64),
 ) {
+    use crate::CoordinationError;
     use crate::counters::{CLAIM_WINDOW, Claim, Lookup, Name};
-    use rocky_core::CoordinationError;
     let name = Name::new("rocky.claim-contract").expect("a counter name");
     let claim = |claim| coordinator.claim(scope, name.clone(), claim);
     let read = async |claim| {
@@ -285,8 +285,8 @@ async fn denied_is_final(
     database: crate::DatabaseContext,
     behaviour: CoordinatorBehaviour,
 ) {
+    use crate::CoordinationError;
     use crate::counters::{Claim, Name};
-    use rocky_core::CoordinationError;
     let (key, other) = (PrivateKey::new(), PrivateKey::new());
     let foreign = certificate(&other, &other, 0, Some(database));
     for _ in 0..3 {

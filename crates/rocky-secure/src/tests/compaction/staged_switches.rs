@@ -48,7 +48,6 @@ async fn a_different_staged_target_is_refused_before_writes() {
             action: SealAction::Continue {
                 schema: lineage.definition(4).hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -132,7 +131,6 @@ async fn a_moved_bookmark_after_a_switch_crash_can_resume_the_saved_target() {
             action: SealAction::Continue {
                 schema: lineage.definition(4).hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -191,7 +189,6 @@ async fn a_sideways_switch_audits_with_the_stored_target_definition() {
             scope: lineage.domain,
             seal: sealed,
             schema: lineage.definition(4).hash(),
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -363,7 +360,6 @@ fn continued(lineage: &Lineage, tip: TipId, version: u32) -> SignedSeal {
             action: SealAction::Continue {
                 schema: lineage.definition(version).hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -474,7 +470,6 @@ async fn a_sideways_move_with_a_close_seal_withdraws_the_staged_switch() {
                 scope: lineage.domain,
                 seal: sealed,
                 schema: lineage.definition(3).hash(),
-                minimum_in_sync: 1,
             },
             lineage.publisher(),
         )
@@ -487,7 +482,6 @@ async fn a_sideways_move_with_a_close_seal_withdraws_the_staged_switch() {
                 tip: target,
                 frontier: vec![],
                 action: SealAction::Close,
-                recovery: None,
             },
             lineage.publisher(),
         )
@@ -596,7 +590,6 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
             action: SealAction::Continue {
                 schema: lineage.definition(4).hash(),
             },
-            recovery: None,
         },
         rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
@@ -668,7 +661,6 @@ async fn an_own_publication_withdraws_with_its_staged_switch() {
         source,
         target,
         from_version: 3,
-        coordinated: false,
         statements: vec![
             TipStatement::Seal(seal),
             bookmark(&lineage, Some(source), target),

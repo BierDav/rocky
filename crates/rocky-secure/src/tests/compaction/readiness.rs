@@ -263,7 +263,6 @@ async fn a_kept_empty_scope_stays_empty_before_during_and_after_a_branch_switch(
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: sealed,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )

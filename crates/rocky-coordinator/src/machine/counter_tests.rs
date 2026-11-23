@@ -1,4 +1,4 @@
-use super::coordinated_tests::{Fixture, T};
+use super::fixture::{Fixture, T};
 use super::*;
 use crate::counters::{
     CLAIM_RECORDS, CLAIM_WINDOW, Claim, Counters, ISSUE_SKEW, Lookup, MAX_COUNTERS, MAX_NAME, Name,
@@ -72,7 +72,7 @@ impl Fixture {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     let retry_records = fixture.state.retry_records();
     let mut values = Vec::new();
     for n in 0..20u8 {
@@ -136,7 +136,7 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn snapshot_round_trip_keeps_values_and_claim_identities() {
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     for n in 0..5 {
         fixture.claim(0, "invoices", claim(n, T), T).unwrap();
     }
@@ -148,7 +148,7 @@ fn snapshot_round_trip_keeps_values_and_claim_identities() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     let stranger = PrivateKey::new();
     let owner = fixture.owner.clone();
     for key in [&stranger, &owner] {
@@ -265,7 +265,7 @@ fn claims_outside_the_window_are_expired_never_given_a_second_value() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     let records = u64::try_from(CLAIM_RECORDS).unwrap();
     let claim = |n: u64| Claim {
         id: rocky_core::commitment("counter-test", &n.to_be_bytes()),
@@ -326,7 +326,7 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         "an oversized name in a decoded request is refused as well"
     );
 
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     for n in 0..MAX_COUNTERS {
         fixture
             .claim(0, &format!("series-{n}"), claim(1, T), T)
@@ -342,7 +342,7 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         "existing counters keep counting"
     );
 
-    let mut fixture = Fixture::new(1, Limits::default());
+    let mut fixture = Fixture::new(Limits::default());
     fixture.claim(0, "invoices", claim(1, T), T).unwrap();
     let used = fixture
         .state
@@ -380,7 +380,7 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn trusted_siblings_claim_until_their_identity_unlinks_them() {
     use rocky_credentials::{Authority, CredentialChain, Revocation, SignedRevocation};
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let identity = f.nodes[0].clone();
     let grant = CredentialChain(vec![
         Authority::owner(&f.owner)

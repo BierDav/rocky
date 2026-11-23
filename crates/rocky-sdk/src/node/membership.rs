@@ -49,7 +49,7 @@ impl Node {
                     .clone();
                 let node = certificate.capability.subject;
                 let cut = graph.heads(&settings.identity, &node)?;
-                let cut = if cut.statements.is_empty() && cut.acknowledgments.is_none() {
+                let cut = if cut.statements.is_empty() {
                     Vec::new()
                 } else {
                     vec![cut]

@@ -13,6 +13,7 @@ use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
+use rocky_credentials::CoordinationError;
 use std::{
     collections::{BTreeSet, HashMap},
     convert::Infallible,
@@ -130,12 +131,9 @@ pub struct VoterService {
     counters: Counters,
     admission: Admission,
     fenced: AtomicBool,
-    acknowledgments: tokio::sync::Mutex<HashMap<TipLog, VolatileAcknowledgments>>,
 }
 mod clients;
-mod coordinated;
 use clients::Admission;
-use coordinated::VolatileAcknowledgments;
 impl VoterService {
     pub async fn open(
         path: &Path,
@@ -204,7 +202,6 @@ impl VoterService {
             node,
             counters: Counters::default(),
             fenced: AtomicBool::new(fenced_after_restore),
-            acknowledgments: Default::default(),
         });
         log_lifecycle(
             node,
@@ -217,7 +214,6 @@ impl VoterService {
         if fenced_after_restore {
             tokio::spawn(service.clone().await_readmission());
         }
-        Self::watch_log_deadlines(&service);
         Ok(service)
     }
     async fn await_readmission(self: Arc<Self>) {
@@ -325,36 +321,6 @@ impl VoterService {
             request.fresh()?;
             request.within_client_limit()?;
             self.store.preflight(&request).await?;
-            if let Operation::Coordinated {
-                log,
-                action: rocky_coordinator::coordinated::Action::Acknowledge { pending },
-            } = &request.operation
-            {
-                let outcome = self.acknowledge_log(&request, *log, pending).await?;
-                let log = self
-                    .raft
-                    .metrics()
-                    .borrow()
-                    .last_applied
-                    .ok_or(CoordinationError::Unavailable)?;
-                return Ok((Ok(outcome), log));
-            }
-            if let Operation::Coordinated {
-                log,
-                action: rocky_coordinator::coordinated::Action::Status { position, hash },
-            } = &request.operation
-            {
-                let outcome = self
-                    .pending_status(&request, *log, *position, *hash)
-                    .await?;
-                let applied = self
-                    .raft
-                    .metrics()
-                    .borrow()
-                    .last_applied
-                    .ok_or(CoordinationError::Unavailable)?;
-                return Ok((Ok(Outcome::CoordinatedStatus(outcome)), applied));
-            }
             if let Some(read) = self.read(&request).await {
                 return read;
             }

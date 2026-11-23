@@ -12,20 +12,6 @@ async fn candidate_at(
     source_version: u32,
     target_version: u32,
 ) -> SchemaStage {
-    replica
-        .publish_tip_statements(&[TipStatement::GenesisLine(
-            rocky_credentials::SignedGenesisLine::sign(
-                rocky_credentials::GenesisLineStatement {
-                    format: rocky_credentials::GENESIS_LINE_FORMAT,
-                    scope: lineage.domain,
-                    minimum_in_sync: 2,
-                },
-                lineage.publisher(),
-            )
-            .unwrap(),
-        )])
-        .await
-        .unwrap();
     let source = replica.followed_tip().await;
     let close = SignedSeal::sign(
         rocky_credentials::SealStatement {
@@ -34,7 +20,6 @@ async fn candidate_at(
             tip: source,
             frontier: replica.seal_frontier(lineage.domain, true).await.unwrap(),
             action: SealAction::Close,
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -45,7 +30,6 @@ async fn candidate_at(
             scope: lineage.domain,
             seal: close.id().unwrap(),
             schema: lineage.definition(target_version).hash(),
-            minimum_in_sync: 2,
         },
         lineage.publisher(),
     )
@@ -58,7 +42,6 @@ async fn candidate_at(
         source,
         target,
         from_version: source_version,
-        coordinated: false,
         statements: vec![
             TipStatement::Seal(close),
             TipStatement::Opening(opening),
@@ -241,7 +224,6 @@ async fn a_source_move_between_preflight_and_admission_refuses_the_stage_atomica
             action: SealAction::Continue {
                 schema: lineage.definition(2).hash(),
             },
-            recovery: None,
         },
         lineage.publisher(),
     )

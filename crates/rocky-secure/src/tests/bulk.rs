@@ -3,8 +3,8 @@ use super::generations::Lineage;
 use super::*;
 use rocky_core::{RowIdentity, SqlValue, TypedRows};
 use rocky_credentials::{
-    GenesisLineStatement, SealAction, SealStatement, SignedGenesisLine, SignedMigrationPublication,
-    SignedSeal, SignedTipOpening, TipOpeningStatement,
+    SealAction, SealStatement, SignedMigrationPublication, SignedSeal, SignedTipOpening,
+    TipOpeningStatement,
 };
 
 mod fixture;

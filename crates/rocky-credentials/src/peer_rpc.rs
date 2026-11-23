@@ -1,6 +1,6 @@
 use crate::{
-    Error, IdentityRequest, PrivateKey, PublicKey, RenewRequest, RevocationSet, SealFinality,
-    Signature, SignedCapability, SignedSeal, denied, signing_bytes,
+    Error, IdentityRequest, PrivateKey, PublicKey, RenewRequest, RevocationSet, Signature,
+    SignedCapability, denied, signing_bytes,
 };
 use rocky_core::Commitment;
 use serde::{Deserialize, Serialize};
@@ -191,17 +191,7 @@ fn receipt_bytes(
     )
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum StagedCloseStatus {
-    Pending,
-    Finality(SealFinality),
-    Conflict {
-        seal: Box<SignedSeal>,
-        finality: SealFinality,
-    },
-}
-
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -214,7 +204,6 @@ pub enum PeerRequest {
     Unlink(RevocationSet),
     Resolve(PeerResolutionRequest),
     TipSchema { manifest: Commitment },
-    StagedClose(SignedSeal),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,7 +212,6 @@ pub enum PeerTrust {
     Invitation,
     Enrolled,
     Identity,
-    Issuer,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerAdmission {
@@ -244,7 +232,6 @@ impl PeerRequest {
             Self::Policy | Self::Resolve(_) | Self::TipSchema { .. } => {
                 (PeerTrust::Public, PeerAdmission::Metadata)
             }
-            Self::StagedClose(_) => (PeerTrust::Issuer, PeerAdmission::Metadata),
         }
     }
     pub fn accepts(&self, reply: &PeerReply) -> bool {
@@ -268,7 +255,6 @@ impl PeerRequest {
                 | (Self::Unlink(_), PeerReply::Unlink(_))
                 | (Self::Resolve(_), PeerReply::Resolve(_))
                 | (Self::TipSchema { .. }, PeerReply::TipSchema(_))
-                | (Self::StagedClose(_), PeerReply::StagedClose(_))
         )
     }
 }
@@ -288,7 +274,6 @@ pub enum PeerReply {
     Unlink(Box<UnlinkReply>),
     Resolve(PeerResolutionProof),
     TipSchema(Option<Vec<u8>>),
-    StagedClose(StagedCloseStatus),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -125,7 +125,7 @@ impl Node {
         first_attempt_id: u64,
     ) -> Result<PassOutcome, Failure> {
         self.ensure_not_revoked().await?;
-        if let ControlFlow::Break(outcome) = self.pass_blocked(transport).await? {
+        if let ControlFlow::Break(outcome) = self.pass_blocked().await? {
             return Ok(outcome);
         }
         if automatic && retry_only && self.no_retry_is_due().await {
@@ -173,18 +173,14 @@ impl Node {
             catalog_changed || schema_changed,
         ))
     }
-    async fn pass_blocked(
-        &self,
-        transport: &dyn Transport,
-    ) -> Result<ControlFlow<PassOutcome>, Failure> {
+    async fn pass_blocked(&self) -> Result<ControlFlow<PassOutcome>, Failure> {
         if !self.online.load(Ordering::SeqCst) {
             return Ok(ControlFlow::Break(PassOutcome::new(
                 SyncStatus::new(SyncState::NetworkingDisabled),
                 false,
             )));
         }
-        if self.replica.private_schema().await? && !self.relay_schema_publication(transport).await?
-        {
+        if !self.release_committed_stage().await? {
             return Ok(ControlFlow::Break(PassOutcome::new(
                 SyncStatus::new(SyncState::SchemaPublicationPending),
                 true,

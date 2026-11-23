@@ -515,7 +515,6 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -655,7 +654,6 @@ async fn switching_to_a_branch_two_seals_back_and_back_costs_the_rows_changed_si
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -749,7 +747,6 @@ async fn branch_writes_across_switches(lineage: Lineage) {
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -870,7 +867,6 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )
@@ -948,7 +944,6 @@ async fn a_node_pulls_a_seal_another_keeps_over_a_session_and_opens_a_branch_on_
             schema: lineage.definition(3).hash(),
             scope: lineage.domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )

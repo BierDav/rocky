@@ -1,9 +1,9 @@
 use crate::revocation::{Cut, Head};
 use crate::{
-    CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
-    SignedCheckpointRecord, TerminalAck, decode_bounded, denied, encode,
+    CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet,
+    SignedCheckpointRecord, decode_bounded, denied, encode,
 };
-use rocky_core::{Commitment, CoordinatorIdentity, Scope, TipId};
+use rocky_core::{Commitment, PrincipalKind, Scope, TipId};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
@@ -11,10 +11,9 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-pub const SEAL_FORMAT: u32 = 3;
-pub const TIP_OPENING_FORMAT: u32 = 3;
+pub const SEAL_FORMAT: u32 = 4;
+pub const TIP_OPENING_FORMAT: u32 = 4;
 pub const BOOKMARK_MOVE_FORMAT: u32 = 2;
-pub const GENESIS_LINE_FORMAT: u32 = 2;
 pub const MAX_BOOKMARK_NAME: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -72,28 +71,46 @@ impl OpensStage for SealStatement {
 }
 impl OpensStage for TipOpeningStatement {}
 impl OpensStage for BookmarkMoveStatement {}
-impl OpensStage for GenesisLineStatement {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Equivocation {
     pub identity: PublicKey,
     pub lane: PublicKey,
     pub sequence: u64,
-    pub acknowledgment: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PastCut {
     pub id: Commitment,
     pub identity: PublicKey,
     pub link: ChainLink,
-    pub acknowledgment: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StrippedFinality {
-    pub record: Commitment,
-    pub kept: Option<SealFinality>,
-    pub acknowledgments: Vec<TerminalAck>,
+impl CredentialChain {
+    pub fn trusted_node(
+        &self,
+        publisher: PublicKey,
+        scope: Scope,
+        node: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<PublicKey, Error> {
+        let leaf = self.links(publisher, current)?;
+        let identity = &self
+            .0
+            .first()
+            .ok_or_else(|| denied("credential depth"))?
+            .capability;
+        if self.0.len() != 2
+            || leaf.kind != PrincipalKind::Node
+            || leaf.delegations != 0
+            || leaf.subject != node
+            || leaf.extended()?.node != Some(crate::PeerId::of(node))
+            || identity.kind != PrincipalKind::User
+            || identity.extended()?.trusted != Some(scope)
+        {
+            return Err(denied("not a node of a trusted identity of this domain"));
+        }
+        Ok(identity.subject)
+    }
 }
 
 pub fn genesis_tip(schema: Commitment) -> TipId {
@@ -110,31 +127,6 @@ pub enum SealAction {
     Continue { schema: Commitment },
     Close,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LogPoint {
-    pub position: u64,
-    pub running: Commitment,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Recovery {
-    pub retained: LogPoint,
-    pub replaced: LogPoint,
-}
-impl Recovery {
-    fn validate(&self) -> Result<(), Error> {
-        if self.retained.position > self.replaced.position
-            || self.replaced.position >= rocky_core::MAX_COUNTER
-            || (self.retained.position == self.replaced.position
-                && self.retained.running != self.replaced.running)
-        {
-            return Err(denied("invalid recovery"));
-        }
-        Ok(())
-    }
-    pub fn abandons(&self, position: u64) -> bool {
-        self.retained.position < position && position <= self.replaced.position
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealStatement {
     pub format: u32,
@@ -142,18 +134,11 @@ pub struct SealStatement {
     pub tip: TipId,
     pub frontier: Vec<AuthorMark>,
     pub action: SealAction,
-    pub recovery: Option<Recovery>,
 }
 impl SealStatement {
     pub fn validate(&self) -> Result<(), Error> {
         if self.format != SEAL_FORMAT {
             return Err(denied("unsupported seal format"));
-        }
-        if let Some(recovery) = &self.recovery {
-            recovery.validate()?;
-            if self.action == SealAction::Close {
-                return Err(denied("a recovery seal continues its tip"));
-            }
         }
         if self.frontier.len() > 256
             || self
@@ -176,15 +161,11 @@ pub struct TipOpeningStatement {
     pub scope: Scope,
     pub seal: Commitment,
     pub schema: Commitment,
-    pub minimum_in_sync: u32,
 }
 impl TipOpeningStatement {
     pub fn validate(&self) -> Result<(), Error> {
         if self.format != TIP_OPENING_FORMAT {
             return Err(denied("unsupported tip opening format"));
-        }
-        if self.minimum_in_sync == 0 {
-            return Err(denied("tip minimum in-sync size must be positive"));
         }
         Ok(())
     }
@@ -208,24 +189,6 @@ impl BookmarkMoveStatement {
             || self.from == self.to
         {
             return Err(denied("invalid bookmark move"));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GenesisLineStatement {
-    pub format: u32,
-    pub scope: Scope,
-    pub minimum_in_sync: u32,
-}
-impl GenesisLineStatement {
-    pub fn validate(&self) -> Result<(), Error> {
-        if self.format != GENESIS_LINE_FORMAT {
-            return Err(denied("unsupported genesis line format"));
-        }
-        if self.minimum_in_sync == 0 || self.minimum_in_sync as usize > crate::MAX_FINALITY_ACKS {
-            return Err(denied("genesis line minimum out of range"));
         }
         Ok(())
     }
@@ -380,22 +343,15 @@ signed_statement!(
     SignedSeal,
     SealStatement,
     SEAL_FORMAT,
-    "rocky.seal.v2",
-    "rocky.seal.id.v2"
+    "rocky.seal.v3",
+    "rocky.seal.id.v3"
 );
 signed_statement!(
     SignedTipOpening,
     TipOpeningStatement,
     TIP_OPENING_FORMAT,
-    "rocky.tip-opening.v3",
-    "rocky.tip-opening.id.v3"
-);
-signed_statement!(
-    SignedGenesisLine,
-    GenesisLineStatement,
-    GENESIS_LINE_FORMAT,
-    "rocky.genesis-line.v2",
-    "rocky.genesis-line.id.v2"
+    "rocky.tip-opening.v4",
+    "rocky.tip-opening.id.v4"
 );
 signed_statement!(
     SignedBookmarkMove,
@@ -407,33 +363,8 @@ signed_statement!(
 
 impl SignedSeal {
     fn check_graph(&self, graph: &TipGraph, _trusted: bool) -> Result<(), Error> {
-        if self.statement.recovery.is_some() && !self.endorsement.chain.0.is_empty() {
-            return Err(denied("only the owner signs a recovery seal"));
-        }
-        let schema = graph.schema_any(self.statement.tip)?;
-        if self.statement.recovery.is_some()
-            && matches!(self.statement.action, SealAction::Continue { schema: next } if next != schema)
-        {
-            return Err(denied("a recovery seal must keep its parent's schema"));
-        }
+        graph.schema_any(self.statement.tip)?;
         Ok(())
-    }
-    pub fn verify_recovery(&self, owner: PublicKey) -> Result<&Recovery, Error> {
-        self.statement.validate()?;
-        let recovery = self
-            .statement
-            .recovery
-            .as_ref()
-            .ok_or_else(|| denied("not a recovery seal"))?;
-        if !self.endorsement.chain.0.is_empty() {
-            return Err(denied("only the owner signs a recovery seal"));
-        }
-        if self.link.is_some() {
-            return Err(denied("only the owner signs a recovery seal"));
-        }
-        self.endorsement
-            .verify_historic(owner, "rocky.seal.v2", &(&self.statement, &self.link))?;
-        Ok(recovery)
     }
     pub fn successor(&self) -> Result<Option<TipId>, Error> {
         match self.statement.action {
@@ -445,23 +376,13 @@ impl SignedSeal {
 impl SignedTipOpening {
     fn check_graph(&self, graph: &TipGraph, trusted: bool) -> Result<(), Error> {
         graph.seal_by_id(self.statement.seal)?;
-        if !trusted && !graph.migration_opening(self, false)? {
+        if !trusted && !graph.migration_opening(self)? {
             return Err(denied("an issuer only opens migration successors"));
         }
         Ok(())
     }
     pub fn tip(&self) -> Result<TipId, Error> {
         Ok(TipId(self.id()?))
-    }
-}
-impl SignedGenesisLine {
-    fn check_graph(&self, _graph: &TipGraph, trusted: bool) -> Result<(), Error> {
-        if !trusted {
-            return Err(denied(
-                "only a trusted identity signs the genesis line's minimum",
-            ));
-        }
-        Ok(())
     }
 }
 impl SignedBookmarkMove {
@@ -563,20 +484,15 @@ fn beyond(walks: &[Walk], link: &ChainLink, id: Commitment) -> bool {
 
 #[derive(Default)]
 struct ChainIndex(Mutex<Places>);
-const INDEXED_LISTS: usize = 7;
+const INDEXED_LISTS: usize = 4;
 #[derive(Clone, Default)]
 struct Places {
     indexed_prefix: [(usize, Option<Commitment>); INDEXED_LISTS],
     links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
-    acks: BTreeMap<Commitment, (PublicKey, ChainLink)>,
     lanes: BTreeMap<(PublicKey, PublicKey), BTreeSet<Commitment>>,
     refs: BTreeMap<Commitment, Vec<Commitment>>,
     referrers: BTreeMap<Commitment, BTreeSet<Commitment>>,
     seals: BTreeMap<Commitment, usize>,
-    finals: BTreeMap<Commitment, BTreeSet<Commitment>>,
-    final_coordinators: BTreeMap<Commitment, CoordinatorIdentity>,
-    decided: BTreeSet<Commitment>,
-    founding: BTreeMap<Scope, ((u64, Commitment), CoordinatorIdentity)>,
 }
 impl Places {
     fn refer(&mut self, id: Commitment, refs: Vec<Commitment>) {
@@ -659,43 +575,8 @@ indexed_statement!(
         .flatten()
         .map(|tip| tip.0)
         .collect(),
-    SignedGenesisLine => |_s| Vec::new(),
     SignedCheckpointRecord => |s| vec![s.statement.seal],
 );
-impl Indexed for crate::SignedDatabaseSettings {
-    fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
-        if let Some(bundle) = self.statement.coordinator() {
-            let key = (self.statement.revision, id);
-            let founding = places
-                .founding
-                .entry(self.statement.scope)
-                .or_insert((key, bundle.identity));
-            if key < founding.0 {
-                *founding = (key, bundle.identity);
-            }
-        }
-        Ok(())
-    }
-}
-impl Indexed for SealFinality {
-    fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
-        places.refer(id, vec![self.seal]);
-        places.finals.entry(self.seal).or_default().insert(id);
-        if let Some(coordinator) = self.coordinator() {
-            places.final_coordinators.insert(id, coordinator);
-        }
-        if self.decided() {
-            places.decided.insert(id);
-        }
-        for ack in &self.acknowledgments {
-            if let Some(identity) = ack.claimed_identity() {
-                places.acks.insert(ack.id()?, (identity, ack.link));
-            }
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TipAuthority {
@@ -727,10 +608,7 @@ pub struct TipGraph {
     pub seals: Vec<SignedSeal>,
     pub openings: Vec<SignedTipOpening>,
     pub moves: Vec<SignedBookmarkMove>,
-    pub genesis_lines: Vec<SignedGenesisLine>,
-    pub finalities: Vec<SealFinality>,
     pub checkpoints: Vec<SignedCheckpointRecord>,
-    pub settings: Vec<crate::SignedDatabaseSettings>,
     #[serde(skip)]
     pub revoked: BTreeSet<Commitment>,
     #[serde(skip)]
@@ -759,10 +637,7 @@ impl TipGraph {
             seals: Vec::new(),
             openings: Vec::new(),
             moves: Vec::new(),
-            genesis_lines: Vec::new(),
-            finalities: Vec::new(),
             checkpoints: Vec::new(),
-            settings: Vec::new(),
             revoked: BTreeSet::new(),
             past_cut: BTreeSet::new(),
             equivocations: BTreeSet::new(),
@@ -825,7 +700,7 @@ impl TipGraph {
                 )*
             };
         }
-        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints, 5 finalities, 6 settings);
+        lists!(0 seals, 1 openings, 2 moves, 3 checkpoints);
         Ok(index)
     }
     #[expect(
@@ -855,10 +730,9 @@ impl TipGraph {
         of!(self.seals)
             .chain(of!(self.openings))
             .chain(of!(self.moves))
-            .chain(of!(self.genesis_lines))
             .chain(of!(self.checkpoints))
     }
-    fn chained(&self) -> Result<(Vec<Chained<'_>>, Vec<Chained<'_>>), Error> {
+    fn chained(&self) -> Result<Vec<Chained<'_>>, Error> {
         let mut statements = Vec::new();
         for (id, credentials, link) in self.signed() {
             if let (Some(link), Some(identity)) =
@@ -872,90 +746,56 @@ impl TipGraph {
                 });
             }
         }
-        let mut acknowledgments = Vec::new();
-        let mut seen = BTreeSet::new();
-        for record in &self.finalities {
-            for ack in &record.acknowledgments {
-                let id = ack.id()?;
-                if let Some(identity) = ack.claimed_identity()
-                    && seen.insert(id)
-                {
-                    acknowledgments.push(Chained {
-                        id,
-                        identity,
-                        link: ack.link,
-                        credentials: &ack.credentials,
-                    });
-                }
-            }
-        }
-        Ok((statements, acknowledgments))
+        Ok(statements)
     }
     pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
         let mut revoked = BTreeSet::new();
         let mut past_cut = BTreeSet::new();
         let mut equivocations = BTreeSet::new();
-        let (statements, acknowledgments) = self.chained()?;
+        let statements = self.chained()?;
         let mut kept_statements = BTreeSet::new();
-        let mut kept_acks = BTreeSet::new();
         for ((identity, lane), heads) in revocations.cut_lanes() {
             kept_statements.extend(kept(&statements, identity, lane, &heads.statements));
-            kept_acks.extend(kept(
-                &acknowledgments,
-                identity,
-                lane,
-                &heads.acknowledgments,
-            ));
         }
-        let mut judge = |chained: &[Chained<'_>], kept: &BTreeSet<Commitment>, ack: bool| {
-            let mut places = BTreeMap::new();
-            let mut ended = BTreeSet::new();
-            for item in chained {
-                let place = (
-                    item.identity,
-                    item.link.lane,
-                    item.link.stage,
-                    item.link.sequence,
-                );
-                if let Some(other) = places.insert(place, item.id)
-                    && other != item.id
-                {
-                    equivocations.insert(Equivocation {
+        let mut places = BTreeMap::new();
+        for item in &statements {
+            let place = (
+                item.identity,
+                item.link.lane,
+                item.link.stage,
+                item.link.sequence,
+            );
+            if let Some(other) = places.insert(place, item.id)
+                && other != item.id
+            {
+                equivocations.insert(Equivocation {
+                    identity: item.identity,
+                    lane: item.link.lane,
+                    sequence: item.link.sequence,
+                });
+            }
+            let cut = revocations.cut(&item.identity, &item.link.lane).is_some();
+            let out = match cut {
+                true => !kept_statements.contains(&item.id),
+                false => revocations.ends_chain(item.credentials)?,
+            };
+            if out {
+                revoked.insert(item.id);
+                if cut {
+                    past_cut.insert(PastCut {
+                        id: item.id,
                         identity: item.identity,
-                        lane: item.link.lane,
-                        sequence: item.link.sequence,
-                        acknowledgment: ack,
+                        link: item.link,
                     });
                 }
-                let cut = revocations.cut(&item.identity, &item.link.lane).is_some();
-                let out = match cut {
-                    true => !kept.contains(&item.id),
-                    false => revocations.ends_chain(item.credentials)?,
-                };
-                if out {
-                    ended.insert(item.id);
-                    if cut {
-                        past_cut.insert(PastCut {
-                            id: item.id,
-                            identity: item.identity,
-                            link: item.link,
-                            acknowledgment: ack,
-                        });
-                    }
-                }
             }
-            Ok::<_, Error>(ended)
-        };
-        revoked.extend(judge(&statements, &kept_statements, false)?);
-        let ended_acks = judge(&acknowledgments, &kept_acks, true)?;
+        }
         for (id, chain, link) in self.signed() {
             let unchained = link.is_none();
             if unchained && revocations.ends_chain(chain)? {
                 revoked.insert(id()?);
             }
         }
-        let unfinal = self.unfinal_records(&revoked, &ended_acks)?;
-        revoked.extend(unfinal);
         let changed = revoked != self.revoked;
         self.revoked = revoked;
         self.past_cut = past_cut;
@@ -974,93 +814,6 @@ impl TipGraph {
         };
         let index = self.indexed()?;
         Ok(beyond(&walks(&index.links, &heads.statements), link, id))
-    }
-    pub fn ack_beyond_cut(
-        &self,
-        revocations: &RevocationSet,
-        ack: &TerminalAck,
-    ) -> Result<bool, Error> {
-        let Some(heads) = ack
-            .claimed_identity()
-            .and_then(|identity| revocations.cut(&identity, &ack.link.lane))
-        else {
-            return Ok(false);
-        };
-        let index = self.indexed()?;
-        Ok(beyond(
-            &walks(&index.acks, &heads.acknowledgments),
-            &ack.link,
-            ack.id()?,
-        ))
-    }
-    pub fn strip_past_cut(
-        &self,
-        revocations: &RevocationSet,
-        record: &SealFinality,
-    ) -> Result<(SealFinality, Vec<TerminalAck>), Error> {
-        let mut kept = record.clone();
-        let mut stripped = Vec::new();
-        kept.acknowledgments.clear();
-        for ack in &record.acknowledgments {
-            match self.ack_beyond_cut(revocations, ack)? {
-                true => stripped.push(ack.clone()),
-                false => kept.acknowledgments.push(ack.clone()),
-            }
-        }
-        Ok((kept, stripped))
-    }
-    pub fn meets_minimum(&self, record: &SealFinality) -> bool {
-        !record.acknowledgments.is_empty()
-            && self
-                .finality_minimum(record)
-                .ok()
-                .is_none_or(|minimum| record.acknowledgments.len() >= minimum)
-    }
-    pub fn strip_finalities(
-        &mut self,
-        revocations: &RevocationSet,
-    ) -> Result<Vec<StrippedFinality>, Error> {
-        let cut = |ack: &TerminalAck| {
-            ack.claimed_identity()
-                .is_some_and(|identity| revocations.cut(&identity, &ack.link.lane).is_some())
-        };
-        if !self
-            .finalities
-            .iter()
-            .any(|record| record.acknowledgments.iter().any(cut))
-        {
-            return Ok(Vec::new());
-        }
-        let mut changed = Vec::new();
-        let mut finalities = Vec::with_capacity(self.finalities.len());
-        let mut held = BTreeSet::new();
-        for record in &self.finalities {
-            let (kept, acknowledgments) = self.strip_past_cut(revocations, record)?;
-            if acknowledgments.is_empty() {
-                if held.insert(record.id()?) {
-                    finalities.push(record.clone());
-                }
-                continue;
-            }
-            let kept = Some(kept).filter(|kept| self.meets_minimum(kept));
-            let replaced = match &kept {
-                Some(kept) if held.insert(kept.id()?) => {
-                    finalities.push(kept.clone());
-                    kept.clone().into()
-                }
-                _ => None,
-            };
-            changed.push(StrippedFinality {
-                record: record.id()?,
-                kept: replaced,
-                acknowledgments,
-            });
-        }
-        if !changed.is_empty() {
-            self.finalities = finalities;
-            *self.index.places() = Places::default();
-        }
-        Ok(changed)
     }
     pub fn prunable(
         &self,
@@ -1118,12 +871,12 @@ impl TipGraph {
                 self.$list = kept;
             )*};
         }
-        remove!(seals, openings, moves, genesis_lines, checkpoints);
+        remove!(seals, openings, moves, checkpoints);
         *self.index.places() = Places::default();
         Ok(())
     }
     pub fn heads(&self, identity: &PublicKey, lane: &PublicKey) -> Result<Cut, Error> {
-        let (statements, acknowledgments) = self.chained()?;
+        let statements = self.chained()?;
         let ours: Vec<&Chained<'_>> = statements
             .iter()
             .filter(|item| item.identity == *identity && item.link.lane == *lane)
@@ -1140,21 +893,10 @@ impl TipGraph {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let head = |chained: &[Chained<'_>]| {
-            chained
-                .iter()
-                .filter(|item| item.identity == *identity && item.link.lane == *lane)
-                .min_by_key(|item| (Reverse(item.link.sequence), item.id))
-                .map(|item| Head {
-                    sequence: item.link.sequence,
-                    id: item.id,
-                })
-        };
         Ok(Cut {
             identity: *identity,
             lane: *lane,
             statements: leaves,
-            acknowledgments: head(&acknowledgments),
         })
     }
     #[expect(
@@ -1169,7 +911,7 @@ impl TipGraph {
         let mut cut = Vec::new();
         for lane in lanes {
             let heads = self.heads(identity, lane)?;
-            if !heads.statements.is_empty() || heads.acknowledgments.is_some() {
+            if !heads.statements.is_empty() {
                 cut.push(heads);
             }
         }
@@ -1213,8 +955,8 @@ impl TipGraph {
         Ok((cut, dropped))
     }
     pub fn next_link(&self, signer: &PublicKey, lane: &PublicKey) -> Result<ChainLink, Error> {
-        let (statements, _) = self.chained()?;
-        Ok(statements
+        Ok(self
+            .chained()?
             .iter()
             .filter(|item| item.identity == *signer && item.link.lane == *lane)
             .min_by_key(|item| (Reverse(item.link.sequence), item.id))
@@ -1223,18 +965,9 @@ impl TipGraph {
                 ..head.link.next(head.id)
             }))
     }
-    pub fn next_ack_link(&self, lane: &PublicKey) -> Result<ChainLink, Error> {
-        let (_, acknowledgments) = self.chained()?;
-        Ok(acknowledgments
-            .iter()
-            .filter(|item| item.link.lane == *lane)
-            .min_by_key(|item| (Reverse(item.link.sequence), item.id))
-            .map_or(ChainLink::first(*lane), |head| head.link.next(head.id)))
-    }
     pub fn trusted_grants(&self) -> Result<BTreeMap<PublicKey, u64>, Error> {
-        let (statements, acknowledgments) = self.chained()?;
         let mut grants = BTreeMap::new();
-        for item in statements.iter().chain(&acknowledgments) {
+        for item in &self.chained()? {
             let Some(grant) = item.credentials.0.first().map(|link| &link.capability) else {
                 continue;
             };
@@ -1246,18 +979,12 @@ impl TipGraph {
         Ok(grants)
     }
     pub fn chain_identities(&self) -> Result<BTreeSet<PublicKey>, Error> {
-        let (statements, acknowledgments) = self.chained()?;
-        Ok(statements
-            .iter()
-            .chain(&acknowledgments)
-            .map(|item| item.identity)
-            .collect())
+        Ok(self.chained()?.iter().map(|item| item.identity).collect())
     }
     pub fn lanes_of(&self, identity: &PublicKey) -> Result<BTreeSet<PublicKey>, Error> {
-        let (statements, acknowledgments) = self.chained()?;
-        Ok(statements
+        Ok(self
+            .chained()?
             .iter()
-            .chain(&acknowledgments)
             .filter(|item| item.identity == *identity)
             .map(|item| item.link.lane)
             .collect())
@@ -1269,49 +996,6 @@ impl TipGraph {
     ) -> (Reverse<TipAuthority>, Commitment) {
         (Reverse(TipAuthority::of(endorsement, self.scope)), id)
     }
-    pub fn is_final(&self, seal: Commitment) -> Result<bool, Error> {
-        self.final_by(seal, false)
-    }
-    pub fn counts_finality(&self, record: &SealFinality) -> Result<bool, Error> {
-        let named = self
-            .indexed()?
-            .founding
-            .get(&self.scope)
-            .map(|(_, identity)| *identity);
-        Ok(named.is_none_or(|named| record.coordinator() == Some(named)))
-    }
-    pub fn finality_coordinators(&self) -> Result<BTreeSet<CoordinatorIdentity>, Error> {
-        let mut named = BTreeSet::new();
-        for record in &self.finalities {
-            if record.scope == self.scope
-                && !self.revoked.contains(&record.id()?)
-                && let Some(coordinator) = record.coordinator()
-            {
-                named.insert(coordinator);
-            }
-        }
-        Ok(named)
-    }
-    pub fn compacts_final(&self, seal: Commitment) -> Result<bool, Error> {
-        Ok(self.indexed()?.founding.contains_key(&self.scope) && self.is_final(seal)?)
-    }
-    pub fn decided_by_named(&self, seal: Commitment) -> Result<bool, Error> {
-        Ok(self.indexed()?.founding.contains_key(&self.scope) && self.final_by(seal, true)?)
-    }
-    fn final_by(&self, seal: Commitment, decided: bool) -> Result<bool, Error> {
-        let index = self.indexed()?;
-        let named = index
-            .founding
-            .get(&self.scope)
-            .map(|(_, identity)| *identity);
-        Ok(index.finals.get(&seal).is_some_and(|records| {
-            records.iter().any(|id| {
-                !self.revoked.contains(id)
-                    && (!decided || index.decided.contains(id))
-                    && named.is_none_or(|named| index.final_coordinators.get(id) == Some(&named))
-            })
-        }))
-    }
     pub fn checkpoints_at(&self, seal: Commitment) -> Result<Vec<&SignedCheckpointRecord>, Error> {
         let mut listed = Vec::new();
         for record in &self.checkpoints {
@@ -1320,184 +1004,6 @@ impl TipGraph {
             }
         }
         Ok(listed)
-    }
-    pub fn settings(&self) -> Result<Option<&crate::DatabaseSettingsStatement>, Error> {
-        Ok(self.governing_settings()?.map(|signed| &signed.statement))
-    }
-    pub fn coordinator(&self) -> Result<Option<&crate::CoordinatorBundle>, Error> {
-        Ok(self
-            .governing_settings()?
-            .and_then(|signed| signed.statement.coordinator()))
-    }
-    fn governing_settings(&self) -> Result<Option<&crate::SignedDatabaseSettings>, Error> {
-        let founding = self
-            .indexed()?
-            .founding
-            .get(&self.scope)
-            .map(|(_, identity)| *identity);
-        let mut governing: Option<((u64, Reverse<Commitment>), &crate::SignedDatabaseSettings)> =
-            None;
-        for signed in self.settings.iter().filter(|s| {
-            s.statement.scope == self.scope
-                && founding.is_none_or(|founding| {
-                    s.statement
-                        .coordinator()
-                        .is_some_and(|bundle| bundle.identity == founding)
-                })
-        }) {
-            let key = (signed.statement.revision, Reverse(signed.id()?));
-            if governing.as_ref().is_none_or(|(current, _)| key > *current) {
-                governing = Some((key, signed));
-            }
-        }
-        Ok(governing.map(|(_, signed)| signed))
-    }
-    pub fn next_settings(
-        &self,
-        coordination: crate::Coordination,
-    ) -> Result<Option<crate::DatabaseSettingsStatement>, Error> {
-        if let crate::Coordination::Coordinated { bundle } = &coordination
-            && self.coordinator()?.is_none()
-            && self
-                .finality_coordinators()?
-                .iter()
-                .any(|named| *named != bundle.identity)
-        {
-            return Err(denied(
-                "the database's finality records name another coordinator: name that one",
-            ));
-        }
-        if let Some(held) = self.coordinator()? {
-            match &coordination {
-                crate::Coordination::Uncoordinated => {
-                    return Err(denied(
-                        "a coordinated database stays coordinated: its settings never uncoordinate it",
-                    ));
-                }
-                crate::Coordination::Coordinated { bundle } if bundle.identity != held.identity => {
-                    return Err(denied(
-                        "a coordinated database keeps its coordinator: changing it is not supported",
-                    ));
-                }
-                crate::Coordination::Coordinated { .. } => {}
-            }
-        }
-        if self
-            .settings()?
-            .is_some_and(|governing| governing.coordination == coordination)
-        {
-            return Ok(None);
-        }
-        let revision = self
-            .settings
-            .iter()
-            .filter(|s| s.statement.scope == self.scope)
-            .map(|s| s.statement.revision)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        Ok(Some(crate::DatabaseSettingsStatement {
-            format: crate::DATABASE_SETTINGS_FORMAT,
-            scope: self.scope,
-            revision,
-            coordination,
-        }))
-    }
-    pub fn line_minimum(&self, tip: TipId) -> Result<Option<usize>, Error> {
-        self.line_minimum_in(tip, &self.revoked)
-    }
-    fn line_minimum_in(
-        &self,
-        tip: TipId,
-        revoked: &BTreeSet<Commitment>,
-    ) -> Result<Option<usize>, Error> {
-        let root = self.line_root_any(tip)?;
-        if root == self.genesis() {
-            return self.genesis_minimum(revoked);
-        }
-        for opening in &self.openings {
-            if opening.statement.scope == self.scope && opening.tip()? == root {
-                return Ok(Some(opening.statement.minimum_in_sync as usize));
-            }
-        }
-        Err(denied("unknown tip"))
-    }
-    fn genesis_minimum(&self, revoked: &BTreeSet<Commitment>) -> Result<Option<usize>, Error> {
-        let (mut owner, mut trusted) = (None, None);
-        for line in &self.genesis_lines {
-            if line.statement.scope != self.scope
-                || (!revoked.is_empty() && revoked.contains(&line.id()?))
-            {
-                continue;
-            }
-            let largest = match TipAuthority::of(line.endorsement(), self.scope) {
-                TipAuthority::Owner => &mut owner,
-                _ => &mut trusted,
-            };
-            *largest = (*largest).max(Some(line.statement.minimum_in_sync as usize));
-        }
-        Ok(owner.or(trusted))
-    }
-    fn unfinal_records(
-        &self,
-        revoked: &BTreeSet<Commitment>,
-        ended_acks: &BTreeSet<Commitment>,
-    ) -> Result<Vec<Commitment>, Error> {
-        let mut unfinal = Vec::new();
-        for record in &self.finalities {
-            let Ok(minimum) = self.finality_minimum_in(record, revoked) else {
-                continue;
-            };
-            let mut ended = 0;
-            for ack in &record.acknowledgments {
-                ended += usize::from(ended_acks.contains(&ack.id()?));
-            }
-            if record.acknowledgments.len() - ended < minimum {
-                unfinal.push(record.id()?);
-            }
-        }
-        Ok(unfinal)
-    }
-    fn finality_minimum(&self, record: &SealFinality) -> Result<usize, Error> {
-        self.finality_minimum_in(record, &self.revoked)
-    }
-    fn finality_minimum_in(
-        &self,
-        record: &SealFinality,
-        revoked: &BTreeSet<Commitment>,
-    ) -> Result<usize, Error> {
-        let seal = self.seal_by_id(record.seal)?;
-        self.line_minimum_in(seal.statement.tip, revoked)?
-            .ok_or_else(|| denied("the genesis line has no signed minimum"))
-    }
-    pub fn verify_finality(
-        &self,
-        record: &SealFinality,
-        publisher: PublicKey,
-        current: Option<(&RevocationSet, u64)>,
-    ) -> Result<(), Error> {
-        record.validate()?;
-        self.check_scope(record.scope)?;
-        let seal = self.seal_by_id(record.seal)?;
-        if record.terminal() != Some((seal.statement.tip, seal.successor()?)) {
-            return Err(denied("seal finality names another terminal"));
-        }
-        if let Some(recovery) = seal.statement.recovery {
-            let position = recovery.replaced.position + 1;
-            let running =
-                rocky_core::coordinated_chain(recovery.replaced.running, position, record.seal);
-            if record
-                .acknowledgments
-                .iter()
-                .any(|ack| ack.statement.position != position || ack.statement.running != running)
-            {
-                return Err(denied("recovery finality names another replaced head"));
-            }
-        }
-        if record.verified_nodes(publisher, current)? < self.finality_minimum(record)? {
-            return Err(denied("seal finality below its line's minimum"));
-        }
-        Ok(())
     }
     pub fn genesis(&self) -> TipId {
         genesis_tip(self.genesis_schema)
@@ -1509,7 +1015,7 @@ impl TipGraph {
         Ok(())
     }
     pub fn seal(&self, tip: TipId) -> Result<Option<&SignedSeal>, Error> {
-        type Key = (Reverse<bool>, (Reverse<TipAuthority>, Commitment));
+        type Key = (Reverse<TipAuthority>, Commitment);
         let mut winner: Option<(Key, &SignedSeal)> = None;
         for seal in self
             .seals
@@ -1520,22 +1026,12 @@ impl TipGraph {
             if self.revoked.contains(&id) {
                 continue;
             }
-            let key = (
-                Reverse(self.is_final(id)?),
-                self.precedence(seal.endorsement(), id),
-            );
+            let key = self.precedence(seal.endorsement(), id);
             if winner.as_ref().is_none_or(|(current, _)| key < *current) {
                 winner = Some((key, seal));
             }
         }
         Ok(winner.map(|(_, seal)| seal))
-    }
-    pub fn abandons(&self, tip: TipId, position: u64) -> Result<bool, Error> {
-        Ok(self.seal(tip)?.is_some_and(|seal| {
-            seal.statement
-                .recovery
-                .is_some_and(|recovery| recovery.abandons(position))
-        }))
     }
     pub fn authority(&self, endorsement: &Endorsement) -> TipAuthority {
         TipAuthority::of(endorsement, self.scope)
@@ -1602,11 +1098,9 @@ impl TipGraph {
                             return Err(denied("tip opens on a losing seal"));
                         }
                         if self.authority(opening.endorsement()) == TipAuthority::Issuer
-                            && !self.migration_opening(opening, true)?
+                            && !self.migration_opening(opening)?
                         {
-                            return Err(denied(
-                                "migration opening does not inherit the line minimum",
-                            ));
+                            return Err(denied("an issuer only opens migration successors"));
                         }
                     }
                     requested.get_or_insert(opening.statement.schema);
@@ -1616,38 +1110,6 @@ impl TipGraph {
             }
             cursor = parent.ok_or_else(|| denied("unknown tip"))?;
         }
-    }
-    pub fn late_anchor(&self, tip: TipId) -> Result<TipId, Error> {
-        if !self.indexed()?.founding.contains_key(&self.scope) || self.schema(tip).is_ok() {
-            return Ok(tip);
-        }
-        let Ok(schema) = self.schema_any(tip) else {
-            return Ok(tip);
-        };
-        let continuations = self.seals_by_continuation();
-        let mut cursor = tip;
-        let mut visited = BTreeSet::new();
-        while visited.insert(cursor) {
-            let Some(seal) = continuations.get(&cursor) else {
-                return Ok(tip);
-            };
-            if self.revoked.contains(&seal.id()?) {
-                return Ok(tip);
-            }
-            cursor = seal.statement.tip;
-            if let Ok(active) = self.schema(cursor) {
-                let decided = match self.seal(cursor)? {
-                    Some(winner) => self.decided_by_named(winner.id()?)?,
-                    None => false,
-                };
-                return Ok(if active == schema && decided {
-                    cursor
-                } else {
-                    tip
-                });
-            }
-        }
-        Err(denied("cyclic tip graph"))
     }
     pub fn continues(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema(from)?;
@@ -1689,37 +1151,23 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    pub(crate) fn migration_opening(
-        &self,
-        opening: &SignedTipOpening,
-        active: bool,
-    ) -> Result<bool, Error> {
+    pub(crate) fn migration_opening(&self, opening: &SignedTipOpening) -> Result<bool, Error> {
         self.check_scope(opening.statement.scope)?;
         let seal = self.seal_by_id(opening.statement.seal)?;
-        if seal.statement.action != SealAction::Close
-            || opening.statement.schema == self.schema_any(seal.statement.tip)?
-        {
-            return Ok(false);
-        }
-        let minimum = opening.statement.minimum_in_sync as usize;
-        if active || self.line_root_any(seal.statement.tip)? != self.genesis() {
-            return Ok(self.line_minimum(seal.statement.tip)? == Some(minimum));
-        }
-        Ok(self.genesis_lines.iter().any(|line| {
-            line.statement.scope == self.scope && line.statement.minimum_in_sync as usize == minimum
-        }))
+        Ok(seal.statement.action == SealAction::Close
+            && opening.statement.schema != self.schema_any(seal.statement.tip)?)
     }
     pub fn succeeds(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema(from)?;
         self.schema(to)?;
-        self.succeeds_inner(from, to, true)
+        self.succeeds_inner(from, to)
     }
     pub fn succeeds_any(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema_any(from)?;
         self.schema_any(to)?;
-        self.succeeds_inner(from, to, false)
+        self.succeeds_inner(from, to)
     }
-    fn succeeds_inner(&self, from: TipId, to: TipId, active: bool) -> Result<bool, Error> {
+    fn succeeds_inner(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         let mut cursor = to;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
@@ -1733,7 +1181,7 @@ impl TipGraph {
             if parent.is_none() {
                 for opening in &self.openings {
                     if opening.statement.scope == self.scope && opening.tip()? == cursor {
-                        if !self.migration_opening(opening, active)? {
+                        if !self.migration_opening(opening)? {
                             return Ok(false);
                         }
                         parent = Some(self.seal_by_id(opening.statement.seal)?.statement.tip);
@@ -1811,7 +1259,7 @@ impl TipGraph {
             for opening in &self.openings {
                 if opening.statement.scope == self.scope
                     && opening.tip()? == cursor
-                    && self.migration_opening(opening, true)?
+                    && self.migration_opening(opening)?
                 {
                     parent = Some(
                         self.line_root(self.seal_by_id(opening.statement.seal)?.statement.tip)?,
@@ -1826,25 +1274,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    fn line_root_any(&self, tip: TipId) -> Result<TipId, Error> {
-        self.schema_any(tip)?;
-        let mut cursor = tip;
-        let mut visited = std::collections::BTreeSet::new();
-        while visited.insert(cursor) {
-            let mut parent = None;
-            for seal in &self.seals {
-                if seal.statement.scope == self.scope && seal.successor()? == Some(cursor) {
-                    parent = Some(seal.statement.tip);
-                    break;
-                }
-            }
-            match parent {
-                Some(tip) => cursor = tip,
-                None => return Ok(cursor),
-            }
-        }
-        Err(denied("cyclic tip graph"))
-    }
     pub fn bookmark(&self, name: &str) -> Result<Option<TipId>, Error> {
         Ok(self.bookmark_walk(name)?.0)
     }
@@ -1853,12 +1282,6 @@ impl TipGraph {
     }
     pub fn bookmark_path(&self, name: &str) -> Result<Vec<(TipId, TipId)>, Error> {
         Ok(self.bookmark_walk(name)?.2)
-    }
-    fn recovery_continuation(&self, tip: TipId) -> Result<Option<TipId>, Error> {
-        match self.seal(tip)? {
-            Some(seal) if seal.statement.recovery.is_some() => seal.successor(),
-            _ => Ok(None),
-        }
     }
     fn bookmark_walk(&self, name: &str) -> Result<BookmarkWalk<'_>, Error> {
         let mut cursor = None;
@@ -1902,16 +1325,7 @@ impl TipGraph {
                     }
                     cursor = target;
                 }
-                None => {
-                    if let Some(tip) = cursor
-                        && let Some(next) = self.recovery_continuation(tip)?
-                    {
-                        path.push((tip, next));
-                        cursor = Some(next);
-                        continue;
-                    }
-                    return Ok((cursor, losers, path));
-                }
+                None => return Ok((cursor, losers, path)),
             }
         }
         Ok((cursor, losers, path))

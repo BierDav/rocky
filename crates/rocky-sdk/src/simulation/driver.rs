@@ -700,11 +700,8 @@ impl Simulation {
                 }
                 crate::AlertKind::SealSkipped { reason } => format!("seal skipped {reason}"),
                 crate::AlertKind::TipStatementsPastCut {
-                    node,
-                    statements,
-                    acknowledgments,
-                    ..
-                } => format!("{} past cut {statements}+{acknowledgments}", name(node)),
+                    node, statements, ..
+                } => format!("{} past cut {statements}", name(node)),
                 crate::AlertKind::TipChainEquivocation { node, sequence, .. } => {
                     format!("{} forked at {sequence}", name(node))
                 }

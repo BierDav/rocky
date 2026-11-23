@@ -1,6 +1,5 @@
-use super::coordinated_tests::{Fixture, T};
+use super::fixture::{Fixture, T};
 use super::*;
-use crate::coordinated::Action;
 use crate::counters::{CLAIM_WINDOW, Claim, Lookup, Name};
 use p2panda_core::PrivateKey;
 use rocky_credentials::{CLAIM_LIFETIME, ClaimRight, Revocation, SignedRevocation};
@@ -145,7 +144,7 @@ impl Fixture {
 }
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_holder_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let holder = f.holder(f.right(None), 1);
     assert!(
         !f.state.controls[0]
@@ -180,7 +179,7 @@ fn a_holder_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn non_holders_and_other_counters_are_denied() {
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let invoices = f.holder(f.right(Some(&["invoices"])), 1);
     assert_eq!(f.claim_by(&invoices, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(
@@ -254,68 +253,20 @@ fn non_holders_and_other_counters_are_denied() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_holder_neither_joins_logs_nor_acknowledges_nor_controls() {
-    let mut f = Fixture::new(1, Limits::default());
+fn a_holder_never_closes_the_domain() {
+    let mut f = Fixture::new(Limits::default());
     let holder = f.holder(f.right(None), 1);
-    let log = tip_log(f.scope);
-    let head = f.state.log_head(log).unwrap();
-    let as_holder = |f: &Fixture, action: Action| {
-        f.presenting(&holder, Operation::Coordinated { log, action }, T)
-    };
-    for action in [
-        Action::Join {
-            position: head.commit,
-            running_hash: head.running_hash,
-            sequence: 1,
-        },
-        Action::Head,
-        Action::Configure { minimum: 1 },
-    ] {
-        let request = as_holder(&f, action);
-        assert_eq!(
-            f.state.apply_at(T, &request),
-            Err(CoordinationError::Denied)
-        );
-    }
-    let pending = f.append(0, 2, 6);
-    let acknowledgment = as_holder(
-        &f,
-        Action::Acknowledge {
-            pending: pending.clone(),
-        },
-    );
-    let resolve = f.request(
-        &f.voter,
-        Action::Resolve {
-            pending,
-            acknowledgments: vec![acknowledgment],
-        },
-        T + 2,
-    );
+    let request = f.presenting(&holder, Operation::Close { scope: f.scope }, T);
     assert_eq!(
-        f.state.apply_at(T + 2, &resolve),
+        f.state.apply_at(T, &request),
         Err(CoordinationError::Denied),
-        "a claim holder's acknowledgment never counts toward a resolution"
+        "a claim holder never closes the domain"
     );
-    for operation in [
-        Operation::Close { scope: f.scope },
-        Operation::Configure {
-            scope: f.scope,
-            minimum: 1,
-        },
-    ] {
-        let request = f.presenting(&holder, operation, T);
-        assert_eq!(
-            f.state.apply_at(T, &request),
-            Err(CoordinationError::Denied),
-            "a claim holder neither closes nor reconfigures the domain"
-        );
-    }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let pushed = f.holder(f.right(None), 1);
     let lapsing = f.holder(f.right(None), 1);
     assert_eq!(f.claim_by(&pushed, "invoices", claim(1, T), T), Ok(1));
@@ -396,7 +347,7 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_delegate_claims_only_within_its_delegators_right() {
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let delegator = f.holder(f.right(Some(&["invoices", "credits"])), 2);
     let (identity, node) = (PrivateKey::new(), PrivateKey::new());
     let held = delegator.chain.delegable();
@@ -439,7 +390,7 @@ fn a_delegate_claims_only_within_its_delegators_right() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_control_without_a_publisher_admits_only_trusted_nodes() {
-    let mut f = Fixture::new(1, Limits::default());
+    let mut f = Fixture::new(Limits::default());
     let holder = f.holder(f.right(None), 1);
     let mut control = f.state.controls[0].control.clone();
     control.revision += 1;

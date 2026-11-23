@@ -1,13 +1,14 @@
 use crate::support;
 use rocky_coordinator::{
     Limits,
-    coordinated::{Action, Result as LogResult},
-    service::{NetworkCoordinator, Operation, Outcome, Usage},
+    counters::Claim,
+    service::{NetworkCoordinator, Operation, Usage},
 };
 use rocky_core::*;
+use rocky_credentials::CoordinationError;
 use rocky_voter::{backup, restore};
 use std::sync::Arc;
-use support::{append, join, log, membership_after_election, public::*};
+use support::{fresh_claim, invoices, membership_after_election, public::*, reading};
 
 fn limits() -> Limits {
     Limits {
@@ -37,26 +38,14 @@ async fn registered(
         .await
         .unwrap();
     let executor = tenant.client(cluster, &tenant.executor).await;
-    join(&executor, scope, 1).await;
     (owner, executor)
 }
 async fn commit(
     client: &NetworkCoordinator,
     scope: Scope,
-    action: Action,
+    claim: Claim,
 ) -> Result<u64, CoordinationError> {
-    let Outcome::Coordinated(LogResult::Assigned(pending)) =
-        client.coordinated(log(scope), action).await?
-    else {
-        return Err(CoordinationError::Corrupt);
-    };
-    match client
-        .coordinated(log(scope), Action::Acknowledge { pending: *pending })
-        .await?
-    {
-        Outcome::Coordinated(LogResult::Committed { position, .. }) => Ok(position),
-        _ => Err(CoordinationError::Corrupt),
-    }
+    client.claim(scope, invoices(), claim).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -66,31 +55,19 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let (sa, sb) = (a.scope(1), b.scope(2));
     let ((a_owner, a_exec), (b_owner, b_exec)) =
         tokio::join!(registered(&cluster, &a, sa), registered(&cluster, &b, sb));
-    let first = append(&a_exec, sa, 0x5a, 2).await;
-    assert_eq!(commit(&a_exec, sa, first).await, Ok(1));
-    let b_first = append(&b_exec, sb, 1, 2).await;
-    assert_eq!(commit(&b_exec, sb, b_first).await, Ok(1));
+    assert_eq!(commit(&a_exec, sa, fresh_claim(0x5a)).await, Ok(1));
+    assert_eq!(commit(&b_exec, sb, fresh_claim(1)).await, Ok(1));
 
     let b_on_a = b.client(&cluster, &b.executor).await;
     assert_eq!(
-        b_on_a.coordinated_head(log(sa)).await,
+        reading(&b_on_a, sa).await,
         Err(CoordinationError::Denied),
-        "a tenant cannot read another tenant's log"
+        "a tenant cannot read another tenant's counters"
     );
-    let head = a_exec.coordinated_head(log(sa)).await.unwrap();
     assert_eq!(
-        b_on_a
-            .coordinated(
-                log(sa),
-                Action::Join {
-                    position: head.commit,
-                    running_hash: head.running_hash,
-                    sequence: 1,
-                },
-            )
-            .await,
+        commit(&b_on_a, sa, fresh_claim(2)).await,
         Err(CoordinationError::Denied),
-        "a tenant cannot join another tenant's log"
+        "a tenant cannot claim from another tenant's counters"
     );
     assert_eq!(
         b_owner
@@ -131,46 +108,17 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     )
     .unwrap();
     assert_eq!(
-        voter_tcp.coordinated_head(log(sa)).await,
+        reading(&voter_tcp, sa).await,
         Err(CoordinationError::Unavailable),
         "the voters' TCP carries administration only, never tenants"
     );
 
-    assert_eq!(
-        a_owner
-            .control(a.control(&cluster.genesis, sa, 2, &[&a.alternate]), [5; 32])
-            .await,
-        Err(CoordinationError::Backpressure),
-        "an owner's control change cannot drop a node of the in-sync set"
-    );
     let a_alt = a.client(&cluster, &a.alternate).await;
-    join(&a_alt, sa, 1).await;
-    let second = append(&a_alt, sa, 2, 2).await;
-    let Outcome::Coordinated(LogResult::Assigned(pending)) =
-        a_alt.coordinated(log(sa), second).await.unwrap()
-    else {
-        panic!("assignment")
-    };
     assert_eq!(
-        a_alt
-            .coordinated(
-                log(sa),
-                Action::Acknowledge {
-                    pending: (*pending).clone()
-                }
-            )
-            .await
-            .unwrap(),
-        Outcome::Coordinated(LogResult::Acknowledged),
-        "an append commits only once both members store it"
+        commit(&a_alt, sa, fresh_claim(3)).await,
+        Ok(2),
+        "either trusted node takes the next number"
     );
-    assert!(matches!(
-        a_exec
-            .coordinated(log(sa), Action::Acknowledge { pending: *pending })
-            .await
-            .unwrap(),
-        Outcome::Coordinated(LogResult::Committed { position: 2, .. })
-    ));
 
     a_owner
         .register(
@@ -214,12 +162,11 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let flood: Vec<_> = (0..64)
         .map(|n| {
             let client = flooders[n % 4].clone();
-            tokio::spawn(async move { client.coordinated_head(log(sa)).await.map(|_| ()) })
+            tokio::spawn(async move { reading(&client, sa).await.map(|_| ()) })
         })
         .collect();
-    let b_second = append(&b_exec, sb, 2, 3).await;
     assert_eq!(
-        commit(&b_exec, sb, b_second).await,
+        commit(&b_exec, sb, fresh_claim(4)).await,
         Ok(2),
         "B commits while A floods its own lanes"
     );
@@ -275,33 +222,31 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     let a = Tenant::new("notes");
     let scope = a.scope(1);
     let (_, exec) = registered(&cluster, &a, scope).await;
-    let first = append(&exec, scope, 1, 2).await;
-    commit(&exec, scope, first).await.unwrap();
+    commit(&exec, scope, fresh_claim(1)).await.unwrap();
 
     let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
     cluster.wait_unfenced_leader(&admin).await;
-    let second = append(&exec, scope, 2, 3).await;
-    commit(&exec, scope, second)
+    commit(&exec, scope, fresh_claim(2))
         .await
         .expect("the remaining quorum continues after leader loss");
     cluster.spawn(leader, false);
     cluster.wait_online(leader, &admin).await;
 
-    let before = exec.coordinated_head(log(scope)).await.unwrap();
-    let pending = append(&exec, scope, 3, 4).await;
+    let before = reading(&exec, scope).await.unwrap();
+    let pending = fresh_claim(3);
     let survivor = cluster.wait_unfenced_leader(&admin).await;
     let down: Vec<u64> = (1..=3).filter(|id| *id != survivor).collect();
     for id in &down {
         cluster.stop(*id);
     }
     assert_eq!(
-        exec.coordinated(log(scope), pending.clone()).await,
+        commit(&exec, scope, pending).await,
         Err(CoordinationError::Unavailable),
         "a quorum outage fabricates no success"
     );
     assert_eq!(
-        exec.coordinated_head(log(scope)).await,
+        reading(&exec, scope).await,
         Err(CoordinationError::Unavailable),
         "a quorum outage gives no authoritative answer"
     );
@@ -313,16 +258,17 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         cluster.wait_online(id, &admin).await;
     }
     cluster.wait_unfenced_leader(&admin).await;
-    assert_eq!(
-        exec.coordinated_head(log(scope)).await.unwrap().commit,
-        before.commit,
-        "a controlled restart of every voter preserves the log"
+    let restarted = reading(&exec, scope).await.unwrap();
+    assert!(
+        restarted == before || restarted == before + 1,
+        "a controlled restart of every voter preserves the counters, with the unanswered claim at most once"
     );
     assert_eq!(
         commit(&exec, scope, pending).await,
-        Ok(before.commit + 1),
-        "`Unavailable` was unknown, not failure: retrying the append yields its one assignment"
+        Ok(before + 1),
+        "`Unavailable` was unknown, not failure: retrying the claim yields its one number"
     );
+    assert_eq!(reading(&exec, scope).await, Ok(before + 1));
 
     let backups = cluster.dir.path().join("backup-3");
     assert!(
@@ -333,9 +279,8 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     let saved = backup(&cluster.data(3), cluster.genesis.clone(), 3, &backups).unwrap();
     cluster.spawn(3, false);
     cluster.wait_online(3, &admin).await;
-    let fourth = append(&exec, scope, 4, 5).await;
-    commit(&exec, scope, fourth).await.unwrap();
-    let latest = exec.coordinated_head(log(scope)).await.unwrap();
+    commit(&exec, scope, fresh_claim(4)).await.unwrap();
+    let latest = reading(&exec, scope).await.unwrap();
     let committed = admin
         .status(cluster.wait_unfenced_leader(&admin).await)
         .await
@@ -409,12 +354,11 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     cluster.stop(1);
     cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
-        exec.coordinated_head(log(scope)).await.unwrap(),
-        latest,
+        reading(&exec, scope).await,
+        Ok(latest),
         "the readmitted voter 3 serves current state with voter 2 while voter 1 is down"
     );
-    let fifth = append(&exec, scope, 5, 6).await;
-    commit(&exec, scope, fifth).await.unwrap();
+    commit(&exec, scope, fresh_claim(5)).await.unwrap();
 }
 
 async fn remove_before_rolling_back(admin: &NetworkCoordinator) {
@@ -452,7 +396,7 @@ async fn a_completely_restored_service_stays_fenced() {
         cluster.wait_online(id, &admin).await;
     }
     assert_eq!(
-        exec.coordinated_head(log(scope)).await,
+        reading(&exec, scope).await,
         Err(CoordinationError::Unavailable),
         "recovering a whole service is an explicit new configuration, never a silent rollback"
     );
@@ -463,7 +407,7 @@ async fn a_completely_restored_service_stays_fenced() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_closure_ends_the_log_and_frees_only_open_quota() {
+async fn owner_closure_ends_the_counters_and_frees_only_open_quota() {
     let cluster = PublicCluster::start(limits(), 3).await;
     let tenant = Tenant::new("closure");
     let first = tenant.scope(1);
@@ -490,11 +434,10 @@ async fn owner_closure_ends_the_log_and_frees_only_open_quota() {
         .close_domain(first, [9; 32])
         .await
         .expect("a retried closure answers the same");
-    let action = append(&executor, first, 1, 2).await;
     assert_eq!(
-        executor.coordinated(log(first), action).await,
+        commit(&executor, first, fresh_claim(1)).await,
         Err(CoordinationError::Denied),
-        "a closed log takes no further entry"
+        "a closed domain takes no further claim"
     );
     let usage = owner.usage().await.unwrap();
     assert_eq!((usage.open_domains, usage.closed_domains), (1, 1));

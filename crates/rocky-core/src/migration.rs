@@ -1,4 +1,4 @@
-use crate::{Commitment, NodeKey, Scope, TipId, commitment};
+use crate::{Commitment, Scope, TipId, commitment};
 use serde::{Deserialize, Serialize};
 
 pub const MIGRATION_PUBLICATION_FORMAT: u32 = 2;
@@ -14,7 +14,7 @@ pub struct MigrationPublicationStatement {
     pub parent: Commitment,
     pub schema: Commitment,
     pub publication: Commitment,
-    pub writer: NodeKey,
+    pub writer: [u8; 32],
     pub frames: u64,
     pub bytes: u64,
     pub root: Commitment,

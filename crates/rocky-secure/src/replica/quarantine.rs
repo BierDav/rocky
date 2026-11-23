@@ -60,7 +60,6 @@ impl<A: RowApplication> Inner<A> {
                 graph.seals.len(),
                 graph.openings.len(),
                 graph.moves.len(),
-                graph.finalities.len(),
                 graph.checkpoints.len(),
                 graph.revoked.len(),
             ] {

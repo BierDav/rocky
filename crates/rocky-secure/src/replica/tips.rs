@@ -2,8 +2,7 @@ use super::*;
 pub(super) mod refresh;
 use rocky_core::Scope;
 use rocky_credentials::{
-    SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedDatabaseSettings,
-    SignedGenesisLine, SignedSeal, SignedTipOpening, TerminalAck, TipGraph,
+    SignedBookmarkMove, SignedCheckpointRecord, SignedSeal, SignedTipOpening, TipGraph,
 };
 use std::collections::BTreeMap;
 
@@ -19,68 +18,31 @@ pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
         .chain(graph.moves.iter().cloned().map(TipStatement::Bookmark))
         .chain(
             graph
-                .genesis_lines
-                .iter()
-                .cloned()
-                .map(TipStatement::GenesisLine),
-        )
-        .chain(graph.finalities.iter().cloned().map(TipStatement::Finality))
-        .chain(
-            graph
                 .checkpoints
                 .iter()
                 .cloned()
                 .map(|record| TipStatement::Checkpoint(Box::new(record))),
         )
-        .chain(graph.settings.iter().cloned().map(TipStatement::Settings))
         .collect()
 }
 
-const ACK_CHAIN_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_ack_chain(lane BLOB PRIMARY KEY,ack BLOB NOT NULL) WITHOUT ROWID";
-const PAST_CUT_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,ack INTEGER NOT NULL CHECK(ack IN(0,1)),PRIMARY KEY(scope,digest)) WITHOUT ROWID";
+const PAST_CUT_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,PRIMARY KEY(scope,digest)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tip_graphs(scope BLOB PRIMARY KEY,genesis BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_tip_statements(digest BLOB PRIMARY KEY,statement BLOB NOT NULL,staged INTEGER NOT NULL DEFAULT 0 CHECK(staged IN(0,1))) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_followed_tip(id INTEGER PRIMARY KEY CHECK(id=1),scope BLOB NOT NULL,bookmark TEXT NOT NULL,tip BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_node_tips(scope BLOB NOT NULL,node BLOB NOT NULL,tip BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_line_nodes(line BLOB PRIMARY KEY,node BLOB NOT NULL UNIQUE) WITHOUT ROWID",
-    ACK_CHAIN_TABLE,
     PAST_CUT_TABLE,
 ];
 const MAX_PAST_CUT_RECORDS: i64 = 256;
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum NamedFormats {
-    One(BTreeMap<String, OptionalFormat>),
-    Batch(Vec<BTreeMap<String, OptionalFormat>>),
-}
-#[derive(Deserialize)]
-struct OptionalFormat {
-    #[serde(default)]
-    format: Option<u32>,
-}
-pub(in crate::replica) fn foreign_finality(bytes: &[u8]) -> Option<Error> {
-    let statements = match p2panda_core::cbor::decode_cbor::<NamedFormats, _>(bytes).ok()? {
-        NamedFormats::One(statement) => vec![statement],
-        NamedFormats::Batch(statements) => statements,
-    };
-    statements
-        .iter()
-        .filter_map(|statement| statement.get("Finality")?.format)
-        .find(|format| *format != rocky_credentials::SEAL_FINALITY_FORMAT)
-        .map(|format| credential(rocky_credentials::unsupported_finality(format)))
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TipStatement {
     Seal(SignedSeal),
     Opening(SignedTipOpening),
     Bookmark(SignedBookmarkMove),
-    GenesisLine(SignedGenesisLine),
-    Finality(SealFinality),
     Checkpoint(Box<SignedCheckpointRecord>),
-    Settings(SignedDatabaseSettings),
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -94,10 +56,7 @@ impl TipStatement {
             Self::Seal(s) => s.id(),
             Self::Opening(s) => s.id(),
             Self::Bookmark(s) => s.id(),
-            Self::GenesisLine(s) => s.id(),
-            Self::Finality(s) => s.id(),
             Self::Checkpoint(s) => s.id(),
-            Self::Settings(s) => s.id(),
         }
         .map_err(credential)
     }
@@ -106,10 +65,7 @@ impl TipStatement {
             Self::Seal(s) => s.statement.scope,
             Self::Opening(s) => s.statement.scope,
             Self::Bookmark(s) => s.statement.scope,
-            Self::GenesisLine(s) => s.statement.scope,
-            Self::Finality(s) => s.scope,
             Self::Checkpoint(s) => s.statement.scope,
-            Self::Settings(s) => s.statement.scope,
         }
     }
     pub fn chain_place(&self) -> Option<(PublicKey, rocky_credentials::ChainLink)> {
@@ -117,10 +73,7 @@ impl TipStatement {
             Self::Seal(s) => (s.link, &s.endorsement().chain),
             Self::Opening(s) => (s.link, &s.endorsement().chain),
             Self::Bookmark(s) => (s.link, &s.endorsement().chain),
-            Self::GenesisLine(s) => (s.link, &s.endorsement().chain),
             Self::Checkpoint(s) => (s.link, &s.endorsement().chain),
-            Self::Settings(s) => (s.link, &s.endorsement().chain),
-            Self::Finality(_) => return None,
         };
         Some((
             rocky_credentials::Endorsement::claimed_signer_of(chain)?,
@@ -132,10 +85,7 @@ impl TipStatement {
             Self::Seal(s) => graph.seals.push(s.clone()),
             Self::Opening(s) => graph.openings.push(s.clone()),
             Self::Bookmark(s) => graph.moves.push(s.clone()),
-            Self::GenesisLine(s) => graph.genesis_lines.push(s.clone()),
-            Self::Finality(s) => graph.finalities.push(s.clone()),
             Self::Checkpoint(s) => graph.checkpoints.push((**s).clone()),
-            Self::Settings(s) => graph.settings.push(s.clone()),
         }
     }
     pub(in crate::replica) fn verify(
@@ -148,16 +98,11 @@ impl TipStatement {
             (Self::Seal(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Opening(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Bookmark(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
-            (Self::GenesisLine(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Checkpoint(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
-            (Self::Settings(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Seal(s), None) => s.verify_historic(publisher, graph),
             (Self::Opening(s), None) => s.verify_historic(publisher, graph),
             (Self::Bookmark(s), None) => s.verify_historic(publisher, graph),
-            (Self::GenesisLine(s), None) => s.verify_historic(publisher, graph),
             (Self::Checkpoint(s), None) => s.verify_historic(publisher, graph),
-            (Self::Settings(s), None) => s.verify_historic(publisher, graph),
-            (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
         }
         .map_err(credential)
     }
@@ -268,17 +213,10 @@ impl<A: RowApplication> Inner<A> {
         mut context: Option<&mut refresh::RefreshGraphContext<'_>>,
     ) -> Result<FrameReach, Error> {
         let graph = self.graph_for(scope)?;
-        let mut active = match context.as_mut() {
+        let active = match context.as_mut() {
             Some(context) => context.schema_ok(scope, tip, true)?,
             None => graph.schema(tip).is_ok(),
         };
-        let mut tip = tip;
-        if !active {
-            let anchor = graph.late_anchor(tip).map_err(credential)?;
-            if anchor != tip {
-                (tip, active) = (anchor, true);
-            }
-        }
         if !active
             && match context.as_mut() {
                 Some(context) => context.schema_ok(scope, tip, false)?,
@@ -474,9 +412,8 @@ impl<A: RowApplication> Inner<A> {
         bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
         canonical: bool,
     ) -> Result<FramePath, Error> {
-        let anchor = graph.late_anchor(source).map_err(credential)?;
         Self::walk_back(graph, target, bounds, canonical, |cursor, _| {
-            cursor == source || cursor == anchor
+            cursor == source
         })
     }
     pub(super) fn ledger_view(
@@ -739,8 +676,7 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(digest), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("tip statement".into()));
             };
-            let statement: TipStatement = decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES)
-                .map_err(|error| foreign_finality(bytes).unwrap_or(error))?;
+            let statement: TipStatement = decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES)?;
             if statement.id()?.as_slice() != digest {
                 return Err(Error::Corrupt("tip statement digest".into()));
             }
@@ -877,41 +813,13 @@ impl<A: RowApplication> Inner<A> {
                     )
                     .await?;
             }
-            let Some(graph) = self.graphs.get_mut(&scope) else {
-                continue;
-            };
-            let graph = Arc::make_mut(graph);
-            if !prunable.is_empty() {
-                graph.remove_statements(&prunable).map_err(credential)?;
-            }
-            let stripped = graph.strip_finalities(revocations).map_err(credential)?;
-            for record in &stripped {
-                for ack in &record.acknowledgments {
-                    self.record_past_cut_ack(scope, ack).await?;
-                }
-                self.conn
-                    .execute(
-                        "DELETE FROM secure_tip_statements WHERE digest=?",
-                        [record.record.to_vec()],
-                    )
-                    .await?;
-                if let Some(kept) = &record.kept {
-                    let statement = TipStatement::Finality(kept.clone());
-                    self.conn
-                        .execute(
-                            "INSERT OR IGNORE INTO secure_tip_statements(digest,statement,staged) VALUES(?,?,0)",
-                            [statement.id()?.to_vec(), encode(&statement)?],
-                        )
-                        .await?;
-                }
-            }
-            if prunable.is_empty() && stripped.is_empty() {
+            if prunable.is_empty() {
                 continue;
             }
             if let Some(graph) = self.graphs.get_mut(&scope) {
-                Arc::make_mut(graph)
-                    .exclude_revoked(revocations)
-                    .map_err(credential)?;
+                let graph = Arc::make_mut(graph);
+                graph.remove_statements(&prunable).map_err(credential)?;
+                graph.exclude_revoked(revocations).map_err(credential)?;
             }
             changed = true;
         }
@@ -929,7 +837,6 @@ impl<A: RowApplication> Inner<A> {
             "SELECT seal FROM secure_served",
             "SELECT seal FROM secure_kept_marks",
             "SELECT seal FROM secure_replayed_seals",
-            "SELECT seal FROM secure_close_relays",
             "SELECT seal FROM secure_pulled",
             "SELECT seal FROM secure_wanted_seals",
             "SELECT digest FROM secure_tip_statements WHERE staged=1",
@@ -952,25 +859,8 @@ impl<A: RowApplication> Inner<A> {
         let Some((identity, link)) = statement.chain_place() else {
             return Ok(());
         };
-        self.record_past(scope, statement.id()?, identity, link.lane, false)
+        self.record_past(scope, statement.id()?, identity, link.lane)
             .await
-    }
-    pub(in crate::replica) async fn record_past_cut_ack(
-        &self,
-        scope: Scope,
-        ack: &TerminalAck,
-    ) -> Result<(), Error> {
-        let Some(identity) = ack.claimed_identity() else {
-            return Ok(());
-        };
-        self.record_past(
-            scope,
-            ack.id().map_err(credential)?,
-            identity,
-            ack.link.lane,
-            true,
-        )
-        .await
     }
     async fn record_past(
         &self,
@@ -978,7 +868,6 @@ impl<A: RowApplication> Inner<A> {
         id: Commitment,
         identity: PublicKey,
         lane: PublicKey,
-        ack: bool,
     ) -> Result<(), Error> {
         let (scope, identity, lane) = (
             encode(&scope)?,
@@ -1004,13 +893,12 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO secure_past_cut VALUES(?,?,?,?,?)",
+                "INSERT OR IGNORE INTO secure_past_cut VALUES(?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(scope),
                     SqlValue::Blob(id.to_vec()),
                     SqlValue::Blob(identity),
                     SqlValue::Blob(lane),
-                    SqlValue::Integer(i64::from(ack)),
                 ]),
             )
             .await?;
@@ -1621,29 +1509,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
         let statements = &self.refuse_past_cut(statements).await?;
-        let mut fresh = false;
-        for statement in statements {
-            fresh |= !self.holds_statement(statement.id()?).await?;
-        }
-        if !fresh {
-            return self.admit_tip_statements(statements, None).await;
+        if self.holds_all(statements).await? {
+            return Ok(0);
         }
         self.check_statements(statements).await?;
-        let batch = self.journal_tips(statements, false).await?;
-        let admitted = match self
-            .coordinate_tip_statements(statements, false, false)
-            .await
-        {
-            Ok(coordinated) => {
-                self.admit_pending_tips(&coordinated.kept, Some(batch), &coordinated.deferred)
-                    .await
+        self.admit_tip_statements(statements, None).await
+    }
+    async fn holds_all(&self, statements: &[TipStatement]) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        for statement in statements {
+            let found = collect_rows(
+                inner
+                    .conn
+                    .query(
+                        "SELECT 1 FROM secure_tip_statements WHERE digest=?",
+                        [statement.id()?.to_vec()],
+                    )
+                    .await?,
+            )
+            .await?;
+            if found.is_empty() {
+                return Ok(false);
             }
-            Err(error) => Err(error),
-        };
-        if let Err(Error::Rejected(_)) = &admitted {
-            self.forget_refused(batch, false).await?;
         }
-        admitted
+        Ok(true)
     }
     async fn refuse_past_cut(
         &self,
@@ -1652,39 +1541,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let revocations = &inner.config.revocations;
         let mut kept = Vec::with_capacity(statements.len());
-        let mut batch: BTreeMap<Scope, TipGraph> = BTreeMap::new();
         for statement in statements {
             let Some(graph) = inner.graphs.get(&statement.scope()) else {
                 kept.push(statement.clone());
                 continue;
             };
-            if let TipStatement::Finality(record) = statement {
-                let (stripped, acks) = graph
-                    .strip_past_cut(revocations, record)
-                    .map_err(credential)?;
-                if acks.is_empty() {
-                    kept.push(statement.clone());
-                    continue;
-                }
-                for ack in &acks {
-                    inner.record_past_cut_ack(record.scope, ack).await?;
-                }
-                let graph = batch.entry(record.scope).or_insert_with(|| {
-                    let mut graph = TipGraph::clone(graph);
-                    for statement in statements {
-                        if !matches!(statement, TipStatement::Finality(_))
-                            && statement.scope() == record.scope
-                        {
-                            statement.append(&mut graph);
-                        }
-                    }
-                    graph
-                });
-                if graph.meets_minimum(&stripped) {
-                    kept.push(TipStatement::Finality(stripped));
-                }
-                continue;
-            }
             let beyond = match statement.chain_place() {
                 Some((identity, link)) => graph
                     .beyond_cut(revocations, &identity, &link, statement.id()?)
@@ -1698,17 +1559,64 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(kept)
     }
+    pub(in crate::replica) async fn check_statements(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<(), Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut graphs = BTreeMap::new();
+        for statement in statements {
+            statement.id()?;
+            let scope = statement.scope();
+            if let std::collections::btree_map::Entry::Vacant(entry) = graphs.entry(scope) {
+                entry.insert(inner.scope_graph(scope)?);
+            }
+            if let Some(graph) = graphs.get_mut(&scope) {
+                statement.append(Arc::make_mut(graph));
+            }
+        }
+        for statement in statements {
+            statement.verify(
+                inner.config.publisher,
+                &graphs[&statement.scope()],
+                Some((&inner.config.revocations, now()?)),
+            )?;
+        }
+        Ok(())
+    }
+    async fn refuse_after_stage(&self, statements: &[TipStatement]) -> Result<(), Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let staged: BTreeSet<Vec<u8>> = rows(
+            &inner.conn,
+            "SELECT digest FROM secure_tip_statements WHERE staged=1",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|record| match record.as_slice() {
+            [SqlValue::Blob(digest)] => Some(digest.clone()),
+            _ => None,
+        })
+        .collect();
+        for statement in statements {
+            if let Some(previous) = statement.chain_place().and_then(|(_, link)| link.previous)
+                && staged.contains(previous.as_slice())
+            {
+                return Err(Error::Application(Box::new(MigrationPending)));
+            }
+        }
+        Ok(())
+    }
     pub async fn past_cut_records(
         &self,
         scope: Scope,
-    ) -> Result<Vec<(PublicKey, PublicKey, u64, u64)>, Error> {
+    ) -> Result<Vec<(PublicKey, PublicKey, u64)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut counts = Vec::new();
         for record in collect_rows(
             inner
                 .conn
                 .query(
-                    "SELECT identity,lane,SUM(ack=0),SUM(ack) FROM secure_past_cut WHERE scope=? GROUP BY identity,lane",
+                    "SELECT identity,lane,COUNT(*) FROM secure_past_cut WHERE scope=? GROUP BY identity,lane",
                     [encode(&scope)?],
                 )
                 .await?,
@@ -1719,7 +1627,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 SqlValue::Blob(identity),
                 SqlValue::Blob(lane),
                 SqlValue::Integer(statements),
-                SqlValue::Integer(acknowledgments),
             ] = record.as_slice()
             else {
                 return Err(Error::Corrupt("past cut record".into()));
@@ -1734,7 +1641,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 key(identity)?,
                 key(lane)?,
                 u64::try_from(*statements).unwrap_or_default(),
-                u64::try_from(*acknowledgments).unwrap_or_default(),
             ));
         }
         Ok(counts)
@@ -1742,24 +1648,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(in crate::replica) async fn admit_tip_statements(
         &self,
         statements: &[TipStatement],
-        journal: Option<Commitment>,
-    ) -> Result<usize, Error> {
-        self.admit_pending_tips(statements, journal, &[]).await
-    }
-    pub(in crate::replica) async fn admit_pending_tips(
-        &self,
-        statements: &[TipStatement],
-        journal: Option<Commitment>,
-        remainder: &[TipStatement],
-    ) -> Result<usize, Error> {
-        self.admit_tips_with_stage(statements, journal, remainder, None)
-            .await
-    }
-    pub(in crate::replica) async fn admit_tips_with_stage(
-        &self,
-        statements: &[TipStatement],
-        journal: Option<Commitment>,
-        remainder: &[TipStatement],
         stage: Option<&super::staging::SchemaStage>,
     ) -> Result<usize, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -1795,13 +1683,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             new.push((id, statement));
         }
         if new.is_empty() {
-            transaction!(inner, |inner| {
-                if let Some(batch) = journal {
-                    inner.replace_pending_tips(batch, remainder).await?;
-                }
-                inner.prune_pending_tips().await
-            })?;
-            drop(flush_guard(inner, &self.inner).await?);
             return Ok(0);
         }
         let changed: BTreeSet<Scope> = new.iter().map(|(_, statement)| statement.scope()).collect();
@@ -1872,21 +1753,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .await?;
             }
-            match stage {
-                Some(stage) => inner.record_schema_stage(stage).await?,
-                None => {
-                    for (_, statement) in &new {
-                        if let TipStatement::Finality(record) = statement
-                            && coordinated::public_finality(
-                                inner.graph_for(record.scope)?,
-                                record.seal,
-                            )?
-                            .is_some()
-                        {
-                            inner.forget_relay(record.seal).await?;
-                        }
-                    }
-                }
+            if let Some(stage) = stage {
+                inner.record_schema_stage(stage).await?;
             }
             let revocations = inner.config.revocations.clone();
             inner.prune_past_cut(&revocations).await?;
@@ -1909,10 +1777,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.revalidate_finalized(scope, true).await?;
                 inner.retain_kept(scope).await?;
             }
-            if let Some(batch) = journal {
-                inner.replace_pending_tips(batch, remainder).await?;
-            }
-            inner.prune_pending_tips().await?;
             for domain in graphs.keys() {
                 inner.reseed_domain_ledgers(*domain).await?;
             }
@@ -2187,103 +2051,61 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.node_author = Some(selected);
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
-    async fn refuse_without_named_log(&self, statements: &[TipStatement]) -> Result<(), Error> {
-        let seals = statements
-            .iter()
-            .any(|s| matches!(s, TipStatement::Seal(seal) if seal.statement.recovery.is_none()));
-        if !seals && !self.after_pending(statements).await? {
-            return Ok(());
-        }
-        for scope in statements
-            .iter()
-            .map(TipStatement::scope)
-            .collect::<BTreeSet<_>>()
-        {
-            let graph = self.tip_graph(scope).await?;
-            if let Some(refused) = self.named_log_refusal(&graph)? {
-                return Err(refused);
-            }
-        }
-        Ok(())
-    }
-    async fn named_log_free(&self, statements: &[TipStatement]) -> Result<bool, Error> {
-        for scope in statements
-            .iter()
-            .map(TipStatement::scope)
-            .collect::<BTreeSet<_>>()
-        {
-            let graph = self.tip_graph(scope).await?;
-            if self.usable_log(&graph)?.is_none() {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+    pub async fn own_chain(
+        &self,
+        scope: Scope,
+        identity: PublicKey,
+        lane: PublicKey,
+    ) -> Result<(rocky_credentials::ChainLink, Vec<TipStatement>), Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut graph = Arc::unwrap_or_clone(inner.scope_graph(scope)?);
+        let staged: BTreeSet<Commitment> = rows(
+            &inner.conn,
+            "SELECT digest FROM secure_tip_statements WHERE staged=1",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|record| match record.as_slice() {
+            [SqlValue::Blob(digest)] => Commitment::try_from(digest.as_slice()).ok(),
+            _ => None,
+        })
+        .collect();
+        graph.remove_statements(&staged).map_err(credential)?;
+        let next = graph.next_link(&identity, &lane).map_err(credential)?;
+        let statements = graph_statements(&graph)
+            .into_iter()
+            .filter(|statement| {
+                statement
+                    .chain_place()
+                    .is_some_and(|(signer, link)| signer == identity && link.lane == lane)
+            })
+            .collect();
+        Ok((next, statements))
     }
     pub async fn publish_tip_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
         self.refuse_after_stage(statements).await?;
-        self.refuse_without_named_log(statements).await?;
-        if self.reseals_waiting_tip(statements).await? || self.after_pending(statements).await? {
-            if let Err(error) = self.settle_tip_statements().await {
-                tracing::debug!(%error, "settling earlier statements failed");
-            }
-            if self.reseals_waiting_tip(statements).await? {
-                return Err(coordinated::refusal(coordinated::Refusal::SealPending(
-                    "this node's earlier seal of the tip waits for its coordinated log entry; the tip is not sealed again meanwhile".into(),
-                )));
-            }
-            if self.after_pending(statements).await? {
-                self.check_statements_over(statements, true).await?;
-                self.journal_tips(statements, true).await?;
-                return Err(coordinated::refusal(coordinated::Refusal::ChainPending(
-                    "an earlier statement of this node waits for its coordinated log entry; this one is journaled after it".into(),
-                )));
-            }
-        }
-        let journaled = match self.domain_log().is_some()
-            && self.named_log_free(statements).await?
-            && statements
-                .iter()
-                .any(|s| matches!(s, TipStatement::Seal(_)))
-        {
-            true => {
-                self.check_statements(statements).await?;
-                Some(self.journal_tips(statements, true).await?)
-            }
-            false => None,
-        };
+        self.check_statements(statements).await?;
         self.inner
             .lock(crate::replica::Class::Background)
             .await
             .publication_fault(1)?;
-        let coordinated = match self.coordinate_tip_statements(statements, true, true).await {
-            Ok(coordinated) => coordinated,
-            Err(error) => {
-                let unconfirmed = match &error {
-                    Error::Application(inner) => inner.downcast_ref::<coordinated::Unconfirmed>(),
-                    _ => None,
-                };
-                let never_committed = matches!(&error, Error::Application(inner)
-                    if inner.downcast_ref::<coordinated::Refusal>().is_some());
-                if never_committed && let Some(batch) = journaled {
-                    self.forget_own_batch(batch).await?;
-                }
-                return Err(match unconfirmed {
-                    Some(unconfirmed) => coordinated::refusal(unconfirmed.0.clone()),
-                    None => error,
-                });
-            }
-        };
-        self.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .publication_fault(2)?;
-        self.admit_tip_statements(&coordinated.kept, journaled)
-            .await
+        self.admit_tip_statements(statements, None).await
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MigrationPending;
+impl std::fmt::Display for MigrationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "a staged schema switch must finish or be withdrawn before this node signs again",
+        )
+    }
+}
+impl std::error::Error for MigrationPending {}
 
 #[cfg(test)]
 const MAX_FRONTIER_HEADERS: usize = 1 << 18;

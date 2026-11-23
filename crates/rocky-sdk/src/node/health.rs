@@ -147,32 +147,21 @@ impl Node {
             Ok(graph) => graph,
             Err(_graph_not_installed) => return Ok(Vec::new()),
         };
-        let mut past: BTreeMap<(PublicKey, PublicKey), (u64, u64)> = BTreeMap::new();
-        for (identity, lane, statements, acknowledgments) in
-            self.replica.past_cut_records(graph.scope).await?
-        {
-            let counts = past.entry((identity, lane)).or_default();
-            counts.0 += statements;
-            counts.1 += acknowledgments;
+        let mut past: BTreeMap<(PublicKey, PublicKey), u64> = BTreeMap::new();
+        for (identity, lane, statements) in self.replica.past_cut_records(graph.scope).await? {
+            *past.entry((identity, lane)).or_default() += statements;
         }
         for item in &graph.past_cut {
-            let counts = past.entry((item.identity, item.link.lane)).or_default();
-            if item.acknowledgment {
-                counts.1 += 1;
-            } else {
-                counts.0 += 1;
-            }
+            *past.entry((item.identity, item.link.lane)).or_default() += 1;
         }
-        let past = past
-            .into_iter()
-            .map(|((signer, node), (statements, acknowledgments))| {
-                AlertKind::TipStatementsPastCut {
+        let past =
+            past.into_iter().map(
+                |((signer, node), statements)| AlertKind::TipStatementsPastCut {
                     signer: signer.to_hex(),
                     node: node.to_hex(),
                     statements,
-                    acknowledgments,
-                }
-            });
+                },
+            );
         let forks = graph
             .equivocations
             .iter()
@@ -180,7 +169,6 @@ impl Node {
                 signer: fork.identity.to_hex(),
                 node: fork.lane.to_hex(),
                 sequence: fork.sequence,
-                acknowledgment: fork.acknowledgment,
             });
         Ok(past
             .chain(forks)

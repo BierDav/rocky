@@ -3,7 +3,8 @@ use openraft::{
     *,
 };
 use rocky_coordinator::{certified::*, protocol::Request, service::Outcome, state::Metadata};
-use rocky_core::{Commitment, CoordinationError, commitment};
+use rocky_core::{Commitment, commitment};
+use rocky_credentials::CoordinationError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
@@ -123,7 +124,6 @@ struct Inner {
     image: Mutex<Image>,
     machine: tokio::sync::RwLock<Machine>,
     durable_mutations: Arc<Mutex<()>>,
-    deadlines: tokio::sync::watch::Sender<()>,
     node: std::sync::OnceLock<u64>,
     _lock: StoreLock,
     #[cfg(test)]
@@ -415,7 +415,6 @@ impl Store {
             image: Mutex::new(image),
             machine: tokio::sync::RwLock::new(machine),
             durable_mutations: Arc::new(Mutex::new(())),
-            deadlines: tokio::sync::watch::channel(()).0,
             node: std::sync::OnceLock::new(),
             _lock: lock,
             #[cfg(test)]
@@ -615,9 +614,6 @@ impl Store {
         }
         Ok(())
     }
-    pub(crate) fn deadlines(&self) -> tokio::sync::watch::Receiver<()> {
-        self.0.deadlines.subscribe()
-    }
     pub async fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
         request.authenticate(self.0.genesis_id)?;
         request.fresh()?;
@@ -628,17 +624,6 @@ impl Store {
         request.authenticate(self.0.genesis_id)?;
         let machine = self.0.machine.read().await;
         machine.metadata.read_authenticated(request)
-    }
-    pub(crate) async fn pending_logs(
-        &self,
-    ) -> Vec<(rocky_core::TipLog, rocky_coordinator::coordinated::Pending)> {
-        self.0.machine.read().await.metadata.pending_logs()
-    }
-    pub(crate) async fn log_head(
-        &self,
-        log: rocky_core::TipLog,
-    ) -> Result<rocky_coordinator::coordinated::Head, CoordinationError> {
-        self.0.machine.read().await.metadata.log_head(log)
     }
     pub async fn authority_time(&self) -> u64 {
         self.0.machine.read().await.metadata.time()
@@ -1011,7 +996,6 @@ impl RaftStateMachine<Types> for Store {
     {
         let entries: Vec<_> = entries.into_iter().collect();
         self.exclusive(move |store| {
-            let pending = store.0.machine.blocking_read().metadata.pending_logs();
             let mut replies = Vec::new();
             for entry in entries {
                 let reply = match entry.payload {
@@ -1042,9 +1026,6 @@ impl RaftStateMachine<Types> for Store {
                     }
                 };
                 replies.push(reply);
-            }
-            if pending != store.0.machine.blocking_read().metadata.pending_logs() {
-                store.0.deadlines.send_replace(());
             }
             crash("apply.after_apply");
             Ok(replies)
@@ -1078,15 +1059,11 @@ impl RaftStateMachine<Types> for Store {
                 store.finish_purge(image)
             })?;
             let mut machine = store.0.machine.blocking_write();
-            let pending = machine.metadata.pending_logs();
             *machine = Machine {
                 applied: meta.last_log_id,
                 membership: meta.last_membership.clone(),
                 metadata,
             };
-            if pending != machine.metadata.pending_logs() {
-                store.0.deadlines.send_replace(());
-            }
             Ok(())
         })
         .await

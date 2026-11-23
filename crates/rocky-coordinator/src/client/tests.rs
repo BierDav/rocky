@@ -318,41 +318,6 @@ async fn the_network_coordinator_meets_the_coordinator_contract() {
     .await;
 }
 
-const MEMORY_LOG_SCOPE: Scope = Scope {
-    mesh: MeshId([1; 16]),
-    app: AppId([2; 16]),
-    domain: DomainId([3; 16]),
-};
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn the_memory_log_meets_the_claim_contract() {
-    let log = crate::coordinated::MemoryLog::new();
-    rocky_credentials::testing::claim_contract(
-        &log.client(PrivateKey::new().public_key()),
-        MEMORY_LOG_SCOPE,
-        async |seconds| log.advance(seconds),
-    )
-    .await;
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn the_memory_log_meets_the_coordinator_contract() {
-    let trusted = PrivateKey::new();
-    rocky_credentials::testing::coordinator_contract(
-        &crate::coordinated::MemoryLog::new().client(trusted.public_key()),
-        &trusted,
-        rocky_credentials::DatabaseContext {
-            publisher: PrivateKey::new().public_key(),
-            scope: MEMORY_LOG_SCOPE,
-        },
-        rocky_credentials::testing::CoordinatorBehaviour {
-            observes_calls: false,
-            denies_untrusted_claims: false,
-        },
-    )
-    .await;
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
     let service = Service::start().await;
@@ -620,33 +585,6 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         NetworkCoordinator::connect(&bundle, PrivateKey::new(), Arc::new(Lane(memory, "other"))),
         Err(CoordinationError::Configuration)
     ));
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_memory_log_binds_only_the_key_its_certificate_names() {
-    let client = crate::coordinated::MemoryLog::new().client(PrivateKey::new().public_key());
-    let key = PrivateKey::new();
-    let certificate = self_certificate_in(
-        &key,
-        rocky_credentials::DatabaseContext {
-            publisher: PrivateKey::new().public_key(),
-            scope: Scope {
-                mesh: MeshId([1; 16]),
-                app: AppId([2; 16]),
-                domain: DomainId([3; 16]),
-            },
-        },
-    );
-    assert!(matches!(
-        rocky_credentials::Coordinator::bind(&client, PrivateKey::new(), certificate.clone()),
-        Err(CoordinationError::Denied)
-    ));
-    assert_eq!(
-        rocky_credentials::Coordinator::bind(&client, key.clone(), certificate)
-            .unwrap()
-            .node(),
-        *key.public_key().as_bytes()
-    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

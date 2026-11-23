@@ -672,7 +672,6 @@ async fn dev_pull(resign: bool) -> DevPull {
             schema: b.tip_graph(domain).await.unwrap().genesis_schema,
             scope: domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         &f.publisher,
     )
@@ -1180,7 +1179,6 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
             tip,
             frontier: c.seal_frontier(domain, false).await.unwrap(),
             action: SealAction::Close,
-            recovery: None,
         },
         rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
@@ -1275,7 +1273,6 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
             tip,
             frontier: Vec::new(),
             action: SealAction::Close,
-            recovery: None,
         },
         &f.publisher,
     )
@@ -1420,7 +1417,6 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
             schema: manifest,
             scope: x.f.public.domain,
             seal: x.sealed,
-            minimum_in_sync: 1,
         },
         &x.f.publisher,
     )
@@ -1433,7 +1429,6 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
             tip,
             frontier: Vec::new(),
             action: SealAction::Close,
-            recovery: None,
         },
         &x.f.publisher,
     )
@@ -1635,7 +1630,6 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
             schema: b.tip_graph(domain).await.unwrap().genesis_schema,
             scope: domain,
             seal: first,
-            minimum_in_sync: 1,
         },
         &f.publisher,
     )
@@ -1727,7 +1721,6 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             action: SealAction::Continue {
                 schema: b.tip_graph(domain).await.unwrap().genesis_schema,
             },
-            recovery: None,
         },
         rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,

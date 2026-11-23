@@ -1272,7 +1272,7 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
         keep: usize,
     ) -> Result<Option<(Finalized, SignedSeal)>, Error> {
-        let graph = self.graph_for(domain)?;
+        self.graph_for(domain)?;
         let path = self.path_seals(domain)?;
         let kept: BTreeSet<Commitment> = self
             .kept_marks()
@@ -1307,9 +1307,7 @@ impl<A: RowApplication> Inner<A> {
             else {
                 break;
             };
-            if graph.compacts_final(known.seal).map_err(credential)?
-                || path.len() - 1 - index >= keep
-            {
+            if path.len() - 1 - index >= keep {
                 let stop = kept.contains(&known.seal);
                 target = Some((known, path[index].clone()));
                 if stop {
@@ -2293,7 +2291,6 @@ mod tests {
                     sequence: 1,
                 }],
                 action: SealAction::Continue { schema: [7; 32] },
-                recovery: None,
             },
             &PrivateKey::new(),
         )

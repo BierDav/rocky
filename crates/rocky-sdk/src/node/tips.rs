@@ -1,14 +1,12 @@
 use super::*;
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
-    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, GENESIS_LINE_FORMAT,
-    GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove,
-    SignedGenesisLine, SignedSeal, SignedTipOpening, TipGraph, TipOpeningStatement,
+    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, SEAL_FORMAT, SealAction,
+    SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening, TipGraph, TipOpeningStatement,
 };
 use rocky_secure::TipStatement;
 
 pub(crate) const BOOKMARK: &str = "main";
-const GENESIS_MINIMUM_IN_SYNC: u32 = 1;
 
 fn hex(digest: &rocky_core::Commitment) -> String {
     HEXLOWER.encode(digest)
@@ -82,7 +80,6 @@ linked!(
     SignedSeal => SealStatement, Seal,
     SignedTipOpening => TipOpeningStatement, Opening,
     SignedBookmarkMove => BookmarkMoveStatement, Bookmark,
-    SignedGenesisLine => GenesisLineStatement, GenesisLine,
     rocky_credentials::SignedCheckpointRecord => rocky_credentials::CheckpointRecordStatement, Checkpoint
 );
 impl HeldSigner {
@@ -137,7 +134,6 @@ impl Node {
             .await
             .map_err(refused)?;
         self.ensure_tip_node().await?;
-        self.sign_genesis_minimum(scope).await?;
         self.observations.touch();
         Ok(())
     }
@@ -386,7 +382,6 @@ impl Node {
             tip,
             frontier,
             action,
-            recovery: None,
         })
     }
 
@@ -437,28 +432,6 @@ impl Node {
         self.seal_followed(scope).await?;
         self.replica.compact(scope, 0).await?;
         self.list_checkpoints(scope).await
-    }
-
-    async fn sign_genesis_minimum(&self, scope: Scope) -> Result<(), Failure> {
-        let statement = GenesisLineStatement {
-            format: GENESIS_LINE_FORMAT,
-            scope,
-            minimum_in_sync: GENESIS_MINIMUM_IN_SYNC,
-        };
-        let signer = self
-            .hold_chain(self.tip_signer(scope).await?, scope)
-            .await?;
-        let line = signer.endorse::<SignedGenesisLine>(statement)?;
-        self.publish_tips(
-            scope,
-            Some(signer),
-            vec![TipStatement::GenesisLine(line)],
-            |graph| match graph.line_minimum(graph.genesis())? {
-                Some(_) => Ok(()),
-                None => Err(refused("the genesis line's minimum was not set")),
-            },
-        )
-        .await
     }
 
     async fn create_bookmark(&self, scope: Scope, name: &str) -> Result<(), Failure> {

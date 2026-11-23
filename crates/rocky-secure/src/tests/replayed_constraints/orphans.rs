@@ -42,7 +42,6 @@ async fn seal_and_compact(c: &Constrained, replica: &EncryptedReplica<TypedRows>
             action: SealAction::Continue {
                 schema: c.app().manifest().hash(),
             },
-            recovery: None,
         },
         &c.publisher,
     )

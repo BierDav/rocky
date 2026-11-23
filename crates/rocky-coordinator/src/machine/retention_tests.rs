@@ -1,5 +1,5 @@
 use super::*;
-use crate::coordinated::Action;
+use crate::counters::{Claim, Name, Reading};
 use p2panda_core::PrivateKey;
 
 const DAY: u64 = crate::retention::DAY;
@@ -83,23 +83,24 @@ impl Mesh {
     ) -> Result<Outcome, CoordinationError> {
         metadata.apply_at(proposed, &self.request(key, operation, signed))
     }
-    fn head(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> crate::coordinated::Head {
-        let head = Operation::Coordinated {
-            log: tip_log(scope),
-            action: Action::Head,
+    fn reading(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> Reading {
+        let read = Operation::Counter {
+            scope,
+            counter: Name::new("invoices").unwrap(),
+            claim: None,
         };
-        match self.apply(metadata, &self.executor, head, time) {
-            Ok(Outcome::CoordinatedHead(head)) => *head,
-            other => panic!("head: {other:?}"),
+        match self.apply(metadata, &self.executor, read, time) {
+            Ok(Outcome::Counter(reading)) => reading,
+            other => panic!("reading: {other:?}"),
         }
     }
-    fn join(&self, scope: Scope, sequence: u64) -> Operation {
-        Operation::Coordinated {
-            log: tip_log(scope),
-            action: Action::Join {
-                position: 0,
-                running_hash: rocky_core::log_genesis(tip_log(scope), [5; 16]),
-                sequence,
+    fn claim(&self, scope: Scope, issued: u64) -> Operation {
+        Operation::Claim {
+            scope,
+            counter: Name::new("invoices").unwrap(),
+            claim: Claim {
+                id: nonce(),
+                issued,
             },
         }
     }
@@ -145,9 +146,9 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
     let mut metadata = mesh.open(Limits::default());
     let scope = mesh.scopes[0];
     let t = mesh.time;
-    mesh.apply(&mut metadata, &mesh.executor, mesh.join(scope, 1), t)
+    mesh.apply(&mut metadata, &mesh.executor, mesh.claim(scope, t), t)
         .unwrap();
-    mesh.head(&mut metadata, scope, t + DAY + 10);
+    mesh.reading(&mut metadata, scope, t + DAY + 10);
     let restored: Metadata = decode(&encode(&metadata).unwrap()).unwrap();
     let mut metadata = restored;
     assert_eq!(metadata.time(), t + DAY + 10);
@@ -155,7 +156,7 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
         mesh.apply_signed(
             &mut metadata,
             &mesh.executor,
-            mesh.join(scope, 2),
+            mesh.claim(scope, t),
             t,
             t - 3600
         ),
@@ -163,10 +164,7 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
         "a new leader whose clock is behind cannot rewind authority time"
     );
     assert_eq!(metadata.time(), t + DAY + 10);
-    assert_eq!(
-        mesh.head(&mut metadata, scope, t + DAY + 10).members.len(),
-        1
-    );
+    assert_eq!(mesh.reading(&mut metadata, scope, t + DAY + 10).value, 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -175,9 +173,9 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
     let mut metadata = mesh.open(Limits::default());
     let scope = mesh.scopes[0];
     let t = mesh.time;
-    mesh.apply(&mut metadata, &mesh.executor, mesh.join(scope, 1), t)
+    mesh.apply(&mut metadata, &mesh.executor, mesh.claim(scope, t), t)
         .unwrap();
-    let head = mesh.head(&mut metadata, scope, t);
+    let reading = mesh.reading(&mut metadata, scope, t);
     assert_eq!(
         mesh.apply(&mut metadata, &mesh.executor, Operation::Close { scope }, t),
         Err(CoordinationError::Denied)
@@ -191,18 +189,8 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
         ),
         Ok(Outcome::Closed)
     );
-    let append = Operation::Coordinated {
-        log: tip_log(scope),
-        action: Action::Append {
-            expected: 0,
-            epoch: head.epoch,
-            hash: [7; 32],
-            duration: 20,
-            sequence: 2,
-        },
-    };
     assert_eq!(
-        mesh.apply(&mut metadata, &mesh.executor, append, t),
+        mesh.apply(&mut metadata, &mesh.executor, mesh.claim(scope, t), t),
         Err(CoordinationError::Denied)
     );
     for revision in [1, 2] {
@@ -216,14 +204,10 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
             .is_err()
         );
     }
-    let closed = crate::coordinated::Head {
-        closed: true,
-        ..head
-    };
     assert_eq!(
-        mesh.head(&mut metadata, scope, t + 8 * DAY),
-        closed,
-        "long after closure the marker and its log head remain, marked closed"
+        mesh.reading(&mut metadata, scope, t + 8 * DAY),
+        reading,
+        "long after closure the marker and its counters remain"
     );
     assert_eq!(metadata.retention().domains, 1);
 }
@@ -275,15 +259,15 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
         Limits::default().tenant_bytes - probe.tenant_available(mesh.scopes[0]).unwrap()
     };
     let limits = Limits {
-        tenant_bytes: used + 1024,
+        tenant_bytes: used + 8,
         ..Limits::default()
     };
     let mut metadata = mesh.open(limits);
     let scope = mesh.scopes[0];
     assert_eq!(
-        mesh.apply(&mut metadata, &mesh.executor, mesh.join(scope, 1), t),
+        mesh.apply(&mut metadata, &mesh.executor, mesh.claim(scope, t), t),
         Err(CoordinationError::Backpressure),
-        "a log that would grow past the tenant's bytes is refused"
+        "a counter that would grow past the tenant's bytes is refused"
     );
-    assert!(mesh.head(&mut metadata, scope, t).members.is_empty());
+    assert_eq!(mesh.reading(&mut metadata, scope, t).value, 0);
 }

@@ -57,24 +57,29 @@ fn seal(f: &Fixture, sequence: u64) -> SignedSeal {
                 sequence,
             }],
             action: SealAction::Continue { schema: manifest },
-            recovery: None,
         },
         &f.publisher,
     )
     .unwrap()
 }
-fn opening(f: &Fixture, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
+fn opening(f: &Fixture, seal: &SignedSeal, variant: u32) -> SignedTipOpening {
+    opening_into(
+        f,
+        seal,
+        rocky_core::commitment("rocky.test.opening-schema", &variant.to_le_bytes()),
+    )
+}
+fn opening_into(
+    f: &Fixture,
+    seal: &SignedSeal,
+    schema: rocky_core::Commitment,
+) -> SignedTipOpening {
     SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
-            schema: f
-                .manifest
-                .verify_historic(f.publisher.public_key())
-                .unwrap()
-                .hash(),
+            schema,
             scope: f.public.domain,
             seal: seal.id().unwrap(),
-            minimum_in_sync: minimum,
         },
         &f.publisher,
     )
@@ -101,8 +106,8 @@ async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     let seal_id = seal.id().unwrap();
     let successor = seal.successor().unwrap().unwrap();
     let mut statements = Vec::new();
-    for minimum in 1..=256 {
-        let opened = opening(&f, &seal, minimum);
+    for variant in 1..=256 {
+        let opened = opening(&f, &seal, variant);
         if opened.id().unwrap() < seal_id {
             statements.push(TipStatement::Opening(opened));
         }
@@ -170,8 +175,8 @@ async fn graph_handshake_verifies_dependencies_across_digest_sorted_pages() {
         .unwrap();
     let seal_id = seal.id().unwrap();
     let mut statements = vec![TipStatement::Seal(seal.clone())];
-    for minimum in 1..=256 {
-        let opened = opening(&f, &seal, minimum);
+    for variant in 1..=256 {
+        let opened = opening(&f, &seal, variant);
         if opened.id().unwrap() < seal_id {
             statements.push(TipStatement::Opening(opened));
         }
@@ -206,7 +211,14 @@ async fn different_followed_tips_exchange_graph_union_and_refresh_peer_tips() {
     let genesis = a.followed_tip().await;
     let seal = seal(&f, 0);
     let successor = seal.successor().unwrap().unwrap();
-    let opened = opening(&f, &seal, 2);
+    let opened = opening_into(
+        &f,
+        &seal,
+        f.manifest
+            .verify_historic(f.publisher.public_key())
+            .unwrap()
+            .hash(),
+    );
     let branch = opened.tip().unwrap();
     let common = [
         movement(&f, "main", None, genesis),

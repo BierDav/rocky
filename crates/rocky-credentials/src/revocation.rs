@@ -39,7 +39,6 @@ pub struct Cut {
     pub identity: PublicKey,
     pub lane: PublicKey,
     pub statements: Vec<Head>,
-    pub acknowledgments: Option<Head>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Head {
@@ -51,7 +50,7 @@ pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v7",
+            "rocky.revocation.id.v8",
             &encode(self)?,
         ))
     }
@@ -97,7 +96,7 @@ pub struct SignedRevocation {
     attestation: Attestation,
     database: Option<crate::DatabaseContext>,
 }
-const SIGNED: &str = "rocky.revocation.v10";
+const SIGNED: &str = "rocky.revocation.v11";
 impl SignedRevocation {
     pub fn sign<'s>(
         statement: Revocation,
@@ -334,7 +333,6 @@ impl std::fmt::Debug for Derived {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Heads {
     pub statements: BTreeSet<Head>,
-    pub acknowledgments: BTreeSet<Head>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Ended {
@@ -350,7 +348,7 @@ struct ReplicatedAuthority {
     statements: Vec<SignedRevocation>,
     certificates: Vec<SignedCapability>,
 }
-const AUTHORITY_FORMAT: u32 = 7;
+const AUTHORITY_FORMAT: u32 = 8;
 impl From<RevocationSet> for ReplicatedAuthority {
     fn from(set: RevocationSet) -> Self {
         Self {
@@ -618,7 +616,6 @@ impl RevocationSet {
                 identity: signed.statement.issuer,
                 lane: certificate.capability.subject,
                 statements: Vec::new(),
-                acknowledgments: None,
             });
         let cuts = implicit
             .as_ref()
@@ -657,7 +654,6 @@ impl RevocationSet {
             }
             let heads = self.cuts.entry(key).or_default();
             heads.statements.extend(cut.statements.iter().copied());
-            heads.acknowledgments.extend(cut.acknowledgments);
         }
         self.statements.insert(id, signed);
         Ok(true)

@@ -30,7 +30,6 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
             tip: root,
             frontier: vec![],
             action: SealAction::Close,
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -42,7 +41,6 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
                 scope: lineage.domain,
                 seal: close.id().unwrap(),
                 schema: lineage.definition(version).hash(),
-                minimum_in_sync: 1,
             },
             lineage.publisher(),
         )
@@ -67,19 +65,7 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
             .unwrap(),
         )
     };
-    let minimum = TipStatement::GenesisLine(
-        rocky_credentials::SignedGenesisLine::sign(
-            rocky_credentials::GenesisLineStatement {
-                format: rocky_credentials::GENESIS_LINE_FORMAT,
-                scope: lineage.domain,
-                minimum_in_sync: 1,
-            },
-            lineage.publisher(),
-        )
-        .unwrap(),
-    );
     let mut statements = vec![
-        minimum.clone(),
         TipStatement::Seal(close.clone()),
         TipStatement::Opening(source_opening.clone()),
         TipStatement::Opening(target_opening),
@@ -87,7 +73,7 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         bookmark("main", target_tip),
     ];
     source
-        .publish_tip_statements(&[minimum, bookmark("dev", root)])
+        .publish_tip_statements(&[bookmark("dev", root)])
         .await
         .unwrap();
     source.follow_bookmark(lineage.domain, "dev").await.unwrap();
@@ -100,7 +86,6 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
             source: root,
             target: source_tip,
             from_version: 2,
-            coordinated: false,
             statements: vec![
                 TipStatement::Seal(close),
                 TipStatement::Opening(source_opening),
@@ -180,10 +165,7 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         .admit_migration_publication(descriptor.clone())
         .await
         .unwrap();
-    source
-        .release_uncoordinated_schema(publication)
-        .await
-        .unwrap();
+    source.release_committed_schema(publication).await.unwrap();
     let frames = identity_insert(
         &session(&source).await,
         "INSERT INTO items(key,title,note) VALUES('held','source3','exact source note')",
@@ -201,7 +183,6 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
             tip: source_tip,
             frontier: vec![],
             action: SealAction::Close,
-            recovery: None,
         },
         lineage.publisher(),
     )
@@ -212,7 +193,6 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
             scope: lineage.domain,
             seal: close_source.id().unwrap(),
             schema: lineage.definition(3).hash(),
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )

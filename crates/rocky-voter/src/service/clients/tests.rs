@@ -2,33 +2,6 @@ use super::*;
 use rocky_coordinator::protocol::{converse, nonce};
 use rocky_core::net::{BoxFuture, Failure, Incoming, Stream};
 
-#[test]
-fn a_busy_append_is_unavailable_since_admission_cannot_know_an_earlier_assignment() {
-    let log = TipLog {
-        scope: Scope {
-            mesh: MeshId([1; 16]),
-            app: rocky_core::AppId([5; 16]),
-            domain: rocky_core::DomainId([2; 16]),
-        },
-        tip: rocky_core::TipId([3; 32]),
-    };
-    let append = Operation::Coordinated {
-        log,
-        action: rocky_coordinator::coordinated::Action::Append {
-            expected: 0,
-            epoch: 1,
-            hash: [4; 32],
-            duration: 30,
-            sequence: 0,
-        },
-    };
-    assert_eq!(busy_refusal(&append), CoordinationError::Unavailable);
-    assert_eq!(
-        busy_refusal(&Operation::Usage),
-        CoordinationError::Backpressure
-    );
-}
-
 struct CallerOwned {
     incoming: tokio::sync::mpsc::UnboundedSender<Option<Incoming>>,
     accepted: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<Incoming>>>,

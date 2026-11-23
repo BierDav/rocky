@@ -325,7 +325,6 @@ async fn waiting_seal_and_invalidated_frontier_match_the_log() {
             action: SealAction::Continue {
                 schema: f.app().definition().hash(),
             },
-            recovery: None,
         },
         &f.publisher,
     )

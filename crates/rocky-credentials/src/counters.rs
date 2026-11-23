@@ -1,4 +1,5 @@
-use rocky_core::{Commitment, CoordinationError};
+use crate::CoordinationError;
+use rocky_core::Commitment;
 use serde::{Deserialize, Serialize};
 pub const MAX_NAME: usize = 64;
 pub const CLAIM_WINDOW: u64 = 7 * 86_400;

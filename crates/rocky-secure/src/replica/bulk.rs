@@ -368,7 +368,7 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
-    pub async fn release_uncoordinated_schema(&self, publication: Commitment) -> Result<(), Error> {
+    pub async fn release_committed_schema(&self, publication: Commitment) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
             inner
@@ -389,11 +389,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(());
         }
         let stage: SchemaStage = decode(bytes)?;
-        if state != "committed" || stage.coordinated {
-            return Err(denied("schema publication requires terminal finality"));
+        if state != "committed" {
+            return Err(denied("schema publication is not committed"));
         }
-        super::staging::refuse_uncoordinated_stage(&stage, inner.graph_for(stage.scope)?)?;
-        inner.release_and_reload(&stage, None).await?;
+        inner.release_and_reload(&stage).await?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }

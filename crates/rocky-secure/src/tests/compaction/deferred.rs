@@ -87,7 +87,6 @@ async fn a_deferred_scope_is_not_served_or_rewound_as_an_empty_kept_state() {
             scope: lineage.domain,
             seal: sealed,
             schema: lineage.definition(3).hash(),
-            minimum_in_sync: 1,
         },
         lineage.publisher(),
     )

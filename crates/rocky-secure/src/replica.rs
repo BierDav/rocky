@@ -26,7 +26,6 @@ pub(crate) mod checkpoint;
 mod compaction;
 mod crypto;
 pub use compaction::{CompactReport, CompactionStatus, FrameReplay, SealRebootstrap};
-mod coordinated;
 #[cfg(any(test, feature = "qualification"))]
 mod crash;
 #[cfg(any(test, feature = "qualification"))]
@@ -90,7 +89,7 @@ pub use tip_observation::{
     EarlierEpochWrites, PeerScopeFrontier, TipDevice, TipNodeObservation, TipObservation,
 };
 pub(crate) mod tips;
-pub use tips::{LineNode, TipStatement};
+pub use tips::{LineNode, MigrationPending, TipStatement};
 mod typed;
 mod workspace;
 
@@ -133,10 +132,6 @@ pub use checkpoint::{
     CoveredMark, CustodySummary, LogPosition, MAX_CHECKPOINT_LOGS, MAX_SEALED_OUTCOMES, PruneBlock,
     PruneReport, PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SealedOutcome,
     SealedOutcomes, SealedTransaction, SetSummary, SignedCheckpoint,
-};
-pub use coordinated::{
-    COORDINATOR_MISMATCH, COORDINATOR_REQUIRED, FinalityStall, Finalization, Refusal,
-    StagedCloseStatus,
 };
 pub use evict::EvictReport;
 pub use generation::{EngineStatus, GenerationStatus};
@@ -682,7 +677,6 @@ pub struct EncryptedReplica<A> {
     pub(super) inner: Arc<ReplicaLock<Inner<A>>>,
     queue: Arc<group::Queue>,
     revisions: watch::Receiver<u64>,
-    domain_log: Arc<std::sync::RwLock<Option<Arc<dyn rocky_core::DomainLog>>>>,
     node: PublicKey,
     lease_clock: sql::LeaseClock,
 }
@@ -692,7 +686,6 @@ impl<A> Clone for EncryptedReplica<A> {
             inner: self.inner.clone(),
             queue: self.queue.clone(),
             revisions: self.revisions.clone(),
-            domain_log: self.domain_log.clone(),
             node: self.node,
             lease_clock: self.lease_clock.clone(),
         }
@@ -702,18 +695,6 @@ impl<A> EncryptedReplica<A> {
     #[cfg(any(test, feature = "qualification"))]
     pub fn lock_measurements(&self) -> LockMeasurements {
         self.inner.measurements()
-    }
-    pub fn set_domain_log(&self, log: Option<Arc<dyn rocky_core::DomainLog>>) {
-        *self
-            .domain_log
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = log;
-    }
-    pub fn domain_log(&self) -> Option<Arc<dyn rocky_core::DomainLog>> {
-        self.domain_log
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 }
 pub(super) fn clock_value(clock: u64) -> Result<SqlValue, Error> {
@@ -736,8 +717,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         revoked_heads::SCHEMA,
         placements::SCHEMA,
         history::SCHEMA,
-        coordinated::statements::SCHEMA,
-        coordinated::relay::SCHEMA,
         bundle::SCHEMA,
         replay::SCHEMA,
         replay::BASE_SCHEMA,
@@ -1369,7 +1348,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             )),
             queue: Arc::default(),
             revisions,
-            domain_log: Arc::default(),
             node,
             lease_clock,
         };

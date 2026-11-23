@@ -12,7 +12,7 @@ license-file.workspace = true
 # Process-death probes inside SQLite COMMIT, omitted from packaged runtimes.
 qualification = []
 # Fault-injection hooks and scratch directories for the tests of dependent crates.
-test-support = ["rocky-platform/test-support"]
+test-support = ["rocky-platform/test-support", "rocky-sqlite/test-support"]
 
 [dependencies]
 rocky-core.workspace = true
@@ -27,6 +27,7 @@ web-time = "1"
 
 [dev-dependencies]
 rocky-platform = { workspace = true, features = ["test-support"] }
+rocky-sqlite = { workspace = true, features = ["test-support"] }
 # Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
 wasm-bindgen-test = "0.3"
 tokio = { version = "1", features = ["macros", "rt"] }

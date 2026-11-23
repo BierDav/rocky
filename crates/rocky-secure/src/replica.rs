@@ -754,6 +754,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
 }
 
 pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
+    let _recovered_once = rocky_storage::database::WalIndex::hold(path)?;
     rocky_storage::database::check_file_format(path).await?;
     if !rocky_platform::fs::len(path).is_ok_and(|len| len > 0) {
         return Ok(());
@@ -985,10 +986,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         check_config_with_families(&config, &manifest, &families)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
         config.keys = current;
+        let wal_index = rocky_storage::database::WalIndex::hold(path.as_ref())?;
         check_replica_format(path.as_ref()).await?;
         let (owner, raw) = DatabaseOwner::open(path.as_ref()).await?;
         let conn = Arc::new(ScopedConnection::new(raw, None, SCHEMA));
         configure(&conn).await?;
+        rows(&conn, "PRAGMA main.wal_checkpoint(TRUNCATE)").await?;
+        drop(wal_index);
         let mut identity = generation::identity(
             rocky_credentials::genesis_tip(manifest.hash()),
             config.node.public_key(),

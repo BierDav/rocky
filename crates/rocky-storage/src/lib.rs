@@ -11,6 +11,8 @@ pub mod sql;
 pub mod sqlite;
 pub mod statement;
 pub mod storage;
+#[cfg(all(any(test, feature = "test-support"), not(target_family = "wasm")))]
+pub use rocky_sqlite::wal_recoveries;
 pub use storage::{Error, FailureReason, StorageFailure};
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;

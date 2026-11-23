@@ -1505,6 +1505,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let directory = setup.directory.clone();
     predecessor.departed(&directory).await?;
     let replica_path = directory.join(crate::enrollment::REPLICA_FILE);
+    let wal_index = rocky_storage::database::WalIndex::hold(&replica_path)?;
     if matches!(setup.install, Install::Installed) && Settings::exists(&replica_path)? {
         Settings::load(&replica_path)?;
     }
@@ -1538,7 +1539,10 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let fresh = setup.install.unwinds_on_failure() && !Settings::exists(&path)?;
     let (mut settings, link) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
-        Err(error) if fresh => return Err(unwind(&directory, None, error)),
+        Err(error) if fresh => {
+            drop(wal_index);
+            return Err(unwind(&directory, None, error));
+        }
         Err(error) => return Err(error),
     };
     let startup_identity = setup.identity.take();
@@ -1631,6 +1635,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         Ok::<_, Failure>((domain, replica))
     }
     .await;
+    drop(wal_index);
     let (domain, replica) = match opened {
         Ok(opened) => opened,
         Err(error) => {
@@ -2252,6 +2257,49 @@ mod tests {
             format!("a reopen racing the dropped database's teardown failed: {error}").into()
         })?;
         database.close().await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reopening_a_crashed_directory_recovers_its_wal_once() -> Result<(), Failure> {
+        rocky_storage::wal_recoveries::watch();
+        let root = rocky_platform::fs::Scratch::new().await;
+        let (live, crashed) = (root.path().join("live"), root.path().join("crashed"));
+        let open = |directory| Open {
+            directory,
+            schema: held_schema(),
+            secrets: None,
+            identity: None,
+            network: None,
+        };
+        let created = Database::create(open(&live), None)?.database;
+        fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                let target = to.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    copy(&entry.path(), &target)?;
+                } else if entry.file_name() != "rocky.sqlite-shm" {
+                    std::fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        }
+        copy(&live, &crashed)?;
+        created.close().await?;
+        let replica = crashed.join("rocky.sqlite");
+        assert!(
+            rocky_platform::fs::len(crashed.join("rocky.sqlite-wal"))? > 0,
+            "the crash left frames to recover"
+        );
+        let reopened = Database::open(open(&crashed))?.database;
+        assert_eq!(
+            rocky_storage::wal_recoveries::of(&replica),
+            1,
+            "settings, format checks and the replica share one recovery"
+        );
+        reopened.close().await
     }
 
     #[cfg(feature = "qualification")]

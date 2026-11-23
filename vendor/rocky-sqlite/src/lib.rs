@@ -13,6 +13,9 @@ mod shim;
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 pub use shim::WasmOsCallback;
 
+#[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+pub mod wal_recoveries;
+
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

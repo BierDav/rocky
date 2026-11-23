@@ -1125,6 +1125,47 @@ async fn a_wal_over_its_limit_truncates_after_a_running_passive_checkpoint() {
     );
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn reopening_after_a_crash_recovers_the_wal_once_and_truncates_it() {
+    rocky_storage::wal_recoveries::watch();
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let key = PrivateKey::new();
+    let (live, crashed) = (dir.path().join("live"), dir.path().join("crashed"));
+    rocky_platform::fs::create_dir_all(&live).unwrap();
+    rocky_platform::fs::create_dir_all(&crashed).unwrap();
+    let replica = open(&f, &live.join("replica.db"), &key).await;
+    for row in 1..=64 {
+        replica
+            .author_buffered([row; 32], insert(&f, row), vec![])
+            .await
+            .unwrap();
+    }
+    replica.flush().await.unwrap();
+    for file in ["replica.db", "replica.db-wal"] {
+        rocky_platform::fs::copy(live.join(file), crashed.join(file)).unwrap();
+    }
+    let path = crashed.join("replica.db");
+    let wal = crashed.join("replica.db-wal");
+    let crashed_wal = rocky_platform::fs::len(&wal).unwrap();
+    assert!(crashed_wal > 0, "the crash left frames to recover");
+    assert_eq!(rocky_storage::wal_recoveries::of(&path), 0);
+    let reopened = open(&f, &path, &key).await;
+    assert_eq!(
+        rocky_storage::wal_recoveries::of(&path),
+        1,
+        "the format checks, the owner and the replica's connections share one recovery"
+    );
+    let opened_wal = rocky_platform::fs::len(&wal).unwrap();
+    assert!(
+        opened_wal < crashed_wal / 4,
+        "the open truncates the recovered frames and keeps only its own: {opened_wal} of {crashed_wal} bytes"
+    );
+    drop(reopened);
+    drop(replica);
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
     let f = Fixture::new();

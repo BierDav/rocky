@@ -23,6 +23,10 @@ all = { level = "deny", priority = -1 }
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 
+[features]
+# Counts SQLite's WAL recoveries per file through its error log, for tests of dependent crates.
+test-support = []
+
 [dependencies]
 rusqlite = { workspace = true, features = ["modern_sqlite"] }
 

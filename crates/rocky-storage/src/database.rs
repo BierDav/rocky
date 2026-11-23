@@ -21,6 +21,7 @@ impl DatabaseOwner {
             return Err(Error::Incompatible("an on-disk file is required".into()));
         }
         fs::prepare(path).await.map_err(Error::Io)?;
+        let wal_index = WalIndex::hold(path)?;
         check_file_format(path).await?;
         let owner = Self {
             path: path.to_path_buf(),
@@ -32,13 +33,33 @@ impl DatabaseOwner {
         };
         check_file_format(path).await?;
         let connection = owner.connect()?;
-        if !has_data(path) {
+        if has_data(path) {
+            connection.rows("SELECT name FROM sqlite_schema LIMIT 0", ())?;
+        } else {
             connection.execute(INCREMENTAL_AUTO_VACUUM, ()).await?;
             connection
                 .execute(format!("PRAGMA application_id={FILE_FORMAT}"), ())
                 .await?;
         }
+        drop(wal_index);
         Ok((owner, connection))
+    }
+}
+
+pub struct WalIndex {
+    _recovered: Option<sqlite::Connection>,
+}
+impl WalIndex {
+    pub fn hold(path: &Path) -> Result<Self, Error> {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        let frames_to_recover = fs::len(Path::new(&wal)).is_ok_and(|len| len > 0);
+        if !frames_to_recover || !has_data(path) {
+            return Ok(Self { _recovered: None });
+        }
+        Ok(Self {
+            _recovered: Some(sqlite::Connection::open_read_only(path)?),
+        })
     }
 }
 
@@ -187,6 +208,42 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         check_file_format(&path).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn an_owner_recovers_a_crashed_wal_once_across_its_checks() {
+        crate::wal_recoveries::watch();
+        let directory = tempfile::tempdir().unwrap();
+        let (live, crashed) = (
+            directory.path().join("live"),
+            directory.path().join("crashed"),
+        );
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&crashed).unwrap();
+        let (owner, conn) = DatabaseOwner::open(&live.join("file.sqlite"))
+            .await
+            .unwrap();
+        conn.run_now("PRAGMA journal_mode=wal").unwrap();
+        conn.run_now("PRAGMA wal_autocheckpoint=0").unwrap();
+        conn.run_now("CREATE TABLE sentinel(value TEXT)").unwrap();
+        conn.run_now("INSERT INTO sentinel VALUES('retained')")
+            .unwrap();
+        for file in ["file.sqlite", "file.sqlite-wal"] {
+            std::fs::copy(live.join(file), crashed.join(file)).unwrap();
+        }
+        drop((conn, owner));
+        let path = crashed.join("file.sqlite");
+        let (owner, conn) = DatabaseOwner::open(&path).await.unwrap();
+        assert_eq!(
+            crate::wal_recoveries::of(&path),
+            1,
+            "both format checks and the owner's connection share one recovery"
+        );
+        assert_eq!(
+            conn.rows("SELECT value FROM sentinel", ()).unwrap(),
+            vec![vec![sqlite::Value::Text("retained".into())]]
+        );
+        assert_eq!(crate::wal_recoveries::of(&path), 1);
+        drop((conn, owner));
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_new_file_reopens_with_the_current_tag() {

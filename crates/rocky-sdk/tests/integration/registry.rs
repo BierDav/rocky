@@ -802,10 +802,15 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let filled = filled.elapsed();
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation).await?;
     assert_eq!(identities(&a).await.len(), 255);
-    synced(&b).await?;
-    synced(&a).await?;
 
-    online(&a, false).await;
+    a.close().await;
+    drop(a);
+    let unreachable_so_only_these_calls_can_write = None;
+    let a = Device::new(
+        open(&root.join("a"), unreachable_so_only_these_calls_can_write)
+            .open()
+            .await?,
+    )?;
     let before = (
         common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
@@ -821,7 +826,13 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     );
     assert_eq!(before, after);
     assert_eq!(identities(&a).await.len(), 255);
-    online(&a, true).await;
+    a.close().await;
+    drop(a);
+    let a = Device::new(
+        open(&root.join("a"), Some(memory(&hub, "a")))
+            .open()
+            .await?,
+    )?;
 
     let start = Instant::now();
     synced(&b).await?;

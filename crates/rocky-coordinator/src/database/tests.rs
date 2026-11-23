@@ -4,24 +4,20 @@ use crate::{
     counters::Lookup,
 };
 use p2panda_core::PrivateKey;
-use rocky_sdk::{Access, Open, Opened, RootKey, Schema, SqlValue};
+use rocky_sdk::{Access, Affinity, Column, Configuration, Schema, SqlValue, Table};
 use std::path::Path;
 
-const SCHEMA: &str = r#"{"application":"billing","version":1,"format":7,"tables":[{"name":"invoices","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"number","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
-
-fn schema() -> &'static Schema {
-    static PARSED: std::sync::LazyLock<Schema> =
-        std::sync::LazyLock::new(|| Schema::parse(SCHEMA).unwrap());
-    &PARSED
-}
-fn open(directory: &Path) -> Open<'_> {
-    Open {
-        directory,
-        schema: schema(),
-        secrets: None,
-        identity: None,
-        network: None,
-    }
+fn open(directory: &Path) -> Configuration {
+    let schema = Schema::builder("billing", 1)
+        .table(
+            Table::replayed("invoices")
+                .column(Column::new("key", Affinity::Text).required())
+                .column(Column::new("number", Affinity::Integer).required())
+                .primary_key(["key"]),
+        )
+        .build()
+        .unwrap();
+    Configuration::new(directory, &schema).unwrap()
 }
 fn invoices() -> Name {
     Name::new("invoices").unwrap()
@@ -31,14 +27,16 @@ struct Office {
     _directory: tempfile::TempDir,
     service: Service,
     transport: Arc<CallerOwned>,
-    publisher: Arc<Database>,
+    publisher: Database,
 }
 impl Office {
     async fn open() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let Opened { database, root, .. } =
-            Database::create(open(&directory.path().join("publisher")), None).unwrap();
-        let root: RootKey = root.unwrap();
+        let created = open(&directory.path().join("publisher"))
+            .create()
+            .await
+            .unwrap();
+        let (database, root) = (created.database, created.root);
         let service = Service::serving(None, &root, database.scope(), "billing").await;
         let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
         Self {
@@ -48,28 +46,24 @@ impl Office {
             publisher: database,
         }
     }
-    fn join(&self, name: &str, uri: &str) -> Arc<Database> {
-        Database::join(open(&self._directory.path().join(name)), uri)
-            .unwrap()
-            .database
-    }
-    async fn person(&self, name: &str, access: Access) -> Arc<Database> {
-        let invitation = self
-            .publisher
-            .session()
-            .provision(access, None)
+    async fn join(&self, name: &str, uri: &str) -> Database {
+        open(&self._directory.path().join(name))
+            .join(uri)
             .await
-            .unwrap();
-        self.join(name, &invitation.uri)
+            .unwrap()
     }
-    async fn writer(&self, name: &str) -> Arc<Database> {
+    async fn person(&self, name: &str, access: Access) -> Database {
+        let invitation = self.publisher.provision(access, None).await.unwrap();
+        self.join(name, &invitation.uri).await
+    }
+    async fn writer(&self, name: &str) -> Database {
         self.person(name, Access::Full).await
     }
     fn counters(&self, database: &Database) -> Counters {
         let client = self
             .service
             .client_on(&PrivateKey::new(), self.transport.clone());
-        Counters::connect(database, Arc::new(client))
+        Counters::new(database.clone(), Arc::new(client))
     }
     fn offline(&self, offline: bool) {
         self.transport.refuse_connections(offline);
@@ -168,13 +162,8 @@ async fn a_removed_person_or_a_reader_never_claims() {
         "a reader still reads the counter"
     );
 
-    let removed = writer.session().device_credential().await.unwrap().identity;
-    office
-        .publisher
-        .session()
-        .revoke_identity(removed)
-        .await
-        .unwrap();
+    let removed = writer.device_credential().await.unwrap().identity;
+    office.publisher.revoke_identity(removed).await.unwrap();
     publisher.share_revocations().await.unwrap();
     assert!(denied(
         writing

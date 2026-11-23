@@ -45,7 +45,7 @@ fn malformed(error: serde_json::Error) -> SchemaError {
     invalid(error.to_string())
 }
 impl Schema {
-    pub fn parse(json: &str) -> Result<Self, SchemaError> {
+    pub(crate) fn parse(json: &str) -> Result<Self, SchemaError> {
         if json.len() > rocky_core::MAX_DEFINITION_BYTES {
             return Err(invalid("schema quota"));
         }
@@ -160,12 +160,6 @@ impl Schema {
             roles: self.roles.clone(),
         }
     }
-    pub(crate) fn names(&self) -> Vec<&str> {
-        self.tables
-            .iter()
-            .map(|table| table.name.as_str())
-            .collect()
-    }
 }
 
 pub struct SchemaBuilder(Schema);
@@ -211,7 +205,7 @@ impl SchemaBuilder {
         self
     }
     pub fn build(self) -> Result<Schema, SchemaError> {
-        Schema::parse(&serde_json::to_string(&self.0).map_err(malformed)?)
+        self.0.validated()
     }
 }
 
@@ -382,8 +376,14 @@ impl Column {
         self
     }
     #[must_use]
-    pub fn default(mut self, value: impl Into<serde_json::Value>) -> Self {
-        self.0.default = Some(value.into());
+    pub fn default(mut self, value: impl crate::IntoSqlValue) -> Self {
+        self.0.default = Some(match value.into_sql_value() {
+            rocky_core::SqlValue::Null => serde_json::Value::Null,
+            rocky_core::SqlValue::Integer(value) => value.into(),
+            rocky_core::SqlValue::Real(value) => value.get().into(),
+            rocky_core::SqlValue::Text(value) => value.into(),
+            rocky_core::SqlValue::Blob(value) => value.into(),
+        });
         self
     }
     pub fn definition(self) -> rocky_core::ColumnDefinition {

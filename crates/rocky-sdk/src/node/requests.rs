@@ -2,27 +2,14 @@ use super::*;
 use crate::request::Request;
 
 impl Node {
-    pub(crate) async fn request(&self, request: Request, client: Result<Arc<Client>, Failure>) {
-        let client = match client {
-            Ok(client) => client,
-            Err(error) => {
-                request.fail(error);
-                return;
-            }
-        };
-        if let Err(error) = self.admit_request(request.kind()).await {
+    pub(crate) async fn request(&self, request: Request) {
+        if let Err(error) = self.admit_request(&request).await {
             request.fail(error);
             return;
         }
         match request {
             Request::WithIdentity(loan, request) => {
-                Box::pin(loan.supply(self.request(*request, Ok(client)))).await;
-            }
-            Request::Domain(reply) => {
-                let _ = reply.send(self.domain_info().await);
-            }
-            Request::Generation(reply) => {
-                let _ = reply.send(self.generation().await);
+                Box::pin(loan.supply(self.request(*request))).await;
             }
             Request::Identities(reply) => {
                 let _ = reply.send(self.identities().await);
@@ -57,7 +44,7 @@ impl Node {
                 let _ = reply.send(Ok(self.activity.after(a)));
             }
             Request::ActivityNext(a, mut reply) => {
-                let result = tokio::select! { result = self.next_activity(&client, a) => result, () = reply.closed() => return, };
+                let result = tokio::select! { result = self.next_activity(a) => result, () = reply.closed() => return, };
                 let _ = reply.send(result);
             }
             Request::PartitionAddress(a, b, reply) => {
@@ -87,62 +74,18 @@ impl Node {
             Request::EvictPartition(a, b, reply) => {
                 let _ = reply.send(self.evict_partition(&a, &b).await);
             }
-            Request::DiscoveryTopics(reply) => {
-                let _ = reply.send(
-                    async {
-                        let time = now()?;
-                        let (current, previous) = match self.settings.try_lock() {
-                            Ok(settings) => settings.advance_discovery_topics(&self.vault, time)?,
-                            Err(_) => self
-                                .settings
-                                .published()
-                                .discovery_topics(&self.vault, time)?,
-                        };
-                        Ok(crate::DiscoveryTopics { current, previous })
-                    }
-                    .await,
-                );
-            }
-            Request::ResolveContact(node, reply) => {
-                let _ = reply.send(
-                    async {
-                        let attached = self.network.read().await;
-                        let transport = &*attached
-                            .as_ref()
-                            .ok_or(ServiceError::NetworkRequired("contact"))?
-                            .transport;
-                        self.request_contact(transport, node).await
-                    }
-                    .await,
-                );
-            }
-            Request::Network(reply) => {
-                let _ = reply.send(self.observed_network().await);
-            }
-            Request::Peers(reply) => {
-                let _ = reply.send(self.observed_network().await.map(|network| network.peers));
-            }
             Request::Status(reply) => {
                 let _ = reply.send(self.observed_status().await);
             }
             Request::StatusAfter(after, mut reply) => {
-                let result = tokio::select! { result = self.readiness_after(&client, &after) => result, () = reply.closed() => return, };
+                let result = tokio::select! { result = self.readiness_after(&after) => result, () = reply.closed() => return, };
                 let _ = reply.send(result);
             }
             Request::Sync(reply) => {
                 let _ = reply.send(self.sync_once().await);
             }
-            Request::NetworkingEnabled(enabled, reply) => {
-                let _ = reply.send(self.set_networking_enabled(enabled).await);
-            }
-            Request::AutomaticSync(enabled, reply) => {
-                let _ = reply.send(self.set_automatic_sync(enabled).await);
-            }
-            Request::Foreground(reply) => {
-                let _ = reply.send(self.enter_foreground().await);
-            }
-            Request::Background(reply) => {
-                let _ = reply.send(self.enter_background().await);
+            Request::SetSync(mode, reply) => {
+                let _ = reply.send(self.set_sync(mode).await);
             }
             Request::Logout(purge, reply) => {
                 let _ = reply.send(self.logout(purge).await);
@@ -201,7 +144,7 @@ impl Node {
                 let _ = reply.send(self.revoke_identity(identity, mode, &root, keep).await);
             }
             Request::Info(reply) => {
-                let _ = reply.send(self.session_info().await);
+                let _ = reply.send(self.device_info().await);
             }
             Request::PartitionCustody(scope, policy, reply) => {
                 let result = self
@@ -253,18 +196,14 @@ impl Node {
         })
     }
 
-    async fn next_activity(
-        &self,
-        client: &Client,
-        after: u64,
-    ) -> Result<crate::ActivityPage, Failure> {
-        let mut closing = client.closing.subscribe();
+    async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, Failure> {
+        let mut closing = self.closing.subscribe();
         self.activity
             .next(after, &mut closing)
             .await
-            .ok_or_else(|| ServiceError::Closed("session").into())
+            .ok_or_else(|| ServiceError::Closed("database").into())
     }
-    pub(super) async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
+    pub(super) async fn sync_once(&self) -> Result<crate::SyncReport, Failure> {
         let attached = self.network.read().await;
         let transport = attached.as_ref().map(|link| &*link.transport);
         let work = async {
@@ -279,6 +218,29 @@ impl Node {
         tokio::select! {
             result = work => result,
             _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => Err(ServiceError::Closed("network service").into()),
+        }
+    }
+    pub(super) async fn set_sync(&self, mode: crate::SyncMode) -> Result<(), Failure> {
+        match mode {
+            crate::SyncMode::Off => {
+                self.set_automatic_sync(false).await?;
+                self.set_networking_enabled(false).await
+            }
+            crate::SyncMode::Manual => {
+                self.set_networking_enabled(true).await?;
+                self.enter_foreground().await?;
+                self.set_automatic_sync(false).await
+            }
+            crate::SyncMode::Foreground => {
+                self.set_networking_enabled(true).await?;
+                self.enter_foreground().await?;
+                self.set_automatic_sync(true).await
+            }
+            crate::SyncMode::Background => {
+                self.set_networking_enabled(true).await?;
+                self.set_automatic_sync(true).await?;
+                self.enter_background().await
+            }
         }
     }
     pub(super) async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {

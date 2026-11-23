@@ -16,24 +16,15 @@ const PAGE_ROWS: usize = 256;
 const PAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULTS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Durability {
-    Buffered,
-    Flushed,
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectionOptions {
-    pub read_only: bool,
-    pub durability: Durability,
-    pub transaction_timeout: Option<std::time::Duration>,
+pub(crate) struct ConnectionOptions {
+    pub(crate) read_only: bool,
+    pub(crate) transaction_timeout: Option<std::time::Duration>,
 }
 impl ConnectionOptions {
     fn sql(&self) -> rocky_secure::SqlOptions {
         let mut options = rocky_secure::SqlOptions {
-            acknowledge: match self.durability {
-                Durability::Buffered => rocky_secure::CommitClass::Buffered,
-                Durability::Flushed => rocky_secure::CommitClass::Flushed,
-            },
+            acknowledge: rocky_secure::CommitClass::Buffered,
             ..Default::default()
         };
         if let Some(timeout) = self.transaction_timeout {
@@ -44,10 +35,10 @@ impl ConnectionOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Page {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<SqlValue>>,
-    pub done: bool,
+pub(crate) struct Page {
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<Vec<SqlValue>>,
+    pub(crate) done: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -428,9 +419,6 @@ impl State {
     pub(crate) fn finish(&mut self, statement: u64) {
         self.results.remove(&statement);
     }
-    pub(crate) fn in_transaction(&self) -> bool {
-        self.active()
-    }
     pub(crate) fn committed(&self) -> Option<rocky_core::TransactionToken> {
         self.committed
     }
@@ -670,7 +658,7 @@ impl State {
 
 const MAX_IDLE_CONNECTIONS: usize = 4;
 
-type IdlePool = BTreeMap<(bool, bool), Vec<Arc<Mutex<State>>>>;
+type IdlePool = BTreeMap<bool, Vec<Arc<Mutex<State>>>>;
 
 impl State {
     fn recycle(&mut self) -> bool {
@@ -697,14 +685,13 @@ pub(crate) struct Registry {
     next: std::sync::atomic::AtomicU64,
 }
 impl Registry {
-    fn pool_key(options: &ConnectionOptions) -> Option<(bool, bool)> {
-        if options.transaction_timeout.is_none() {
-            Some((options.read_only, options.durability == Durability::Flushed))
-        } else {
-            None
-        }
+    fn pool_key(options: &ConnectionOptions) -> Option<bool> {
+        options
+            .transaction_timeout
+            .is_none()
+            .then_some(options.read_only)
     }
-    fn return_idle(&self, key: (bool, bool), entry: Arc<Mutex<State>>) {
+    fn return_idle(&self, key: bool, entry: Arc<Mutex<State>>) {
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
@@ -763,7 +750,7 @@ impl Registry {
         sql: String,
         params: Vec<SqlValue>,
     ) -> Result<(Page, Option<u64>), Failure> {
-        let key = (true, false);
+        let key = true;
         let entry = match self
             .idle
             .lock()
@@ -777,7 +764,6 @@ impl Registry {
             None => {
                 let options = ConnectionOptions {
                     read_only: true,
-                    durability: Durability::Buffered,
                     transaction_timeout: None,
                 };
                 Arc::new(Mutex::new(State::new(node, options).await?))
@@ -861,12 +847,14 @@ pub(crate) enum Call {
     Finish {
         statement: u64,
     },
+    #[cfg(test)]
     InTransaction,
     Committed,
     Begin,
 }
 pub(crate) enum Reply {
     Page(Page),
+    #[cfg(test)]
     Flag(bool),
     Token(Option<rocky_core::TransactionToken>),
     Done,
@@ -887,7 +875,8 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
             state.finish(statement);
             Ok(Reply::Done)
         }
-        Call::InTransaction => Ok(Reply::Flag(state.in_transaction())),
+        #[cfg(test)]
+        Call::InTransaction => Ok(Reply::Flag(state.active())),
         Call::Committed => Ok(Reply::Token(state.committed())),
         Call::Begin => state
             .begin_identified()

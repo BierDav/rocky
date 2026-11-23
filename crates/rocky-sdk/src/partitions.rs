@@ -1,4 +1,4 @@
-use crate::{Failure, Session, SqlValue, request::Request};
+use crate::{Database, Failure, SqlValue, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -47,7 +47,7 @@ pub struct PartitionShare {
     pub envelopes: Vec<PartitionEnvelope>,
     pub sender: Option<CredentialChain>,
 }
-impl Session {
+impl Database {
     pub async fn set_partition_custody(
         &self,
         scope: rocky_core::ResourceScope,
@@ -137,7 +137,7 @@ pub struct PartitionSelection {
     pub name: Option<rocky_core::PartitionName>,
     pub omit: BTreeSet<String>,
 }
-impl Session {
+impl Database {
     pub async fn partition_address(
         &self,
         table: &str,

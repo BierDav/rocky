@@ -1,78 +1,6 @@
 use rocky_credentials::PublicKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Domain,
-    Generation,
-    Identities,
-    IdentityLabel,
-    HeldChanges,
-    DropHeld,
-    Retention,
-    RetentionLimits,
-    TrustedStaleAfter,
-    Activity,
-    ActivityNext,
-    PartitionAddress,
-    PartitionComplete,
-    PartitionCreate,
-    PartitionInstall,
-    PartitionStatus,
-    PartitionRegister,
-    PartitionSubscribe,
-    PartitionUnsubscribe,
-    PartitionEvict,
-    DiscoveryTopics,
-    ContactRequest,
-    Network,
-    Peers,
-    Status,
-    StatusNext,
-    Sync,
-    NetworkingControl,
-    SyncStart,
-    NetworkForeground,
-    NetworkBackground,
-    Logout,
-    #[cfg(any(test, feature = "test-support"))]
-    Tips,
-    Trust,
-    Provision,
-    Invitations,
-    Renew,
-    Discovered,
-    ConfirmLink,
-    Contact,
-    PeerAdd,
-    PeerRemove,
-    Unlink,
-    Revoke,
-    Session,
-    PartitionRole,
-    PartitionNext,
-    PartitionShare,
-    Extension,
-    PartitionGrant,
-}
-impl Kind {
-    pub(crate) fn waits(self) -> bool {
-        matches!(self, Self::StatusNext | Self::ActivityNext)
-    }
-    pub(crate) fn allowed_after_logout(self) -> bool {
-        matches!(
-            self,
-            Self::Domain
-                | Self::Status
-                | Self::Activity
-                | Self::ActivityNext
-                | Self::StatusNext
-                | Self::Network
-                | Self::Peers
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lifecycle {
     Active,
     LoggedOut { purge_on_close: bool },
@@ -96,8 +24,6 @@ use tokio::sync::oneshot;
 type Reply<T> = oneshot::Sender<Result<T, crate::Failure>>;
 
 pub(crate) enum Request {
-    DiscoveryTopics(Reply<crate::DiscoveryTopics>),
-    ResolveContact(rocky_core::NodeId, Reply<Option<PublicKey>>),
     PartitionAddress(String, Vec<crate::SqlValue>, Reply<crate::PartitionAddress>),
     PartitionComplete(String, Reply<bool>),
     CreatePartition(crate::PartitionTarget, Reply<crate::PreparedPartition>),
@@ -126,8 +52,6 @@ pub(crate) enum Request {
         Reply<crate::PartitionEviction>,
     ),
 
-    Domain(Reply<crate::DomainInfo>),
-    Generation(Reply<crate::GenerationStatus>),
     Identities(Reply<Vec<crate::IdentityInfo>>),
     IdentityLabel(PublicKey, Vec<u8>, Reply<()>),
     HeldChanges(Reply<Vec<crate::HeldChange>>),
@@ -147,15 +71,10 @@ pub(crate) enum Request {
     ActivityNext(u64, Reply<crate::ActivityPage>),
 
     WithIdentity(crate::identities::Loan, Box<Request>),
-    Network(Reply<crate::NetworkStatus>),
-    Peers(Reply<Vec<crate::Peer>>),
     Status(Reply<crate::DatabaseStatus>),
     StatusAfter(String, Reply<crate::DatabaseStatus>),
-    Sync(Reply<crate::ReconciliationReport>),
-    NetworkingEnabled(bool, Reply<()>),
-    AutomaticSync(bool, Reply<()>),
-    Foreground(Reply<()>),
-    Background(Reply<()>),
+    Sync(Reply<crate::SyncReport>),
+    SetSync(crate::SyncMode, Reply<()>),
     Logout(bool, Reply<()>),
     #[cfg(any(test, feature = "test-support"))]
     Tips(crate::testing::Probe),
@@ -192,7 +111,7 @@ pub(crate) enum Request {
         bool,
         Reply<crate::RevocationResult>,
     ),
-    Info(Reply<crate::SessionInfo>),
+    Info(Reply<crate::DeviceInfo>),
     ReplicaRole(crate::ReplicaRoleConfig, Reply<()>),
     PartitionCustody(
         rocky_core::ResourceScope,
@@ -223,79 +142,20 @@ pub(crate) enum Request {
     SignExtension(Vec<u8>, Reply<rocky_credentials::Signature>),
 }
 impl Request {
-    pub(crate) fn kind(&self) -> Kind {
+    pub(crate) fn allowed_after_logout(&self) -> bool {
         match self {
-            Self::WithIdentity(_, request) => request.kind(),
-            Self::Domain(..) => Kind::Domain,
-            Self::Generation(..) => Kind::Generation,
-            Self::Identities(..) => Kind::Identities,
-            Self::IdentityLabel(..) => Kind::IdentityLabel,
-            Self::HeldChanges(..) => Kind::HeldChanges,
-            Self::DropHeld(..) => Kind::DropHeld,
-            Self::Retention(..) => Kind::Retention,
-            Self::RetentionLimits(..) => Kind::RetentionLimits,
-            Self::TrustedStaleAfter(..) => Kind::TrustedStaleAfter,
-            Self::Activity(..) => Kind::Activity,
-            Self::ActivityNext(..) => Kind::ActivityNext,
-            Self::PartitionAddress(..) => Kind::PartitionAddress,
-            Self::PartitionComplete(..) => Kind::PartitionComplete,
-            Self::CreatePartition(..) => Kind::PartitionCreate,
-            Self::InstallPartition(..) => Kind::PartitionInstall,
-            Self::PartitionStatus(..) => Kind::PartitionStatus,
-            Self::RegisterPartition(..) => Kind::PartitionRegister,
-            Self::HoldPartition(..) => Kind::PartitionSubscribe,
-            Self::ReleasePartition(..) => Kind::PartitionUnsubscribe,
-            Self::EvictPartition(..) => Kind::PartitionEvict,
-            Self::DiscoveryTopics(..) => Kind::DiscoveryTopics,
-            Self::ResolveContact(..) => Kind::ContactRequest,
-            Self::Network(..) => Kind::Network,
-            Self::Peers(..) => Kind::Peers,
-            Self::Status(..) => Kind::Status,
-            Self::StatusAfter(..) => Kind::StatusNext,
-            Self::Sync(..) => Kind::Sync,
-            Self::NetworkingEnabled(..) => Kind::NetworkingControl,
-            Self::AutomaticSync(..) => Kind::SyncStart,
-            Self::Foreground(..) => Kind::NetworkForeground,
-            Self::Background(..) => Kind::NetworkBackground,
-            Self::Logout(..) => Kind::Logout,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Tips(..) => Kind::Tips,
-            Self::Trust(..) | Self::InstallTrust(..) => Kind::Trust,
-            Self::Provision(..) => Kind::Provision,
-            Self::Invite(..) | Self::WithdrawInvitation(..) | Self::OpenInvitations(..) => {
-                Kind::Invitations
-            }
-            Self::Renew(..) => Kind::Renew,
-            Self::Discovered(..) => Kind::Discovered,
-            Self::ConfirmLink(..) => Kind::ConfirmLink,
-            Self::Contact(..) => Kind::Contact,
-            Self::AddPeer(..) => Kind::PeerAdd,
-            Self::RemovePeer(..) => Kind::PeerRemove,
-            Self::DeviceRevocationReceipt(..) => Kind::Status,
-            Self::Unlink(..) => Kind::Unlink,
-            Self::RevokeIdentity(..) => Kind::Revoke,
-            Self::Info(..) => Kind::Session,
-            Self::ReplicaRole(..) | Self::PartitionCustody(..) => Kind::PartitionRole,
-            Self::NextPartition(..) => Kind::PartitionNext,
-            Self::PartitionRecipients(..) => Kind::PartitionStatus,
-            Self::SharePartition(..) => Kind::PartitionShare,
-            Self::GrantPartition(..) => Kind::PartitionGrant,
-            Self::IdentityForNode(..) => Kind::Identities,
-            Self::DeviceCredential(..) | Self::SignExtension(..) => Kind::Extension,
+            Self::WithIdentity(_, request) => request.allowed_after_logout(),
+            Self::Status(..)
+            | Self::StatusAfter(..)
+            | Self::DeviceRevocationReceipt(..)
+            | Self::Activity(..)
+            | Self::ActivityNext(..) => true,
+            _ => false,
         }
-    }
-    pub(crate) fn waits(&self) -> bool {
-        self.kind().waits()
     }
     pub(crate) fn fail(self, error: crate::Failure) {
         match self {
             Self::WithIdentity(_, request) => request.fail(error),
-            Self::Domain(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Generation(reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::Identities(reply) => {
                 let _ = reply.send(Err(error));
             }
@@ -350,18 +210,6 @@ impl Request {
             Self::EvictPartition(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::DiscoveryTopics(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::ResolveContact(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Network(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Peers(reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::Status(reply) => {
                 let _ = reply.send(Err(error));
             }
@@ -371,16 +219,7 @@ impl Request {
             Self::Sync(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::NetworkingEnabled(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::AutomaticSync(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Foreground(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Background(reply) => {
+            Self::SetSync(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Logout(_, reply) => {

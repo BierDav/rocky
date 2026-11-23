@@ -50,17 +50,16 @@ async fn a_browser_node_syncs_with_a_native_node_over_a_relay() -> Result<(), Fa
     };
     let configuration =
         Configuration::new(directory.path(), &schema)?.network(Network::Owned(Arc::new(network)));
-    let db = configuration.join(invitation).await?.database;
-    let session = db.session();
-    session.set_automatic_sync(false).await?;
-    session.sync_once().await?;
+    let db = configuration.join(invitation).await?;
+    db.set_sync(rocky_sdk::SyncMode::Manual).await?;
+    db.sync_now().await?;
     assert_eq!(bodies(&db, "from %").await?, ["from native"]);
 
     note(&db, "from browser").await?;
-    session.sync_once().await?;
+    db.sync_now().await?;
     db.close().await?;
 
-    let db = configuration.open().await?.database;
+    let db = configuration.open().await?;
     assert_eq!(
         bodies(&db, "from %").await?,
         ["from browser", "from native"],

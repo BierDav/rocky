@@ -219,9 +219,9 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
                     .all(|(i, name)| hub.dials_to(name) > counts[i])
             );
             for peer in peers {
-                peer.detach(None).await;
+                peer.detach().await;
             }
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -257,8 +257,8 @@ async fn pause_cancels_stalled_dial_and_foreground_starts_without_a_timer() -> R
             start(&a, true).await?;
             hub.wait_dials("b", before + 2).await;
             start(&a, false).await?;
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -301,7 +301,7 @@ async fn unreachable_idle_peers_have_no_retry_timer_for_an_hour() -> Result<(), 
             tokio::task::yield_now().await;
             assert_eq!(hub.counts()[1], dials);
             start(&a, false).await?;
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -343,8 +343,8 @@ async fn two_automatic_workers_converge_and_then_stop_dialing() -> Result<(), Fa
             assert_eq!(rows(&b).await?, ["1", "2"]);
             start(&a, false).await?;
             start(&b, false).await?;
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -395,7 +395,7 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
                 .await;
             hub.wait_dials("b", dials + 1).await;
             start(&a, false).await?;
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -444,7 +444,7 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
             start(&a, false).await?;
             hub.stalled.store(false, Ordering::SeqCst);
             for peer in &peers {
-                peer.detach(None).await;
+                peer.detach().await;
             }
             let mut status = a.sync_status.subscribe();
             start(&a, true).await?;
@@ -461,7 +461,7 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
             snap::value(a.set_networking_enabled(true)).await?;
             until(|| hub.counts()[1] >= before + 5).await;
             start(&a, false).await?;
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -495,7 +495,7 @@ async fn an_unchanged_identity_is_not_rewritten() -> Result<(), Failure> {
                     .await?
                     .is_some()
             );
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -510,7 +510,6 @@ async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
             start(&a, true).await?;
             settled(&a).await;
-            let _client = a.client(1)?;
             snap::value(a.set_networking_enabled(false)).await?;
             until(|| a.sync_status.borrow().state == SyncState::NetworkingDisabled).await;
             snap::value(a.set_networking_enabled(true)).await?;
@@ -520,7 +519,7 @@ async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
             settled(&a).await;
             assert_ne!(a.sync_status.borrow().state, SyncState::NetworkingDisabled);
             start(&a, false).await?;
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -554,8 +553,8 @@ async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Fa
             assert_eq!(outcome.status.state, SyncState::Connected);
             assert!(!outcome.retry);
             assert_eq!(rows(&b).await?, ["1"]);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await

@@ -23,7 +23,7 @@ serialized!(
     sdk::TrustGrant,
     sdk::RevocationResult,
     sdk::DatabaseStatus,
-    sdk::ReconciliationReport,
+    sdk::SyncReport,
     sdk::NetworkStatus,
     sdk::PartitionShare,
     sdk::PreparedPartition,
@@ -85,7 +85,7 @@ impl Snapshot for rocky_core::RowIdentity {
         json!({"id":self.to_string()})
     }
 }
-impl Snapshot for sdk::SessionInfo {
+impl Snapshot for sdk::DeviceInfo {
     fn snapshot(self) -> Value {
         json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
     }
@@ -103,11 +103,6 @@ impl Snapshot for sdk::Discovered {
 impl Snapshot for sdk::ContactInfo {
     fn snapshot(self) -> Value {
         json!({"uri":self.uri,"node":self.node,"routes":self.routes})
-    }
-}
-impl Snapshot for sdk::DomainInfo {
-    fn snapshot(self) -> Value {
-        json!({"scope":self.scope,"issuer":self.issuer,"access":self.access,"collections":self.collections,"durable_mutations":true,"transport":self.transport})
     }
 }
 impl Snapshot for sdk::GenerationStatus {
@@ -141,11 +136,6 @@ impl Snapshot for sdk::PartitionEviction {
 impl Snapshot for sdk::PartitionStatus {
     fn snapshot(self) -> Value {
         json!({"group":self.group,"address":self.address,"current":self.current,"epochs":self.epochs,"tables":self.tables.into_iter().map(|table|json!({"table":table.table,"scope":table.scope,"partition":table.scope.map(|scope|data_encoding::HEXLOWER.encode(&scope.encryption)),"epochs":table.epochs,"current":table.current,"holding":table.holding.map(|holding|format!("{holding:?}").to_lowercase())})).collect::<Vec<_>>(),"recipients":self.recipients.into_iter().map(|recipient|json!({"node":recipient.node,"reference":recipient.reference,"epoch":recipient.epoch,"state":match recipient.state { sdk::DeliveryState::Delivered=>"delivered",sdk::DeliveryState::Deposited=>"deposited",sdk::DeliveryState::Pending=>"pending" }})).collect::<Vec<_>>()})
-    }
-}
-impl Snapshot for sdk::DiscoveryTopics {
-    fn snapshot(self) -> Value {
-        json!({"current":data_encoding::HEXLOWER.encode(&self.current),"previous":self.previous.map(|topic|data_encoding::HEXLOWER.encode(&topic))})
     }
 }
 impl Snapshot for Vec<sdk::HeldChange> {
@@ -216,7 +206,7 @@ pub fn schema(json: &str) -> &'static sdk::Schema {
         return parsed;
     }
     let parsed: &'static sdk::Schema =
-        Box::leak(Box::new(sdk::Schema::parse(json).expect("test schema")));
+        Box::leak(Box::new(serde_json::from_str(json).expect("test schema")));
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -300,13 +290,12 @@ pub fn fields(values: Value) -> Vec<(String, sdk::SqlValue)> {
 }
 pub async fn mutate(
     database: &sdk::Database,
-    session: &sdk::Session,
     bytes: Vec<u8>,
     action: Action,
     entity: Option<String>,
     author: Option<String>,
 ) -> Result<Value, sdk::Failure> {
-    let handle = mutation_handle(session, &bytes, author.as_deref()).await?;
+    let handle = mutation_handle(database, &bytes, author.as_deref()).await?;
     let key = data_encoding::HEXLOWER.encode(&handle);
     let valid = |name: &str| {
         !name.is_empty()
@@ -467,13 +456,13 @@ pub async fn string<T: Snapshot>(
 }
 
 pub async fn mutation_handle(
-    session: &sdk::Session,
+    database: &sdk::Database,
     bytes: &[u8],
     author: Option<&str>,
 ) -> Result<rocky_core::Commitment, sdk::Failure> {
     let author = match author {
         Some(author) => author.to_owned(),
-        None => session.info().await?.node.to_hex(),
+        None => database.info().await?.node.to_hex(),
     };
     let mut identity = author.into_bytes();
     identity.extend(serde_json::to_vec(bytes)?);

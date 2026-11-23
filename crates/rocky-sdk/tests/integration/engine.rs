@@ -1,5 +1,5 @@
 use rocky_credentials::testing::MemoryKeys;
-use rocky_sdk::{Database, Network, NetworkService, Open, Opened, Session, transport::memory::Hub};
+use rocky_sdk::{Database, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::snapshot as snap;
@@ -27,86 +27,59 @@ enum OpenMode {
     Resume,
 }
 
-struct OpenedDb {
-    database: Arc<Database>,
-    session: Session,
-    network: Option<NetworkService>,
-}
-impl OpenedDb {
-    fn open(
-        directory: &Path,
-        mode: OpenMode,
-        schema: &str,
-        network: Network,
-        secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
-    ) -> Result<Arc<Self>, Failure> {
-        let open = Open {
-            identity: None,
-            directory,
-            schema: crate::support::snapshot::schema(schema),
-            secrets,
-            network: Some(network),
-        };
-        let Opened {
-            database, network, ..
-        } = match mode {
-            OpenMode::Create => Database::create(open, None)?,
-            OpenMode::Join { invitation } => Database::join(open, &invitation)?,
-            OpenMode::Resume => Database::open(open)?,
-        };
-        Ok(Arc::new(Self {
-            session: database.session(),
-            database,
-            network,
-        }))
-    }
-    fn scope(&self) -> rocky_sdk::Scope {
-        self.database.scope()
-    }
-    fn session(&self) -> &Session {
-        &self.session
-    }
-    async fn close(&self) -> Result<(), Failure> {
-        if let Some(network) = &self.network {
-            network.close().await;
-        }
-        self.database.close().await
-    }
-}
-
 struct Db {
-    engine: Arc<OpenedDb>,
+    engine: Database,
     scope: rocky_sdk::Scope,
 }
 impl Db {
-    fn open(
+    async fn open(
         directory: &Path,
         mode: OpenMode,
         transport: rocky_iroh::Options,
     ) -> Result<Self, Failure> {
-        Self::with_secrets(directory, mode, transport, None)
+        Self::with_secrets(directory, mode, transport, None).await
     }
-    fn with_secrets(
+    async fn with_secrets(
         directory: &Path,
         mode: OpenMode,
         transport: rocky_iroh::Options,
         secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
     ) -> Result<Self, Failure> {
-        let engine = OpenedDb::open(
+        Self::start(
             directory,
             mode,
             SCHEMA,
             Network::Owned(Arc::new(transport)),
             secrets,
-        )?;
+        )
+        .await
+    }
+    async fn start(
+        directory: &Path,
+        mode: OpenMode,
+        schema: &str,
+        network: Network,
+        secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
+    ) -> Result<Self, Failure> {
+        let configuration = crate::common::configuration(
+            directory,
+            crate::support::snapshot::schema(schema),
+            secrets,
+            None,
+            Some(network),
+        );
+        let engine = match mode {
+            OpenMode::Create => configuration.create().await?.database,
+            OpenMode::Join { invitation } => configuration.join(&invitation).await?,
+            OpenMode::Resume => configuration.open().await?,
+        };
         let scope = engine.scope();
-
         Ok(Self { engine, scope })
     }
-    fn create(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
-        Self::open(directory, OpenMode::Create, transport)
+    async fn create(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
+        Self::open(directory, OpenMode::Create, transport).await
     }
-    fn join(
+    async fn join(
         directory: &Path,
         invitation: &str,
         transport: rocky_iroh::Options,
@@ -118,23 +91,19 @@ impl Db {
             },
             transport,
         )
+        .await
     }
-    fn resume(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
-        Self::open(directory, OpenMode::Resume, transport)
+    async fn resume(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
+        Self::open(directory, OpenMode::Resume, transport).await
     }
     async fn invite(&self) -> String {
-        snap::ok(
-            self.engine
-                .session()
-                .provision(rocky_sdk::Access::Full, None),
-        )
-        .await["uri"]
+        snap::ok(self.engine.provision(rocky_sdk::Access::Full, None)).await["uri"]
             .as_str()
             .unwrap_or_default()
             .to_owned()
     }
     async fn sync(&self) -> Value {
-        snap::ok(self.engine.session().sync_once()).await
+        snap::ok(self.engine.sync_now()).await
     }
     async fn mutate(
         &self,
@@ -143,8 +112,7 @@ impl Db {
         id: Option<&str>,
     ) -> Result<Value, Value> {
         snap::observe(snap::mutate(
-            &self.engine.database,
-            self.engine.session(),
+            &self.engine,
             vec![handle; 32],
             payload,
             id.map(str::to_owned),
@@ -171,7 +139,7 @@ impl Db {
     }
     async fn items(&self) -> Vec<(String, String, i64)> {
         let page = snap::ok(snap::read(
-            &self.engine.database,
+            &self.engine,
             "SELECT key, title, completed FROM items ORDER BY key",
             Vec::new(),
         ))
@@ -213,11 +181,9 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         OpenMode::Create,
         transport(),
         Some(a_keys.clone()),
-    )?;
-    assert_eq!(
-        snap::ok(creator.engine.session().domain()).await["issuer"],
-        json!(true)
-    );
+    )
+    .await?;
+    assert!(creator.engine.status().await?.authority.is_issuer);
     let member = Db::with_secrets(
         &root.path().join("b"),
         OpenMode::Join {
@@ -225,18 +191,16 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         },
         at(0),
         Some(b_keys.clone()),
-    )?;
-    assert_eq!(
-        snap::ok(member.engine.session().domain()).await["issuer"],
-        json!(false)
-    );
+    )
+    .await?;
+    assert!(!member.engine.status().await?.authority.is_issuer);
     assert_eq!(member.scope, creator.scope);
 
     let milk = creator.add(1, "Milk").await;
     assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&member.items().await), ["Milk"]);
 
-    snap::ok(member.engine.session().set_networking_enabled(false)).await;
+    snap::ok(member.engine.set_sync(rocky_sdk::SyncMode::Off)).await;
     assert_eq!(member.sync().await["skip"], "networking_disabled");
     creator
         .mutate(
@@ -263,7 +227,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         .await
         .map_err(|error| error.to_string())?;
     member.add(4, "Eggs").await;
-    snap::ok(member.engine.session().set_networking_enabled(true)).await;
+    snap::ok(member.engine.set_sync(rocky_sdk::SyncMode::Manual)).await;
     member.sync().await;
     assert_eq!(creator.items().await, member.items().await);
     assert!(
@@ -309,13 +273,15 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         OpenMode::Resume,
         transport(),
         Some(a_keys),
-    )?;
+    )
+    .await?;
     let member = Db::with_secrets(
         &root.path().join("b"),
         OpenMode::Resume,
         at(0),
         Some(b_keys),
-    )?;
+    )
+    .await?;
     member.add(7, "Bread").await;
     creator.add(8, "Jam").await;
     member.sync().await;
@@ -337,7 +303,7 @@ async fn devices_converge_over_iroh() -> Result<(), Failure> {
 #[tokio::test]
 async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let db = Db::create(root.path(), iroh())?;
+    let db = Db::create(root.path(), iroh()).await?;
     let id = db.add(9, "Tea").await;
     assert_eq!(id.len(), 64);
     let replay = db
@@ -356,7 +322,7 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
         .map_err(|error| error.to_string())?;
     assert_eq!(replay["replayed"], json!(true));
     db.close().await;
-    let db = Db::resume(root.path(), iroh())?;
+    let db = Db::resume(root.path(), iroh()).await?;
     let replay = db
         .mutate(
             9,
@@ -428,7 +394,7 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     }
     for sql in ["SELECT * FROM secure_rows", "DELETE FROM items"] {
         assert!(
-            snap::observe(snap::read(&db.engine.database, sql, Vec::new()))
+            snap::observe(snap::read(&db.engine, sql, Vec::new()))
                 .await
                 .is_err(),
             "reads cannot reach protocol tables or write: {sql}"
@@ -441,12 +407,12 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
 #[tokio::test]
 async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let creator = Db::create(&root.path().join("a"), iroh())?;
-    let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh())?;
+    let creator = Db::create(&root.path().join("a"), iroh()).await?;
+    let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh()).await?;
     let invitation = creator.invite().await;
     let other = SCHEMA.replace("shopping", "other");
     assert!(
-        OpenedDb::open(
+        Db::start(
             &root.path().join("wrong"),
             OpenMode::Join {
                 invitation: invitation.clone(),
@@ -455,35 +421,37 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
             Network::Owned(Arc::new(iroh())),
             None,
         )
+        .await
         .is_err(),
         "a wrong application schema is refused"
     );
-    let bob = Db::join(&root.path().join("c"), &invitation, iroh()).map_err(|error| {
-        format!("a refused schema does not prevent installing the bundle: {error}")
-    })?;
+    let bob = Db::join(&root.path().join("c"), &invitation, iroh())
+        .await
+        .map_err(|error| {
+            format!("a refused schema does not prevent installing the bundle: {error}")
+        })?;
 
-    let status = snap::ok(alice.engine.session().info()).await;
+    let status = snap::ok(alice.engine.info()).await;
     assert_eq!(status["revocations"]["statements"], 0);
     assert_ne!(status["principal"], status["node"]);
     let renewed = snap::ok(async {
-        alice.engine.session().renew().await?;
-        alice.engine.session().info().await
+        alice.engine.renew().await?;
+        alice.engine.info().await
     })
     .await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
-    let identities = snap::ok(creator.engine.session().identities()).await;
+    let identities = snap::ok(creator.engine.identities()).await;
     assert_eq!(
         identities["identities"].as_array().map(Vec::len),
         Some(3),
         "the creator's, Alice's and Bob's identities"
     );
-    let bob_identity = snap::ok(bob.engine.session().info()).await["principal"].clone();
+    let bob_identity = snap::ok(bob.engine.info()).await["principal"].clone();
     assert_eq!(
         snap::ok(
             creator
                 .engine
-                .session()
                 .revoke_identity(snap::public_key(&(bob_identity)))
         )
         .await["revocations"]["statements"],
@@ -492,24 +460,22 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     creator.add(1, "After revocation").await;
     alice.sync().await;
     assert_eq!(
-        snap::ok(alice.engine.session().info()).await["revocations"]["statements"],
+        snap::ok(alice.engine.info()).await["revocations"]["statements"],
         1,
         "Alice learns of Bob's revocation on her next sync"
     );
     assert_eq!(titles(&alice.items().await), ["After revocation"]);
     assert!(
         snap::observe(async {
-            bob.engine.session().renew().await?;
-            bob.engine.session().info().await
+            bob.engine.renew().await?;
+            bob.engine.info().await
         })
         .await
         .is_err(),
         "renewal fetches the revocation a refused link need not carry"
     );
     assert!(
-        snap::observe(bob.engine.session().sync_once())
-            .await
-            .is_err(),
+        snap::observe(bob.engine.sync_now()).await.is_err(),
         "a revoked device refuses to sync"
     );
     assert!(
@@ -518,14 +484,12 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     );
 
     assert!(
-        snap::observe(creator.engine.session().logout(false))
-            .await
-            .is_err(),
+        snap::observe(creator.engine.logout(false)).await.is_err(),
         "the creator cannot log out"
     );
-    snap::ok(alice.engine.session().logout(true)).await;
+    snap::ok(alice.engine.logout(true)).await;
     assert!(
-        snap::observe(snap::read(&alice.engine.database, "SELECT 1", Vec::new()))
+        snap::observe(snap::read(&alice.engine, "SELECT 1", Vec::new()))
             .await
             .is_err(),
         "a logged-out member reads nothing"
@@ -539,10 +503,10 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         !root.path().join("b/secrets").exists(),
         "purging removes the member's secrets"
     );
-    assert!(Db::resume(&root.path().join("b"), iroh()).is_err());
-    snap::ok(bob.engine.session().logout(false)).await;
+    assert!(Db::resume(&root.path().join("b"), iroh()).await.is_err());
+    snap::ok(bob.engine.logout(false)).await;
     bob.close().await;
-    assert!(Db::resume(&root.path().join("c"), iroh()).is_err());
+    assert!(Db::resume(&root.path().join("c"), iroh()).await.is_err());
     creator.close().await;
     Ok(())
 }
@@ -551,22 +515,15 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
 async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let open = |directory: &str, mode: OpenMode, name: &'static str| -> Result<Db, Failure> {
-        let engine = OpenedDb::open(
-            &root.path().join(directory),
-            mode,
-            SCHEMA,
-            Network::Owned(hub.connector(name)),
-            None,
-        )?;
-        let scope = engine.scope();
-
-        Ok(Db { engine, scope })
+    let open = |directory: &str, mode: OpenMode, name: &'static str| {
+        let directory = root.path().join(directory);
+        let network = Network::Owned(hub.connector(name));
+        async move { Db::start(&directory, mode, SCHEMA, network, None).await }
     };
-    let creator = open("a", OpenMode::Create, "a")?;
+    let creator = open("a", OpenMode::Create, "a").await?;
     assert_eq!(
-        snap::ok(creator.engine.session().domain()).await["transport"],
-        "memory"
+        creator.engine.status().await?.network.kind.as_deref(),
+        Some("memory")
     );
     let invitation = creator.invite().await;
     let member = open(
@@ -575,7 +532,8 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
             invitation: snap::text(&(invitation)),
         },
         "b",
-    )?;
+    )
+    .await?;
     creator.add(1, "Milk").await;
     member.add(2, "Eggs").await;
     assert!(support::reconciled(&member.sync().await));
@@ -584,8 +542,8 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
 
     member.close().await;
     creator.close().await;
-    let creator = open("a", OpenMode::Resume, "a")?;
-    let member = open("b", OpenMode::Resume, "b")?;
+    let creator = open("a", OpenMode::Resume, "a").await?;
+    let member = open("b", OpenMode::Resume, "b").await?;
     creator.add(3, "Jam").await;
     assert!(support::reconciled(&member.sync().await));
     assert_eq!(

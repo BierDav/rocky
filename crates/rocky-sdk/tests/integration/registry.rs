@@ -2,7 +2,7 @@ use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_credentials::CredentialChain;
 use rocky_sdk::{
-    Database, Network, Open,
+    Network,
     transport::{
         BoxFuture, Connector, Protocol, Stream, Transport,
         memory::{Hub, Memory},
@@ -27,31 +27,35 @@ const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "roles":[{"name":"lister","tables":[{"table":"items","access":"write"},{"table":"parts","access":"read"}],"per_partition":["parts"]}]}"#;
 
-fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
-    Open {
-        identity: common::prepared_identity(directory),
+fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        common::prepared_identity(directory),
         network,
-    }
+    )
 }
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
-fn create(root: &Path, network: Network) -> Result<Device, Failure> {
-    Device::new(Database::create(open(root, Some(network)), None)?)
+async fn create(root: &Path, network: Network) -> Result<Device, Failure> {
+    Device::new(open(root, Some(network)).create().await?)
 }
-fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, Failure> {
-    let mut options = open(directory, Some(network));
+async fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, Failure> {
     let mut seed = directory.to_string_lossy().as_bytes().to_vec();
     seed.extend_from_slice(invitation.as_bytes());
     let signer_stable_across_lost_answers_and_restarts =
         rocky_core::commitment("fixture.join-identity", &seed);
-    options.identity = Some(Arc::new(rocky_sdk::IdentityKey::from_secret(
+    let identity = Arc::new(rocky_sdk::IdentityKey::from_secret(
         signer_stable_across_lost_answers_and_restarts,
-    )));
-    Device::new(Database::join(options, invitation)?)
+    ));
+    Device::new(
+        open(directory, Some(network))
+            .identity(identity)
+            .join(invitation)
+            .await?,
+    )
 }
 fn identity(directory: &Path) -> Result<Value, Failure> {
     common::authority_json(directory, "identity")
@@ -60,7 +64,7 @@ fn issuer() -> rocky_sdk::Access {
     rocky_sdk::Access::Full
 }
 async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
-    snap::ok(issuer.session.identities()).await["identities"]
+    snap::ok(issuer.database.identities()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
@@ -76,14 +80,20 @@ async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
         .collect()
 }
 async fn settle(device: &Device) -> Value {
-    let mut status = snap::ok(device.session.status()).await;
+    let mut changes = device.database.status_changes();
+    let mut status = snap::ok(changes.next()).await;
     while status["data"]["bootstrap_pending"] == true {
-        status = snap::ok(device.session.status_after(snap::text(&(status["token"])))).await;
+        status = snap::ok(changes.next()).await;
     }
     status
 }
 async fn online(device: &Device, online: bool) {
-    snap::ok(device.session.set_networking_enabled(online)).await;
+    let mode = if online {
+        rocky_sdk::SyncMode::Manual
+    } else {
+        rocky_sdk::SyncMode::Off
+    };
+    snap::ok(device.database.set_sync(mode)).await;
 }
 async fn settle_first_syncs_before_anything_else_is_recorded(devices: &[&Device]) {
     for device in devices {
@@ -130,14 +140,15 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
     let b = join(
         &root.join("b"),
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
-    a.session.add_peer(&b.contact().await).await?;
+    a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
     let lister = rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("lister"));
@@ -145,18 +156,19 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
         &root.join("m"),
         memory(&hub, "m"),
         &a.invite_as(lister).await,
-    )?;
+    )
+    .await?;
     settle(&m).await;
     let m_identity = m.identity().await;
     snap::ok(
-        a.session
+        a.database
             .create_partition(rocky_sdk::PartitionTarget::Table {
                 table: "parts".to_owned(),
                 values: vec![rocky_sdk::SqlValue::Text("L".to_owned())],
             }),
     )
     .await;
-    snap::ok(a.session.grant_partition(
+    snap::ok(a.database.grant_partition(
         snap::public_key(&m_identity),
         rocky_sdk::PartitionTarget::Table {
             table: "parts".to_owned(),
@@ -165,7 +177,7 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     ))
     .await;
     synced(&m).await?;
-    snap::ok(a.session.set_identity_label(
+    snap::ok(a.database.set_identity_label(
         snap::public_key(&(m_identity)),
         serde_json::from_value::<Vec<u8>>(json!([7, 8, 9])).expect("typed fixture"),
     ))
@@ -176,7 +188,7 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     assert_eq!(at_a["kind"], "paired");
     assert_eq!(at_a["partitions"].as_array().map(Vec::len), Some(1));
     assert_eq!(at_a["label"], json!([7, 8, 9]));
-    let enrolled_expiry = snap::ok(m.session.info()).await["expires"]
+    let enrolled_expiry = snap::ok(m.database.info()).await["expires"]
         .as_str()
         .ok_or("enrollment expiry")?
         .parse::<u64>()?;
@@ -212,17 +224,18 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
     let b = join(
         &root.join("b"),
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
-    a.session.add_peer(&b.contact().await).await?;
+    a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
-    let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
+    let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await).await?;
     settle(&m).await;
     let (a_node, m_identity) = (a.node().await, m.identity().await);
     a.close().await;
@@ -232,16 +245,16 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     assert!(!identities(&b).await.contains_key(&m_identity));
 
     snap::ok(async {
-        m.session.renew().await?;
-        m.session.info().await
+        m.database.renew().await?;
+        m.database.info().await
     })
     .await;
-    let after = snap::ok(m.session.info()).await;
+    let after = snap::ok(m.database.info()).await;
     let expiry = |info: &Value| -> Result<u64, Failure> {
         Ok(info["expires"].as_str().ok_or("expiry")?.parse()?)
     };
     assert!(
-        expiry(&after)? <= expiry(&snap::ok(b.session.info()).await)?,
+        expiry(&after)? <= expiry(&snap::ok(b.database.info()).await)?,
         "a renewal through B's chain expires no later than B does"
     );
     let record = identities(&b).await[&m_identity].clone();
@@ -249,9 +262,9 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     assert_eq!(record["access"], json!("full"));
     assert_eq!(record["expires"], after["expires"]);
 
-    snap::ok(m.session.remove_peer(snap::public_key(&(a_node)))).await;
+    snap::ok(m.database.remove_peer(snap::public_key(&(a_node)))).await;
     assert!(
-        !m.session
+        !m.database
             .status()
             .await?
             .authority
@@ -264,7 +277,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         crate::support::completed_peers(&report),
         1,
         "{report}; activity: {}",
-        snap::ok(m.session.activity(0_u64)).await
+        snap::ok(m.database.activity(0_u64)).await
     );
     assert_eq!(b.titles().await, ["Milk"]);
     for device in [&b, &m] {
@@ -278,33 +291,36 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
     let b = join(
         &root.join("b"),
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
     let custody = rocky_sdk::Access::Store;
     let c = join(
         &root.join("c"),
         memory(&hub, "c"),
         &a.invite_as(custody).await,
-    )?;
+    )
+    .await?;
     let reader = rocky_sdk::Access::Read;
     let r = join(
         &root.join("r"),
         memory(&hub, "r"),
         &a.invite_as(reader).await,
-    )?;
-    let w = join(&root.join("w"), memory(&hub, "w"), &a.invite().await)?;
+    )
+    .await?;
+    let w = join(&root.join("w"), memory(&hub, "w"), &a.invite().await).await?;
     synced(&r).await?;
     synced(&w).await?;
     let (a_node, _b_node) = (a.node().await, b.node().await);
-    snap::ok(b.session.remove_peer(snap::public_key(&(a_node)))).await;
+    snap::ok(b.database.remove_peer(snap::public_key(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let keys = a.session.provision(rocky_sdk::Access::Full, None).await?;
+    let keys = a.database.provision(rocky_sdk::Access::Full, None).await?;
     synced(&a).await?;
     synced(&b).await?;
     assert!(identities(&b).await.contains_key(&keys.identity.to_hex()));
@@ -329,7 +345,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
         assert_eq!(tables, 0, "{name}");
     }
     for device in [&c, &r, &w] {
-        assert!(snap::observe(device.session.identities()).await.is_err());
+        assert!(snap::observe(device.database.identities()).await.is_err());
         assert!(
             snap::observe(snap::read(
                 &device.database,
@@ -362,19 +378,22 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let root = tempfile::tempdir()?;
     let root = root.path().to_path_buf();
     let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
     let b = join(
         &root.join("b"),
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
-    a.session.add_peer(&b.contact().await).await?;
+    a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
     let started = |name: &str, invitation: String| {
         let (directory, network) = (root.join(name), memory(&hub, name));
-        tokio::task::spawn_blocking(move || {
-            join(&directory, network, &invitation).map_err(|e| e.to_string())
+        tokio::spawn(async move {
+            join(&directory, network, &invitation)
+                .await
+                .map_err(|e| e.to_string())
         })
     };
     let (x, y) = tokio::join!(
@@ -388,7 +407,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let mut writers = std::collections::BTreeSet::new();
     for device in [&a, &b, &x, &y] {
         writers.insert(
-            snap::ok(device.session.info()).await["writer"]
+            snap::ok(device.database.info()).await["writer"]
                 .clone()
                 .to_string(),
         );
@@ -409,27 +428,27 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     }
 
     for issuer in [&a, &b] {
-        snap::ok(issuer.session.set_automatic_sync(false)).await;
+        snap::ok(issuer.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     }
     keep_enrollment_issuers_from_renewals(&[&x, &y]).await;
     online(&b, false).await;
-    let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
+    let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await).await?;
     settle(&m).await;
-    snap::ok(m.session.set_automatic_sync(false)).await;
+    snap::ok(m.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     let m_identity = m.identity().await;
     snap::ok(async {
-        m.session.renew().await?;
-        m.session.info().await
+        m.database.renew().await?;
+        m.database.info().await
     })
     .await;
-    snap::ok(a.session.set_networking_enabled(false)).await;
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     online(&b, true).await;
     snap::ok(async {
-        m.session.renew().await?;
-        m.session.info().await
+        m.database.renew().await?;
+        m.database.info().await
     })
     .await;
-    snap::ok(a.session.set_networking_enabled(true)).await;
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     assert_eq!(identities(&b).await[&m_identity]["kind"], "renewed");
     synced(&a).await?;
     let (at_a, at_b) = (identities(&a).await, identities(&b).await);
@@ -437,7 +456,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let expires =
         |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
     assert!(
-        expires(&snap::ok(m.session.info()).await["expires"])?
+        expires(&snap::ok(m.database.info()).await["expires"])?
             <= expires(&at_a[&m_identity]["expires"])?,
         "the record keeps the later renewal; a chain through the second issuer expires no later"
     );
@@ -672,7 +691,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let issuing = Arc::new(Faults::default());
-    let a = create(&root.join("a"), faulty(&hub, "a", &issuing))?;
+    let a = create(&root.join("a"), faulty(&hub, "a", &issuing)).await?;
     let mut members = Vec::new();
     for name in ["m", "n"] {
         let directory = root.join(name);
@@ -689,7 +708,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             .collect();
         assert_eq!(fresh.len(), 1, "{name}: {recorded:?}");
         let identity = fresh[0].clone();
-        let member = join(&directory, faulty(&hub, name, &requesting), &invitation)?;
+        let member = join(&directory, faulty(&hub, name, &requesting), &invitation).await?;
         assert_eq!(member.identity().await, identity, "{name}");
         assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
         members.push((member, identity, requesting));
@@ -697,14 +716,15 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let profile = rocky_sdk::Access::Full;
     let mut granted = Vec::new();
     for name in ["g", "h"] {
-        let keys = a.session.provision(profile.clone(), None).await?;
+        let keys = a.database.provision(profile.clone(), None).await?;
         let recorded = identities(&a).await;
         assert!(recorded.contains_key(&keys.identity.to_hex()));
         let requesting = Arc::new(Faults::default());
-        let device = Device::new(Database::join(
-            open(&root.join(name), Some(faulty(&hub, name, &requesting))),
-            &keys.uri,
-        )?)?;
+        let device = Device::new(
+            open(&root.join(name), Some(faulty(&hub, name, &requesting)))
+                .join(&keys.uri)
+                .await?,
+        )?;
         assert_eq!(device.node().await, keys.node.to_hex());
         let listed = identities(&a).await;
         assert_eq!(listed.len(), recorded.len());
@@ -725,8 +745,8 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         }
         assert!(
             snap::observe(async {
-                device.session.renew().await?;
-                device.session.info().await
+                device.database.renew().await?;
+                device.database.info().await
             })
             .await
             .is_err()
@@ -737,8 +757,8 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         );
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
         snap::ok(async {
-            device.session.renew().await?;
-            device.session.info().await
+            device.database.renew().await?;
+            device.database.info().await
         })
         .await;
         assert_eq!(
@@ -762,24 +782,25 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let root = tempfile::tempdir()?;
     let root: PathBuf = root.path().to_path_buf();
     let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
     let b = join(
         &root.join("b"),
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
-    a.session.add_peer(&b.contact().await).await?;
+    a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
     let reader = rocky_sdk::Access::Read;
     let invitation = a.invite_as(reader.clone()).await;
     let filled = Instant::now();
     let a_b_and_the_pending_invitation = 3;
     for _ in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {
-        snap::ok(a.session.provision(reader.clone(), None)).await;
+        snap::ok(a.database.provision(reader.clone(), None)).await;
     }
     let filled = filled.elapsed();
-    let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
+    let joined = join(&root.join("j"), memory(&hub, "j"), &invitation).await?;
     assert_eq!(identities(&a).await.len(), 255);
     synced(&b).await?;
     synced(&a).await?;
@@ -789,7 +810,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
     );
-    let refused = snap::observe(a.session.provision(reader.clone(), None))
+    let refused = snap::observe(a.database.provision(reader.clone(), None))
         .await
         .err()
         .ok_or("invited a 257th device")?;
@@ -809,10 +830,11 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     b.close().await;
     drop(b);
     let start = Instant::now();
-    let b = Device::new(Database::open(open(
-        &root.join("b"),
-        Some(memory(&hub, "b")),
-    ))?)?;
+    let b = Device::new(
+        open(&root.join("b"), Some(memory(&hub, "b")))
+            .open()
+            .await?,
+    )?;
     let reopen = start.elapsed();
     assert_eq!(identities(&b).await.len(), 255);
     eprintln!(
@@ -829,9 +851,9 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let path = root.path().join("issuer");
-    let owner = create(&path, memory(&hub, "issuer"))?;
+    let owner = create(&path, memory(&hub, "issuer")).await?;
     let label = b"application-defined label";
-    let invitation = snap::ok(owner.session.provision(
+    let invitation = snap::ok(owner.database.provision(
         issuer(),
         Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
     ))
@@ -840,15 +862,16 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
         &root.path().join("member"),
         memory(&hub, "member"),
         invitation["uri"].as_str().ok_or("uri")?,
-    )?;
+    )
+    .await?;
     let identity = member.identity().await;
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
-    snap::ok(owner.session.provision(issuer(), None)).await;
+    snap::ok(owner.database.provision(issuer(), None)).await;
     member.database.close().await?;
     owner.database.close().await?;
-    let reopened = Device::new(Database::open(open(&path, None))?)?;
+    let reopened = Device::new(open(&path, None).open().await?)?;
     let record = identities(&reopened)
         .await
         .remove(&identity)

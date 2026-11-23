@@ -244,8 +244,8 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
             tokio::time::timeout(Duration::from_secs(5), revisions.changed()).await??;
             let rows = read_rows(&b, "SELECT title FROM items").await?;
             assert_eq!(rows[0][0], SqlValue::Text("Milk".into()));
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await
@@ -287,8 +287,8 @@ async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Fai
             assert!(service.live.handle(peer).is_some());
             drop(second);
             assert!(service.live.handle(peer).is_none());
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await
@@ -383,7 +383,7 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
                 "keyless custody owes no key retry"
             );
             for node in [&a, &relay, &b] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -416,7 +416,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             a.configure(|settings| settings.add_peer(&a.vault, &contact))
                 .await?;
             add(&a, 2).await?;
-            b.detach(None).await;
+            b.detach().await;
             let mut status = a.sync_status.subscribe();
             a.automatic.store(true, Ordering::SeqCst);
             a.wake_sync();
@@ -443,8 +443,8 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             .await??;
             assert_eq!(status.borrow().state, SyncState::Connected);
             assert!(!status.borrow().retry);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await
@@ -480,7 +480,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     sql.run("COMMIT", Vec::new()).await?;
     let rows = read_rows(&node, "SELECT id FROM items").await?;
     assert_eq!(rows[0][0], id.sql());
-    node.detach(None).await;
+    node.detach().await;
     Ok(())
     }).await
 }
@@ -501,7 +501,6 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
         let connections = Registry::default();
         let options = ConnectionOptions {
             read_only: false,
-            durability: crate::Durability::Buffered,
             transaction_timeout: Some(Duration::from_secs(1)),
         };
         let writer = connections.get(connections.connect(node.clone(), options).await?)?;
@@ -529,7 +528,7 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
         let (renewed, written) = tokio::join!(renewal, write);
         written?;
         renewed?;
-        node.detach(None).await;
+        node.detach().await;
         Ok(())
     }).await
 }
@@ -563,7 +562,6 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
                         node.clone(),
                         ConnectionOptions {
                             read_only: false,
-                            durability: crate::Durability::Buffered,
                             transaction_timeout: Some(timeout),
                         },
                     )
@@ -621,7 +619,7 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
             execute("ROLLBACK TRANSACTION").await?;
             assert!(!in_transaction().await?);
             assert_eq!(count().await?, SqlValue::Integer(0));
-            node.detach(None).await;
+            node.detach().await;
             Ok(())
         })
         .await
@@ -689,8 +687,8 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
             let (served, exchange) = tokio::join!(serving, exchanging);
             served?;
             assert_eq!(exchange?.changed, scopes);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await

@@ -5,7 +5,7 @@ use rocky_iroh::{
     iroh::{Endpoint, RelayMode, SecretKey, endpoint::presets, protocol::Router, tls::CaTlsConfig},
     testing::{LookupServer, run_relay_server},
 };
-use rocky_sdk::{Database, Network, Open};
+use rocky_sdk::Network;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -24,7 +24,7 @@ fn starter(lookup: Option<&str>, local: bool) -> Network {
 }
 async fn discovered(device: &Device) -> Option<Value> {
     let peers = snap::ok(async {
-        let network = device.session.network().await?;
+        let network = device.database.status().await?.network;
         Ok(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await;
@@ -35,17 +35,19 @@ async fn discovered(device: &Device) -> Option<Value> {
         .cloned()
 }
 async fn enrolled(root: &Path) -> Result<(), Failure> {
-    let issuer = Device::create(&root.join("issuer"), Some(starter(None, false)))?;
+    let issuer = Device::create(&root.join("issuer"), Some(starter(None, false))).await?;
     let a = Device::join(
         &root.join("a"),
         &issuer.invite().await,
         starter(None, false),
-    )?;
+    )
+    .await?;
     let b = Device::join(
         &root.join("b"),
         &issuer.invite().await,
         starter(None, false),
-    )?;
+    )
+    .await?;
     b.sync().await.map_err(|error| error.to_string())?;
     issuer.add(1, "Milk").await;
     a.sync().await.map_err(|error| error.to_string())?;
@@ -53,9 +55,9 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     assert!(b.titles().await.is_empty());
     let node = issuer.node().await;
     for member in [&a, &b] {
-        snap::ok(member.session.remove_peer(snap::public_key(&(node)))).await;
+        snap::ok(member.database.remove_peer(snap::public_key(&(node)))).await;
         let peers = snap::ok(async {
-            let network = member.session.network().await?;
+            let network = member.database.status().await?.network;
             Ok(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;
@@ -105,7 +107,8 @@ async fn member_process() -> Result<(), Failure> {
     let b = Device::open(
         Path::new(&directory),
         Some(starter(lookup.as_deref(), local)),
-    )?;
+    )
+    .await?;
     let found = tokio::time::timeout(WAIT, async {
         loop {
             if let Some(found) = discovered(&b).await {
@@ -116,7 +119,7 @@ async fn member_process() -> Result<(), Failure> {
     })
     .await?;
     b.sync().await.map_err(|error| error.to_string())?;
-    let status = snap::ok(b.session.status()).await;
+    let status = snap::ok(b.database.status()).await;
     std::fs::write(
         report,
         json!({
@@ -146,23 +149,24 @@ async fn simulator_peer() -> Result<(), Failure> {
         }
     })
     .await?;
-    let host = Device::new(Database::join(
-        Open {
-            identity: None,
-            directory: &root.join("host"),
-            schema: crate::support::snapshot::schema(&schema),
-            secrets: None,
-            network: Some(starter(None, true)),
-        },
-        invitation.trim(),
-    )?)?;
-    snap::observe(host.sync_once())
+    let host = Device::new(
+        crate::common::configuration(
+            &root.join("host"),
+            crate::support::snapshot::schema(&schema),
+            None,
+            None,
+            Some(starter(None, true)),
+        )
+        .join(invitation.trim())
+        .await?,
+    )?;
+    snap::observe(host.sync_now())
         .await
         .map_err(|error| error.to_string())?;
     let found = tokio::time::timeout(WAIT, async {
         loop {
             let peers = snap::ok(async {
-                let network = host.session.network().await?;
+                let network = host.database.status().await?.network;
                 Ok(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await;
@@ -193,7 +197,7 @@ async fn simulator_peer() -> Result<(), Failure> {
 async fn two_processes_find_each_other_over_mdns_and_converge() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     enrolled(root.path()).await?;
-    let a = Device::open(&root.path().join("a"), Some(starter(None, true)))?;
+    let a = Device::open(&root.path().join("a"), Some(starter(None, true))).await?;
     let report = second_process(root.path(), None, true).await?;
     assert_eq!(report["titles"], json!(a.titles().await));
     assert_eq!(report["titles"], json!(["Milk"]));
@@ -216,12 +220,9 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
     let a = Device::open(
         &root.path().join("a"),
         Some(starter(Some(&server.url), false)),
-    )?;
-    let topics = snap::ok(a.session.discovery_topics()).await;
-    let topic: [u8; 32] = data_encoding::HEXLOWER
-        .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
-        .try_into()
-        .map_err(|_| "topic")?;
+    )
+    .await?;
+    let topic = a.database.discovery_topic().await?;
     tokio::time::timeout(WAIT, server.wait_for_contacts(&topic, 1)).await?;
     let report = second_process(root.path(), Some(&server.url), false).await?;
     assert_eq!(report["titles"], json!(a.titles().await));
@@ -259,14 +260,13 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Attached(attachment.connected())),
-    )?;
-    let topics = snap::ok(a.session.discovery_topics()).await;
-    let topic: [u8; 32] = data_encoding::HEXLOWER
-        .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
-        .try_into()
-        .map_err(|_| "topic")?;
+    )
+    .await?;
+    let topic = a.database.discovery_topic().await?;
     tokio::time::timeout(WAIT, server.wait_for_contacts(&topic, 1)).await?;
-    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+        .await["discovery"]
+        .clone();
     assert_eq!(
         discovery["announcing"], true,
         "a discovering attachment announces beside the endpoint's services"
@@ -274,9 +274,11 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     assert_eq!(discovery["topic"]["state"], "on");
     assert_eq!(discovery["local"]["state"], "off");
     assert_eq!(endpoint.address_lookup()?.len(), services);
-    a.network.as_ref().ok_or("attached")?.close().await;
+    a.database.detach().await?;
     assert_eq!(endpoint.address_lookup()?.len(), services);
-    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+        .await["discovery"]
+        .clone();
     assert_eq!(discovery["announcing"], false);
     a.close().await;
     assert!(!endpoint.is_closed());
@@ -286,8 +288,11 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     let a = Device::open(
         &root.path().join("a"),
         Some(Network::Borrowed(plain.transport())),
-    )?;
-    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
+    )
+    .await?;
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+        .await["discovery"]
+        .clone();
     assert_eq!(
         discovery["announcing"], false,
         "a plain attachment on the same endpoint has no discovery"
@@ -332,15 +337,16 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
         network.push(Network::Borrowed(attachment.transport()));
     }
     let (b_network, a_network) = (network.pop(), network.pop());
-    let a = Device::create(&root.path().join("a"), a_network)?;
+    let a = Device::create(&root.path().join("a"), a_network).await?;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         b_network.ok_or("network")?,
-    )?;
+    )
+    .await?;
     a.add(1, "Milk").await;
     b.add(2, "Eggs").await;
-    let pass = snap::observe(b.sync_once()).await;
+    let pass = snap::observe(b.sync_now()).await;
     assert_eq!(
         crate::support::completed_peers(&pass.map_err(|error| error.to_string())?),
         1

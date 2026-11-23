@@ -19,7 +19,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
     let config = Configuration::new(directory.path(), &schema()?)?;
     let db = config.create().await?.database;
     assert!(config.create().await.is_err());
-    let events = db.observe_tables(Some(vec!["notes".into()])).await?;
+    let events = db.observe(&["notes"]).await?;
     let mut tx = db.transaction().await?;
     assert!(tx.execute("COMMIT", params![]).await.is_err());
     let id = tx.next_id("notes", vec![]).await?;
@@ -36,7 +36,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
         .await?;
     tx.rollback().await?;
     db.close().await?;
-    let db = config.open().await?.database;
+    let db = config.open().await?;
     let rows = db
         .query("SELECT id,body,optional FROM notes", params![])
         .await?
@@ -167,7 +167,6 @@ fn invalid_schema_is_refused_before_installation() {
             .build()
             .is_err()
     );
-    assert!(Schema::parse(r#"{"format":0}"#).is_err());
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -182,16 +181,14 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .create()
         .await?
         .database;
-    let session = issuer.session();
-    let invitation = session.provision(rocky_sdk::Access::Full, None).await?;
+    let invitation = issuer.provision(rocky_sdk::Access::Full, None).await?;
     assert!(!invitation.uri.is_empty());
     let member_configuration = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")));
-    let member = member_configuration.join(&invitation.uri).await?.database;
-    let member_session = member.session();
-    member_session.set_automatic_sync(false).await?;
-    session.set_automatic_sync(false).await?;
-    member_session.sync_once().await?;
+    let member = member_configuration.join(&invitation.uri).await?;
+    member.set_sync(rocky_sdk::SyncMode::Manual).await?;
+    issuer.set_sync(rocky_sdk::SyncMode::Manual).await?;
+    member.sync_now().await?;
     let mut tx = issuer.transaction().await?;
     let id = tx.next_id("notes", vec![]).await?;
     tx.execute(
@@ -200,7 +197,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
     )
     .await?;
     tx.commit().await?;
-    member_session.sync_once().await?;
+    member.sync_now().await?;
     let rows = member
         .query("SELECT body FROM notes", params![])
         .await?
@@ -208,11 +205,11 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<String>("body")?, "from issuer");
-    let contact = member_session.contact().await?;
-    let peer = session.add_peer(&contact).await?;
-    assert_eq!(peer, member_session.info().await?.node);
+    let contact = member.contact().await?.uri;
+    let peer = issuer.add_peer(&contact).await?;
+    assert_eq!(peer, member.info().await?.node);
     member.close().await?;
-    let reopened = member_configuration.open().await?.database;
+    let reopened = member_configuration.open().await?;
     assert_eq!(
         reopened
             .query("SELECT body FROM notes", params![])
@@ -235,9 +232,8 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
     let configuration = Configuration::new(directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("owner")));
     let db = configuration.create().await?.database;
-    let session = db.session();
-    session.set_automatic_sync(false).await?;
-    let status = session.tip_status().await?;
+    db.set_sync(rocky_sdk::SyncMode::Manual).await?;
+    let status = db.tip_status().await?;
     assert_eq!(status.bookmark.as_deref(), Some("main"));
     let genesis = status.tip;
     let transactions_for_routine_seal = 128;
@@ -251,19 +247,16 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
         .await?;
         tx.commit().await?;
     }
-    session.sync_once().await?;
-    let sealed = session.tip_status().await?;
+    db.sync_now().await?;
+    let sealed = db.tip_status().await?;
     assert_eq!(sealed.bookmark.as_deref(), Some("main"));
     assert_ne!(
         sealed.tip, genesis,
         "the routine seal moved the bookmark on"
     );
     db.close().await?;
-    let db = configuration.open().await?.database;
-    assert_eq!(
-        db.session().tip_status().await?.bookmark.as_deref(),
-        Some("main")
-    );
+    let db = configuration.open().await?;
+    assert_eq!(db.tip_status().await?.bookmark.as_deref(), Some("main"));
     db.close().await
 }
 
@@ -314,7 +307,7 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     tx.rollback().await?;
     db.close().await?;
 
-    let db = configuration.open().await?.database;
+    let db = configuration.open().await?;
     let rows = db
         .query("SELECT txn FROM outbox", params![])
         .await?
@@ -336,33 +329,29 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
-async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() -> Result<(), Failure>
-{
-    use rocky_sdk::{Durability, TransactionOutcome};
+async fn flush_persists_every_commit_returned_before_it() -> Result<(), Failure> {
+    use rocky_sdk::TransactionOutcome;
     let directory = Scratch::new().await;
     let configuration = Configuration::new(directory.path(), &schema()?)?;
     let db = configuration.create().await?.database;
     let mut tokens = Vec::new();
-    for durability in [Durability::Flushed, Durability::Buffered] {
-        let mut tx = db.transaction_with(durability).await?;
+    for body in ["first", "second"] {
+        let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
-        tx.execute(
-            "INSERT INTO notes(id,body) VALUES(?,?)",
-            params![id, format!("{durability:?}")],
-        )
-        .await?;
+        tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
+            .await?;
         let token = tx.token();
         assert_eq!(tx.commit().await?, Some(token));
         tokens.push(token);
     }
     db.flush().await?;
     db.close().await?;
-    let db = configuration.open().await?.database;
+    let db = configuration.open().await?;
     for token in tokens {
         assert_eq!(
             db.transaction_outcome(token).await?,
             Some(TransactionOutcome::Applied { sealed: false }),
-            "flush persists every commit returned before it, buffered ones included"
+            "flush persists every commit returned before it"
         );
     }
     assert!(db.flush().await.is_ok());
@@ -409,21 +398,16 @@ async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure
         .database;
     let profile = rocky_sdk::Access::Full;
     let refused = issuer
-        .session()
         .provision(profile.clone(), Some(vec![b'x'; 257]))
         .await
         .err()
         .ok_or("a 257-byte device label is refused")?;
     assert!(refused.to_string().contains("256 bytes"), "{refused}");
-    let provisioning = issuer
-        .session()
-        .provision(profile, Some(vec![b'x'; 256]))
-        .await?;
+    let provisioning = issuer.provision(profile, Some(vec![b'x'; 256])).await?;
     let joined = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")))
         .join(&provisioning.uri)
-        .await?
-        .database;
+        .await?;
     joined.close().await?;
     issuer.close().await
 }
@@ -435,15 +419,14 @@ async fn trusted_staleness_is_set_between_a_minute_and_ten_years() -> Result<(),
         .create()
         .await?
         .database;
-    let session = database.session();
     let ten_years = 10 * 366 * 24 * 60 * 60;
     for refused in [0, 59, ten_years + 1] {
         assert!(
-            session.set_trusted_stale_after(refused).await.is_err(),
+            database.set_trusted_stale_after(refused).await.is_err(),
             "a staleness threshold of {refused} s is refused"
         );
     }
-    session.set_trusted_stale_after(60).await?;
-    session.set_trusted_stale_after(ten_years).await?;
+    database.set_trusted_stale_after(60).await?;
+    database.set_trusted_stale_after(ten_years).await?;
     database.close().await
 }

@@ -1,5 +1,4 @@
 use crate::common::{self, Device, Failure};
-use crate::support::snapshot as snap;
 use rocky_sdk::Network;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -28,11 +27,14 @@ async fn devices_enroll_and_sync_both_ways_over_websockets() -> Result<(), Failu
 
 async fn enroll_and_sync_both_ways(network: fn() -> Network) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let a = Device::create(&root.path().join("a"), Some(network()))?;
+    let a = Device::create(&root.path().join("a"), Some(network())).await?;
     let invitation = a.invite().await;
-    let b = Device::join(&root.path().join("b"), &invitation, network())?;
+    let b = Device::join(&root.path().join("b"), &invitation, network()).await?;
     b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(snap::ok(a.session.domain()).await["transport"], "tcp");
+    assert_eq!(
+        a.database.status().await?.network.kind.as_deref(),
+        Some("tcp")
+    );
 
     a.add(1, "Milk").await;
     let synced = b.sync().await.map_err(|error| error.to_string())?;

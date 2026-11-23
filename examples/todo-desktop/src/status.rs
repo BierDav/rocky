@@ -1,6 +1,6 @@
 use crate::{Shared, short};
 use dioxus::prelude::*;
-use rocky_sdk::DatabaseStatus;
+use rocky_sdk::{DatabaseStatus, SyncMode};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use todo_app::Member;
 
@@ -17,18 +17,18 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
     use_future(move || {
         let todos = polled.clone();
         async move {
-            let session = todos.database().session();
+            let database = todos.database().clone();
             let mut tick: u32 = 0;
             loop {
                 tick = tick.wrapping_add(1);
-                match session.status().await {
+                match database.status().await {
                     Ok(current) => {
                         let online = current.network.networking_enabled;
                         status.set(Some(current));
                         error.set(None);
                         let pass_due = online && tick.is_multiple_of(SYNC_EVERY) && !syncing();
                         if pass_due {
-                            let _ = session.sync_once().await;
+                            let _ = database.sync_now().await;
                         }
                     }
                     Err(failure) => error.set(Some(failure.to_string())),
@@ -81,14 +81,14 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
             div { class: "row",
                 button { class: "secondary", disabled: !online || syncing(),
                     onclick: move |_| { let todos = syncer.clone(); syncing.set(true); spawn(async move {
-                        if let Err(failure) = todos.database().session().sync_once().await { error.set(Some(failure.to_string())) }
+                        if let Err(failure) = todos.database().sync_now().await { error.set(Some(failure.to_string())) }
                         syncing.set(false);
                     }); },
                     "Sync now"
                 }
                 button { class: "secondary",
                     onclick: move |_| { let todos = toggling.clone(); spawn(async move {
-                        if let Err(failure) = todos.database().session().set_networking_enabled(!online).await { error.set(Some(failure.to_string())) }
+                        if let Err(failure) = todos.database().set_sync(if online { SyncMode::Off } else { SyncMode::Manual }).await { error.set(Some(failure.to_string())) }
                     }); },
                     if online { "Go offline" } else { "Go online" }
                 }

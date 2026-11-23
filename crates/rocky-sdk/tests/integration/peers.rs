@@ -17,11 +17,11 @@ fn iroh() -> Network {
     Network::Owned(Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")))
 }
 async fn enroll(root: &Path, hub: &Arc<Hub>, members: &[&str]) -> Result<Vec<Device>, Failure> {
-    let creator = Device::create(&root.join("a"), Some(memory(hub, "a")))?;
+    let creator = Device::create(&root.join("a"), Some(memory(hub, "a"))).await?;
     let mut devices = Vec::new();
     for name in members {
         let invitation = creator.invite().await;
-        let member = Device::join(&root.join(name), &invitation, memory(hub, name))?;
+        let member = Device::join(&root.join(name), &invitation, memory(hub, name)).await?;
         member.sync().await.map_err(|error| error.to_string())?;
         devices.push(member);
     }
@@ -42,7 +42,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         a.add_peer(&b.contact().await).await.is_ok(),
         "the creator accepts contacts of devices it enrolled"
     );
-    let foreign = Device::create(&root.path().join("x"), Some(memory(&hub, "x")))?;
+    let foreign = Device::create(&root.path().join("x"), Some(memory(&hub, "x"))).await?;
     for device in [a, b] {
         let error = device.add_peer(&foreign.contact().await).await;
         assert_eq!(error.err().ok_or("another domain")?["code"], "rejected");
@@ -66,9 +66,9 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .any(|attempt| attempt["outcome"] == "completed"),
         "the network reports each peer on its own"
     );
-    let creator = snap::ok(c.session.info()).await;
+    let creator = snap::ok(c.database.info()).await;
     let creators: Vec<Value> = snap::ok(async {
-        let network = c.session.network().await?;
+        let network = c.database.status().await?.network;
         Ok(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await["peers"]
@@ -87,13 +87,13 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .any(|attempt| attempt["outcome"] == "failed")
     );
     assert_ne!(creators[0]["node"], creator["node"]);
-    let network = snap::ok(c.session.network()).await;
+    let network = snap::ok(async { c.database.status().await.map(|status| status.network) }).await;
     assert_eq!(network["attachment"], "attached");
     assert_eq!(network["kind"], "memory");
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
-    snap::ok(b.session.remove_peer(snap::public_key(&(c.node().await)))).await;
+    snap::ok(b.database.remove_peer(snap::public_key(&(c.node().await)))).await;
     b.add(4, "Tea").await;
     assert!(
         common::exchange_failed(&b.sync().await),
@@ -108,16 +108,16 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     );
     let creator_node = creators[0]["node"].clone();
     assert!(
-        !b.session
+        !b.database
             .status()
             .await?
             .authority
             .renewal_routes
             .is_empty()
     );
-    snap::ok(b.session.remove_peer(snap::public_key(&(creator_node)))).await;
+    snap::ok(b.database.remove_peer(snap::public_key(&(creator_node)))).await;
     assert!(
-        b.session
+        b.database
             .status()
             .await?
             .authority
@@ -126,7 +126,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         "the last issuer contact can be removed, leaving no known renewal candidates"
     );
     assert!(
-        snap::ok(b.session.status()).await["authority"]["renewal_routes"]
+        snap::ok(b.database.status()).await["authority"]["renewal_routes"]
             .as_array()
             .expect("routes")
             .is_empty()
@@ -159,7 +159,6 @@ async fn edits_relayed_in_any_order_and_repeated_converge() -> Result<(), Failur
     let eggs = c.add(5, "Jam").await;
     snap::ok(snap::mutate(
         &c.database,
-        &c.session,
         vec![6u8; 32],
         snap::Action::Delete {
             table: "items".to_owned(),
@@ -197,7 +196,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
         .await
         .map_err(|e| e.to_string())?;
     snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&(c.identity().await))),
     )
     .await;
@@ -212,7 +211,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     );
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
-        snap::ok(b.session.info()).await["revocations"]["statements"],
+        snap::ok(b.database.info()).await["revocations"]["statements"],
         1,
         "the other member learns the revocation from the creator"
     );
@@ -243,8 +242,8 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     a.add(1, "Milk").await;
     b.sync().await.map_err(|error| error.to_string())?;
     let identity = async |device: &Device| {
-        let session = snap::ok(device.session.info()).await;
-        (session["node"].clone(), session["principal"].clone())
+        let info = snap::ok(device.database.info()).await;
+        (info["node"].clone(), info["principal"].clone())
     };
     let (before_a, before_b) = (identity(a).await, identity(b).await);
     let scope = a.database.scope();
@@ -252,14 +251,17 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         device.close().await;
     }
 
-    let a = Device::open(&root.path().join("a"), Some(iroh()))?;
-    let b = Device::open(&root.path().join("b"), Some(iroh()))?;
+    let a = Device::open(&root.path().join("a"), Some(iroh())).await?;
+    let b = Device::open(&root.path().join("b"), Some(iroh())).await?;
     assert_eq!(a.database.scope(), scope);
     assert_eq!(
         (identity(&a).await, identity(&b).await),
         (before_a, before_b)
     );
-    assert_eq!(snap::ok(a.session.domain()).await["transport"], "iroh");
+    assert_eq!(
+        snap::ok(async { a.database.status().await.map(|status| status.network) }).await["kind"],
+        "iroh"
+    );
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     let error = b
@@ -285,7 +287,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
 
-    let c = Device::open(&root.path().join("c"), Some(iroh()))?;
+    let c = Device::open(&root.path().join("c"), Some(iroh())).await?;
     let c_contact: Value = decode(&c.contact().await, "rocky://peer/")?;
     let mut forged: Value = decode(&a.contact().await, "rocky://peer/")?;
     forged["routes"] = c_contact["routes"].clone();
@@ -368,7 +370,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
 {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer")))?;
+    let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer"))).await?;
     let invite = decode(&a.invite().await, "rocky://provision/")?;
     assert_eq!(invite["v"], 2);
     for version in [0, 1, 3, u32::MAX] {
@@ -381,6 +383,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
                 &encode(&other, "rocky://provision/"),
                 memory(&hub, "join")
             )
+            .await
             .is_err()
         );
         assert!(!directory.exists());
@@ -412,7 +415,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         let bytes = serde_json::to_vec(&identity)?;
         common::write_authority(&directory, "identity", &bytes).await?;
         let before = files(&directory)?;
-        let opened = Device::open(&directory, None);
+        let opened = Device::open(&directory, None).await;
         let error = match opened {
             Err(error) => error.to_string(),
             Ok(device) => {
@@ -440,7 +443,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     }
     assert!(errors.iter().all(|error| error == &errors[0]));
     std::fs::write(directory.join("rocky.sqlite"), database)?;
-    let a = Device::open(&directory, None)?;
+    let a = Device::open(&directory, None).await?;
     assert_eq!(a.titles().await, ["retained"]);
     a.close().await;
     Ok(())
@@ -453,15 +456,15 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
     let transport = hub.connector("a").start(true, [0; 32]).await?;
     for round in 0..2 {
         let a = if round == 0 {
-            Device::create(&root.path().join("a"), None)?
+            Device::create(&root.path().join("a"), None).await?
         } else {
-            Device::open(&root.path().join("a"), None)?
+            Device::open(&root.path().join("a"), None).await?
         };
         a.database
             .attach(Network::Attached(transport.clone()))
             .await?;
         assert_eq!(
-            snap::ok(a.session.network()).await["ownership"],
+            snap::ok(async { a.database.status().await.map(|status| status.network) }).await["ownership"],
             json!("application")
         );
         a.close().await;
@@ -476,14 +479,14 @@ async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_outside
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer = Device::create(&root.path().join("issuer"), Some(memory(&hub, "issuer")))?;
+    let issuer = Device::create(&root.path().join("issuer"), Some(memory(&hub, "issuer"))).await?;
     let member_path = root.path().join("member");
-    let member = Device::join(&member_path, &issuer.invite().await, memory(&hub, "member"))?;
+    let member = Device::join(&member_path, &issuer.invite().await, memory(&hub, "member")).await?;
     member.sync().await.map_err(|error| error.to_string())?;
     let foreign: rocky_secure::PublicKey = serde_json::from_value(json!(issuer.node().await))?;
     member.close().await;
     issuer.add(1, "After restart").await;
-    let reopened = Device::open(&member_path, Some(memory(&hub, "reopened")))?;
+    let reopened = Device::open(&member_path, Some(memory(&hub, "reopened"))).await?;
     reopened.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(reopened.titles().await, ["After restart"]);
     reopened.close().await;

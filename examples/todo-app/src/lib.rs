@@ -7,7 +7,7 @@ use rocky_sdk::{
     TableDefinition, Transaction, TransactionOutcome, TransactionToken, params,
 };
 pub use roles::{Member, Role};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 pub const APPLICATION: &str = "todo";
 pub const LISTS: &str = "lists";
@@ -163,18 +163,18 @@ fn title(title: &str) -> Result<&str, TodoError> {
 
 #[derive(Clone)]
 pub struct Todos {
-    database: Arc<Database>,
+    database: Database,
 }
 impl Todos {
-    pub fn new(database: Arc<Database>) -> Self {
+    pub fn new(database: Database) -> Self {
         Self { database }
     }
-    pub fn database(&self) -> &Arc<Database> {
+    pub fn database(&self) -> &Database {
         &self.database
     }
     pub async fn create_list(&self, name: &str) -> Result<Created, Failure> {
         let name = title(name)?;
-        self.database.session().next_partition(LISTS).await?;
+        self.database.next_partition(LISTS).await?;
         let mut transaction = self.database.transaction().await?;
         let id = transaction.next_id(LISTS, params![]).await?;
         transaction
@@ -205,8 +205,7 @@ impl Todos {
             .database
             .query("SELECT id,title FROM lists ORDER BY title,id", params![])
             .await;
-        let partial =
-            self.database.session().info().await?.access == rocky_sdk::Access::Role(roles::PARTIAL);
+        let partial = self.database.info().await?.access == rocky_sdk::Access::Role(roles::PARTIAL);
         let rows = match query {
             Ok(rows) => rows.collect().await?,
             Err(_) if partial => return Ok(Vec::new()),

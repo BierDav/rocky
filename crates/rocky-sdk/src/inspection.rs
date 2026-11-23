@@ -1,15 +1,7 @@
-use crate::{Failure, Session, request::Request};
+use crate::{Database, Failure, request::Request};
 use rocky_core::Commitment;
 use rocky_credentials::PublicKey;
 
-#[derive(Clone, Debug)]
-pub struct DomainInfo {
-    pub scope: crate::Scope,
-    pub issuer: bool,
-    pub access: crate::Access,
-    pub collections: Vec<String>,
-    pub transport: String,
-}
 #[derive(Clone, Debug)]
 pub struct IdentityInfo {
     pub identity: PublicKey,
@@ -47,13 +39,7 @@ pub struct RetentionStatus {
     pub policy: Option<crate::RetentionPolicy>,
     pub checkpoint: crate::CheckpointStatus,
 }
-impl Session {
-    pub async fn domain(&self) -> Result<DomainInfo, Failure> {
-        self.send(Request::Domain).await
-    }
-    pub async fn generation(&self) -> Result<crate::GenerationStatus, Failure> {
-        self.send(Request::Generation).await
-    }
+impl Database {
     pub async fn identities(&self) -> Result<Vec<IdentityInfo>, Failure> {
         self.send(Request::Identities).await
     }
@@ -107,23 +93,5 @@ impl Session {
     }
     pub async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, Failure> {
         self.send(|reply| Request::ActivityNext(after, reply)).await
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DiscoveryTopics {
-    pub current: [u8; 32],
-    pub previous: Option<[u8; 32]>,
-}
-impl Session {
-    pub async fn discovery_topics(&self) -> Result<DiscoveryTopics, Failure> {
-        self.send(Request::DiscoveryTopics).await
-    }
-    pub async fn request_contact(
-        &self,
-        node: rocky_core::NodeId,
-    ) -> Result<Option<PublicKey>, Failure> {
-        self.send(|reply| Request::ResolveContact(node, reply))
-            .await
     }
 }

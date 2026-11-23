@@ -484,7 +484,7 @@ impl Node {
         transport: Option<&dyn Transport>,
         automatic: bool,
         retry_only: bool,
-    ) -> Result<(ReconciliationReport, super::PassOutcome), Failure> {
+    ) -> Result<(SyncReport, super::PassOutcome), Failure> {
         let skip = if !self.online.load(Ordering::SeqCst) {
             Some(SkipReason::NetworkingDisabled)
         } else if !self.foreground.load(Ordering::SeqCst) {
@@ -553,7 +553,7 @@ impl Node {
             self.try_ensure_tip_node().await;
         }
         let peers = peers.into_inner().unwrap_or_else(PoisonError::into_inner);
-        let report = ReconciliationReport {
+        let report = SyncReport {
             contact_resolutions: self
                 .observations
                 .snapshot()

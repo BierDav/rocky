@@ -69,8 +69,8 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
             frozen(a.sync(&*transport(&a).await?)).await?;
             let bytes = *hub.written().borrow() - before;
             assert!(bytes > 0);
-            frozen(a.detach(None)).await;
-            frozen(b.detach(None)).await;
+            frozen(a.detach()).await;
+            frozen(b.detach()).await;
 
             let fixture = Fixture {
                 root: root.path().to_owned(),
@@ -259,8 +259,8 @@ async fn trial(fixture: &Fixture, offset: usize) -> Result<(), Failure> {
     assert_eq!(rows(&a).await?, ["1", "2"], "cut at {offset}: {report}");
     assert_eq!(rows(&b).await?, ["1", "2"], "cut at {offset}");
     progress.phase.set("detaching");
-    a.detach(None).await;
-    b.detach(None).await;
+    a.detach().await;
+    b.detach().await;
     drop(a);
     drop(b);
     std::fs::remove_dir_all(trial)?;

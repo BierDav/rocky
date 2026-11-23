@@ -30,32 +30,39 @@ cargo run -p rocky-sdk --example notes -- ./local/notes --create
 cargo run -p rocky-sdk --example notes -- ./local/notes
 ```
 
+`Configuration` opens a database and `Database` is its one handle: clones
+share it, every call is a future the caller may drop, and `close` ends the
+database for every clone. `observe(&["notes"])` streams committed changes to
+the named tables (an empty list means all), `flush` makes every returned commit
+durable, and `status` with `status_changes` reports progress, blockers and the
+network.
+
 A database's authority is an offline root key: `Configuration::create`
-returns it once as a 24-word phrase (`Opened::root`), or
+returns it once as a 24-word phrase (`Created::root`), or
 `create_with_root` takes a passkey-backed signer. Rocky never stores it.
 The owner's identity is derived from that root. Identity signers are also
-never stored: a device joining with `Session::provision`'s URI joins as a
+never stored: a device joining with `Database::provision`'s URI joins as a
 single-use identity the issuer minted, or `Configuration::join_linkable`
 returns its identity phrase once. To keep an identity the person already
-has, an issuer calls `Session::invite` with its public key instead; the
+has, an issuer calls `Database::invite` with its public key instead; the
 URI carries no secret, and `Configuration::accept_invitation` joins with
 the configured identity provider over the network, asking the issuing node
 for an enrollment that node signs. Such an invitation is single use and expires (ten
 minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
-unused one with `Session::withdraw_invitation`. Supply the identity for
+unused one with `Database::withdraw_invitation`. Supply the identity for
 later linking; opening and renewal use the node key alone.
-`Session::provision` and `Session::invite` take an `Access`: `Full`,
+`Database::provision` and `Database::invite` take an `Access`: `Full`,
 `Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
 A role reads, writes, appends to or updates named columns of the tables it
 lists; column lists restrict writes only. A role declared `per_partition`
 holds no partition of that group until a trusted identity calls
-`Session::grant_partition`; the person's next renewal, which the delivered
+`Database::grant_partition`; the person's next renewal, which the delivered
 group secret starts, carries the grant. `Full` and `Read` reach every
 partition. Only trusted identities grant partitions or share group secrets
 with members; a member hands the secret of a partition it created only to
 trusted nodes, and no access delegates further. A trusted identity becomes an
-administrator by provisioning it, granting `Session::trust` with the root key
-and calling `Session::install_trust` on its node.
+administrator by provisioning it, granting `Database::trust` with the root key
+and calling `Database::install_trust` on its node.
 A relay is an ordinary identity invited with store-only access
 (`Access::Store`): it holds and forwards encrypted frames and
 partition-key mailboxes for devices that are never online together, but never
@@ -97,7 +104,11 @@ Firefox.
 `rocky-sdk` starts without networking on native targets and in the browser.
 Applications select a connector explicitly: add `rocky-iroh` and supply its
 `Options` through `Network::Owned`, or attach an application's endpoint with
-`Attachment::transport` and `Network::Borrowed`. `Attachment::connected` also
+`Attachment::transport` and `Network::Borrowed`. A configured network attaches
+at open; `Database::attach` and `detach` change it later, and `detach` closes
+only a transport the database started. `set_sync` picks `SyncMode::Off`,
+`Manual`, `Foreground` or `Background`; `sync_now` runs one pass and returns
+its `SyncReport`, and `add_peer`, `remove_peer` and `contact` manage peers. `Attachment::connected` also
 supplies optional discovery and network-change events through `Network::Attached`.
 One attachment routes RPC and replication streams to independent database scopes.
 Endpoint diagnostics and lifecycle controls belong to the iroh attachment.
@@ -115,7 +126,7 @@ A dialer pins the node it expects, so a route must reach one node: behind a
 load balancer give each node its own path.
 Guarantees that need a global authority, gap-free numbers and at-most-once
 admission, come from the optional `rocky-coordinator` crate, an add-on to a
-`Database`: `Counters::connect(&database, client)` claims the next number of a
+`Database`: `Counters::new(database, client)` claims the next number of a
 named counter for any person with write access, and a claim key such as an
 order or ticket id keeps every retry on its first number. The application
 writes that number in its own transaction; an unreachable coordinator is a

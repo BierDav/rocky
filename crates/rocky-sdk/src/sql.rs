@@ -1,6 +1,7 @@
 use crate::{
-    Connection, ConnectionOptions, Database, Durability, Failure, Page, RowIdentity, SqlFailure,
-    SqlValue, TransactionToken,
+    Database, Failure, RowIdentity, SqlFailure, SqlValue, TransactionToken,
+    connection::{ConnectionOptions, Page},
+    database::Connection,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -374,13 +375,6 @@ impl Drop for Rows<'_> {
     }
 }
 
-fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
-    ConnectionOptions {
-        read_only,
-        durability,
-        transaction_timeout: None,
-    }
-}
 impl Database {
     pub async fn query(&self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'static>, Failure> {
         let (page, connection) = self.query_once(sql.into(), params).await?;
@@ -391,10 +385,12 @@ impl Database {
         Ok(Rows::from_page(source, 1, page))
     }
     pub async fn transaction(&self) -> Result<Transaction, Failure> {
-        self.transaction_with(Durability::Buffered).await
-    }
-    pub async fn transaction_with(&self, durability: Durability) -> Result<Transaction, Failure> {
-        let connection = self.connect(options(false, durability)).await?;
+        let connection = self
+            .connect(ConnectionOptions {
+                read_only: false,
+                transaction_timeout: None,
+            })
+            .await?;
         let token = connection.begin_identified().await?;
         Ok(Transaction { connection, token })
     }

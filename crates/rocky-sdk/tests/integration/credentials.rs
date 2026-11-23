@@ -1,7 +1,7 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_credentials::Revocation;
-use rocky_sdk::{Access, Database, Network, Open, RoleName, transport::memory::Hub};
+use rocky_sdk::{Access, Network, RoleName, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -15,26 +15,28 @@ const ITEM_WRITER: RoleName = RoleName::from_static("item_writer");
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: common::prepared_identity(directory),
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(memory(hub, name)),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        common::prepared_identity(directory),
+        Some(memory(hub, name)),
+    )
 }
-fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
-    Device::new(Database::create(open(&root.join(name), hub, name), None)?)
+async fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).create().await?)
 }
-fn join(root: &Path, hub: &Arc<Hub>, name: &str, invitation: &str) -> Result<Device, Failure> {
-    Device::new(Database::join(
-        open(&root.join(name), hub, name),
-        invitation,
-    )?)
+async fn join(
+    root: &Path,
+    hub: &Arc<Hub>,
+    name: &str,
+    invitation: &str,
+) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).join(invitation).await?)
 }
-fn reopen(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
-    Device::new(Database::open(open(&root.join(name), hub, name))?)
+async fn reopen(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).open().await?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     let mut identity = common::authority_json(&root.join(name), "identity")?;
@@ -102,7 +104,6 @@ async fn create_row(
 ) -> Result<Value, Failure> {
     snap::observe(snap::mutate(
         &device.database,
-        &device.session,
         vec![handle; 32],
         snap::Action::Create {
             table: snap::text(&(collection)),
@@ -147,12 +148,12 @@ async fn notes(device: &Device) -> Result<Vec<String>, Failure> {
 async fn items(device: &Device) -> Result<Vec<String>, Failure> {
     texts(device, "SELECT title FROM items ORDER BY title").await
 }
-async fn session(device: &Device) -> Value {
-    snap::ok(device.session.info()).await
+async fn device_info(device: &Device) -> Value {
+    snap::ok(device.database.info()).await
 }
 async fn manual(devices: &[&Device]) {
     for device in devices {
-        snap::ok(device.session.set_automatic_sync(false)).await;
+        snap::ok(device.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     }
 }
 async fn synced(device: &Device) -> Result<(), Failure> {
@@ -168,13 +169,13 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
+    let a = create(root, &hub, "a").await?;
     let reader = Access::Role(ITEM_READER);
     let writer = Access::Role(NOTE_WRITER);
-    let r = join(root, &hub, "r", &a.invite_as(reader.clone()).await)?;
-    let w = join(root, &hub, "w", &a.invite_as(writer.clone()).await)?;
+    let r = join(root, &hub, "r", &a.invite_as(reader.clone()).await).await?;
+    let w = join(root, &hub, "w", &a.invite_as(writer.clone()).await).await?;
     let refused = snap::observe(
-        a.session
+        a.database
             .provision(Access::Role(RoleName::new("unknown")?), None),
     )
     .await;
@@ -186,12 +187,12 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
 
     let check = async |renewed: bool| -> Result<(), Failure> {
         assert_eq!(
-            session(&r).await["access"],
+            device_info(&r).await["access"],
             json!(reader),
             "renewed {renewed}"
         );
         assert_eq!(
-            session(&w).await["access"],
+            device_info(&w).await["access"],
             json!(writer),
             "renewed {renewed}"
         );
@@ -208,7 +209,7 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
             "a reader writes nothing"
         );
         assert!(
-            snap::observe(r.session.provision(reader.clone(), None))
+            snap::observe(r.database.provision(reader.clone(), None))
                 .await
                 .is_err()
         );
@@ -222,15 +223,15 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
             items(&w).await.unwrap_or_default().is_empty(),
             "a scoped writer does not read another collection"
         );
-        assert!(snap::observe(w.session.identities()).await.is_err());
+        assert!(snap::observe(w.database.identities()).await.is_err());
         Ok(())
     };
     check(false).await?;
     for device in [&r, &w] {
-        let before = session(device).await;
+        let before = device_info(device).await;
         let renewed = snap::ok(async {
-            device.session.renew().await?;
-            device.session.info().await
+            device.database.renew().await?;
+            device.database.info().await
         })
         .await;
         assert_eq!(renewed["readable"], before["readable"]);
@@ -242,7 +243,7 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
     synced(&w).await?;
     assert_eq!(notes(&a).await?, ["From writer", "Hello"]);
     assert_eq!(items(&a).await?, ["Milk"]);
-    let identities = snap::ok(a.session.identities()).await;
+    let identities = snap::ok(a.database.identities()).await;
     let mut listed: Vec<Value> = identities["identities"]
         .as_array()
         .into_iter()
@@ -267,13 +268,13 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
-    let i = join(root, &hub, "i", &a.invite_as(rocky_sdk::Access::Full).await)?;
+    let a = create(root, &hub, "a").await?;
+    let i = join(root, &hub, "i", &a.invite_as(rocky_sdk::Access::Full).await).await?;
     a.admit(&i).await;
     manual(&[&a, &i]).await;
     item(&a, 1, "Milk").await?;
     synced(&i).await?;
-    let (creator, issuer) = (session(&a).await, session(&i).await);
+    let (creator, issuer) = (device_info(&a).await, device_info(&i).await);
     assert_eq!(issuer["issuer"], json!(true));
     assert_eq!(issuer["access"], json!("full"));
     assert_ne!(issuer["node"], creator["node"]);
@@ -301,7 +302,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     let scope = a.database.scope();
     a.close().await;
 
-    let m = join(root, &hub, "m", &i.invite().await)?;
+    let m = join(root, &hub, "m", &i.invite().await).await?;
     manual(&[&m]).await;
     assert_eq!(m.database.scope(), scope);
     synced(&m).await?;
@@ -309,18 +310,18 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     m.add(2, "Eggs").await;
     synced(&m).await?;
     snap::ok(async {
-        m.session.renew().await?;
-        m.session.info().await
+        m.database.renew().await?;
+        m.database.info().await
     })
     .await;
     assert_eq!(i.titles().await, ["Eggs", "Milk"]);
-    let identities = snap::ok(i.session.identities()).await.to_string();
+    let identities = snap::ok(i.database.identities()).await.to_string();
     assert!(identities.contains(m.identity().await.as_str()));
     for device in [&i, &m] {
         device.close().await;
     }
-    let a = reopen(root, &hub, "a")?;
-    let reopened = session(&a).await;
+    let a = reopen(root, &hub, "a").await?;
+    let reopened = device_info(&a).await;
     assert_eq!(
         (&reopened["node"], &reopened["principal"]),
         (&creator["node"], &creator["principal"])
@@ -335,32 +336,35 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     let root = crate::support::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
+    let a = create(root, &hub, "a").await?;
     let b = join(
         root,
         &hub,
         "b",
         &a.invite_as(Access::Role(ITEM_WRITER)).await,
-    )?;
+    )
+    .await?;
     let c = join(
         root,
         &hub,
         "c",
         &a.invite_as(Access::Role(ITEM_READER)).await,
-    )?;
+    )
+    .await?;
     let w = join(
         root,
         &hub,
         "w",
         &a.invite_as(Access::Role(NOTE_WRITER)).await,
-    )?;
+    )
+    .await?;
     item(&a, 1, "Before").await?;
     for device in [&b, &c] {
         synced(device).await?;
         assert_eq!(items(device).await?, ["Before"]);
     }
     let revoked = snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&(c.identity().await))),
     )
     .await;
@@ -374,7 +378,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     item(&a, 2, "After").await?;
 
     synced(&b).await?;
-    assert_eq!(session(&b).await["revocations"]["statements"], 1);
+    assert_eq!(device_info(&b).await["revocations"]["statements"], 1);
     assert_eq!(identity(root, "b")?["keys"], json!({"items": [1, 2]}));
     assert_eq!(
         secret(root, "b", "reader.items.2")?,
@@ -386,7 +390,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert_eq!(items(&a).await?, ["After", "Before", "Rotated"]);
     synced(&w).await?;
     assert_eq!(
-        session(&w).await["revocations"]["statements"],
+        device_info(&w).await["revocations"]["statements"],
         1,
         "a writer of another collection learns the revocation"
     );
@@ -399,13 +403,13 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert!(common::exchange_failed(&c.sync().await));
     assert!(
         snap::observe(async {
-            c.session.renew().await?;
-            c.session.info().await
+            c.database.renew().await?;
+            c.database.info().await
         })
         .await
         .is_err()
     );
-    assert!(!snap::ok(c.session.status()).await["authority"]["verified_revocation"].is_null());
+    assert!(!snap::ok(c.database.status()).await["authority"]["verified_revocation"].is_null());
     assert_eq!(
         secret(root, "c", "reader.items.2")?,
         None,
@@ -424,9 +428,9 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         device.close().await;
     }
 
-    let reopened = reopen(root, &hub, "c")?;
+    let reopened = reopen(root, &hub, "c").await?;
     assert!(
-        !snap::ok(reopened.session.status()).await["authority"]["verified_revocation"].is_null()
+        !snap::ok(reopened.database.status()).await["authority"]["verified_revocation"].is_null()
     );
     reopened.close().await;
     let c_dir = root.join("c");
@@ -435,9 +439,9 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert_eq!(tampered["version"], 3);
     tampered["statement"]["statement"]["time"] = json!(999);
     common::write_authority(&c_dir, "revoked", &serde_json::to_vec(&tampered)?).await?;
-    let reopened = reopen(root, &hub, "c")?;
+    let reopened = reopen(root, &hub, "c").await?;
     assert!(
-        snap::observe(reopened.session.status()).await.is_err(),
+        snap::observe(reopened.database.status()).await.is_err(),
         "a local file cannot forge a publisher's revocation notice"
     );
     reopened.close().await;
@@ -450,7 +454,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         .ok_or("epoch 2 key")?;
     std::fs::remove_file(root.join("b/secrets").join(role))?;
     assert!(
-        reopen(root, &hub, "b").is_err(),
+        reopen(root, &hub, "b").await.is_err(),
         "a lost key epoch is an error at open"
     );
     assert_eq!(
@@ -466,13 +470,13 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let root = crate::support::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
-    let b = join(root, &hub, "b", &a.invite().await)?;
-    let c = join(root, &hub, "c", &a.invite().await)?;
+    let a = create(root, &hub, "a").await?;
+    let b = join(root, &hub, "b", &a.invite().await).await?;
+    let c = join(root, &hub, "c", &a.invite().await).await?;
     item(&a, 1, "Before").await?;
     synced(&b).await?;
     let (c_node, c_identity) = (c.node().await, c.identity().await);
-    let identities = snap::ok(a.session.identities()).await;
+    let identities = snap::ok(a.database.identities()).await;
     let record = identities["identities"]
         .as_array()
         .into_iter()
@@ -531,9 +535,9 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     )?;
 
     for round in 0..2 {
-        let a = reopen(root, &hub, "a")?;
+        let a = reopen(root, &hub, "a").await?;
         assert_eq!(
-            session(&a).await["revocations"]["statements"],
+            device_info(&a).await["revocations"]["statements"],
             1,
             "round {round}"
         );
@@ -543,7 +547,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             saved["keys"],
             json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
         );
-        let listed = snap::ok(a.session.identities()).await;
+        let listed = snap::ok(a.database.identities()).await;
         assert!(
             listed["identities"]
                 .as_array()
@@ -572,16 +576,16 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         }
         a.close().await;
     }
-    let a = reopen(root, &hub, "a")?;
-    let b = reopen(root, &hub, "b")?;
+    let a = reopen(root, &hub, "a").await?;
+    let b = reopen(root, &hub, "b").await?;
     synced(&b).await?;
-    assert_eq!(session(&b).await["revocations"]["statements"], 1);
+    assert_eq!(device_info(&b).await["revocations"]["statements"], 1);
     assert_eq!(
         secret(root, "b", "reader.items.2")?,
         Some(made_before_the_device_stopped)
     );
     assert_eq!(items(&b).await?, ["After", "Before"]);
-    let c = reopen(root, &hub, "c")?;
+    let c = reopen(root, &hub, "c").await?;
     assert!(common::exchange_failed(&c.sync().await));
     assert_eq!(secret(root, "c", "reader.items.2")?, None);
     for device in [&a, &b, &c] {

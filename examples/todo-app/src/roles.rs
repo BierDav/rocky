@@ -67,11 +67,10 @@ pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, 
 
 pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Result<Todos, Failure> {
     let (role, uri) = parse_invitation(code)?;
-    let todos = Todos::new(configuration.join(uri).await?.database);
+    let todos = Todos::new(configuration.join(uri).await?);
     if role == Role::Partial {
         todos
             .database
-            .session()
             .set_replica_role(ReplicaRoleConfig {
                 role: ReplicaRole::Partial,
             })
@@ -83,14 +82,10 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
 
 impl Todos {
     pub async fn node(&self) -> Result<String, Failure> {
-        Ok(self.database.session().status().await?.authority.node)
+        Ok(self.database.status().await?.authority.node)
     }
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
-        let provisioning = self
-            .database
-            .session()
-            .provision(role.access()?, None)
-            .await?;
+        let provisioning = self.database.provision(role.access()?, None).await?;
         Ok(format!("{role}:{}", provisioning.uri))
     }
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
@@ -126,18 +121,18 @@ impl Todos {
             return Err("a device cannot remove itself; reset it instead".into());
         }
         let node_key = node.parse()?;
-        let session = self.database.session();
-        let identity = session
+        let identity = self
+            .database
             .identity_for_node(node_key)
             .await?
             .ok_or("the node is not linked to a recorded identity")?;
-        session.revoke_identity(identity).await?;
+        self.database.revoke_identity(identity).await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])
             .await?;
         transaction.commit().await?;
-        let _ = self.database.session().remove_peer(node_key).await;
+        let _ = self.database.remove_peer(node_key).await;
         Ok(())
     }
     pub async fn role(&self) -> Result<Option<Role>, Failure> {
@@ -173,7 +168,6 @@ impl Todos {
     pub async fn shared_with(&self, list: RowIdentity) -> Result<BTreeSet<String>, Failure> {
         Ok(self
             .database
-            .session()
             .partition_recipients(list_target(list))
             .await?
             .iter()
@@ -191,22 +185,24 @@ impl Todos {
             .filter(|member| member.role == Role::Partial)
             .map(|member| member.node)
             .collect();
-        let session = self.database.session();
         let mut full = BTreeSet::new();
         for node in nodes {
             let key = node.parse()?;
             if partial.contains(node) {
-                let identity = session
+                let identity = self
+                    .database
                     .identity_for_node(key)
                     .await?
                     .ok_or("the node is not linked to a recorded identity")?;
-                session.grant_partition(identity, list_target(list)).await?;
+                self.database
+                    .grant_partition(identity, list_target(list))
+                    .await?;
             } else {
                 full.insert(key);
             }
         }
         if !full.is_empty() {
-            session
+            self.database
                 .share_partition(list_target(list), full, None)
                 .await?;
         }

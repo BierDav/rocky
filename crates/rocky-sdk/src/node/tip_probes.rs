@@ -34,6 +34,15 @@ impl Node {
             Probe::Compaction(reply) => {
                 let _ = reply.send(self.compaction(scope, 0, Vec::new()).await);
             }
+            Probe::DiscoveryTopic(reply) => {
+                let _ = reply.send(now().and_then(|time| {
+                    Ok(self
+                        .settings
+                        .published()
+                        .discovery_topics(&self.vault, time)?
+                        .0)
+                }));
+            }
         }
     }
 

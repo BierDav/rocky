@@ -1,6 +1,6 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use rocky_sdk::{Network, transport::memory::Hub};
 use std::sync::Arc;
 
 use crate::common;
@@ -12,17 +12,20 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     let issuer = Device::create(
         &directory.path().join("issuer"),
         Some(Network::Owned(hub.connector("issuer"))),
-    )?;
+    )
+    .await?;
     let path = directory.path().join("writer");
-    let open = || Open {
-        identity: common::prepared_identity(&path),
-        directory: &path,
-        schema: crate::support::snapshot::schema(common::SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector("writer"))),
+    let open = || {
+        crate::common::configuration(
+            &path,
+            crate::support::snapshot::schema(common::SCHEMA),
+            None,
+            common::prepared_identity(&path),
+            Some(Network::Owned(hub.connector("writer"))),
+        )
     };
-    let writer = Device::new(Database::join(open(), &issuer.invite().await)?)?;
-    let before = snap::ok(writer.session.info()).await;
+    let writer = Device::new(open().join(&issuer.invite().await).await?)?;
+    let before = snap::ok(writer.database.info()).await;
     let own = before["writer"]
         .as_str()
         .ok_or("writer missing")?
@@ -38,11 +41,11 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     );
     tx.rollback().await?;
     writer.close().await;
-    let writer = Device::new(Database::open(open())?)?;
-    assert_eq!(snap::ok(writer.session.info()).await["writer"], own);
+    let writer = Device::new(open().open().await?)?;
+    assert_eq!(snap::ok(writer.database.info()).await["writer"], own);
     common::introduce(&issuer, &writer).await;
-    writer.session.renew().await?;
-    assert_eq!(snap::ok(writer.session.info()).await["writer"], own);
+    writer.database.renew().await?;
+    assert_eq!(snap::ok(writer.database.info()).await["writer"], own);
     writer.add(2, "after reopen").await;
     writer.close().await;
     issuer.close().await;

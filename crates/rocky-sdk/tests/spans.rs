@@ -116,7 +116,8 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     let title = "Quietly kept row value 7f3a";
     a.add(1, title).await;
     let invitation = a.invite().await;
@@ -124,7 +125,8 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
         &root.path().join("b"),
         &invitation,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("sync");
     assert_eq!(b.titles().await, [title]);
     let spans = recorder.0.lock().map_err(|_| "recorder")?.clone();

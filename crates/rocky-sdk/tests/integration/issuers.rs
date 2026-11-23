@@ -1,30 +1,29 @@
 use common::{Device, Failure};
-use rocky_sdk::{
-    CallFailure, Database, Network, Open, ReconciliationReport, RevocationMode,
-    transport::memory::Hub,
-};
+use rocky_sdk::{CallFailure, Network, RevocationMode, SyncReport, transport::memory::Hub};
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use crate::common;
 
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: common::prepared_identity(directory),
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(common::SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(common::SCHEMA),
+        None,
+        common::prepared_identity(directory),
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
-fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
-    Device::new(Database::create(open(&root.join(name), hub, name), None)?)
+async fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).create().await?)
 }
-fn join(root: &Path, hub: &Arc<Hub>, name: &str, invitation: &str) -> Result<Device, Failure> {
-    Device::new(Database::join(
-        open(&root.join(name), hub, name),
-        invitation,
-    )?)
+async fn join(
+    root: &Path,
+    hub: &Arc<Hub>,
+    name: &str,
+    invitation: &str,
+) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).join(invitation).await?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     common::authority_json(&root.join(name), "identity")
@@ -48,10 +47,10 @@ fn assert_issuers(root: &Path, name: &str, nodes: &[&str]) -> Result<(), Failure
     assert_eq!(actual, expected, "{name}");
     Ok(())
 }
-async fn synced(device: &Device) -> Result<ReconciliationReport, Failure> {
-    device.session().sync_once().await
+async fn synced(device: &Device) -> Result<SyncReport, Failure> {
+    device.sync_now().await
 }
-fn reconciled_with(report: &ReconciliationReport, node: &str) -> bool {
+fn reconciled_with(report: &SyncReport, node: &str) -> bool {
     report.peers.iter().any(|peer| {
         peer.node == node
             && peer.attempts.iter().any(|attempt| {
@@ -74,8 +73,8 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     }
     Err("the rows never became readable".into())
 }
-async fn session(device: &Device) -> rocky_sdk::SessionInfo {
-    device.session().info().await.expect("session")
+async fn device_info(device: &Device) -> rocky_sdk::DeviceInfo {
+    device.database.info().await.expect("device info")
 }
 async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
     device.close().await;
@@ -98,8 +97,8 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
-    let early = join(root, &hub, "early", &a.invite().await)?;
+    let a = create(root, &hub, "a").await?;
+    let early = join(root, &hub, "early", &a.invite().await).await?;
     a.add(1, "Milk").await;
     synced(&early).await?;
 
@@ -107,18 +106,19 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         root,
         &hub,
         "b",
-        &a.session()
+        &a.database
             .provision(rocky_sdk::Access::Full, None)
             .await?
             .uri,
-    )?;
-    let principal = session(&b).await.principal.to_hex();
+    )
+    .await?;
+    let principal = device_info(&b).await.principal.to_hex();
     let grant = a
-        .session()
+        .database
         .trust(principal.parse()?, a.root_signer()?)
         .await?;
-    b.session().install_trust(&grant.grant).await?;
-    a.session().add_peer(&b.contact().await).await?;
+    b.database.install_trust(&grant.grant).await?;
+    a.database.add_peer(&b.contact().await).await?;
     let root_key = a.root_signer()?;
     let (a_node, b_node) = (a.node().await, b.node().await);
     let (a_identity, b_identity) = (a.identity().await, b.identity().await);
@@ -129,22 +129,22 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "b"
     );
     assert_ne!(
-        session(&a).await.principal,
-        session(&b).await.principal,
+        device_info(&a).await.principal,
+        device_info(&b).await.principal,
         "paired issuers share no identity key"
     );
     assert_ne!(
-        session(&a).await.writer,
-        session(&b).await.writer,
+        device_info(&a).await.writer,
+        device_info(&b).await.writer,
         "paired issuers share no writer key"
     );
     synced(&b).await?;
     assert_eq!(b.titles().await, ["Milk"]);
 
-    let late = join(root, &hub, "late", &a.invite().await)?;
+    let late = join(root, &hub, "late", &a.invite().await).await?;
     assert_issuers(root, "late", &[&a_node, &b_node])?;
     assert_issuers(root, "early", &[&a_node])?;
-    early.session().renew().await?;
+    early.database.renew().await?;
     assert_issuers(root, "early", &[&a_node, &b_node])?;
     let report = synced(&late).await?;
     assert!(
@@ -153,9 +153,11 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     );
     let late_node = late.node().await;
     assert!(
-        b.session()
-            .peers()
+        b.database
+            .status()
             .await?
+            .network
+            .peers
             .iter()
             .any(|peer| peer.node == late_node
                 && peer.last_authenticated_exchange_at_epoch_seconds.is_some())
@@ -170,7 +172,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     destroy(root, "a", a).await?;
 
     let error = b
-        .session()
+        .database
         .revoke_identity(b_identity.parse()?)
         .await
         .err()
@@ -181,7 +183,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "a trusted node does not revoke itself without the root: {error}"
     );
     let error = b
-        .session()
+        .database
         .revoke_identity(a_identity.parse()?)
         .await
         .err()
@@ -192,7 +194,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "a trusted node revokes no trusted node without the root: {error}"
     );
     let revoked = b
-        .session()
+        .database
         .revoke_trusted(a_identity.parse()?, mode, root_key)
         .await?;
     assert_eq!(
@@ -208,7 +210,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 
     if mode == RevocationMode::Compromised {
         let error = early
-            .session()
+            .database
             .renew()
             .await
             .err()
@@ -218,7 +220,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             "revoked",
             "{error}"
         );
-        let status = early.session().status().await?;
+        let status = early.database.status().await?;
         assert_eq!(
             status
                 .authority
@@ -230,13 +232,13 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             }),
             "{status:?}"
         );
-        assert!(early.session().renew().await.is_err());
+        assert!(early.database.renew().await.is_err());
         for device in [&b, &early, &late] {
             device.close().await;
         }
         drop(early);
-        let early = Device::new(Database::open(open(&root.join("early"), &hub, "early"))?)?;
-        let status = early.session().status().await?;
+        let early = Device::new(open(&root.join("early"), &hub, "early").open().await?)?;
+        let status = early.database.status().await?;
         assert_eq!(
             status
                 .authority
@@ -248,14 +250,14 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             }),
             "{status:?}"
         );
-        assert!(early.session().renew().await.is_err());
+        assert!(early.database.renew().await.is_err());
         early.close().await;
         return Ok(());
     }
 
     b.seal_and_compact().await;
-    let c = join(root, &hub, "c", &b.invite().await)?;
-    assert_eq!(session(&c).await.revocations.statements, 1);
+    let c = join(root, &hub, "c", &b.invite().await).await?;
+    assert_eq!(device_info(&c).await.revocations.statements, 1);
     let report = synced(&c).await?;
     assert!(reconciled_with(&report, &b_node), "{report:?}");
     assert_eq!(
@@ -264,16 +266,16 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "the second issuer's invitee gets pre-rotation rows through a base at a seal"
     );
 
-    let before = session(&early).await;
+    let before = device_info(&early).await;
     assert_eq!(before.revocations.statements, 0);
-    early.session().renew().await?;
-    let after = session(&early).await;
+    early.database.renew().await?;
+    let after = device_info(&early).await;
     assert_eq!(
         after.revocations.statements, 1,
         "a device the creator enrolled renews through the second issuer"
     );
     assert_eq!(
-        session(&b).await.expires,
+        device_info(&b).await.expires,
         u64::MAX,
         "a trusted grant never expires"
     );
@@ -302,7 +304,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 
     synced(&late).await?;
     assert_eq!(
-        session(&late).await.revocations.statements,
+        device_info(&late).await.revocations.statements,
         1,
         "a refused sync renews from the second issuer and learns the revocation"
     );
@@ -312,7 +314,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     let report = synced(&c).await?;
     assert!(reconciled_with(&report, &b_node), "{report:?}");
     assert_eq!(c.titles().await, ["Bread", "Eggs", "Milk"]);
-    assert_eq!(session(&c).await.revocations.statements, 1);
+    assert_eq!(device_info(&c).await.revocations.statements, 1);
     assert_issuers(root, "early", &[&b_node])?;
     for device in [&b, &c, &early, &late] {
         device.close().await;
@@ -322,7 +324,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         ("c", &["Bread", "Eggs", "Milk"][..]),
         ("early", &["Eggs", "Milk"][..]),
     ] {
-        let device = Device::new(Database::open(open(&root.join(name), &hub, name))?)?;
+        let device = Device::new(open(&root.join(name), &hub, name).open().await?)?;
         assert_eq!(
             device.titles().await,
             titles,
@@ -339,18 +341,19 @@ async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
+    let a = create(root, &hub, "a").await?;
     let b = join(
         root,
         &hub,
         "b",
-        &a.session()
+        &a.database
             .provision(rocky_sdk::Access::Full, None)
             .await?
             .uri,
-    )?;
+    )
+    .await?;
     a.admit(&b).await;
-    a.session().add_peer(&b.contact().await).await?;
+    a.database.add_peer(&b.contact().await).await?;
     synced(&b).await.map_err(|error| {
         format!("the second issuer bootstraps its keys before their source is lost: {error}")
     })?;
@@ -358,16 +361,17 @@ async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
         root,
         &hub,
         "g",
-        &a.session()
+        &a.database
             .provision(rocky_sdk::Access::Full, None)
             .await?
             .uri,
-    )?;
-    let granted = session(&g).await.expires;
+    )
+    .await?;
+    let granted = device_info(&g).await.expires;
     destroy(root, "a", a).await?;
 
-    g.session().renew().await?;
-    let renewed = session(&g).await.expires;
+    g.database.renew().await?;
+    let renewed = device_info(&g).await.expires;
     assert!(
         renewed >= granted,
         "the second issuer renews for the domain's lifetime: {granted} {renewed}"
@@ -386,41 +390,42 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     let root = tempfile::tempdir()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
+    let a = create(root, &hub, "a").await?;
     let t = join(
         root,
         &hub,
         "t",
-        &a.session()
+        &a.database
             .provision(rocky_sdk::Access::Full, None)
             .await?
             .uri,
-    )?;
-    let t_identity = session(&t).await.principal.to_hex();
+    )
+    .await?;
+    let t_identity = device_info(&t).await.principal.to_hex();
     let grant = a
-        .session()
+        .database
         .trust(t_identity.parse()?, a.root_signer()?)
         .await?;
-    t.session().install_trust(&grant.grant).await?;
+    t.database.install_trust(&grant.grant).await?;
     let (a_node, t_node) = (a.node().await, t.node().await);
     a.add(1, "Milk").await;
     synced(&t).await?;
-    let enrolled_by_t = join(root, &hub, "d", &t.invite().await)?;
+    let enrolled_by_t = join(root, &hub, "d", &t.invite().await).await?;
     assert_eq!(synced_titles(&enrolled_by_t).await?, ["Milk"]);
-    let enrolled_by_a = join(root, &hub, "e", &a.invite().await)?;
+    let enrolled_by_a = join(root, &hub, "e", &a.invite().await).await?;
     assert_eq!(synced_titles(&enrolled_by_a).await?, ["Milk"]);
     assert_issuers(root, "d", &[&a_node, &t_node])?;
 
     t.close().await;
     drop(t);
     enrolled_by_t
-        .session()
+        .database
         .renew()
         .await
         .map_err(|error| format!("renews through the creator, which never enrolled it: {error}"))?;
 
     let error = a
-        .session()
+        .database
         .revoke_identity(t_identity.parse()?)
         .await
         .err()
@@ -430,7 +435,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         "publisher_required",
         "only the root revokes a trusted identity: {error}"
     );
-    a.session()
+    a.database
         .revoke_trusted(
             t_identity.parse()?,
             RevocationMode::Compromised,
@@ -439,8 +444,8 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         .await?;
 
     let _ = enrolled_by_t.sync().await;
-    let _ = enrolled_by_t.session().renew().await;
-    let status = enrolled_by_t.session().status().await?;
+    let _ = enrolled_by_t.database.renew().await;
+    let status = enrolled_by_t.database.status().await?;
     assert_eq!(
         status
             .authority
@@ -452,7 +457,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         }),
         "the cut-off device learns the revoked trusted node is why: {status:?}"
     );
-    assert!(enrolled_by_t.session().renew().await.is_err());
+    assert!(enrolled_by_t.database.renew().await.is_err());
 
     enrolled_by_a.add(2, "Eggs").await;
     let report = synced(&enrolled_by_a).await?;
@@ -463,7 +468,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
 
     a.seal_and_compact().await;
-    let again = join(root, &hub, "d2", &a.invite().await)?;
+    let again = join(root, &hub, "d2", &a.invite().await).await?;
     assert_eq!(
         synced_titles(&again).await?,
         ["Eggs", "Milk"],
@@ -480,15 +485,15 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
 -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let owner = create(directory.path(), &hub, "owner")?;
-    let member = join(directory.path(), &hub, "member", &owner.invite().await)?;
-    let identity = member.session().info().await?.principal;
-    owner.session().revoke_identity(identity).await?;
+    let owner = create(directory.path(), &hub, "owner").await?;
+    let member = join(directory.path(), &hub, "member", &owner.invite().await).await?;
+    let identity = member.database.info().await?.principal;
+    owner.database.revoke_identity(identity).await?;
     let _ = member.sync().await;
-    let _ = member.session().renew().await;
+    let _ = member.database.renew().await;
     assert_eq!(
         member
-            .session()
+            .database
             .status()
             .await?
             .authority

@@ -1,7 +1,6 @@
 use crate::test_snapshot as snap;
 use crate::{
-    Database, Network, NetworkService, Open, Opened, Schema, Session, enrollment::Settings,
-    transport::memory::Hub,
+    Configuration, Database, Network, Schema, enrollment::Settings, transport::memory::Hub,
 };
 use rocky_credentials::CredentialChain;
 use serde_json::{Value, json};
@@ -9,25 +8,19 @@ use std::{path::Path, sync::Arc};
 type Failure = crate::Failure;
 
 struct Device {
-    database: Arc<Database>,
-    _network: Option<NetworkService>,
-    session: Session,
-
+    database: Database,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 impl Device {
-    fn new(opened: Opened) -> Result<Self, Failure> {
-        Ok(Self {
-            session: opened.database.session(),
-
-            database: opened.database,
-            _network: opened.network,
+    fn new(database: Database) -> Self {
+        Self {
+            database,
             identity: None,
-        })
+        }
     }
 
     async fn contact(&self) -> String {
-        snap::ok(self.session.contact_info()).await["uri"]
+        snap::ok(self.database.contact()).await["uri"]
             .as_str()
             .unwrap()
             .into()
@@ -35,15 +28,15 @@ impl Device {
     async fn sync(&self) -> Result<Value, Value> {
         snap::observe(async {
             match &self.identity {
-                Some(identity) => self.session.sync_once_with_identity(identity.clone()).await,
-                None => self.session.sync_once().await,
+                Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
+                None => self.database.sync_now().await,
             }
         })
         .await
     }
     async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {
-            let value = self.session.add_peer(&(snap::text(&(contact)))).await?;
+            let value = self.database.add_peer(&(snap::text(&(contact)))).await?;
             Ok(json!({"node":value}))
         })
         .await
@@ -61,19 +54,13 @@ fn schema(count: usize) -> String {
         .collect();
     json!({"format":7,"application":"wide_grants","version":1,"tables":tables}).to_string()
 }
-fn open<'a>(
-    directory: &'a Path,
-    schema: &'a crate::Schema,
+fn open(
+    directory: &Path,
+    schema: &crate::Schema,
     hub: &Arc<Hub>,
     name: &str,
-) -> Open<'a> {
-    Open {
-        directory,
-        schema,
-        identity: None,
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+) -> Result<Configuration, Failure> {
+    Ok(Configuration::new(directory, schema)?.network(Network::Owned(hub.connector(name))))
 }
 fn settings(directory: &Path) -> Settings {
     Settings::load(&directory.join("rocky.sqlite")).unwrap()
@@ -99,7 +86,7 @@ fn metric(label: &str, chain: &CredentialChain) -> usize {
 async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
     let status = snap::ok(
         device
-            .session
+            .database
             .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "book".into(),
                 values: vec![rocky_sdk::SqlValue::Text("A".into())],
@@ -124,10 +111,12 @@ async fn exercise(count: usize) -> Result<(), Failure> {
     assert_eq!(schema.tables.len(), count);
     let hub = Arc::new(Hub::default());
     let owner_dir = root.path().join("owner");
-    let owner = Device::new(Database::create(
-        open(&owner_dir, &schema, &hub, "owner"),
-        None,
-    )?)?;
+    let owner = Device::new(
+        open(&owner_dir, &schema, &hub, "owner")?
+            .create()
+            .await?
+            .database,
+    );
     let label = format!("{count} tables");
     let before = metric(&format!("{label} owner"), &settings(&owner_dir).credentials);
     assert_eq!(
@@ -142,11 +131,12 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         ("reader", crate::Access::Read),
     ] {
         let dir = root.path().join(kind);
-        let provisioned = owner.session.provision(profile, None).await?;
-        let device = Device::new(Database::join(
-            open(&dir, &schema, &hub, kind),
-            &provisioned.uri,
-        )?)?;
+        let provisioned = owner.database.provision(profile, None).await?;
+        let device = Device::new(
+            open(&dir, &schema, &hub, kind)?
+                .join(&provisioned.uri)
+                .await?,
+        );
         device.add_peer(&contact).await.map_err(|e| e.to_string())?;
         metric(&format!("{label} {kind}"), &settings(&dir).credentials);
         assert_eq!(
@@ -158,7 +148,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
     }
     snap::ok(
         owner
-            .session
+            .database
             .create_partition(rocky_sdk::PartitionTarget::Group {
                 group: "book".to_owned(),
                 values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
@@ -166,7 +156,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
     )
     .await;
     snap::ok(
-        owner.session.share_partition(
+        owner.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "book".to_owned(),
                 values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
@@ -231,24 +221,24 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         println!(
             "writer peers: {}; owner peers: {}; reader peers: {}",
             snap::ok(async {
-                let network = writer.session.network().await?;
+                let network = writer.database.status().await?.network;
                 Ok(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await,
             snap::ok(async {
-                let network = owner.session.network().await?;
+                let network = owner.database.status().await?.network;
                 Ok(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await,
             snap::ok(async {
-                let network = members[1].0.session.network().await?;
+                let network = members[1].0.database.status().await?.network;
                 Ok(json!({"peers":network.peers,"discovery":network.discovery}))
             })
             .await
         );
         println!(
             "owner activity: {}",
-            snap::ok(owner.session.activity(0)).await
+            snap::ok(owner.database.activity(0)).await
         );
     }
     assert_eq!(title.as_deref(), Some("written"));
@@ -259,7 +249,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
             .is_err()
     );
     tx.rollback().await?;
-    snap::ok(owner.session.revoke_identity(members[0].1.identity)).await;
+    snap::ok(owner.database.revoke_identity(members[0].1.identity)).await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
     assert_epochs(&members[0].0, count, &[1]).await;
@@ -289,19 +279,15 @@ async fn a_wide_schema_under_full_access_stays_within_the_grant_budget() -> Resu
 async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let schema = crate::Schema::parse(&schema(160))?;
-    let device = Device::new(Database::create(
-        Open {
-            directory: directory.path(),
-            schema: &schema,
-            identity: None,
-            secrets: None,
-            network: None,
-        },
-        None,
-    )?)?;
+    let device = Device::new(
+        Configuration::new(directory.path(), &schema)?
+            .create()
+            .await?
+            .database,
+    );
     snap::ok(
         device
-            .session
+            .database
             .create_partition(rocky_sdk::PartitionTarget::Group {
                 group: "book".to_owned(),
                 values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],

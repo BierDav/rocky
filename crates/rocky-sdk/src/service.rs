@@ -1,5 +1,6 @@
 use crate::{
-    Failure,
+    Database, DatabaseStatus, Failure, PublicKey, Route, SyncReport,
+    request::Request,
     transport::{Connected, Connector, Transport},
 };
 use std::sync::Arc;
@@ -68,3 +69,66 @@ impl std::fmt::Display for ServiceError {
     }
 }
 impl std::error::Error for ServiceError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    Off,
+    Manual,
+    Foreground,
+    Background,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContactInfo {
+    pub uri: String,
+    pub node: PublicKey,
+    pub routes: Vec<Route>,
+}
+
+pub struct StatusChanges {
+    database: Database,
+    seen: Option<String>,
+}
+impl StatusChanges {
+    pub async fn next(&mut self) -> Result<DatabaseStatus, Failure> {
+        let status = match self.seen.clone() {
+            None => self.database.status().await?,
+            Some(seen) => {
+                self.database
+                    .send(|reply| Request::StatusAfter(seen, reply))
+                    .await?
+            }
+        };
+        self.seen = Some(status.token.clone());
+        Ok(status)
+    }
+}
+
+impl Database {
+    pub async fn contact(&self) -> Result<ContactInfo, Failure> {
+        self.send(Request::Contact).await
+    }
+    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
+        self.send(|reply| Request::AddPeer(contact.into(), reply))
+            .await
+    }
+    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
+        self.send(|reply| Request::RemovePeer(node, reply)).await
+    }
+    pub async fn sync_now(&self) -> Result<SyncReport, Failure> {
+        self.send(Request::Sync).await
+    }
+    pub async fn set_sync(&self, mode: SyncMode) -> Result<(), Failure> {
+        self.send(|reply| Request::SetSync(mode, reply)).await
+    }
+    pub async fn status(&self) -> Result<DatabaseStatus, Failure> {
+        self.send(Request::Status).await
+    }
+    pub fn status_changes(&self) -> StatusChanges {
+        StatusChanges {
+            database: self.clone(),
+            seen: None,
+        }
+    }
+}

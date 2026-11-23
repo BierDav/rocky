@@ -1,4 +1,4 @@
-use crate::{Failure, Session, request::Request};
+use crate::{Database, Failure, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey, RevocationSet, Signature};
 
 #[derive(Clone, Debug)]
@@ -11,7 +11,7 @@ pub struct DeviceCredential {
     pub revocations: RevocationSet,
 }
 
-impl Session {
+impl Database {
     pub async fn device_credential(&self) -> Result<DeviceCredential, Failure> {
         self.send(Request::DeviceCredential).await
     }

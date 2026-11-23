@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure, introduce};
 use crate::support::snapshot as snap;
 use rocky_sdk::{
-    Configuration, IdentityKey, IdentityProvider, InviteTerms, Network, Opened, StoreOnlyRefusal,
+    Configuration, IdentityKey, IdentityProvider, InviteTerms, Network, StoreOnlyRefusal,
     transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
@@ -25,7 +25,7 @@ async fn invited_relay(
 ) -> Result<(Device, Arc<dyn IdentityProvider>), Failure> {
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let invitation = issuer
-        .session
+        .database
         .invite(person.public_key()?, store_only(), InviteTerms::default())
         .await?;
     let relay = relay_configuration(directory, hub, &person)
@@ -56,7 +56,7 @@ async fn reads_nothing(relay: &Device) -> bool {
     .await
     .is_err()
 }
-fn refusal(opened: Result<Opened, Failure>) -> Option<StoreOnlyRefusal> {
+fn refusal(opened: Result<rocky_sdk::Database, Failure>) -> Option<StoreOnlyRefusal> {
     opened
         .err()
         .and_then(|error| error.downcast_ref::<StoreOnlyRefusal>().copied())
@@ -68,15 +68,15 @@ async fn devices_never_online_together_converge_through_a_store_only_relay() -> 
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let net = |name| Network::Owned(hub.connector(name));
-    let issuer = Device::create(&root.path().join("issuer"), Some(net("issuer")))?;
+    let issuer = Device::create(&root.path().join("issuer"), Some(net("issuer"))).await?;
     let (relay, person) = invited_relay(&issuer, &root.path().join("relay"), &hub).await?;
     assert_keyless(&root.path().join("relay"))?;
-    let a = Device::join(&root.path().join("a"), &issuer.invite().await, net("a"))?;
-    let b = Device::join(&root.path().join("b"), &issuer.invite().await, net("b"))?;
+    let a = Device::join(&root.path().join("a"), &issuer.invite().await, net("a")).await?;
+    let b = Device::join(&root.path().join("b"), &issuer.invite().await, net("b")).await?;
     introduce(&a, &relay).await;
     introduce(&b, &relay).await;
     issuer.close().await;
-    snap::ok(b.session.set_networking_enabled(false)).await;
+    snap::ok(b.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     a.add(1, "Milk").await;
     a.sync().await.expect("upload");
     assert!(reads_nothing(&relay).await);
@@ -86,21 +86,21 @@ async fn devices_never_online_together_converge_through_a_store_only_relay() -> 
             .open()
             .await?,
     )?;
-    snap::ok(a.session.set_networking_enabled(false)).await;
-    snap::ok(b.session.set_networking_enabled(true)).await;
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    snap::ok(b.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     b.sync().await.expect("catch up");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     b.sync().await.expect("upload");
-    snap::ok(b.session.set_networking_enabled(false)).await;
-    snap::ok(a.session.set_networking_enabled(true)).await;
+    snap::ok(b.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     a.sync().await.expect("catch up");
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert!(reads_nothing(&relay).await);
     assert_keyless(&root.path().join("relay"))?;
     assert!(
         relay
-            .session
+            .database
             .invite(
                 IdentityKey::generate().public_key(),
                 store_only(),
@@ -124,7 +124,8 @@ async fn a_new_device_bootstraps_from_the_relay_while_every_other_device_is_offl
     let issuer = Device::create(
         &root.path().join("issuer"),
         Some(Network::Owned(hub.connector("issuer"))),
-    )?;
+    )
+    .await?;
     let (relay, _) = invited_relay(&issuer, &root.path().join("relay"), &hub).await?;
     introduce(&issuer, &relay).await;
     issuer.add(1, "Milk").await;
@@ -135,7 +136,8 @@ async fn a_new_device_bootstraps_from_the_relay_while_every_other_device_is_offl
         &root.path().join("device"),
         &invitation,
         Network::Owned(hub.connector("device")),
-    )?;
+    )
+    .await?;
     introduce(&device, &relay).await;
     device.sync().await.expect("bootstrap from the relay");
     assert_eq!(device.titles().await, ["Milk"]);
@@ -150,14 +152,14 @@ async fn removing_the_relay_stops_it_carrying_frames() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let net = |name| Network::Owned(hub.connector(name));
-    let issuer = Device::create(&root.path().join("issuer"), Some(net("issuer")))?;
+    let issuer = Device::create(&root.path().join("issuer"), Some(net("issuer"))).await?;
     let (relay, person) = invited_relay(&issuer, &root.path().join("relay"), &hub).await?;
-    let a = Device::join(&root.path().join("a"), &issuer.invite().await, net("a"))?;
+    let a = Device::join(&root.path().join("a"), &issuer.invite().await, net("a")).await?;
     introduce(&a, &relay).await;
     introduce(&issuer, &relay).await;
     a.sync().await.expect("reach the relay");
     let (node, contact) = (relay.node().await, relay.contact().await);
-    snap::ok(issuer.session.revoke_identity(person.public_key()?)).await;
+    snap::ok(issuer.database.revoke_identity(person.public_key()?)).await;
     a.sync().await.expect("learn the revocation");
     assert_eq!(
         a.peer(&node).await,
@@ -182,10 +184,11 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
     let issuer = Device::create(
         &root.path().join("issuer"),
         Some(Network::Owned(hub.connector("issuer"))),
-    )?;
+    )
+    .await?;
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let writer = issuer
-        .session
+        .database
         .invite(
             person.public_key()?,
             rocky_sdk::Access::Full,
@@ -215,6 +218,7 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
             Configuration::store_only(root.path().join("created"))
                 .create()
                 .await
+                .map(|created| created.database)
         ),
         Some(StoreOnlyRefusal::NeedsSchema)
     );

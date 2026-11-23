@@ -1,17 +1,24 @@
-use crate::support;
-use rocky_sdk::{
-    Connection, ConnectionOptions, Database, Network, Open, Page, SqlValue, transport::memory::Hub,
+use super::Connection;
+use crate::test_snapshot as snap;
+use crate::{
+    Configuration, Database, Network, SqlValue, connection::ConnectionOptions, connection::Page,
+    transport::memory::Hub,
 };
+use rocky_credentials::testing::MemoryKeys;
 use serde_json::{Value, json};
 use sqlparser::{
     ast::{Expr, Ident, SelectItem, SetExpr, Statement},
     dialect::SQLiteDialect,
     parser::Parser,
 };
-use std::{path::Path, sync::Arc, time::Duration};
-use support::snapshot as snap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
+};
 
-type Failure = Box<dyn std::error::Error + Send + Sync>;
+type Failure = crate::Failure;
 
 const SQLITE_ERROR: i32 = 1;
 const SQLITE_READONLY: i32 = 8;
@@ -31,26 +38,29 @@ const SHOPPING: &str = r#"{"format":7,"application":"shopping","version":3,"tabl
   "indexes":[{"name":"items_by_list","columns":[{"name":"list","descending":false},{"name":"title","descending":true}]}]}
 ]}"#;
 
-fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
-    Open {
-        identity: None,
-        directory,
-        schema: crate::support::snapshot::schema(SHOPPING),
-        secrets: Some(support::secrets::keys(directory)),
-        network,
-    }
+static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
+fn open(directory: &Path, network: Option<Network>) -> Result<Configuration, Failure> {
+    let keys: Arc<MemoryKeys> = KEYS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(directory.to_path_buf())
+        .or_default()
+        .clone();
+    let configuration = Configuration::new(directory, snap::schema(SHOPPING))?.secrets(keys);
+    Ok(match network {
+        Some(network) => configuration.network(network),
+        None => configuration,
+    })
 }
-async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, Failure> {
-    let opened = Database::create(open, ttl)?;
-    let database = &opened.database;
-
+async fn create(configuration: Configuration) -> Result<Database, Failure> {
+    let database = configuration.create().await?.database;
     let mut tx = database.transaction().await?;
     for table in ["lists", "items"] {
         let id = tx.next_id(table, Vec::new()).await?;
         assert_eq!(id.sequence(), 1, "{table}");
     }
     tx.rollback().await?;
-    Ok(opened)
+    Ok(database)
 }
 fn expression(sql: &str) -> Expr {
     let Statement::Query(query) = Parser::parse_sql(&SQLiteDialect {}, &format!("SELECT {sql}"))
@@ -132,12 +142,10 @@ fn text(value: &str) -> SqlValue {
 }
 const WRITER: ConnectionOptions = ConnectionOptions {
     read_only: false,
-    durability: rocky_sdk::Durability::Buffered,
     transaction_timeout: None,
 };
 const READER: ConnectionOptions = ConnectionOptions {
     read_only: true,
-    durability: rocky_sdk::Durability::Buffered,
     transaction_timeout: None,
 };
 
@@ -215,7 +223,7 @@ fn published(directory: &Path) -> Result<(i64, i64), Failure> {
 #[tokio::test]
 async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     let reader = database.connect(READER).await?;
     let before = published(root.path())?;
@@ -356,7 +364,7 @@ async fn exact(
 #[tokio::test]
 async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     let reader = database.connect(READER).await?;
     let before = published(root.path())?;
@@ -447,7 +455,7 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
 async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     let before = published(root.path())?;
     let code = |error: Failure| {
@@ -539,7 +547,7 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
 #[tokio::test]
 async fn a_transaction_timeout_of_zero_or_past_sixty_seconds_is_refused() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     for refused in [Duration::ZERO, Duration::from_secs(61)] {
         let outcome = async {
             let writer = database
@@ -573,7 +581,7 @@ async fn a_transaction_timeout_of_zero_or_past_sixty_seconds_is_refused() -> Res
 #[tokio::test]
 async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     let reader = database.connect(READER).await?;
     let batch_under_intent_statement_quota = 200;
@@ -682,12 +690,12 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
 async fn a_deferred_transaction_opens_on_the_session_renewed_after_its_begin() -> Result<(), Failure>
 {
     let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
+    let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
     snap::value(async {
-        database.session().renew().await?;
-        database.session().info().await
+        database.renew().await?;
+        database.info().await
     })
     .await?;
     let first_real_statement = count(&writer, "items")
@@ -705,29 +713,23 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = create(
-        open(
-            &root.path().join("a"),
-            Some(Network::Owned(hub.connector("a"))),
-        ),
-        None,
-    )
-    .await?
-    .database;
-    let invitation = snap::value(a.session().provision(rocky_sdk::Access::Full, None)).await?;
-    let b = Database::join(
-        open(
-            &root.path().join("b"),
-            Some(Network::Owned(hub.connector("b"))),
-        ),
-        invitation["uri"].as_str().ok_or("uri")?,
+    let a = create(open(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?)
+    .await?;
+    let invitation = snap::value(a.provision(rocky_sdk::Access::Full, None)).await?;
+    let b = open(
+        &root.path().join("b"),
+        Some(Network::Owned(hub.connector("b"))),
     )?
-    .database;
-    snap::value(b.session().sync_once()).await?;
+    .join(invitation["uri"].as_str().ok_or("uri")?)
+    .await?;
+    snap::value(b.sync_now()).await?;
 
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
     let reader_b = b.connect(READER).await?;
-    let events = b.observe_tables(None).await?;
+    let events = b.observe(&[]).await?;
 
     run(&writer_a, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(
@@ -746,7 +748,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     )
     .await?;
     run(&writer_a, "END TRANSACTION").await?;
-    snap::value(b.session().sync_once()).await?;
+    snap::value(b.sync_now()).await?;
     let change = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
     assert_eq!(
         change.tables,
@@ -761,8 +763,8 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
 
     run(&writer_a, "UPDATE items SET key = 'i1', list = 'l1', title = 'Oat milk', completed = 0, note = NULL WHERE key = 'i1'").await?;
     run(&writer_b, "UPDATE items SET completed = 1 WHERE key = 'i1'").await?;
-    snap::value(b.session().sync_once()).await?;
-    snap::value(a.session().sync_once()).await?;
+    snap::value(b.sync_now()).await?;
+    snap::value(a.sync_now()).await?;
     for writer in [&writer_a, &writer_b] {
         let rows = all(
             writer,
@@ -803,24 +805,19 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     let schema = schema.to_string();
     let a_path = root.path().join("a");
     let b_path = root.path().join("b");
-    let setup = |directory, name| Open {
-        identity: None,
-        directory,
-        schema: crate::support::snapshot::schema(&schema),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
+    let setup = |directory: &Path, name| {
+        Configuration::new(directory, snap::schema(&schema))
+            .map(|configuration| configuration.network(Network::Owned(hub.connector(name))))
     };
-    let a = Database::create(setup(&a_path, "a"), None)?.database;
-    let invitation = snap::value(a.session().provision(
+    let a = setup(&a_path, "a")?.create().await?.database;
+    let invitation = snap::value(a.provision(
         rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("list_reader")),
         None,
     ))
     .await?;
-    let b = Database::join(
-        setup(&b_path, "b"),
-        invitation["uri"].as_str().ok_or("uri")?,
-    )?
-    .database;
+    let b = setup(&b_path, "b")?
+        .join(invitation["uri"].as_str().ok_or("uri")?)
+        .await?;
     {
         let reader = b.connect(READER).await?;
         all(&reader, "SELECT * FROM lists", vec![]).await?;
@@ -843,7 +840,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
         reader.close().await;
     }
     b.close().await?;
-    let b = Database::open(setup(&b_path, "b"))?.database;
+    let b = setup(&b_path, "b")?.open().await?;
     let reader = b.connect(READER).await?;
     assert!(
         all(&reader, "SELECT * FROM devices", vec![])

@@ -7,7 +7,7 @@ use crate::{
     transport::nonce,
 };
 use rocky_core::Commitment;
-use rocky_sdk::{Database, DeviceCredential, Session};
+use rocky_sdk::{Database, DeviceCredential};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -36,18 +36,15 @@ impl From<rocky_sdk::Failure> for CounterError {
 }
 
 pub struct Counters {
-    session: Session,
+    database: Database,
     client: Arc<NetworkCoordinator>,
 }
 impl Counters {
-    pub fn connect(database: &Database, client: Arc<NetworkCoordinator>) -> Self {
-        Self {
-            session: database.session(),
-            client,
-        }
+    pub fn new(database: Database, client: Arc<NetworkCoordinator>) -> Self {
+        Self { database, client }
     }
     pub async fn claim(&self, counter: &Name, claim: Claim) -> Result<u64, CounterError> {
-        let device = self.session.device_credential().await?;
+        let device = self.database.device_credential().await?;
         let operation = Operation::Claim {
             scope: device.scope,
             counter: counter.clone(),
@@ -63,7 +60,7 @@ impl Counters {
         counter: &Name,
         claim: Option<Claim>,
     ) -> Result<Reading, CounterError> {
-        let device = self.session.device_credential().await?;
+        let device = self.database.device_credential().await?;
         let operation = Operation::Counter {
             scope: device.scope,
             counter: counter.clone(),
@@ -75,7 +72,7 @@ impl Counters {
         }
     }
     pub async fn share_revocations(&self) -> Result<Commitment, CounterError> {
-        let device = self.session.device_credential().await?;
+        let device = self.database.device_credential().await?;
         Ok(self.client.revoke(device.scope, device.revocations).await?)
     }
     async fn submit(
@@ -91,7 +88,7 @@ impl Counters {
             now()?,
         );
         let signature = self
-            .session
+            .database
             .sign_extension(REQUEST_LABEL, &request.extension_body()?)
             .await?;
         Ok(self

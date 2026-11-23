@@ -136,8 +136,8 @@ async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
             assert_eq!(reply, Some(requested));
             assert!(b.settings.lock().await.peers.contains_key(&requested));
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -236,8 +236,8 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
             );
             assert_eq!(a.current().ok_or("service")?.live.len(), 1);
             assert_eq!(b.current().ok_or("service")?.live.len(), 1);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -273,8 +273,8 @@ async fn reverse_opened_link_delivers_when_receiver_cannot_be_dialed() -> Result
             settled(&b).await;
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.dials_to("b"), before);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -312,8 +312,8 @@ async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), 
                 tokio::task::yield_now().await;
             }
             assert_eq!(hub.counts(), counts);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -379,9 +379,9 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
             );
             snap::value(a.set_networking_enabled(false)).await?;
             until(|| service.live.len() == 0).await;
-            a.detach(None).await;
-            b.detach(None).await;
-            c.detach(None).await;
+            a.detach().await;
+            b.detach().await;
+            c.detach().await;
             assert_eq!(service.live.len(), 0);
             Ok(())
         }))
@@ -418,8 +418,8 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
             );
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
             assert_eq!(sa.live.id(peer), link, "nothing replaces an idle link");
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -464,9 +464,8 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             }
 
             let sync_token = a.sync_status.borrow().token;
-            let client = a.client(1)?;
             let token = status.token.as_str();
-            let mut waiting = Box::pin(a.readiness_after(&client, token));
+            let mut waiting = Box::pin(a.readiness_after(token));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             let dials = hub.protocol_dials("a", "b", Protocol::Link);
             let reverse_dials = hub.protocol_dials("b", "a", Protocol::Link);
@@ -503,8 +502,8 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
                     + hub.protocol_dials("b", "a", Protocol::Link)
                     > dials + reverse_dials
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -551,8 +550,8 @@ async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failur
             assert!(matches!(reply, PeerReply::Policy(_)));
             assert!(service.served.load(Ordering::Relaxed) > before);
             assert_eq!(service.live_budget.available_permits(), 0);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -593,8 +592,8 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
             until(|| sa.live.dialed(kb) == Some(ka < kb) && sb.live.dialed(ka) == Some(kb < ka))
                 .await;
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -623,8 +622,8 @@ async fn simultaneous_short_syncs_reconcile_after_a_duplicate_stream_ends() -> R
             assert_eq!(completed_peers(&first?.0), 1);
             assert_eq!(completed_peers(&second?.0), 1);
             assert_eq!(rows(&b).await?, ["1"]);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -683,8 +682,8 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
             .await?;
             first?;
             second?;
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await
@@ -813,8 +812,8 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
                 last.failure.ok_or("failure")?.code.as_deref(),
                 Some("rejected")
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -878,8 +877,8 @@ async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<
             drop(cleanup);
             assert!(high_service.live.contains(lower_key));
             assert!(low_service.live.contains(higher_key));
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -897,8 +896,8 @@ async fn learned_revocation_closes_the_revoked_peers_link() -> Result<(), Failur
             learn_revocation(&a, peer).await?;
             until(|| !service.live.contains(peer)).await;
             assert!(a.replica.revocations().await.revokes(&peer));
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -910,8 +909,8 @@ async fn real_pair(
 ) -> Result<(Arc<Node>, Arc<Node>, String, String), Failure> {
     let a = enrolled(&root.join("a"), hub, "a", None).await?;
     let b = enrolled(&root.join("b"), hub, "b", Some((&a, crate::Access::Read))).await?;
-    a.detach(None).await;
-    b.detach(None).await;
+    a.detach().await;
+    b.detach().await;
     let connector: Arc<dyn Connector> = Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0"));
     let ta = connector
         .start(true, Settings::route_secret(&a.vault)?)
@@ -950,8 +949,8 @@ async fn real_signal_gate() -> Result<(), Failure> {
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.dials_to(&ab), before[1]);
             assert_eq!(hub.dials_to(&aa), before[0]);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -982,8 +981,8 @@ async fn real_reverse_gate() -> Result<(), Failure> {
             settled(&b).await;
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.dials_to(&ab), before);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1016,7 +1015,7 @@ async fn detach_real_pair(a: &Node, b: &Node) -> Result<(), Failure> {
     let (stopped_a, stopped_b) = tokio::join!(start(a, false), start(b, false));
     stopped_a?;
     stopped_b?;
-    tokio::join!(a.detach(None), b.detach(None));
+    tokio::join!(a.detach(), b.detach());
     Ok(())
 }
 
@@ -1138,8 +1137,8 @@ async fn real_tie_gate() -> Result<(), Failure> {
             until(|| sa.live.dialed(kb) == Some(ka < kb) && sb.live.dialed(ka) == Some(kb < ka))
                 .await;
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1199,8 +1198,8 @@ async fn real_budget_gate() -> Result<(), Failure> {
             assert_eq!(sa.live_budget.available_permits(), 0);
             drop(full);
             assert!(sa.live_budget.available_permits() > 0);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1257,9 +1256,9 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
             until(|| c.current().is_some_and(|s| s.live.contains(peer))).await;
             c.sync(&*transport).await?;
             assert_eq!(rows(&c).await?, ["1"]);
-            a.detach(None).await;
-            b.detach(None).await;
-            c.detach(None).await;
+            a.detach().await;
+            b.detach().await;
+            c.detach().await;
             Ok(())
         }))
         .await
@@ -1333,8 +1332,8 @@ async fn an_in_budget_burst_spans_publication_pages_without_reconciliation() -> 
             let author = a.replica.frontier(a.app_scopes()[0]).await?.logs[0].author;
             let frontier = b.replica.frontier(b.app_scopes()[0]).await?;
             assert_eq!(frontier.log(author).ok_or("author log")?.applied, 40);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1447,8 +1446,8 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
                     .all(|event| event["kind"] != "peer_reconciliation_completed"
                         && event["kind"] != "rows_synced")
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1497,8 +1496,8 @@ async fn a_local_commit_between_link_open_snapshots_remains_eligible_for_publica
                 "a token read before a commit racing the link open leaves the scope dirty for the first publication"
             );
             drop(publish);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1542,8 +1541,8 @@ async fn a_local_commit_between_failed_push_snapshots_is_left_to_the_peers_repai
             );
             drop(publish);
             drop(b_never_publishes_back);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1588,8 +1587,8 @@ async fn two_writers_push_concurrently_and_converge_on_the_same_scope() -> Resul
                 a.replica.frontier(a.app_scopes()[0]).await?,
                 b.replica.frontier(b.app_scopes()[0]).await?
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1631,8 +1630,8 @@ async fn revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority
                 ["1"],
                 "the local commit survives cancelled publication"
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1688,8 +1687,8 @@ async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(
             b.sync(&*b_port).await?;
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(tokio::time::Instant::now(), before);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1740,8 +1739,8 @@ async fn unchanged_epoch_probe_ignores_contacts_changed_while_the_reply_was_in_f
                 !authority.has_changed()?,
                 "an unchanged epoch response must not invalidate admission"
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1779,8 +1778,8 @@ async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), 
                 crate::LinkState::Closed
             );
             assert_ne!(a.observed_status().await?.token, token);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1793,7 +1792,6 @@ async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> 
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
-            let _client = a.client(1)?;
             let before = tokio::time::Instant::now();
             start(&a, false).await?;
             snap::value(a.enter_background()).await?;
@@ -1821,8 +1819,8 @@ async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> 
                 a.observed_peers().await[0].link.state,
                 crate::LinkState::Open
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -1909,7 +1907,7 @@ async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result
                 "the healthy link must not be redialed"
             );
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         }))
@@ -1943,8 +1941,8 @@ async fn incoming_pushes_do_not_wait_for_page_publication() -> Result<(), Failur
             until(|| *b.replica.observe_revision().borrow() > revision).await;
             assert_eq!(rows(&b).await?, ["1"]);
             drop(_publishing);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -2004,7 +2002,7 @@ async fn a_stalled_peer_does_not_hold_publication_to_another() -> Result<(), Fai
             );
             assert_eq!(intakes(&c_service) - c_before, 2);
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         }))
@@ -2033,8 +2031,8 @@ async fn publication_backpressure_preserves_committed_work_without_reopening_the
             assert_eq!(rows(&b).await?.len(), 24);
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
             assert_eq!(service.live.len(), 1);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -2065,8 +2063,8 @@ async fn link_control_round_trip_runs_while_the_database_executor_is_blocked() -
                     return Err("the control probe ended without answering".into());
                 }
             }
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await
@@ -2162,8 +2160,8 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
         assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
         assert!(snap::Snapshot::snapshot(b.activity.after(activity))["events"].as_array().ok_or("events")?.iter().all(|event|
             event["kind"] != "peer_reconciliation_completed" && event["kind"] != "rows_synced"));
-        a.detach(None).await;
-        b.detach(None).await;
+        a.detach().await;
+        b.detach().await;
         Ok(())
     })).await
 }
@@ -2208,7 +2206,6 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             .await
             .map_err(|error| format!("multi-batch receiver enrollment: {error}"))?;
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-            let (_client_a, _client_b) = (a.client(1)?, b.client(1)?);
             for n in 0..3 {
                 let values = vec![crate::SqlValue::Text(format!("partition_{n}"))];
                 snap::value(a.create_partition(&rocky_sdk::PartitionTarget::Group {
@@ -2294,8 +2291,8 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             PublicationTraffic::between(&before, traffic_snapshot(&service_a, &service_b))
                 .assert_complete();
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -2377,8 +2374,8 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
                 "{events}"
             );
             drop(b_never_publishes_back);
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -2419,7 +2416,7 @@ async fn a_control_hint_matching_local_state_schedules_no_repair() -> Result<(),
             let peer = PrivateKey::new().public_key();
             a.changed_signal(peer, &full, token, true).await?;
             assert_eq!(work(peer), Some(None));
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await

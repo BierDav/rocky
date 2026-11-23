@@ -33,10 +33,10 @@ async fn converged(
 }
 
 async fn seal(world: &World) -> Result<String, Failure> {
-    let tip = world.trusted().database().session().seal().await?.tip;
+    let tip = world.trusted().database().seal().await?.tip;
     world.sync().await?;
     for device in &world.devices {
-        assert_eq!(device.database().session().tip_status().await?.tip, tip);
+        assert_eq!(device.database().tip_status().await?.tip, tip);
     }
     Ok(tip)
 }
@@ -80,8 +80,8 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     for device in [&phone, &tablet] {
         assert_eq!(titles(device, list).await?.len(), 4);
     }
-    let laptop_events = laptop.database().observe_tables(None).await?;
-    let phone_events = phone.database().observe_tables(None).await?;
+    let laptop_events = laptop.database().observe(&[]).await?;
+    let phone_events = phone.database().observe(&[]).await?;
 
     let (on_laptop, on_phone, on_tablet) = tokio::join!(
         async {
@@ -144,7 +144,7 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     };
     notified(author_of_dropped_add, lost).await?;
 
-    laptop.database().session().compact(0).await?;
+    laptop.database().compact(0).await?;
     world.sync().await?;
     let watch = world.join("watch", Role::Full).await?;
     world.sync().await?;
@@ -170,13 +170,9 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     let list = laptop.create_list("Errands").await?.id;
     let post = laptop.add(list, "Post").await?.id;
     world.sync().await?;
-    let opened = laptop.database().session().tip_status().await?.tip;
+    let opened = laptop.database().tip_status().await?.tip;
 
-    phone
-        .database()
-        .session()
-        .set_networking_enabled(false)
-        .await?;
+    phone.database().set_sync(rocky_sdk::SyncMode::Off).await?;
     let late = [
         token(phone.add(list, "Milk").await?.token)?,
         token(phone.raise_priority(list, post).await?)?,
@@ -192,8 +188,8 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     tokens.push(token(laptop.add(list, "Bread").await?.token)?);
     let sealed = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            laptop.database().session().sync_once().await?;
-            let tip = laptop.database().session().tip_status().await?.tip;
+            laptop.database().sync_now().await?;
+            let tip = laptop.database().tip_status().await?.tip;
             if tip != opened {
                 return Ok::<_, Failure>(tip);
             }
@@ -206,8 +202,7 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
 
     phone
         .database()
-        .session()
-        .set_networking_enabled(true)
+        .set_sync(rocky_sdk::SyncMode::Manual)
         .await?;
     world.sync().await?;
     tokens.extend(late);
@@ -252,11 +247,7 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
     let list = laptop.create_list("Errands").await?.id;
     let shared = laptop.add(list, "Shared").await?.id;
     world.sync().await?;
-    laptop
-        .database()
-        .session()
-        .set_networking_enabled(false)
-        .await?;
+    laptop.database().set_sync(rocky_sdk::SyncMode::Off).await?;
 
     let target = 4 * rocky_secure_routine();
     let rounds = target / (2 * WRITES_APART_PER_ROUND);
@@ -299,8 +290,7 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
 
     laptop
         .database()
-        .session()
-        .set_networking_enabled(true)
+        .set_sync(rocky_sdk::SyncMode::Manual)
         .await?;
     let started = Instant::now();
     world.sync().await?;
@@ -333,7 +323,7 @@ async fn qualification_child() -> Result<(), Failure> {
         return Ok(());
     };
     let (mode, directory) = spec.split_once(':').ok_or("mode:directory")?;
-    let todos = Todos::new(configuration(directory)?.open().await?.database);
+    let todos = Todos::new(configuration(directory)?.open().await?);
     let list = todos.lists().await?[0].id;
     let mut out = std::io::stdout();
     match mode {
@@ -407,7 +397,7 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
         .ok_or("the child committed nothing")?
         .parse()?;
     killed.wait()?;
-    let todos = Todos::new(config.open().await?.database);
+    let todos = Todos::new(config.open().await?);
     let list = todos.lists().await?[0].id;
     assert!(
         todos.todos(list).await?.iter().any(|todo| todo.id == id),
@@ -420,7 +410,7 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
     assert_eq!(committed, 40, "the child stopped");
     writer.kill()?;
     writer.wait()?;
-    let todos = Todos::new(config.open().await?.database);
+    let todos = Todos::new(config.open().await?);
     let mut sides = std::collections::BTreeMap::<String, usize>::new();
     for todo in todos.todos(list).await? {
         if let Some((side, pair)) = todo.title.split_once(' ')

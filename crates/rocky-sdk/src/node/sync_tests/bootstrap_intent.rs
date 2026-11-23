@@ -110,7 +110,7 @@ async fn a_reimport_requested_by_a_revocation_while_an_import_step_records_progr
             assert!(intent.totals().is_empty());
             assert_eq!(intent.inviter(), Some(inviter));
             for node in [&a, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })

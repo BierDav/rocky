@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Access, Affinity, Column, Database, Network, Open, PartitionTarget, Role, RoleName, Schema,
-    SqlValue, Table, transport::memory::Hub,
+    Access, Affinity, Column, Network, PartitionTarget, Role, RoleName, Schema, SqlValue, Table,
+    transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -42,14 +42,19 @@ fn clinic() -> Result<Schema, Failure> {
         )
         .build()?)
 }
-fn open<'a>(directory: &'a Path, schema: &'a Schema, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
+fn open<'a>(
+    directory: &'a Path,
+    schema: &'a Schema,
+    hub: &Arc<Hub>,
+    name: &str,
+) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
         schema,
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        None,
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 async fn rows(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
     device
@@ -119,18 +124,23 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = venue()?;
-    let admin = Device::new(Database::create(
-        open(&root.path().join("admin"), &schema, &hub, "admin"),
-        None,
-    )?)?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
     insert(&admin, "tickets", ["T1", "Ada"]).await?;
-    let provisioned = admin.session.provision(Access::Role(SCANNER), None).await?;
+    let provisioned = admin
+        .database
+        .provision(Access::Role(SCANNER), None)
+        .await?;
     assert_eq!(provisioned.access, Access::Role(SCANNER));
     let scanner_dir = root.path().join("scanner");
-    let scanner = Device::new(Database::join(
-        open(&scanner_dir, &schema, &hub, "scanner"),
-        &provisioned.uri,
-    )?)?;
+    let scanner = Device::new(
+        open(&scanner_dir, &schema, &hub, "scanner")
+            .join(&provisioned.uri)
+            .await?,
+    )?;
     synced(&scanner).await?;
     assert_eq!(rows(&scanner, "SELECT code FROM tickets").await?, ["T1"]);
     assert!(
@@ -159,7 +169,7 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
     assert_eq!(rows(&admin, "SELECT gate FROM check_ins").await?, ["north"]);
     assert!(holds_reader_key(&scanner_dir, "tickets")?);
     assert_eq!(
-        scanner.session.info().await?.access,
+        scanner.database.info().await?.access,
         Access::Role(SCANNER),
         "the role survives into the installed settings"
     );
@@ -173,23 +183,25 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = clinic()?;
-    let admin = Device::new(Database::create(
-        open(&root.path().join("admin"), &schema, &hub, "admin"),
-        None,
-    )?)?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
     for name in ["A", "B"] {
-        admin.session.create_partition(ward(name)).await?;
+        admin.database.create_partition(ward(name)).await?;
         insert(&admin, "charts", [name, &format!("chart in {name}")]).await?;
     }
     ward_name(&admin, "A").await?;
     let provisioned = admin
-        .session
+        .database
         .provision(Access::Role(CLINICIAN), None)
         .await?;
-    let clinician = Device::new(Database::join(
-        open(&root.path().join("clinician"), &schema, &hub, "clinician"),
-        &provisioned.uri,
-    )?)?;
+    let clinician = Device::new(
+        open(&root.path().join("clinician"), &schema, &hub, "clinician")
+            .join(&provisioned.uri)
+            .await?,
+    )?;
     synced(&clinician).await?;
     assert_eq!(rows(&clinician, "SELECT name FROM wards").await?, ["A"]);
     assert!(
@@ -197,7 +209,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
         "a per-partition role installs no partitioned table until an admin grants a partition"
     );
     admin
-        .session
+        .database
         .grant_partition(provisioned.identity, ward("A"))
         .await?;
     synced(&admin).await?;
@@ -214,7 +226,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     );
     assert!(
         clinician
-            .session
+            .database
             .grant_partition(provisioned.identity, ward("B"))
             .await
             .is_err(),
@@ -222,8 +234,8 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     );
     assert!(
         admin
-            .session
-            .grant_partition(admin.session.info().await?.principal, ward("B"))
+            .database
+            .grant_partition(admin.database.info().await?.principal, ward("B"))
             .await
             .is_err(),
         "whole access already holds every partition"
@@ -238,13 +250,14 @@ async fn an_unknown_or_reserved_role_is_refused() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = venue()?;
-    let admin = Device::new(Database::create(
-        open(&root.path().join("admin"), &schema, &hub, "admin"),
-        None,
-    )?)?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
     assert!(
         admin
-            .session
+            .database
             .provision(Access::Role(RoleName::new("usher")?), None)
             .await
             .is_err()

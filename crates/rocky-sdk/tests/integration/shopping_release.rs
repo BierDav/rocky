@@ -1,5 +1,5 @@
 use crate::support::snapshot as snap;
-use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
+use rocky_sdk::{Database, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -22,21 +22,16 @@ const SCHEMA: &str = r#"{"format":7,"application":"shopping","version":3,"tables
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 struct Peer {
-    database: Arc<Database>,
-    session: Session,
+    database: Database,
 }
 impl Peer {
-    fn new(database: Arc<Database>) -> Result<Self, Failure> {
-        Ok(Self {
-            session: database.session(),
-
-            database,
-        })
+    fn new(database: Database) -> Result<Self, Failure> {
+        Ok(Self { database })
     }
 
     async fn invite(&self, access: rocky_sdk::Access) -> Result<String, Failure> {
         Ok(
-            snap::value(self.session.provision(access, None)).await?["uri"]
+            snap::value(self.database.provision(access, None)).await?["uri"]
                 .as_str()
                 .ok_or("uri")?
                 .to_owned(),
@@ -44,15 +39,19 @@ impl Peer {
     }
 
     async fn node(&self) -> Result<Value, Failure> {
-        Ok(snap::value(self.session.info()).await?["node"].clone())
+        Ok(snap::value(self.database.info()).await?["node"].clone())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        snap::value(self.session.set_networking_enabled(online))
-            .await
-            .map(drop)
+        snap::value(self.database.set_sync(if online {
+            rocky_sdk::SyncMode::Manual
+        } else {
+            rocky_sdk::SyncMode::Off
+        }))
+        .await
+        .map(drop)
     }
     async fn sync(&self) -> Result<(), Failure> {
-        let status = snap::value(self.session.sync_once()).await?;
+        let status = snap::value(self.database.sync_now()).await?;
         if !status["peers"].as_array().is_some_and(|peers| {
             peers.iter().any(|peer| {
                 peer["attempts"].as_array().is_some_and(|attempts| {
@@ -76,7 +75,7 @@ impl Peer {
         Ok(id.to_string())
     }
     async fn create_list(&self, title: &str) -> Result<String, Failure> {
-        snap::value(self.session.next_partition("lists")).await?;
+        snap::value(self.database.next_partition("lists")).await?;
         self.insert(
             "lists",
             None,
@@ -141,7 +140,7 @@ impl Peer {
     }
     async fn share(&self, list: &str, reader: &Peer) -> Result<(), Failure> {
         snap::value(
-            self.session.share_partition(
+            self.database.share_partition(
                 rocky_sdk::PartitionTarget::Group {
                     group: "list".to_owned(),
                     values: (values(list)).clone(),
@@ -160,25 +159,25 @@ impl Peer {
 fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![snap::row_id(&(list))]
 }
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 async fn introduce(left: &Peer, right: &Peer) -> Result<(), Failure> {
-    let l = snap::value(left.session.contact_info()).await?["uri"].clone();
-    let r = snap::value(right.session.contact_info()).await?["uri"].clone();
+    let l = snap::value(left.database.contact()).await?["uri"].clone();
+    let r = snap::value(right.database.contact()).await?["uri"].clone();
     snap::value(async {
-        let value = left.session.add_peer(&(snap::text(&(r)))).await?;
+        let value = left.database.add_peer(&(snap::text(&(r)))).await?;
         Ok(json!({"node":value}))
     })
     .await?;
     snap::value(async {
-        let value = right.session.add_peer(&(snap::text(&(l)))).await?;
+        let value = right.database.add_peer(&(snap::text(&(l)))).await?;
         Ok(json!({"node":value}))
     })
     .await?;
@@ -195,23 +194,26 @@ struct Topology {
 async fn topology() -> Result<Topology, Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let a = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
     let custody = Peer::new(
-        Database::join(
-            open(&root.path().join("custody"), &hub, "custody"),
-            &a.invite(rocky_sdk::Access::Store).await?,
-        )?
-        .database,
+        open(&root.path().join("custody"), &hub, "custody")
+            .join(&a.invite(rocky_sdk::Access::Store).await?)
+            .await?,
     )?;
     let b = Peer::new(
-        Database::join(
-            open(&root.path().join("b"), &hub, "b"),
-            &a.invite(rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(
-                "shopper",
-            )))
+        open(&root.path().join("b"), &hub, "b")
+            .join(
+                &a.invite(rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(
+                    "shopper",
+                )))
+                .await?,
+            )
             .await?,
-        )?
-        .database,
     )?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
@@ -339,11 +341,9 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     let milk = a.add(&weekly, "Milk", None).await?;
     a.move_item(&weekly, &milk, &weekend).await?;
     let c = Peer::new(
-        Database::join(
-            open(&_root.path().join("c"), &hub, "c"),
-            &a.invite(rocky_sdk::Access::Full).await?,
-        )?
-        .database,
+        open(&_root.path().join("c"), &hub, "c")
+            .join(&a.invite(rocky_sdk::Access::Full).await?)
+            .await?,
     )?;
     c.sync().await?;
     for list in [&weekly, &weekend] {
@@ -378,8 +378,11 @@ async fn custody_keeps_offered_partitions_across_restart() -> Result<(), Failure
     a.sync().await?;
     a.online(false).await?;
     custody.database.close().await?;
-    let custody =
-        Peer::new(Database::open(open(&_root.path().join("custody"), &hub, "custody"))?.database)?;
+    let custody = Peer::new(
+        open(&_root.path().join("custody"), &hub, "custody")
+            .open()
+            .await?,
+    )?;
     b.online(true).await?;
     b.sync().await?;
     assert_eq!(

@@ -251,7 +251,14 @@ mod tests {
         assert_eq!(logical, &super::logical(&schema, [9; 32])?);
         logical.supported_on(rocky_core::Profile::Secure)?;
         logical.supported_on(rocky_core::Profile::Secure)?;
-        assert_eq!(schema.names(), ["samples"]);
+        assert_eq!(
+            schema
+                .tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            ["samples"]
+        );
         Ok(())
     }
 

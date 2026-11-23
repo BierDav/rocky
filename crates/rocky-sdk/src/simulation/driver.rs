@@ -3,7 +3,7 @@ use super::{
     relational::{self, Authored, Position},
     schedule::{Action, Change, Fixture, LISTS, Scenario, Wall, node_name, plan},
 };
-use crate::{Failure, TransactionToken, transport::memory::Hub};
+use crate::{Database, Failure, TransactionToken, transport::memory::Hub};
 use rocky_core::{Blocker, BlockerKind, WaitReason, replay::TransactionOutcome};
 
 use std::{
@@ -245,18 +245,16 @@ impl Simulation {
                 Ok("set".into())
             }
             Action::Alerts(node) => {
-                let status = self.running(*node)?.session()?.status().await?;
+                let status = self.running(*node)?.database()?.status().await?;
                 let alerts = status.alerts;
                 Ok(self.alerts(&alerts))
             }
             Action::Watch(node) => {
-                let database = self.running(*node)?.running.as_ref().ok_or("not running")?;
-                let session = database.database.session();
+                let mut changes = self.database(*node)?.status_changes();
                 let watch = tokio::task::spawn_local(async move {
-                    let mut status = session.status().await?;
-                    let before = status.alerts.clone();
+                    let before = changes.next().await?.alerts;
                     for _ in 0..MAX_STATUS_WAKES {
-                        status = session.status_after(status.token).await?;
+                        let status = changes.next().await?;
                         if status.alerts != before {
                             return Ok(status.alerts);
                         }
@@ -275,49 +273,36 @@ impl Simulation {
             }
             Action::Trust(node) => {
                 self.invite_as(0, *node, crate::Access::Full).await?;
-                let identity = self
-                    .database(*node)?
-                    .session()
-                    .status()
-                    .await?
-                    .authority
-                    .principal;
+                let identity = self.database(*node)?.status().await?.authority.principal;
                 let root = self
                     .running(0)?
                     .root
                     .clone()
                     .ok_or("member 0 holds no root")?;
-                let grant = self
-                    .database(0)?
-                    .session()
-                    .trust(identity.parse()?, root)
-                    .await?;
-                let creator = self.database(0)?.session().status().await?;
+                let grant = self.database(0)?.trust(identity.parse()?, root).await?;
+                let creator = self.database(0)?.status().await?;
                 for (member, identity) in
                     [(0, creator.authority.principal), (*node, identity.clone())]
                 {
                     let name = self.members[member].name.clone();
                     self.identities.insert(identity, name);
                 }
-                self.database(*node)?
-                    .session()
-                    .install_trust(&grant.grant)
-                    .await?;
+                self.database(*node)?.install_trust(&grant.grant).await?;
                 Ok("trusted".into())
             }
             Action::StaleAfter(node, after) => {
                 self.running(*node)?
-                    .session()?
+                    .database()?
                     .set_trusted_stale_after(after.as_secs())
                     .await?;
                 Ok("set".into())
             }
             Action::Mesh(node) => {
-                let status = self.database(*node)?.session().status().await?;
+                let status = self.database(*node)?.status().await?;
                 Ok(self.mesh(&status.mesh))
             }
             Action::WatchMesh(node, device) => {
-                let session = self.database(*node)?.session();
+                let mut changes = self.database(*node)?.status_changes();
                 let device = self.members[*device]
                     .node_key
                     .clone()
@@ -335,10 +320,9 @@ impl Simulation {
                                 (report, entry.silent)
                             })
                     };
-                    let mut status = session.status().await?;
-                    let before = entry_without_times(&status.mesh);
+                    let before = entry_without_times(&changes.next().await?.mesh);
                     for _ in 0..MAX_STATUS_WAKES {
-                        status = session.status_after(status.token).await?;
+                        let status = changes.next().await?;
                         if entry_without_times(&status.mesh) != before {
                             return Ok(status.mesh);
                         }
@@ -357,7 +341,7 @@ impl Simulation {
             }
             Action::Partial(node) => {
                 self.running(*node)?
-                    .session()?
+                    .database()?
                     .set_replica_role(crate::ReplicaRoleConfig {
                         role: crate::ReplicaRole::Partial,
                     })
@@ -446,13 +430,13 @@ impl Simulation {
                 Ok(format!("{fired}, {}", self.reopen(*node).await?))
             }
             Action::Seal(node) => {
-                let sealed = self.running(*node)?.session()?.seal().await?;
+                let sealed = self.running(*node)?.database()?.seal().await?;
                 Ok(format!("sealed {}", short_hash(&sealed.tip)))
             }
             Action::Compact(node) => {
                 let report = self
                     .running(*node)?
-                    .session()
+                    .database()
                     .expect("running crash fixture")
                     .compact(0)
                     .await?;
@@ -460,7 +444,7 @@ impl Simulation {
             }
             Action::Partition(list) => {
                 self.running(0)?
-                    .session()?
+                    .database()?
                     .create_partition(crate::PartitionTarget::Group {
                         group: "list".into(),
                         values: vec![crate::SqlValue::Text(list.clone())],
@@ -475,7 +459,7 @@ impl Simulation {
                     .clone()
                     .ok_or("skipped: never joined")?;
                 self.running(0)?
-                    .session()?
+                    .database()?
                     .share_partition(
                         crate::PartitionTarget::Group {
                             group: "list".into(),
@@ -498,9 +482,9 @@ impl Simulation {
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
             Action::Revoke(node) => {
-                let identity = self.running(*node)?.session()?.info().await?.principal;
+                let identity = self.running(*node)?.database()?.info().await?.principal;
                 self.running(0)?
-                    .session()?
+                    .database()?
                     .revoke_identity(identity)
                     .await?;
                 self.members[*node].revoked = true;
@@ -523,7 +507,7 @@ impl Simulation {
                 let member = self.running(*node)?;
                 if !self.partial[*node] {
                     member
-                        .session()?
+                        .database()?
                         .set_replica_role(crate::ReplicaRoleConfig {
                             role: crate::ReplicaRole::Partial,
                         })
@@ -533,10 +517,10 @@ impl Simulation {
                     group: "list".into(),
                     values: vec![crate::SqlValue::Text(list.clone())],
                 };
-                let session = member.session()?;
-                for table in session.partition_status(target.clone()).await?.tables {
+                let database = member.database()?;
+                for table in database.partition_status(target.clone()).await?.tables {
                     if let Some(scope) = table.scope {
-                        session
+                        database
                             .set_partition_custody(
                                 scope,
                                 crate::PartitionCustody {
@@ -549,13 +533,13 @@ impl Simulation {
                 }
                 self.sync(*node).await?;
                 self.running(*node)?
-                    .session()?
+                    .database()?
                     .unsubscribe_partition(target.clone(), Default::default())
                     .await?;
                 self.partial[*node] = true;
                 let evicted = self
                     .running(*node)?
-                    .session()?
+                    .database()?
                     .evict_partition(target, Default::default())
                     .await?;
                 self.count("evicted");
@@ -566,7 +550,7 @@ impl Simulation {
                     return Err("skipped: never shared".into());
                 }
                 self.running(*node)?
-                    .session()?
+                    .database()?
                     .subscribe_partition(
                         crate::PartitionTarget::Group {
                             group: "list".into(),
@@ -580,8 +564,11 @@ impl Simulation {
             Action::Offline(node) | Action::Online(node) => {
                 let online = matches!(action, Action::Online(_));
                 self.database(*node)?
-                    .session()
-                    .set_networking_enabled(online)
+                    .set_sync(if online {
+                        crate::SyncMode::Manual
+                    } else {
+                        crate::SyncMode::Off
+                    })
                     .await?;
                 Ok(if online { "online" } else { "offline" }.into())
             }
@@ -590,7 +577,7 @@ impl Simulation {
     fn count(&mut self, what: &str) {
         *self.coverage.entry(what.into()).or_default() += 1;
     }
-    fn database(&self, node: usize) -> Result<Arc<crate::Database>, Failure> {
+    fn database(&self, node: usize) -> Result<Database, Failure> {
         let member = self.running(node)?;
         Ok(member
             .running
@@ -756,7 +743,7 @@ impl Simulation {
         let _ = match point {
             Prune | Compact | BasePrepare | BasePrepared | BasePublished | BaseCleanup
             | BaseCleaned => member
-                .session()
+                .database()
                 .expect("running crash fixture")
                 .compact(0)
                 .await
@@ -801,7 +788,7 @@ impl Simulation {
         }
         let uri = self
             .running(by)?
-            .session()?
+            .database()?
             .provision(profile, None)
             .await?
             .uri;
@@ -823,12 +810,12 @@ impl Simulation {
                 continue;
             };
             let _ = self.members[other]
-                .session()
+                .database()
                 .expect("running peer")
                 .add_peer(&contact)
                 .await;
             let _ = self.members[node]
-                .session()
+                .database()
                 .expect("running peer")
                 .add_peer(&theirs)
                 .await;
@@ -967,7 +954,7 @@ impl Simulation {
             } else if self.fixture == Fixture::Relational
                 && let Ok(database) = self.database(*node)
             {
-                let _ = database.session().set_networking_enabled(true).await;
+                let _ = database.set_sync(rocky_sdk::SyncMode::Manual).await;
             }
         }
         for node in &live {
@@ -1106,7 +1093,7 @@ impl Simulation {
         let mut held = BTreeSet::new();
         for list in &self.lists {
             let status = member
-                .session()?
+                .database()?
                 .partition_status(crate::PartitionTarget::Group {
                     group: "list".into(),
                     values: vec![crate::SqlValue::Text(list.clone())],
@@ -1137,7 +1124,7 @@ impl Simulation {
             .clone();
         for (table, list) in &authored.scopes {
             let status = member
-                .session()?
+                .database()?
                 .partition_status(crate::PartitionTarget::Group {
                     group: "list".into(),
                     values: vec![crate::SqlValue::Text(list.clone())],
@@ -1170,7 +1157,7 @@ impl Simulation {
         Ok(lists)
     }
     async fn canonical_seals(&self, node: usize) -> Result<BTreeSet<String>, Failure> {
-        let inspection = self.running(node)?.session()?.inspect_tips().await?;
+        let inspection = self.running(node)?.database()?.inspect_tips().await?;
         Ok(inspection
             .seals
             .iter()

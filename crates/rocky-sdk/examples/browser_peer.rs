@@ -49,7 +49,7 @@ mod native {
         )
         .await?;
         tx.commit().await?;
-        let invitation = db.session().provision(Access::Full, None).await?;
+        let invitation = db.provision(Access::Full, None).await?;
         println!("{}", json!({ "relay": url, "invitation": invitation.uri }));
 
         tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;

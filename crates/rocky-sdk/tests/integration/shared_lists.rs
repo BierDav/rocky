@@ -1,5 +1,5 @@
 use crate::support;
-use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
+use rocky_sdk::{Database, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::secrets;
@@ -53,20 +53,18 @@ fn identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
 
 struct Peer {
     identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
-    database: Arc<Database>,
-    session: Session,
+    database: Database,
 }
 async fn only_explicit_syncs(peers: &[&Peer]) -> Result<(), Failure> {
     for peer in peers {
-        snap::value(peer.session.set_automatic_sync(false)).await?;
+        snap::value(peer.database.set_sync(rocky_sdk::SyncMode::Manual)).await?;
     }
     Ok(())
 }
 impl Peer {
-    fn new(database: Arc<Database>) -> Result<Self, Failure> {
+    fn new(database: Database) -> Result<Self, Failure> {
         Ok(Self {
             identity: None,
-            session: database.session(),
             database,
         })
     }
@@ -75,10 +73,10 @@ impl Peer {
         self
     }
 
-    async fn sync_once(&self) -> Result<rocky_sdk::ReconciliationReport, Failure> {
+    async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, Failure> {
         match &self.identity {
-            Some(identity) => self.session.sync_once_with_identity(identity.clone()).await,
-            None => self.session.sync_once().await,
+            Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
+            None => self.database.sync_now().await,
         }
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
@@ -103,28 +101,31 @@ impl Peer {
 fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![snap::row_id(&(list))]
 }
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     at(directory, hub, name, SCHEMA)
 }
-fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> Open<'a> {
-    Open {
-        identity: Some(identity(directory)),
+fn at(directory: &Path, hub: &Arc<Hub>, name: &str, schema: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(schema),
-        secrets: Some(secrets::keys(directory)),
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(schema),
+        Some(secrets::keys(directory)),
+        Some(identity(directory)),
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
-fn at_without_identity<'a>(
-    directory: &'a Path,
+fn at_without_identity(
+    directory: &Path,
     hub: &Arc<Hub>,
     name: &str,
-    schema: &'a str,
-) -> Open<'a> {
-    Open {
-        identity: None,
-        ..at(directory, hub, name, schema)
-    }
+    schema: &str,
+) -> rocky_sdk::Configuration {
+    crate::common::configuration(
+        directory,
+        crate::support::snapshot::schema(schema),
+        Some(secrets::keys(directory)),
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 
 async fn checkpoint_writer(
@@ -133,10 +134,13 @@ async fn checkpoint_writer(
     schema: &str,
 ) -> Result<(Peer, Peer), Failure> {
     let issuer_path = root.join("issuer");
-    let mut options = open(&issuer_path, hub, "issuer");
-    options.schema = crate::support::snapshot::schema(schema);
-    let issuer = Peer::new(Database::create(options, None)?.database)?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let issuer = Peer::new(
+        at(&issuer_path, hub, "issuer", schema)
+            .create()
+            .await?
+            .database,
+    )?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let base = issuer
         .insert(
             "lists",
@@ -144,17 +148,18 @@ async fn checkpoint_writer(
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    snap::value(issuer.session.seal()).await?;
-    snap::value(issuer.session.compact(0)).await?;
-    let invite = snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?;
+    snap::value(issuer.database.seal()).await?;
+    snap::value(issuer.database.compact(0)).await?;
+    let invite = snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?;
     let writer_path = root.join("writer");
-    let mut options = open(&writer_path, hub, "writer");
-    options.schema = crate::support::snapshot::schema(schema);
-    let writer =
-        Peer::new(Database::join(options, invite["uri"].as_str().ok_or("uri")?)?.database)?;
-    let writer_node = snap::value(writer.session.info()).await?["node"].clone();
+    let writer = Peer::new(
+        at(&writer_path, hub, "writer", schema)
+            .join(invite["uri"].as_str().ok_or("uri")?)
+            .await?,
+    )?;
+    let writer_node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&base)).clone(),
@@ -167,7 +172,7 @@ async fn checkpoint_writer(
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     assert_eq!(
         writer.column("SELECT title FROM lists").await?,
         [json!("Base list")]
@@ -187,13 +192,12 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        Database::create(
-            at(&root.path().join("issuer"), &hub, "issuer", ORDERED),
-            None,
-        )?
-        .database,
+        at(&root.path().join("issuer"), &hub, "issuer", ORDERED)
+            .create()
+            .await?
+            .database,
     )?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let base = issuer
         .insert(
             "lists",
@@ -201,17 +205,15 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    let invite = snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?;
+    let invite = snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?;
     let writer = Peer::new(
-        Database::join(
-            at(&root.path().join("writer"), &hub, "writer", ORDERED),
-            invite["uri"].as_str().ok_or("uri")?,
-        )?
-        .database,
+        at(&root.path().join("writer"), &hub, "writer", ORDERED)
+            .join(invite["uri"].as_str().ok_or("uri")?)
+            .await?,
     )?;
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&base)).clone(),
@@ -224,12 +226,12 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
-    let prepared = snap::value(writer.session.next_partition("lists")).await?;
-    snap::value(issuer.session.seal()).await?;
-    snap::value(issuer.session.compact(0)).await?;
-    snap::value(writer.sync_once()).await?;
-    let status = snap::value(writer.session.status()).await?;
+    snap::value(writer.sync_now()).await?;
+    let prepared = snap::value(writer.database.next_partition("lists")).await?;
+    snap::value(issuer.database.seal()).await?;
+    snap::value(issuer.database.compact(0)).await?;
+    snap::value(writer.sync_now()).await?;
+    let status = snap::value(writer.database.status()).await?;
     assert!(
         status["data"]["blockers"]
             .as_array()
@@ -238,7 +240,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .all(|blocker| blocker["kind"]["type"] != "seal_rebootstrap"),
         "an unused partition is not unverified history: {status}"
     );
-    let again = snap::value(writer.session.next_partition("lists")).await?;
+    let again = snap::value(writer.database.next_partition("lists")).await?;
     assert_eq!(again["id"], prepared["id"]);
     let list = writer
         .insert(
@@ -261,7 +263,7 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
     let mut schema: Value = serde_json::from_str(SCHEMA)?;
     schema["tables"][2]["foreign_keys"] = json!([]);
     let (issuer, writer) = checkpoint_writer(root.path(), &hub, &schema.to_string()).await?;
-    snap::value(writer.session.next_partition("lists")).await?;
+    snap::value(writer.database.next_partition("lists")).await?;
     let list = writer
         .insert(
             "lists",
@@ -269,7 +271,7 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
             "INSERT INTO lists(id,title) VALUES(?,'Prepared')",
         )
         .await?;
-    let status = snap::value(writer.session.status()).await?;
+    let status = snap::value(writer.database.status()).await?;
     let rebootstraps: Vec<&Value> = status["data"]["blockers"]
         .as_array()
         .ok_or("blockers")?
@@ -312,7 +314,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
     assert!(
         snap::value(
             writer
-                .session
+                .database
                 .create_partition(rocky_sdk::PartitionTarget::Group {
                     group: "list".to_owned(),
                     values: values(&format!("{}{:016x}", "ab".repeat(32), 123))
@@ -321,14 +323,13 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         .await
         .is_err()
     );
-    let prepared = snap::value(writer.session.next_partition("lists")).await?;
-    let Peer {
-        database, session, ..
-    } = writer;
-    drop(session);
-    database.close().await?;
-    let writer =
-        Peer::new(Database::open(open(&root.path().join("writer"), &hub, "writer"))?.database)?;
+    let prepared = snap::value(writer.database.next_partition("lists")).await?;
+    writer.database.close().await?;
+    let writer = Peer::new(
+        open(&root.path().join("writer"), &hub, "writer")
+            .open()
+            .await?,
+    )?;
     let list = writer
         .insert(
             "lists",
@@ -341,9 +342,9 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         list.as_str(),
         "a prepared partition survives a restart before its first row commits"
     );
-    let issuer_node = snap::value(issuer.session.info()).await?["node"].clone();
+    let issuer_node = snap::value(issuer.database.info()).await?["node"].clone();
     snap::value(
-        writer.session.share_partition(
+        writer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -356,24 +357,22 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
-    snap::value(issuer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
+    snap::value(issuer.sync_now()).await?;
     assert_eq!(
         issuer
             .column("SELECT title FROM lists ORDER BY title")
             .await?,
         [json!("Base list"), json!("Member list")]
     );
-    let read_invite = snap::value(issuer.session.provision(rocky_sdk::Access::Read, None)).await?;
+    let read_invite = snap::value(issuer.database.provision(rocky_sdk::Access::Read, None)).await?;
     let reader = Peer::new(
-        Database::join(
-            open(&root.path().join("reader"), &hub, "reader"),
-            read_invite["uri"].as_str().ok_or("uri")?,
-        )?
-        .database,
+        open(&root.path().join("reader"), &hub, "reader")
+            .join(read_invite["uri"].as_str().ok_or("uri")?)
+            .await?,
     )?;
     assert!(
-        snap::value(reader.session.next_partition("lists"))
+        snap::value(reader.database.next_partition("lists"))
             .await
             .is_err()
     );
@@ -387,18 +386,25 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
 async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer =
-        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let issuer = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    let writer = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     only_explicit_syncs(&[&issuer, &writer]).await?;
 
-    let prepared = snap::value(issuer.session.next_partition("lists")).await?;
+    let prepared = snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -424,9 +430,9 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         )
         .await?;
 
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -439,7 +445,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await.map_err(|error| {
+    snap::value(writer.sync_now()).await.map_err(|error| {
         format!("one sync delivers the envelope and the list's checkpoint: {error}")
     })?;
     assert_eq!(
@@ -464,7 +470,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     )
     .await?;
     tx.commit().await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     for peer in [&writer, &issuer] {
         assert_eq!(
             peer.column(&format!(
@@ -482,7 +488,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
 }
 
 async fn refused(peer: &Peer) -> Result<Option<Vec<Value>>, Failure> {
-    let activity = snap::value(peer.session.activity(0)).await?;
+    let activity = snap::value(peer.database.activity(0)).await?;
     Ok(activity["events"]
         .as_array()
         .into_iter()
@@ -506,17 +512,24 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer =
-        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let issuer = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    snap::value(writer.sync_once()).await?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let writer = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
+    snap::value(writer.sync_now()).await?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -524,11 +537,11 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = snap::value(writer.session.info()).await?["node"].clone();
-    snap::value(issuer.session.seal()).await?;
-    snap::value(issuer.session.compact(0)).await?;
+    let node = snap::value(writer.database.info()).await?["node"].clone();
+    snap::value(issuer.database.seal()).await?;
+    snap::value(issuer.database.compact(0)).await?;
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -541,7 +554,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     writer
         .insert(
             "items",
@@ -549,7 +562,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     assert_eq!(
         issuer
             .column(&format!("SELECT title FROM items WHERE list = X'{list}'"))
@@ -557,7 +570,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         [json!("Milk")]
     );
 
-    let served = kinds(&snap::value(issuer.session.activity(0)).await?);
+    let served = kinds(&snap::value(issuer.database.activity(0)).await?);
     for kind in [
         "device_provisioned",
         "partition_created",
@@ -568,7 +581,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             "issuer lacks {kind}: {served:?}"
         );
     }
-    let activity = snap::value(writer.session.activity(0)).await?;
+    let activity = snap::value(writer.database.activity(0)).await?;
     let seen = kinds(&activity);
     for kind in [
         "peer_reconciliation_completed",
@@ -599,10 +612,14 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .any(|event| event["scopes"][0]["table"].is_string())
     );
     let token = activity["token"].clone();
-    let waiting = snap::value(writer.session.next_activity(snap::integer(&(token)) as u64));
+    let waiting = snap::value(
+        writer
+            .database
+            .next_activity(snap::integer(&(token)) as u64),
+    );
     let (next, _) = tokio::join!(
         waiting,
-        snap::value(writer.session.set_networking_enabled(false))
+        snap::value(writer.database.set_sync(rocky_sdk::SyncMode::Off))
     );
     assert_eq!(
         kinds(&next?),
@@ -620,23 +637,30 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer =
-        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let issuer = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    snap::value(writer.sync_once()).await?;
+    let writer = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
+    snap::value(writer.sync_now()).await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
-    snap::value(issuer.session.set_retention(
+    snap::value(issuer.database.set_retention(
         "items",
         serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy)).expect("typed fixture"),
     ))
     .await?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -644,9 +668,9 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -672,14 +696,14 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     tx.execute("DELETE FROM items WHERE title='Eggs'", Vec::new())
         .await?;
     tx.commit().await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(
         writer.column(&titles).await?,
         [json!("Flour"), json!("Milk")]
     );
-    snap::value(issuer.session.seal()).await?;
-    let compacted = snap::value(issuer.session.compact(0)).await?;
+    snap::value(issuer.database.seal()).await?;
+    let compacted = snap::value(issuer.database.compact(0)).await?;
     assert!(
         compacted["pruned"].as_u64() >= Some(4),
         "the list's items were not released: {compacted}"
@@ -699,9 +723,8 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = root.path().join("a");
-    let issuer =
-        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -718,11 +741,11 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
             )
             .await?;
     }
-    snap::value(issuer.session.seal()).await?;
-    snap::value(issuer.session.compact(0)).await?;
+    snap::value(issuer.database.seal()).await?;
+    snap::value(issuer.database.compact(0)).await?;
     issuer.database.close().await?;
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -739,16 +762,23 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
 async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer =
-        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let issuer = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let writer = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -763,9 +793,9 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -778,7 +808,7 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     writer
         .insert(
             "items",
@@ -792,23 +822,15 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         [json!("Eggs"), json!("Milk")]
     );
 
-    let Peer {
-        database, session, ..
-    } = writer;
-    drop(session);
-    database.close().await?;
-    let reopened = Peer::new(Database::open(open(&root.path().join("b"), &hub, "b"))?.database)?;
+    writer.database.close().await?;
+    let reopened = Peer::new(open(&root.path().join("b"), &hub, "b").open().await?)?;
     assert_eq!(
         reopened.column(&titles).await?,
         [json!("Eggs"), json!("Milk")],
         "after reopening, the items' parent list anchors them again"
     );
-    let Peer {
-        database, session, ..
-    } = issuer;
-    drop(session);
-    database.close().await?;
-    let issuer = Peer::new(Database::open(open(&root.path().join("a"), &hub, "a"))?.database)?;
+    issuer.database.close().await?;
+    let issuer = Peer::new(open(&root.path().join("a"), &hub, "a").open().await?)?;
     assert_eq!(
         issuer
             .column(&format!("SELECT title FROM items WHERE list = X'{list}'"))
@@ -826,8 +848,13 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    snap::value(a.session.next_partition("lists")).await?;
+    let a = Peer::new(
+        open(&root.path().join("a"), &hub, "a")
+            .create()
+            .await?
+            .database,
+    )?;
+    snap::value(a.database.next_partition("lists")).await?;
     let list = a
         .insert(
             "lists",
@@ -835,20 +862,23 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             "INSERT INTO lists(id,title) VALUES(?,'Own list')",
         )
         .await?;
-    let invitation = snap::value(a.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+    let invitation = snap::value(a.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
-    let b =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    snap::value(b.sync_once()).await?;
+    let b = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
+    snap::value(b.sync_now()).await?;
     assert_eq!(
         b.column("SELECT title FROM lists").await?,
         [json!("Own list")]
     );
-    let node = snap::value(a.session.info()).await?["node"].clone();
+    let node = snap::value(a.database.info()).await?["node"].clone();
     snap::value(
-        b.session.share_partition(
+        b.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -861,15 +891,15 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         ),
     )
     .await?;
-    snap::value(a.sync_once()).await?;
-    let activity = snap::value(a.session.activity(0)).await?;
+    snap::value(a.sync_now()).await?;
+    let activity = snap::value(a.database.activity(0)).await?;
     assert!(
         !kinds(&activity).contains(&"partition_bootstrap".to_owned()),
         "{activity}"
     );
     assert!(!root.path().join("a/bootstrap.json").exists());
     assert_eq!(
-        snap::value(a.session.status()).await?["data"]["bootstrap_pending"],
+        snap::value(a.database.status()).await?["data"]["bootstrap_pending"],
         false
     );
     for peer in [b, a] {
@@ -880,7 +910,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
 
 async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Failure> {
     for peer in peers {
-        snap::value(peer.sync_once()).await?;
+        snap::value(peer.sync_now()).await?;
     }
     Ok(())
 }
@@ -888,31 +918,34 @@ async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Fail
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
-    let created = Database::create(open(&root.path().join("a"), &hub, "a"), None)?;
-    let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.root.ok_or("root")?);
+    let created = open(&root.path().join("a"), &hub, "a").create().await?;
+    let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.root);
     let a = Peer::new(created.database)?;
-    let invitation = snap::value(a.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+    let invitation = snap::value(a.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
-    let b =
-        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    let b = Peer::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     let trusted = a
-        .session
-        .trust(b.session.info().await?.principal, owner)
+        .database
+        .trust(b.database.info().await?.principal, owner)
         .await?;
-    b.session.install_trust(&trusted.grant).await?;
+    b.database.install_trust(&trusted.grant).await?;
     let mut lists = Vec::new();
     for (peer, title) in [(&a, "From a"), (&b, "From b")] {
-        snap::value(peer.session.next_partition("lists")).await?;
+        snap::value(peer.database.next_partition("lists")).await?;
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
         lists.push(peer.insert("lists", None, &sql).await?);
     }
     sync_each_learning_the_others_tuple(&[&a, &b]).await?;
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
-        let node = snap::value(to.session.info()).await?["node"].clone();
+        let node = snap::value(to.database.info()).await?["node"].clone();
         snap::value(
-            from.session.share_partition(
+            from.database.share_partition(
                 rocky_sdk::PartitionTarget::Group {
                     group: "list".to_owned(),
                     values: (values(list)).clone(),
@@ -925,8 +958,8 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
             ),
         )
         .await?;
-        snap::value(from.sync_once()).await?;
-        snap::value(to.sync_once()).await?;
+        snap::value(from.sync_now()).await?;
+        snap::value(to.sync_now()).await?;
     }
     for peer in [&a, &b] {
         assert_eq!(
@@ -950,23 +983,21 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer =
-        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
+    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?.with_identity(&b);
     snap::value(
-        writer.session.set_replica_role(
+        writer.database.set_replica_role(
             serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
                 .expect("typed fixture"),
         ),
     )
     .await?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -993,9 +1024,9 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             )
             .await?;
     }
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -1008,12 +1039,12 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -1026,9 +1057,8 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application =
-        Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    snap::value(older_application.sync_once()).await?;
+    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
+    snap::value(older_application.sync_now()).await?;
     older_application
         .insert(
             "items",
@@ -1036,7 +1066,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_once()).await?;
+    snap::value(older_application.sync_now()).await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1047,8 +1077,8 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
-    snap::value(writer.sync_once()).await?;
+    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
+    snap::value(writer.sync_now()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
         .column(&format!(
@@ -1063,7 +1093,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")],
@@ -1080,16 +1110,14 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer =
-        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let writer =
-        Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?.with_identity(&b);
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -1116,9 +1144,9 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             )
             .await?;
     }
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -1131,12 +1159,12 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
@@ -1149,9 +1177,8 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application =
-        Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    snap::value(older_application.sync_once()).await?;
+    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
+    snap::value(older_application.sync_now()).await?;
     older_application
         .insert(
             "items",
@@ -1159,7 +1186,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_once()).await?;
+    snap::value(older_application.sync_now()).await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1170,8 +1197,8 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
-    snap::value(writer.sync_once()).await?;
+    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
+    snap::value(writer.sync_now()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
         .column(&format!(
@@ -1186,7 +1213,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")],
@@ -1219,17 +1246,18 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer =
-        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
     let writer = Peer::new(
-        Database::join(at_without_identity(&b, &hub, "b", SCHEMA), &invitation)?.database,
+        at_without_identity(&b, &hub, "b", SCHEMA)
+            .join(&invitation)
+            .await?,
     )?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -1256,9 +1284,9 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             )
             .await?;
     }
-    let node = snap::value(writer.session.info()).await?["node"].clone();
+    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -1271,7 +1299,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
         ),
     )
     .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     writer
         .insert(
             "items",
@@ -1279,18 +1307,16 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Butter')"),
         )
         .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
 
-    let issuer =
-        Peer::new(Database::open(at(&a, &hub, "a", POSITIONED))?.database)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", POSITIONED).open().await?)?.with_identity(&a);
 
-    let older_application =
-        Peer::new(Database::open(at_without_identity(&b, &hub, "b", SCHEMA))?.database)?;
-    snap::value(older_application.sync_once()).await?;
-    older_application.session.renew().await?;
+    let older_application = Peer::new(at_without_identity(&b, &hub, "b", SCHEMA).open().await?)?;
+    snap::value(older_application.sync_now()).await?;
+    older_application.database.renew().await?;
     older_application
         .insert(
             "items",
@@ -1298,7 +1324,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_once()).await?;
+    snap::value(older_application.sync_now()).await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1310,10 +1336,13 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     );
     older_application.database.close().await?;
 
-    let writer =
-        Peer::new(Database::open(at_without_identity(&b, &hub, "b", POSITIONED))?.database)?;
-    snap::value(writer.sync_once()).await?;
-    writer.session.renew().await?;
+    let writer = Peer::new(
+        at_without_identity(&b, &hub, "b", POSITIONED)
+            .open()
+            .await?,
+    )?;
+    snap::value(writer.sync_now()).await?;
+    writer.database.renew().await?;
     writer
         .insert(
             "items",
@@ -1321,7 +1350,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title,position) VALUES(?,X'{list}','Eggs','9')"),
         )
         .await?;
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_now()).await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1349,15 +1378,14 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer =
-        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
     let invitation =
-        snap::value(issuer.session.provision(rocky_sdk::Access::Full, None)).await?["uri"]
+        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-    let member = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
-    snap::value(issuer.session.next_partition("lists")).await?;
+    let member = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?;
+    snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -1383,9 +1411,9 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         }
         transaction.commit().await?;
     }
-    let node = snap::value(member.session.info()).await?["node"].clone();
+    let node = snap::value(member.database.info()).await?["node"].clone();
     snap::value(
-        issuer.session.share_partition(
+        issuer.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(&list)).clone(),
@@ -1398,12 +1426,12 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         ),
     )
     .await?;
-    snap::value(member.sync_once()).await?;
+    snap::value(member.sync_now()).await?;
     for peer in [member, issuer] {
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
     let check_sql = format!(
         "SELECT COUNT(*) || ':' || COUNT(DISTINCT position) FROM items WHERE list = X'{list}' AND position > ''"
     );
@@ -1419,8 +1447,8 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let issuer_rows = issuer.column(&all_rows_sql).await?;
     assert_eq!(issuer_rows.len(), total);
 
-    let member = Peer::new(Database::open(at_without_identity(&b, &hub, "b", ORDERED))?.database)?;
-    snap::value(member.sync_once()).await?;
+    let member = Peer::new(at_without_identity(&b, &hub, "b", ORDERED).open().await?)?;
+    snap::value(member.sync_now()).await?;
     assert_eq!(
         member.column(&check_sql).await?,
         expected_summary,

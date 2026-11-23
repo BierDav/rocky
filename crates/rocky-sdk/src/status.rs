@@ -330,7 +330,7 @@ pub struct NetworkStatus {
     pub connected_peer_count: u64,
     pub contact_resolutions: Vec<AttemptObservation>,
     pub discovery: DiscoveryStatus,
-    pub last_reconciliation: Option<ReconciliationReport>,
+    pub last_reconciliation: Option<SyncReport>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Alert {
@@ -483,7 +483,7 @@ pub struct TimeoutCount {
     pub count: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconciliationReport {
+pub struct SyncReport {
     pub contact_resolutions: Vec<AttemptObservation>,
     pub started_at_epoch_millis: Option<u64>,
     pub ended_at_epoch_millis: Option<u64>,

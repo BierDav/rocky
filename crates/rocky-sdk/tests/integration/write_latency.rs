@@ -1,5 +1,5 @@
 use common::{Device, Failure, introduce};
-use rocky_sdk::{Database, Network, Open, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Database, Network, SqlValue, transport::memory::Hub};
 use std::{
     path::Path,
     sync::Arc,
@@ -17,14 +17,14 @@ const TABLES: [&str; 2] = ["counters", "items"];
 const WARM_UP: usize = 50;
 const SAMPLES: usize = 600;
 
-fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
-    Open {
-        identity: None,
+fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        None,
         network,
-    }
+    )
 }
 
 async fn write(database: &Database, sql: &str) -> Result<(), Failure> {
@@ -62,7 +62,7 @@ async fn probe(
     table: &str,
     period: Duration,
 ) -> Result<(), Failure> {
-    let events = database.observe_tables(Some(vec![table.into()])).await?;
+    let events = database.observe(&[table]).await?;
     let (mut written, mut observed) = (Vec::new(), Vec::new());
     let mut ticks = interval(period);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -112,7 +112,7 @@ fn release() -> Result<(), Failure> {
 async fn l0_idle_interactive_writes() -> Result<(), Failure> {
     release()?;
     let root = tempfile::tempdir()?;
-    let database = Database::create(open(root.path(), None), None)?.database;
+    let database = open(root.path(), None).create().await?.database;
     seed(&database, &["probe"]).await?;
     for table in TABLES {
         probe("L0", &database, table, Duration::from_millis(10)).await?;
@@ -128,16 +128,14 @@ async fn l2_interactive_writes_while_receiving_small_writes() -> Result<(), Fail
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), network("a")),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), network("a")).create().await?)?;
     seed(&a.database, &["probe", "pressure"]).await?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("b"), network("b")),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("b"), network("b"))
+            .join(&invitation)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     for device in [&b, &a, &b] {
         device.sync().await.map_err(|error| error.to_string())?;

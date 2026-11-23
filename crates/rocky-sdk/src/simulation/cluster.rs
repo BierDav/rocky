@@ -1,7 +1,7 @@
 use crate::SqlValue;
 use crate::{
-    Database, Failure, Network, Open, SecretStore, Session, database::Install,
-    enrollment::DEFAULT_TTL, node::Node, transport::memory::Hub,
+    Configuration, Database, Failure, Network, SecretStore, database::Install, node::Node,
+    transport::memory::Hub,
 };
 use rocky_credentials::testing::MemoryKeys;
 use std::{
@@ -16,8 +16,7 @@ fn text(value: &str) -> SqlValue {
 pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
 pub(super) struct Running {
-    pub(super) database: Arc<Database>,
-    session: Session,
+    pub(super) database: Database,
     pub(super) node: Weak<Node>,
 }
 pub(super) struct Member {
@@ -49,40 +48,23 @@ impl Member {
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
         let secrets: Arc<dyn SecretStore> = self.keys.clone();
         let schema = crate::Schema::parse(self.schema)?;
-        let hosted = Database::host(
-            Open {
-                directory: &self.directory,
-                schema: &schema,
-                secrets: Some(secrets),
-                identity: None,
-                network: Some(Network::Owned(hub.connector(&self.name))),
-            },
-            install,
-            self.ahead.clone(),
-        )
-        .await?;
-        let database = hosted.opened.database;
+        let configuration = Configuration::new(&self.directory, &schema)?
+            .secrets(secrets)
+            .network(Network::Owned(hub.connector(&self.name)));
+        let hosted = Database::host(&configuration, install, self.ahead.clone()).await?;
         self.running = Some(Running {
-            session: database.session(),
-            database,
+            database: hosted.database,
             node: hosted.node,
         });
         if self.node_key.is_none() {
-            self.node_key = Some(self.session()?.info().await?.node.to_hex());
+            self.node_key = Some(self.database()?.info().await?.node.to_hex());
         }
         Ok(())
     }
     pub(super) async fn create(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
         let root = Arc::new(crate::RootKey::generate());
         self.root = Some(root.clone());
-        self.start(
-            hub,
-            Install::Create {
-                ttl: DEFAULT_TTL,
-                root: std::sync::Mutex::new(Some(root)),
-            },
-        )
-        .await
+        self.start(hub, Install::create(root)).await
     }
     pub(super) async fn join(&mut self, hub: &Arc<Hub>, provisioning: &str) -> Result<(), Failure> {
         self.start(
@@ -100,7 +82,6 @@ impl Member {
     }
     pub(super) async fn close(&mut self) -> Result<(), Failure> {
         if let Some(running) = self.running.take() {
-            running.session.close().await;
             running.database.close().await?;
         }
         Ok(())
@@ -117,21 +98,14 @@ impl Member {
             .ok_or("the node is not running")?
             .database)
     }
-    pub(super) fn session(&self) -> Result<&Session, Failure> {
-        Ok(&self
-            .running
-            .as_ref()
-            .ok_or("the node is not running")?
-            .session)
-    }
-    pub(super) async fn sync(&self) -> Result<crate::ReconciliationReport, Failure> {
+    pub(super) async fn sync(&self) -> Result<crate::SyncReport, Failure> {
         match &self.root {
             Some(root) => {
-                self.session()?
-                    .sync_once_with_identity(Arc::new(root.identity()))
+                self.database()?
+                    .sync_now_with_identity(Arc::new(root.identity()))
                     .await
             }
-            None => self.session()?.sync_once().await,
+            None => self.database()?.sync_now().await,
         }
     }
     pub(super) async fn write(&self, key: &str, handle: u64) -> Result<(), Failure> {
@@ -190,6 +164,6 @@ impl Member {
         Ok(keys)
     }
     pub(super) async fn contact(&self) -> Result<String, Failure> {
-        self.session()?.contact().await
+        Ok(self.database()?.contact().await?.uri)
     }
 }

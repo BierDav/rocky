@@ -15,7 +15,6 @@ async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> R
             let report = a.sync(&*transport(&a).await?).await?.0;
             assert_eq!(report["peers"], json!([]));
             assert!(report["skip"].is_null());
-            let _client = a.client(1)?;
             snap::value(a.enter_background()).await?;
             start(&a, true).await?;
             let suspended = a.observed_status().await?;
@@ -23,7 +22,7 @@ async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> R
             assert!(suspended.network.worker_enabled);
             assert!(!suspended.network.foreground);
             assert!(!suspended.network.worker_running);
-            let report: crate::ReconciliationReport =
+            let report: crate::SyncReport =
                 serde_json::from_value(a.sync(&*transport(&a).await?).await?.0)?;
             assert_eq!(report.skip, Some(SkipReason::Suspended));
             snap::value(a.set_networking_enabled(false)).await?;
@@ -31,8 +30,8 @@ async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> R
             assert!(!disabled.network.networking_enabled);
             assert!(!disabled.network.foreground);
             assert_ne!(disabled.token, suspended.token);
-            a.detach(None).await;
-            let report: crate::ReconciliationReport = a.sync_optional(None).await?.0;
+            a.detach().await;
+            let report: crate::SyncReport = a.sync_optional(None).await?.0;
             assert_eq!(report.skip, Some(SkipReason::NetworkingDisabled));
             assert_eq!(
                 a.observed_status().await?.network.attachment,
@@ -53,7 +52,7 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             let creator = enrolled(&root.path().join("c"), &hub, "c", None).await?;
             let writer = crate::Access::Full;
             let a = enrolled(&root.path().join("a"), &hub, "a", Some((&creator, writer))).await?;
-            creator.detach(None).await;
+            creator.detach().await;
             let expires = a.settings.lock().await.expires();
             *a.status_clock
                 .lock()
@@ -63,8 +62,7 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             let stable = a.observed_status().await?;
             assert_eq!(before.token, stable.token);
             assert!(!before.authority.expired);
-            let client = a.client(1)?;
-            let wait = a.readiness_after(&client, &before.token);
+            let wait = a.readiness_after(&before.token);
             let advance = async {
                 tokio::task::yield_now().await;
                 tokio::time::advance(Duration::from_secs(1)).await;
@@ -72,7 +70,7 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             let (status, ()) = tokio::join!(wait, advance);
             assert!(status?.authority.expired);
             assert!(!a.observed_status().await?.network.worker_enabled);
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         }))
         .await
@@ -101,8 +99,8 @@ async fn a_short_exchange_and_a_failed_peer_do_not_become_a_connection_verdict()
             )
             .await?;
             targets(&a, &[b.clone(), c.clone()]).await?;
-            c.detach(None).await;
-            let report: crate::ReconciliationReport =
+            c.detach().await;
+            let report: crate::SyncReport =
                 serde_json::from_value(a.sync(&*transport(&a).await?).await?.0)?;
             assert!(report.peers.iter().any(|peer| {
                 peer.attempts.iter().any(|attempt| {
@@ -126,8 +124,8 @@ async fn a_short_exchange_and_a_failed_peer_do_not_become_a_connection_verdict()
             );
             assert!(!status.authority.expired);
             assert!(status.authority.verified_revocation.is_none());
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await
@@ -143,7 +141,7 @@ async fn a_scope_the_peer_does_not_share_is_not_a_blocker() -> Result<(), Failur
             let profile = crate::Access::Full;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, profile))).await?;
             targets(&a, std::slice::from_ref(&b)).await?;
-            let report: crate::ReconciliationReport =
+            let report: crate::SyncReport =
                 serde_json::from_value(a.sync(&*transport(&a).await?).await?.0)?;
             assert!(!report.peers[0].refused.is_empty(), "{report:?}");
             let blockers = a.blockers().await?;
@@ -154,8 +152,8 @@ async fn a_scope_the_peer_does_not_share_is_not_a_blocker() -> Result<(), Failur
                 )),
                 "{blockers:?}"
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         }))
         .await

@@ -11,20 +11,20 @@ fn leave_only_the_pruned_issuer_to_serve_c(hub: &Hub) {
 }
 
 async fn retry_after_restoring_authority(device: &Device) {
-    snap::ok(device.session.set_networking_enabled(true)).await;
+    snap::ok(device.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
 }
 
 async fn end_backoff_by_going_online(device: &Device) {
-    snap::ok(device.session.set_networking_enabled(false)).await;
-    snap::ok(device.session.set_networking_enabled(true)).await;
+    snap::ok(device.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    snap::ok(device.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reopen()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let device = Device::create(root.path(), None)?;
-    let default = snap::ok(device.session.retention("items")).await;
+    let device = Device::create(root.path(), None).await?;
+    let default = snap::ok(device.database.retention("items")).await;
     assert_eq!(
         default["policy"],
         json!({"required": [], "behind": [], "copies": 1, "window": 256})
@@ -34,21 +34,21 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
     let policy = json!({"required": [], "behind": [], "copies": 1, "window": 0});
     let status = snap::ok(async {
         device
-            .session
+            .database
             .set_retention(
                 "items",
                 serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy))
                     .expect("typed fixture"),
             )
             .await?;
-        device.session.maintain_retention("items").await
+        device.database.maintain_retention("items").await
     })
     .await;
     assert_eq!(status["covered"], 1);
     assert_eq!(status["pruned_prefix"], json!([]));
     assert!(
         snap::observe(
-            device.session.set_retention(
+            device.database.set_retention(
                 "missing",
                 serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy))
                     .expect("typed fixture")
@@ -59,7 +59,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
     );
     assert!(
         snap::observe(
-            device.session.set_retention_limits(
+            device.database.set_retention_limits(
                 serde_json::from_value::<rocky_sdk::RetentionLimits>(
                     json!({"hard_bytes": 0, "handles": 1})
                 )
@@ -70,9 +70,9 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
         .is_err()
     );
     device.close().await;
-    let device = Device::open(root.path(), None)?;
+    let device = Device::open(root.path(), None).await?;
     assert_eq!(
-        snap::ok(device.session.retention("items")).await["policy"],
+        snap::ok(device.database.retention("items")).await["policy"],
         policy
     );
     assert_eq!(device.titles().await, ["sole copy"]);
@@ -87,18 +87,21 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     a.add(1, "base").await;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     let c = Device::join(
         &root.path().join("c"),
         &a.invite().await,
         Network::Owned(hub.connector("c")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("initial sync");
     c.sync().await.expect("initial sync");
     leave_only_the_pruned_issuer_to_serve_c(&hub);
@@ -109,7 +112,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     b.sync().await.expect("custody sync");
     a.seal_and_compact().await;
     let status = snap::ok(async {
-        a.session
+        a.database
             .set_retention(
                 "items",
                 serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!({
@@ -118,7 +121,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
                 .expect("typed fixture"),
             )
             .await?;
-        a.session.maintain_retention("items").await
+        a.database.maintain_retention("items").await
     })
     .await;
     assert!(
@@ -142,7 +145,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
         "completed",
         "pushing to a peer behind the pruned prefix skips the scope and the pass succeeds"
     );
-    let activity = snap::ok(a.session.activity(0)).await;
+    let activity = snap::ok(a.database.activity(0)).await;
     assert!(
         activity["events"]
             .as_array()
@@ -157,7 +160,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     assert_eq!(a.items().await, c.items().await);
     assert!(c.titles().await.contains(&"unsent".to_owned()));
     assert!(c.titles().await.contains(&"tail".to_owned()));
-    let status = snap::ok(c.session.retention("items")).await;
+    let status = snap::ok(c.database.retention("items")).await;
     assert!(
         !status["pruned_prefix"]
             .as_array()
@@ -167,7 +170,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     c.add(99, "unsent").await;
     assert_eq!(a.items().await, c.items().await);
     c.close().await;
-    let c = Device::open(&root.path().join("c"), None)?;
+    let c = Device::open(&root.path().join("c"), None).await?;
     assert_eq!(a.items().await, c.items().await);
     c.close().await;
     b.close().await;
@@ -182,7 +185,8 @@ async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failur
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
@@ -192,7 +196,8 @@ async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failur
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("join sync");
     assert_eq!(b.titles().await.len(), 40);
     b.close().await;
@@ -207,16 +212,18 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     a.add(1, "before revocation").await;
     let revoked = Device::join(
         &root.path().join("revoked"),
         &a.invite().await,
         Network::Owned(hub.connector("revoked")),
-    )?;
+    )
+    .await?;
     revoked.sync().await.expect("initial bootstrap");
     snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&(revoked.identity().await))),
     )
     .await;
@@ -226,7 +233,8 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         &member_path,
         &a.invite_as(rocky_sdk::Access::Read).await,
         Network::Owned(hub.connector("member")),
-    )?;
+    )
+    .await?;
     member
         .sync()
         .await
@@ -256,8 +264,8 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         "earlier ciphertext was replaced by the checkpoint"
     );
     snap::ok(async {
-        member.session.renew().await?;
-        member.session.info().await
+        member.database.renew().await?;
+        member.database.info().await
     })
     .await;
     let renewed = common::authority_json(&member_path, "identity")?;
@@ -275,7 +283,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     assert_eq!(member.titles().await, ["before revocation", "tail"]);
     assert!(common::exchange_failed(&revoked.sync().await));
     member.close().await;
-    let member = Device::open(&member_path, None)?;
+    let member = Device::open(&member_path, None).await?;
     assert_eq!(member.titles().await, ["before revocation", "tail"]);
     member.close().await;
     revoked.close().await;
@@ -354,7 +362,8 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     a.add(1, "base").await;
     let gate = Arc::new(Gate {
         inner: hub
@@ -370,20 +379,21 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     });
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");
-    let member = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    let member = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone())).await?;
     attempts.wait_for(|count| *count > 0).await?;
-    let status = snap::ok(member.session.status()).await;
+    let mut changes = member.database.status_changes();
+    let status = snap::ok(changes.next()).await;
     assert_eq!(status["data"]["bootstrap_pending"], true);
     gate.allowed.send_replace(true);
     member.sync().await.expect("finish join");
-    let ready = snap::ok(member.session.status_after(snap::text(&(status["token"])))).await;
+    let ready = snap::ok(changes.next()).await;
     assert_eq!(ready["data"]["bootstrap_pending"], false);
     gate.allowed.send_replace(false);
     let previous = *attempts.borrow_and_update();
     let sync = member.sync();
     let observe = async {
         attempts.wait_for(|count| *count > previous).await?;
-        let status = snap::ok(member.session.status()).await;
+        let status = snap::ok(member.database.status()).await;
         assert_eq!(status["network"]["reconciling"], true);
         gate.allowed.send_replace(true);
         Ok::<_, Failure>(())
@@ -407,16 +417,16 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
         pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let path = root.path().join("retry");
-    let retry = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    let retry = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone())).await?;
     assert!(common::exchange_failed(&retry.sync().await));
     assert_eq!(
-        snap::ok(retry.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(retry.database.status()).await["data"]["bootstrap_pending"],
         true
     );
     retry.close().await;
-    let retry = Device::open(&path, None)?;
+    let retry = Device::open(&path, None).await?;
     assert_eq!(
-        snap::ok(retry.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(retry.database.status()).await["data"]["bootstrap_pending"],
         true,
         "an enrolled device whose every sync failed keeps its checkpoint intent across reopen"
     );
@@ -428,7 +438,7 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
         .await?;
     retry.sync().await.expect("resume checkpoint-first join");
     assert_eq!(
-        snap::ok(retry.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(retry.database.status()).await["data"]["bootstrap_pending"],
         false
     );
     assert_eq!(retry.titles().await, ["base"]);
@@ -444,13 +454,14 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a_path = root.path().join("a");
-    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a")))).await?;
     a.add(1, "base").await;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("b joins");
     let gate = Arc::new(Gate {
         inner: hub
@@ -465,24 +476,24 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
         pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let c_path = root.path().join("c");
-    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone())).await?;
     c.close().await;
     gate.close().await;
     a.close().await;
-    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c"))))?;
+    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c")))).await?;
     c.add_peer(&b.contact().await).await.expect("c knows b");
     let _ = c.sync().await;
     assert_eq!(c.titles().await, ["base"]);
-    let status = snap::ok(c.session.status()).await;
+    let status = snap::ok(c.database.status()).await;
     assert_eq!(
         status["data"]["bootstrap_pending"], true,
         "a join enrolled by A with no exchange with it stays pending after B's checkpoint"
     );
 
-    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a")))).await?;
     c.sync().await.expect("c meets its inviter");
     assert_eq!(
-        snap::ok(c.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(c.database.status()).await["data"]["bootstrap_pending"],
         false
     );
     for device in [c, b, a] {
@@ -498,20 +509,22 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a_path = root.path().join("a");
-    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a")))).await?;
     let inviter = a.node().await;
     a.add(1, "base").await;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("b joins");
     let d = Device::join(
         &root.path().join("d"),
         &a.invite().await,
         Network::Owned(hub.connector("d")),
-    )?;
+    )
+    .await?;
     d.sync().await.expect("d joins");
     let gate = Arc::new(Gate {
         inner: hub
@@ -526,11 +539,11 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
         pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let c_path = root.path().join("c");
-    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone())).await?;
     c.close().await;
     gate.close().await;
     snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&d.identity().await)),
     )
     .await;
@@ -539,15 +552,15 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     d.close().await;
     a.close().await;
 
-    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c"))))?;
+    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c")))).await?;
     c.add_peer(&b.contact().await).await.expect("c knows b");
     let _ = c.sync().await;
     assert_eq!(
-        c.session.info().await?.revocations.statements,
+        c.database.info().await?.revocations.statements,
         1,
         "c learns the revocation from b before it meets its inviter"
     );
-    let status = snap::ok(c.session.status()).await;
+    let status = snap::ok(c.database.status()).await;
     assert_eq!(
         status["data"]["bootstrap_pending"], true,
         "a revocation learned from b must not end the wait for the inviter: {status}"
@@ -555,10 +568,10 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     let intent = common::authority_json(&c_path, "bootstrap")?;
     assert_eq!(intent["inviter"], inviter, "{intent}");
 
-    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a")))).await?;
     c.sync().await.expect("c meets its inviter");
     assert_eq!(
-        snap::ok(c.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(c.database.status()).await["data"]["bootstrap_pending"],
         false
     );
     assert_eq!(c.titles().await, ["after enrolment", "base"]);
@@ -576,24 +589,27 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     a.add(1, "epoch one").await;
     let b_path = root.path().join("b");
     let b = Device::join(
         &b_path,
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     b.sync().await.expect("initial join");
     for (name, handle, title) in [("c", 2, "epoch two"), ("d", 3, "epoch three")] {
         let revoked = Device::join(
             &root.path().join(name),
             &a.invite().await,
             Network::Owned(hub.connector(name)),
-        )?;
+        )
+        .await?;
         revoked.sync().await.expect("join");
         snap::ok(
-            a.session
+            a.database
                 .revoke_identity(snap::public_key(&(revoked.identity().await))),
         )
         .await;
@@ -602,12 +618,12 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     }
     a.seal_and_compact().await;
     snap::ok(async {
-        b.session.renew().await?;
-        b.session.info().await
+        b.database.renew().await?;
+        b.database.info().await
     })
     .await;
     assert_eq!(
-        snap::ok(b.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(b.database.status()).await["data"]["bootstrap_pending"],
         true
     );
     let identity = common::authority_json(&b_path, "identity")?;
@@ -624,7 +640,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     assert_eq!(a.items().await, b.items().await);
     assert_eq!(b.titles().await.len(), 3);
     assert_eq!(
-        snap::ok(b.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(b.database.status()).await["data"]["bootstrap_pending"],
         false
     );
     b.close().await;
@@ -634,29 +650,26 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
 
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Result<(), Failure> {
-    use rocky_sdk::{
-        Database, Open,
-        transport::{Connector, Transport},
-    };
+    use rocky_sdk::transport::{Connector, Transport};
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
     let a_path = root.path().join("a");
-    let a = Device::new(Database::create(
-        Open {
-            identity: None,
-            directory: &a_path,
-            schema: crate::support::snapshot::schema(schema),
-            secrets: None,
-            network: Some(Network::Owned(hub.connector("a"))),
-        },
-        None,
-    )?)?;
+    let a = Device::new(
+        crate::common::configuration(
+            &a_path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Owned(hub.connector("a"))),
+        )
+        .create()
+        .await?,
+    )?;
     a.add(1, "first scope").await;
     snap::ok(snap::mutate(
         &a.database,
-        &a.session,
         vec![2; 32],
         snap::Action::Create {
             table: "notes".to_owned(),
@@ -682,16 +695,17 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let member = Device::new(Database::join(
-        Open {
-            identity: None,
-            directory: &path,
-            schema: crate::support::snapshot::schema(schema),
-            secrets: None,
-            network: Some(Network::Borrowed(gate.clone())),
-        },
-        &invitation,
-    )?)?;
+    let member = Device::new(
+        crate::common::configuration(
+            &path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Borrowed(gate.clone())),
+        )
+        .join(&invitation)
+        .await?,
+    )?;
     attempts.wait_for(|count| *count >= 2).await?;
     assert!(common::exchange_failed(&member.sync().await));
     let progress = common::authority_json(&path, "bootstrap")?;
@@ -704,15 +718,19 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         "losing the transport while imports overlap interrupts one or both scopes: {pending:?}"
     );
     member.close().await;
-    let member = Device::new(Database::open(Open {
-        identity: None,
-        directory: &path,
-        schema: crate::support::snapshot::schema(schema),
-        secrets: None,
-        network: None,
-    })?)?;
+    let member = Device::new(
+        crate::common::configuration(
+            &path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            None,
+        )
+        .open()
+        .await?,
+    )?;
     assert_eq!(
-        snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(member.database.status()).await["data"]["bootstrap_pending"],
         true
     );
     let reopened = common::authority_json(&path, "bootstrap")?;
@@ -730,7 +748,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     let resumed = member.sync().await.expect("resume the remaining scopes");
     assert!(*attempts.borrow() > before);
     assert_eq!(
-        snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(member.database.status()).await["data"]["bootstrap_pending"],
         false,
         "resume report: {resumed:?}"
     );
@@ -745,33 +763,34 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
 #[tokio::test(flavor = "multi_thread")]
 async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_that_inviter_is_revoked()
 -> Result<(), Failure> {
-    use rocky_sdk::{Database, Open};
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
     let a_path = root.path().join("a");
-    let a = Device::new(Database::create(
-        Open {
-            identity: None,
-            directory: &a_path,
-            schema: crate::support::snapshot::schema(schema),
-            secrets: None,
-            network: Some(Network::Owned(hub.connector("a"))),
-        },
-        None,
-    )?)?;
+    let a = Device::new(
+        crate::common::configuration(
+            &a_path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Owned(hub.connector("a"))),
+        )
+        .create()
+        .await?,
+    )?;
     a.add(1, "base").await;
     let invitation = a.invite_as(rocky_sdk::Access::Read).await;
-    let c = Device::new(Database::join(
-        Open {
-            identity: None,
-            directory: &root.path().join("unmet"),
-            schema: crate::support::snapshot::schema(schema),
-            secrets: None,
-            network: Some(Network::Owned(hub.connector("unmet"))),
-        },
-        &invitation,
-    )?)?;
+    let c = Device::new(
+        crate::common::configuration(
+            &root.path().join("unmet"),
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Owned(hub.connector("unmet"))),
+        )
+        .join(&invitation)
+        .await?,
+    )?;
     c.sync().await.expect("join");
     let unmet_inviter = c.node().await;
     let unmet_identity = c.identity().await;
@@ -779,16 +798,17 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
 
     let path = root.path().join("member");
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let member = Device::new(Database::join(
-        Open {
-            identity: None,
-            directory: &path,
-            schema: crate::support::snapshot::schema(schema),
-            secrets: None,
-            network: Some(Network::Owned(hub.connector("member"))),
-        },
-        &invitation,
-    )?)?;
+    let member = Device::new(
+        crate::common::configuration(
+            &path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Owned(hub.connector("member"))),
+        )
+        .join(&invitation)
+        .await?,
+    )?;
     member.sync().await.expect("join");
     member.close().await;
     let intent_awaiting_an_unmet_inviter = format!(
@@ -800,13 +820,17 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         intent_awaiting_an_unmet_inviter.as_bytes(),
     )
     .await?;
-    let member = Device::new(Database::open(Open {
-        identity: None,
-        directory: &path,
-        schema: crate::support::snapshot::schema(schema),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector("member"))),
-    })?)?;
+    let member = Device::new(
+        crate::common::configuration(
+            &path,
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            Some(Network::Owned(hub.connector("member"))),
+        )
+        .open()
+        .await?,
+    )?;
     let _ = member.sync().await;
     assert_eq!(
         common::authority_bytes(&path, "bootstrap")?
@@ -816,21 +840,25 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         "a bootstrap that completes without meeting the named inviter keeps waiting for it"
     );
     assert_eq!(
-        snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(member.database.status()).await["data"]["bootstrap_pending"],
         true,
         "an intent naming an inviter the node has not met keeps the bootstrap pending"
     );
 
-    snap::ok(a.session.revoke_identity(snap::public_key(&unmet_identity))).await;
+    snap::ok(
+        a.database
+            .revoke_identity(snap::public_key(&unmet_identity)),
+    )
+    .await;
     snap::ok(async {
-        member.session.renew().await?;
-        member.session.info().await
+        member.database.renew().await?;
+        member.database.info().await
     })
     .await;
     retry_after_restoring_authority(&member).await;
     member.sync().await.expect("fresh intent under epoch 2");
     assert_eq!(
-        snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
+        snap::ok(member.database.status()).await["data"]["bootstrap_pending"],
         false,
         "once the unmet inviter is revoked, renewal resets all scopes and the bootstrap clears"
     );
@@ -843,15 +871,15 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
 #[tokio::test(flavor = "multi_thread")]
 async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    Device::create(root.path(), None)?.close().await;
+    Device::create(root.path(), None).await?.close().await;
     common::write_authority(
         root.path(),
         "bootstrap",
         br#"{"version":1,"imports":{"scopes":[]},"totals":[],"inviter":null}"#,
     )
     .await?;
-    let device = Device::open(root.path(), None)?;
-    let status = snap::ok(device.session.status()).await;
+    let device = Device::open(root.path(), None).await?;
+    let status = snap::ok(device.database.status()).await;
     assert_eq!(status["data"]["bootstrap_pending"], true);
     assert!(status["data"]["bootstrap"].is_null(), "{status}");
     device.close().await;
@@ -866,7 +894,8 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     for handle in 0..40 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
@@ -882,9 +911,9 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
         hub.cut_after(Some(STEP));
         spent
     };
-    let joining = tokio::task::spawn_blocking({
+    let joining = tokio::spawn({
         let (directory, network) = (root.path().join("b"), hub.connector("b"));
-        move || Device::join(&directory, &invitation, Network::Owned(network))
+        async move { Device::join(&directory, &invitation, Network::Owned(network)).await }
     });
     tokio::pin!(joining);
     let b = loop {
@@ -898,26 +927,25 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
     };
     let stepped = async {
         let mut seen = Vec::new();
-        let mut status = snap::ok(b.session.status()).await;
+        let mut changes = b.database.status_changes();
+        let mut status = snap::ok(changes.next()).await;
         while status["data"]["bootstrap_pending"] == true {
             seen.push(status["data"]["bootstrap"].clone());
             let spent = step(&mut written);
-            let mut watched = status.clone();
             loop {
                 tokio::select! {
                     held = written.wait_for(|total| *total >= spent) => {
                         held.expect("the hub outlives the join");
                         break;
                     }
-                    next = snap::ok(b.session.status_after(snap::text(&(watched["token"])))) => {
-                        watched = next;
+                    watched = snap::ok(changes.next()) => {
                         if watched["data"]["bootstrap_pending"] != true {
                             break;
                         }
                     }
                 }
             }
-            status = snap::ok(b.session.status()).await;
+            status = snap::ok(b.database.status()).await;
         }
         hub.cut_after(None);
         (seen, status)
@@ -950,29 +978,34 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     for handle in 0..60 {
         a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
             .await;
     }
     a.seal_and_compact().await;
-    let b = Arc::new(Device::join(
-        &root.path().join("b"),
-        &a.invite().await,
-        Network::Owned(hub.connector("b")),
-    )?);
-    let mut status = snap::ok(b.session.status()).await;
+    let b = Arc::new(
+        Device::join(
+            &root.path().join("b"),
+            &a.invite().await,
+            Network::Owned(hub.connector("b")),
+        )
+        .await?,
+    );
+    let mut changes = b.database.status_changes();
+    let mut status = snap::ok(changes.next()).await;
     while status["data"]["bootstrap"]["rows_done"]
         .as_u64()
         .unwrap_or(0)
         == 0
     {
-        status = snap::ok(b.session.status_after(snap::text(&(status["token"])))).await;
+        status = snap::ok(changes.next()).await;
     }
     hub.cut_after(Some(0));
     a.add(200, "edited on a while cut").await;
     b.add(201, "edited on b while cut").await;
-    let paused = snap::ok(b.session.status()).await;
+    let paused = snap::ok(b.database.status()).await;
     assert_eq!(paused["data"]["bootstrap_pending"], true);
     let done = paused["data"]["bootstrap"]["rows_done"]
         .as_u64()
@@ -983,10 +1016,11 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         let b = b.clone();
         tokio::spawn(async move {
             let mut seen = Vec::new();
-            let mut status = snap::ok(b.session.status()).await;
+            let mut changes = b.database.status_changes();
+            let mut status = snap::ok(changes.next()).await;
             while status["data"]["bootstrap_pending"] == true {
                 seen.push(status["data"]["bootstrap"].clone());
-                status = snap::ok(b.session.status_after(snap::text(&(status["token"])))).await;
+                status = snap::ok(changes.next()).await;
             }
             seen
         })

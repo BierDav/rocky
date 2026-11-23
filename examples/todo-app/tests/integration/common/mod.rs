@@ -39,13 +39,11 @@ impl World {
         for other in &self.devices {
             joined
                 .database()
-                .session()
-                .add_peer(&other.database().session().contact().await?)
+                .add_peer(&other.database().contact().await?.uri)
                 .await?;
             other
                 .database()
-                .session()
-                .add_peer(&joined.database().session().contact().await?)
+                .add_peer(&joined.database().contact().await?.uri)
                 .await?;
         }
         self.devices.push(joined.clone());
@@ -65,7 +63,7 @@ impl World {
 pub async fn sync(devices: &[&Todos]) -> Result<(), Failure> {
     for _ in 0..2 {
         for device in devices {
-            device.database().session().sync_once().await?;
+            device.database().sync_now().await?;
         }
     }
     Ok(())

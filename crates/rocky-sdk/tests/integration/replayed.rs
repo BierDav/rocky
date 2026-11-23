@@ -1,6 +1,6 @@
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
-    Database, DropReason, Network, Open, SqlValue, TransactionOutcome, TransactionToken,
+    Database, DropReason, Network, SqlValue, TransactionOutcome, TransactionToken,
     transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
@@ -9,14 +9,14 @@ use crate::common;
 
 const SCHEMA: &str = r#"{"application":"counters","version":1,"format":7,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<TransactionToken, Failure> {
@@ -59,15 +59,13 @@ async fn counters(database: &Database) -> Result<Vec<(String, i64)>, Failure> {
 async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("b"), &hub, "b"),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     b.sync().await.map_err(|error| error.to_string())?;
     introduce(&a, &b).await;
     let sync = || async {
@@ -94,7 +92,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
         Some(TransactionOutcome::Applied { sealed: false })
     );
 
-    let events = b.database.observe_tables(None).await?;
+    let events = b.database.observe(&[]).await?;
     create(&a.database, "k", 1).await?;
     let later = create(&b.database, "k", 2).await?;
     assert_eq!(
@@ -132,17 +130,15 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
 async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     create(&a.database, "c", 0).await?;
     raise(&a.database, "c").await?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("b"), &hub, "b"),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     for device in [&b, &a, &b] {
         device.sync().await.map_err(|error| error.to_string())?;
@@ -162,13 +158,10 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
 async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let directory = root.path().join("b");
-    let b = Device::new(Database::join(open(&directory, &hub, "b"), &invitation)?)?;
+    let b = Device::new(open(&directory, &hub, "b").join(&invitation).await?)?;
     b.sync().await.map_err(|error| error.to_string())?;
     introduce(&a, &b).await;
     let sync = || async {
@@ -177,7 +170,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
         }
         Ok::<_, Failure>(())
     };
-    let events = b.database.observe_tables(None).await?;
+    let events = b.database.observe(&[]).await?;
     let token = create(&b.database, "k", 1).await?;
     let provisional = Some(TransactionOutcome::Applied { sealed: false });
     assert_eq!(b.database.transaction_outcome(token).await?, provisional);
@@ -188,7 +181,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
             provisional
         );
     }
-    a.database.session().seal().await?;
+    a.database.seal().await?;
     sync().await?;
     let sealed = Some(TransactionOutcome::Applied { sealed: true });
     for device in [&a, &b] {
@@ -202,7 +195,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
     drop(events);
     b.close().await;
     drop(b);
-    let b = Device::new(Database::open(open(&directory, &hub, "b"))?)?;
+    let b = Device::new(open(&directory, &hub, "b").open().await?)?;
     assert_eq!(b.database.transaction_outcome(token).await?, sealed);
     a.close().await;
     b.close().await;
@@ -213,15 +206,13 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
 async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("b"), &hub, "b"),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     b.sync().await.map_err(|error| error.to_string())?;
     introduce(&a, &b).await;
     let sync = || async {
@@ -233,7 +224,7 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
     create(&a.database, "k", 1).await?;
     let later = create(&b.database, "k", 2).await?;
     sync().await?;
-    a.database.session().seal().await?;
+    a.database.seal().await?;
     sync().await?;
     for device in [&a, &b] {
         assert_eq!(

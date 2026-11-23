@@ -2,7 +2,7 @@ use super::{Device, Failure};
 use crate::common;
 use crate::support::snapshot as snap;
 use rocky_credentials::testing::MemoryKeys;
-use rocky_sdk::{Database, Network, Open, SecretStore, transport::memory::Hub};
+use rocky_sdk::{Network, SecretStore, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -28,14 +28,14 @@ pub(crate) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
         .or_default()
         .clone()
 }
-pub(crate) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: common::prepared_identity(root),
-        directory: root,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: Some(keys(root)),
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+pub(crate) fn open(root: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
+        root,
+        crate::support::snapshot::schema(SCHEMA),
+        Some(keys(root)),
+        common::prepared_identity(root),
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 pub(crate) fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     let mut identity = common::authority_json(&root.join(name), "identity")?;
@@ -51,9 +51,10 @@ pub(crate) async fn sync(device: &Device) -> Result<(), Failure> {
     Ok(())
 }
 pub(crate) async fn settle(device: &Device) {
-    let mut status = snap::ok(device.session.status()).await;
+    let mut changes = device.database.status_changes();
+    let mut status = snap::ok(changes.next()).await;
     while status["data"]["bootstrap_pending"] == true {
-        status = snap::ok(device.session.status_after(snap::text(&(status["token"])))).await;
+        status = snap::ok(changes.next()).await;
     }
 }
 pub(crate) async fn join(
@@ -64,13 +65,13 @@ pub(crate) async fn join(
     access: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
     let invite = issuer.invite_as(access).await;
-    let device = Device::new(Database::join(open(&root.join(name), hub, name), &invite)?)?;
-    issuer.session.add_peer(&device.contact().await).await?;
+    let device = Device::new(open(&root.join(name), hub, name).join(&invite).await?)?;
+    issuer.database.add_peer(&device.contact().await).await?;
     settle(&device).await;
     Ok(device)
 }
 pub(crate) async fn listed(device: &Device, identity: &str) -> Value {
-    snap::ok(device.session.identities()).await["identities"]
+    snap::ok(device.database.identities()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
@@ -84,7 +85,7 @@ pub(crate) fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
 pub(crate) async fn epoch(device: &Device, list: &str) -> Value {
     let status = snap::ok(
         device
-            .session
+            .database
             .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values(list)).clone(),
@@ -107,7 +108,7 @@ pub(crate) fn role(name: &'static str) -> rocky_sdk::Access {
     rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(name))
 }
 pub(crate) async fn grant(issuer: &Device, identity: &str, list: &str) {
-    snap::ok(issuer.session.grant_partition(
+    snap::ok(issuer.database.grant_partition(
         identity.parse().expect("public key"),
         rocky_sdk::PartitionTarget::Group {
             group: "list".to_owned(),
@@ -122,12 +123,12 @@ pub(crate) struct Domain {
 }
 impl Domain {
     pub(super) async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
-        let a = Device::new(Database::create(open(&root.join("a"), hub, "a"), None)?)?;
+        let a = Device::new(open(&root.join("a"), hub, "a").create().await?)?;
         let b = join(root, hub, "b", &a, rocky_sdk::Access::Full).await?;
         a.admit(&b).await;
         for list in ["L", "M"] {
             snap::ok(
-                a.session
+                a.database
                     .create_partition(rocky_sdk::PartitionTarget::Group {
                         group: "list".to_owned(),
                         values: (values(list)).clone(),
@@ -135,7 +136,7 @@ impl Domain {
             )
             .await;
             snap::ok(
-                a.session.share_partition(
+                a.database.share_partition(
                     rocky_sdk::PartitionTarget::Group {
                         group: "list".to_owned(),
                         values: (values(list)).clone(),

@@ -1,4 +1,4 @@
-use crate::{Failure, Session};
+use crate::{Database, Failure};
 pub use rocky_credentials::TipAuthority;
 pub use rocky_secure::HeldSeal;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ pub(crate) enum Probe {
     Seal(Reply<TipStatus>),
     Compact(usize, Reply<TipCompaction>),
     Compaction(Reply<TipCompaction>),
+    DiscoveryTopic(Reply<[u8; 32]>),
 }
 impl Probe {
     pub(crate) fn fail(self, error: Failure) {
@@ -25,11 +26,14 @@ impl Probe {
             Self::Compact(_, reply) | Self::Compaction(reply) => {
                 let _ = reply.send(Err(error));
             }
+            Self::DiscoveryTopic(reply) => {
+                let _ = reply.send(Err(error));
+            }
         }
     }
 }
 
-impl Session {
+impl Database {
     pub async fn tip_status(&self) -> Result<TipStatus, Failure> {
         self.send(|reply| crate::request::Request::Tips(Probe::Status(reply)))
             .await
@@ -48,6 +52,10 @@ impl Session {
     }
     pub async fn compaction(&self) -> Result<TipCompaction, Failure> {
         self.send(|reply| crate::request::Request::Tips(Probe::Compaction(reply)))
+            .await
+    }
+    pub async fn discovery_topic(&self) -> Result<[u8; 32], Failure> {
+        self.send(|reply| crate::request::Request::Tips(Probe::DiscoveryTopic(reply)))
             .await
     }
 }

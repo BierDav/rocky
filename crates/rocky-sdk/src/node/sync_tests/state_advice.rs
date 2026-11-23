@@ -56,7 +56,7 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
                 .await?;
             assert_eq!(rows.rows, vec![vec![SqlValue::Integer(4)]]);
             for node in [&a, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -199,7 +199,7 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                 }
             }
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -257,7 +257,7 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
             );
             assert!(!upstream.link.is_closed());
             for node in [&a, &b] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -346,7 +346,7 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
                 "planning closes before row transfers fan out, leaving a request slot free"
             );
             for node in [&a, &b] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })

@@ -83,7 +83,7 @@ async fn one_contact_hands_over_a_second_and_answers_a_request_for_a_third() -> 
                     .is_some_and(|last| last.error.is_none())
             );
             for node in [&a, &b, &c, &d] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -132,7 +132,7 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
                     .is_none_or(|bytes| !bytes.is_empty())
             );
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -173,7 +173,7 @@ async fn an_unreachable_contact_costs_no_dial_during_its_backoff() -> Result<(),
                 a.observed_peers().await[0].choice,
                 crate::PeerChoice::Backoff
             );
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         })
         .await
@@ -209,7 +209,7 @@ async fn a_sync_the_app_asks_for_dials_a_peer_in_backoff_and_reports_its_failure
                 "backoff",
                 "the failure grows the backoff the background passes wait out"
             );
-            a.detach(None).await;
+            a.detach().await;
             Ok(())
         })
         .await
@@ -366,7 +366,7 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 }
             }
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -447,7 +447,7 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
                 task.await??;
             }
             for node in [&a, &b] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -480,7 +480,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         sql.run("INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![id.sql()]).await?;
         sql.run("COMMIT", Vec::new()).await?;
         pass(&d).await?;
-        a.detach(None).await;
+        a.detach().await;
         let d_key = contact(&b, &d).await?;
         let c_key = contact(&b, &c).await?;
         let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
@@ -496,7 +496,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         }
         let rows = read_rows(&b, "SELECT title FROM items").await?;
         assert_eq!(rows[0][0], SqlValue::Text("custody row".into()));
-        for node in [&a, &b, &c, &d] { node.detach(None).await; }
+        for node in [&a, &b, &c, &d] { node.detach().await; }
         Ok(())
     }).await
 }
@@ -520,7 +520,7 @@ async fn handover_survives_an_earlier_successful_pass() -> Result<(), Failure> {
                 "handover"
             );
             for node in [&a, &b, &c] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         }))

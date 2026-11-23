@@ -1,5 +1,5 @@
 use crate::{
-    Failure,
+    Configuration, Failure,
     bootstrap_intent::BootstrapIntentFile,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
     enrollment::{DEFAULT_TTL, Settings, now},
@@ -22,43 +22,17 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 mod fault;
 mod residence;
 
-pub struct Open<'a> {
-    pub directory: &'a Path,
-    pub schema: &'a Schema,
-    pub secrets: Option<Arc<dyn SecretStore>>,
-    pub identity: Option<Arc<dyn crate::IdentityProvider>>,
-    pub network: Option<Network>,
+pub struct Created {
+    pub database: Database,
+    pub root: crate::RootKey,
 }
-pub(crate) struct Opening<'a> {
-    pub(crate) directory: &'a Path,
-    pub(crate) schema: Option<&'a Schema>,
-    pub(crate) secrets: Option<Arc<dyn SecretStore>>,
-    pub(crate) identity: Option<Arc<dyn crate::IdentityProvider>>,
-    pub(crate) network: Option<Network>,
-    pub(crate) page_cache: rocky_secure::PageCache,
-}
-impl<'a> From<Open<'a>> for Opening<'a> {
-    fn from(open: Open<'a>) -> Self {
-        Self {
-            directory: open.directory,
-            schema: Some(open.schema),
-            secrets: open.secrets,
-            identity: open.identity,
-            network: open.network,
-            page_cache: rocky_secure::PageCache::default(),
-        }
-    }
-}
-pub struct Opened {
-    pub database: Arc<Database>,
-    pub network: Option<NetworkService>,
-    pub root: Option<crate::RootKey>,
-    pub identity: Option<String>,
+pub struct Joined {
+    pub database: Database,
+    pub identity: String,
 }
 
 pub(crate) enum Install {
     Create {
-        ttl: u64,
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
     },
     Join {
@@ -76,6 +50,22 @@ pub(crate) enum Install {
     Installed,
 }
 impl Install {
+    pub(crate) fn create(root: Arc<dyn crate::IdentityProvider>) -> Self {
+        Self::Create {
+            root: std::sync::Mutex::new(Some(root)),
+        }
+    }
+    fn join(provisioning: &str, single_use: bool) -> (Self, Arc<std::sync::Mutex<Option<String>>>) {
+        let phrase = Arc::new(std::sync::Mutex::new(None));
+        (
+            Self::Join {
+                provisioning: provisioning.into(),
+                single_use,
+                phrase: phrase.clone(),
+            },
+            phrase,
+        )
+    }
     fn bootstraps_from_checkpoint(&self) -> bool {
         matches!(
             self,
@@ -113,19 +103,14 @@ struct Senders {
     handles: residence::Handles,
 }
 enum Command {
-    Request {
-        session: u64,
-        ending: Arc<AtomicBool>,
-        request: Box<crate::request::Request>,
-    },
+    Request(Box<crate::request::Request>),
     #[cfg(all(test, feature = "qualification"))]
     BlockReactor(
         oneshot::Sender<()>,
         std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     ),
-    End(u64, oneshot::Sender<()>),
-    Attach(Network, oneshot::Sender<Result<u64, Failure>>),
-    Detach(u64, oneshot::Sender<()>),
+    Attach(Network, oneshot::Sender<Result<(), Failure>>),
+    Detach(oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), String>>),
     Connect {
         options: ConnectionOptions,
@@ -158,7 +143,7 @@ enum Command {
     #[cfg(feature = "qualification")]
     ReactorMeasurements(oneshot::Sender<Option<crate::ReactorMeasurements>>),
     Observe(
-        Option<Vec<String>>,
+        Vec<String>,
         oneshot::Sender<Result<rocky_storage::observe::TableObserver, Failure>>,
     ),
     Outcome(
@@ -167,28 +152,21 @@ enum Command {
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
 }
-type Greeting = Result<Ready, Failure>;
-type Ready = (rocky_core::Scope, Option<u64>);
-enum Hello {
-    #[cfg(not(target_family = "wasm"))]
-    Thread(std::sync::mpsc::SyncSender<Greeting>),
-    Task(std::sync::Mutex<Option<oneshot::Sender<Greeting>>>),
-}
+type Greeting = Result<rocky_core::Scope, Failure>;
+struct Hello(std::sync::Mutex<Option<oneshot::Sender<Greeting>>>);
 impl Hello {
+    fn new() -> (Self, oneshot::Receiver<Greeting>) {
+        let (hello, greeting) = oneshot::channel();
+        (Self(std::sync::Mutex::new(Some(hello))), greeting)
+    }
     fn send(&self, greeting: Greeting) -> Result<(), Failure> {
-        match self {
-            #[cfg(not(target_family = "wasm"))]
-            Self::Thread(sender) => sender
-                .send(greeting)
-                .map_err(|_| "database opener abandoned")?,
-            Self::Task(sender) => sender
-                .lock()
-                .map_err(|_| "greeting poisoned")?
-                .take()
-                .ok_or("greeted twice")?
-                .send(greeting)
-                .map_err(|_| "database opener abandoned")?,
-        }
+        self.0
+            .lock()
+            .map_err(|_| "greeting poisoned")?
+            .take()
+            .ok_or("greeted twice")?
+            .send(greeting)
+            .map_err(|_| "database opener abandoned")?;
         Ok(())
     }
 }
@@ -200,7 +178,7 @@ struct Shared {
     cleanup: mpsc::UnboundedSender<Command>,
     budget: Semaphore,
     closed: AtomicBool,
-    sessions: AtomicU64,
+    worker: Mutex<Option<Worker>>,
     _handles: residence::Handles,
 }
 impl Shared {
@@ -217,17 +195,20 @@ impl Shared {
     }
 }
 
+#[derive(Clone)]
 pub struct Database {
     shared: Arc<Shared>,
     scope: rocky_core::Scope,
-    worker: Mutex<Option<Worker>>,
 }
+impl PartialEq for Database {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+impl Eq for Database {}
 enum Worker {
     #[cfg(not(target_family = "wasm"))]
-    Thread {
-        thread: std::thread::JoinHandle<()>,
-        ended: oneshot::Receiver<()>,
-    },
+    Thread(oneshot::Receiver<()>),
     #[cfg(any(test, target_family = "wasm"))]
     Task(rocky_platform::task::JoinHandle<()>),
 }
@@ -249,7 +230,7 @@ impl Worker {
         let (end, ended) = oneshot::channel();
         #[cfg(test)]
         let held = HOLD_END.with(|hold| hold.borrow_mut().take());
-        let thread = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("rocky-sdk".into())
             .stack_size(rocky_platform::task::THREAD_STACK)
             .spawn(move || {
@@ -262,7 +243,7 @@ impl Worker {
                 }
                 let _ = end.send(());
             })?;
-        Ok(Self::Thread { thread, ended })
+        Ok(Self::Thread(ended))
     }
     #[cfg(any(test, target_family = "wasm"))]
     fn local(serving: Serving, claim: residence::Claim, hello: Hello) -> std::io::Result<Self> {
@@ -279,93 +260,13 @@ impl Worker {
     async fn join(self) -> Result<(), Failure> {
         match self {
             #[cfg(not(target_family = "wasm"))]
-            Self::Thread { ended, .. } => {
+            Self::Thread(ended) => {
                 ended.await.map_err(|_| "database thread failed")?;
             }
             #[cfg(any(test, target_family = "wasm"))]
             Self::Task(task) => task.await.map_err(|_| "database task failed")?,
         }
         Ok(())
-    }
-    #[cfg(not(target_family = "wasm"))]
-    fn release(self) {
-        match self {
-            Self::Thread { thread, .. } => drop(thread.join()),
-            #[cfg(test)]
-            Self::Task(_) => {}
-        }
-    }
-}
-#[cfg(not(target_family = "wasm"))]
-impl Database {
-    pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
-        let root = crate::RootKey::generate();
-        let created = crate::RootKey::from_secret(root.secret());
-        let mut opened = Self::start(
-            open.into(),
-            Self::create_install(credential_ttl, Arc::new(root))?,
-        )?;
-        opened.root = Some(created);
-        Ok(opened)
-    }
-    pub fn create_with_root(
-        open: Open<'_>,
-        credential_ttl: Option<u64>,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<Opened, Failure> {
-        Self::start(open.into(), Self::create_install(credential_ttl, root)?)
-    }
-    pub fn join(open: Open<'_>, provisioning: &str) -> Result<Opened, Failure> {
-        let single_use = open.identity.is_none();
-        let (install, phrase) = Self::join_install(provisioning, single_use);
-        let mut opened = Self::start(open.into(), install)?;
-        if let Ok(mut guard) = phrase.lock() {
-            opened.identity = guard.take();
-        }
-        Ok(opened)
-    }
-    pub fn enroll_identity(open: Open<'_>, contact: &str) -> Result<Opened, Failure> {
-        if open.network.is_none() {
-            return Err(ServiceError::NetworkRequired("enroll an identity's node").into());
-        }
-        if open.identity.is_none() {
-            return Err("another node of an identity needs that identity's provider".into());
-        }
-        Self::start(
-            open.into(),
-            Install::Identity {
-                contact: contact.into(),
-                confirmed: None,
-            },
-        )
-    }
-    pub fn accept_invitation(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        Self::start(open.into(), Self::invited_install(invitation))
-    }
-    pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
-        Self::start(open.into(), Install::Installed)
-    }
-    pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
-        Self::start_confirmed(open.into(), Install::Installed, Some(digest.into()))
-    }
-    fn start(open: Opening<'_>, install: Install) -> Result<Opened, Failure> {
-        Self::start_confirmed(open, install, None)
-    }
-    fn start_confirmed(
-        open: Opening<'_>,
-        install: Install,
-        confirmation: Option<String>,
-    ) -> Result<Opened, Failure> {
-        let (serving, claim, senders) = Self::serving(open, install, confirmation)?;
-        let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
-        let worker = Worker::serving_thread(serving, claim, Hello::Thread(hello))?;
-        match greeting.recv().map_err(|_| "database failed to start")? {
-            Ok(ready) => Ok(Self::opened(ready, senders, worker)),
-            Err(error) => {
-                worker.release();
-                Err(error)
-            }
-        }
     }
 }
 impl Database {
@@ -380,177 +281,96 @@ impl Database {
             .await?
             .ok_or_else(|| "reactor measurement context missing".into())
     }
-    fn create_install(
-        credential_ttl: Option<u64>,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<Install, Failure> {
-        let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
-        if !CREDENTIAL_TTL_SECONDS.contains(&ttl) {
-            return Err("credential lifetime must be between a minute and a year".into());
-        }
-        Ok(Install::Create {
-            ttl,
-            root: std::sync::Mutex::new(Some(root)),
-        })
-    }
-    fn join_install(
-        provisioning: &str,
-        single_use: bool,
-    ) -> (Install, Arc<std::sync::Mutex<Option<String>>>) {
-        let phrase = Arc::new(std::sync::Mutex::new(None));
-        (
-            Install::Join {
-                provisioning: provisioning.into(),
-                single_use,
-                phrase: phrase.clone(),
-            },
-            phrase,
-        )
-    }
-    async fn launch(
-        open: Opening<'_>,
+    pub(crate) async fn launch(
+        configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
-    ) -> Result<Opened, Failure> {
+    ) -> Result<Self, Failure> {
         #[cfg(not(target_family = "wasm"))]
         let place = Worker::serving_thread;
         #[cfg(target_family = "wasm")]
         let place = Worker::local;
-        Self::launch_in(open, install, confirmation, place).await
+        Self::launch_in(configuration, install, confirmation, place).await
     }
     async fn launch_in(
-        open: Opening<'_>,
+        configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
         place: fn(Serving, residence::Claim, Hello) -> std::io::Result<Worker>,
-    ) -> Result<Opened, Failure> {
-        let (serving, claim, senders) = Self::serving(open, install, confirmation)?;
+    ) -> Result<Self, Failure> {
+        let (serving, claim, senders) = Self::serving(configuration, install, confirmation)?;
         #[cfg(target_family = "wasm")]
         rocky_platform::fs::prepare(&serving.setup.directory.join("rocky.sqlite")).await?;
-        let (hello, greeting) = oneshot::channel();
-        let worker = place(
-            serving,
-            claim,
-            Hello::Task(std::sync::Mutex::new(Some(hello))),
-        )?;
+        let (hello, greeting) = Hello::new();
+        let worker = place(serving, claim, hello)?;
         match greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()))
         {
-            Ok(ready) => Ok(Self::opened(ready, senders, worker)),
+            Ok(scope) => Ok(Self::opened(scope, senders, worker)),
             Err(error) => {
                 let _ = worker.join().await;
                 Err(error)
             }
         }
     }
-    pub(crate) async fn launch_create(
-        open: Opening<'_>,
-        credential_ttl: Option<u64>,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<Opened, Failure> {
-        let install = Self::create_install(credential_ttl, root)?;
-        Self::launch(open, install, None).await
-    }
     pub(crate) async fn launch_join(
-        open: Opening<'_>,
+        configuration: &Configuration,
         provisioning: &str,
         single_use: bool,
-    ) -> Result<Opened, Failure> {
-        let (install, phrase) = Self::join_install(provisioning, single_use);
-        let mut opened = Self::launch(open, install, None).await?;
-        opened.identity = phrase.lock().ok().and_then(|mut guard| guard.take());
-        Ok(opened)
-    }
-    fn invited_install(invitation: &str) -> Install {
-        Install::Invited {
-            invitation: invitation.into(),
-        }
-    }
-    pub(crate) async fn launch_invited(
-        open: Opening<'_>,
-        invitation: &str,
-    ) -> Result<Opened, Failure> {
-        Self::launch(open, Self::invited_install(invitation), None).await
-    }
-    pub(crate) async fn launch_link(
-        open: Opening<'_>,
-        contact: &str,
-        confirmed: Option<Arc<crate::AwaitingLink>>,
-    ) -> Result<Opened, Failure> {
-        Self::launch(
-            open,
-            Install::Identity {
-                contact: contact.into(),
-                confirmed,
-            },
-            None,
-        )
-        .await
-    }
-    #[cfg(not(target_family = "wasm"))]
-    pub fn confirm_link(
-        open: Open<'_>,
-        contact: &str,
-        pending: Arc<crate::AwaitingLink>,
-        code: &str,
-    ) -> Result<Opened, Failure> {
-        if pending.code != code {
-            return Err("link code does not match".into());
-        }
-        Self::start(
-            open.into(),
-            Install::Identity {
-                contact: contact.into(),
-                confirmed: Some(pending),
-            },
-        )
-    }
-    pub(crate) async fn launch_open(open: Opening<'_>) -> Result<Opened, Failure> {
-        Self::launch(open, Install::Installed, None).await
+    ) -> Result<(Self, Option<String>), Failure> {
+        let (install, phrase) = Install::join(provisioning, single_use);
+        let database = Self::launch(configuration, install, None).await?;
+        let phrase = phrase.lock().ok().and_then(|mut guard| guard.take());
+        Ok((database, phrase))
     }
     fn setup(
-        open: Opening<'_>,
+        configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
-        let directory = open.directory.to_path_buf();
+        let directory = configuration.directory.clone();
         if let Install::Join { provisioning, .. } = &install {
             crate::enrollment::ProvisioningBundle::parse(provisioning)?;
         }
         if let Install::Invited { invitation } = &install {
             crate::invitation::check_uri(invitation)?;
-            if open.network.is_none() {
+            if configuration.network.is_none() {
                 return Err(ServiceError::NetworkRequired("accept an invitation").into());
             }
-            if open.identity.is_none() {
+            if configuration.identity.is_none() {
                 return Err("accepting an invitation needs the invited identity's provider".into());
             }
         }
-        if open.schema.is_none() && matches!(install, Install::Create { .. }) {
+        if configuration.schema.is_none() && matches!(install, Install::Create { .. }) {
             return Err(crate::StoreOnlyRefusal::NeedsSchema.into());
         }
         let setup = Setup {
-            schema: open.schema.map(Schema::validated).transpose()?,
-            secrets: open
+            schema: configuration
+                .schema
+                .as_ref()
+                .map(Schema::validated)
+                .transpose()?,
+            secrets: configuration
                 .secrets
+                .clone()
                 .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
-            identity: open.identity,
+            identity: configuration.identity.clone(),
             directory,
             install,
             confirmation,
-            page_cache: open.page_cache,
+            page_cache: configuration.page_cache,
             #[cfg(test)]
             expose: None,
         };
-        Ok((setup, open.network))
+        Ok((setup, configuration.network.clone()))
     }
     fn serving(
-        open: Opening<'_>,
+        configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<(Serving, residence::Claim, Senders), Failure> {
-        let (setup, network) = Self::setup(open, install, confirmation)?;
+        let (setup, network) = Self::setup(configuration, install, confirmation)?;
         let claimed = residence::claim(&setup.directory)?;
         let (input, receiver) = mpsc::channel(32);
         let (cleanup, cleanups) = mpsc::unbounded_channel();
@@ -570,44 +390,82 @@ impl Database {
             },
         ))
     }
-    fn opened((scope, network): Ready, senders: Senders, worker: Worker) -> Opened {
-        let shared = Arc::new(Shared {
-            input: senders.input,
-            cleanup: senders.cleanup,
-            budget: Semaphore::new(ACTIVE_CALL_QUOTA),
-            closed: AtomicBool::new(false),
-            sessions: AtomicU64::new(1),
-            _handles: senders.handles,
-        });
-        Opened {
-            root: None,
-            identity: None,
-            network: network.map(|id| NetworkService::new(&shared, id)),
-            database: Arc::new(Self {
-                shared,
-                scope,
+    fn opened(scope: rocky_core::Scope, senders: Senders, worker: Worker) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                input: senders.input,
+                cleanup: senders.cleanup,
+                budget: Semaphore::new(ACTIVE_CALL_QUOTA),
+                closed: AtomicBool::new(false),
                 worker: Mutex::new(Some(worker)),
+                _handles: senders.handles,
             }),
+            scope,
         }
     }
     pub fn scope(&self) -> rocky_core::Scope {
         self.scope
     }
-    pub fn session(&self) -> Session {
-        Session {
-            shared: self.shared.clone(),
-            id: self.shared.sessions.fetch_add(1, Ordering::Relaxed),
-            closed: Arc::new(AtomicBool::new(false)),
+    pub(crate) async fn send<T>(
+        &self,
+        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        self.send_lending(None, |_, reply| request(reply)).await
+    }
+    pub(crate) async fn send_signed<T>(
+        &self,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        self.send_lending(identity, |loan, reply| match loan {
+            Some(loan) => crate::request::Request::WithIdentity(loan, Box::new(request(reply))),
+            None => request(reply),
+        })
+        .await
+    }
+    pub(crate) async fn send_rooted<T>(
+        &self,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(node::Root, oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        self.send_lending(root, |loan, reply| request(node::Root::lent(loan), reply))
+            .await
+    }
+    async fn send_lending<T>(
+        &self,
+        provider: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(
+            Option<crate::identities::Loan>,
+            oneshot::Sender<Result<T, Failure>>,
+        ) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(ServiceError::Closed("database").into());
         }
-    }
-    pub async fn attach(&self, network: Network) -> Result<NetworkService, Failure> {
-        let id = self
+        let _permit = self
             .shared
-            .request(|reply| Command::Attach(network, reply))
-            .await??;
-        Ok(NetworkService::new(&self.shared, id))
+            .budget
+            .try_acquire()
+            .map_err(|_| "pending call quota")?;
+        let (loan, returned) = provider.map(crate::identities::lend).unzip();
+        let result = self
+            .shared
+            .request(|reply| Command::Request(Box::new(request(loan, reply))))
+            .await;
+        if let Some(returned) = returned {
+            returned.released().await;
+        }
+        result?.map_err(crate::CallFailure::boxed)
     }
-    pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
+    pub async fn attach(&self, network: Network) -> Result<(), Failure> {
+        self.shared
+            .request(|reply| Command::Attach(network, reply))
+            .await?
+    }
+    pub async fn detach(&self) -> Result<(), Failure> {
+        Ok(self.shared.request(Command::Detach).await?)
+    }
+    pub(crate) async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
         self.shared
             .request(|reply| Command::Connect {
                 options,
@@ -643,10 +501,8 @@ impl Database {
     pub async fn flush(&self) -> Result<(), Failure> {
         self.shared.request(Command::Flush).await?
     }
-    pub async fn observe_tables(
-        &self,
-        tables: Option<Vec<String>>,
-    ) -> Result<TableEvents, Failure> {
+    pub async fn observe(&self, tables: &[&str]) -> Result<TableEvents, Failure> {
+        let tables = tables.iter().map(|table| (*table).to_owned()).collect();
         let observer = self
             .shared
             .request(|reply| Command::Observe(tables, reply))
@@ -654,7 +510,7 @@ impl Database {
         Ok(TableEvents::new(observer))
     }
     pub async fn close(&self) -> Result<(), Failure> {
-        let mut worker = self.worker.lock().await;
+        let mut worker = self.shared.worker.lock().await;
         if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
             let result = self.shared.request(Command::Close).await;
@@ -669,21 +525,20 @@ impl Database {
 
 #[cfg(test)]
 pub(crate) struct Hosted {
-    pub(crate) opened: Opened,
+    pub(crate) database: Database,
     pub(crate) node: std::sync::Weak<Node>,
 }
 #[cfg(test)]
 impl Database {
     pub(crate) async fn host(
-        open: Open<'_>,
+        configuration: &Configuration,
         install: Install,
         ahead: Arc<AtomicU64>,
     ) -> Result<Hosted, Failure> {
-        let (mut serving, claim, senders) = Self::serving(open.into(), install, None)?;
+        let (mut serving, claim, senders) = Self::serving(configuration, install, None)?;
         let (expose, exposed) = std::sync::mpsc::channel();
         serving.setup.expose = Some(expose);
-        let (hello, greeting) = oneshot::channel();
-        let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
+        let (hello, greeting) = Hello::new();
         let task = crate::reactor::spawn_local("host", async move {
             let _claim = claim;
             let local = tokio::task::LocalSet::new();
@@ -706,25 +561,28 @@ impl Database {
         let greeting = greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()));
-        let opened = Self::opened(greeting?, senders, Worker::Task(task));
+        let database = Self::opened(greeting?, senders, Worker::Task(task));
         let node = exposed
             .try_recv()
             .map_err(|_| "the database exposed no node")?;
-        Ok(Hosted { opened, node })
+        Ok(Hosted { database, node })
     }
-    async fn launch_local(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
-        Self::launch_in(open.into(), install, None, Worker::local).await
+    async fn launch_local(
+        configuration: &Configuration,
+        install: Install,
+    ) -> Result<Self, Failure> {
+        Self::launch_in(configuration, install, None, Worker::local).await
     }
     pub(crate) async fn crash(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        if let Some(Worker::Task(task)) = self.worker.lock().await.take() {
+        if let Some(Worker::Task(task)) = self.shared.worker.lock().await.take() {
             task.abort();
             let _ = task.await;
         }
     }
 }
 
-pub struct Connection {
+pub(crate) struct Connection {
     shared: Arc<Shared>,
     id: u64,
     statements: AtomicU64,
@@ -732,10 +590,10 @@ pub struct Connection {
 }
 impl Connection {
     #[cfg(feature = "qualification")]
-    pub fn measurement_id(&self) -> u64 {
+    pub(crate) fn measurement_id(&self) -> u64 {
         self.id
     }
-    pub fn statement(&self) -> u64 {
+    pub(crate) fn statement(&self) -> u64 {
         self.statements.fetch_add(1, Ordering::Relaxed)
     }
     async fn call(&self, call: connection::Call) -> Result<connection::Reply, SqlFailure> {
@@ -757,7 +615,7 @@ impl Connection {
             .await
             .map_err(|error| connection::failure(connection::code::MISUSE, error.to_string()))?
     }
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         statement: u64,
         sql: String,
@@ -775,7 +633,7 @@ impl Connection {
             _ => Err(connection::failure(connection::code::MISUSE, "no page")),
         }
     }
-    pub async fn next(&self, statement: u64) -> Result<Page, SqlFailure> {
+    pub(crate) async fn next(&self, statement: u64) -> Result<Page, SqlFailure> {
         match self.call(connection::Call::Next { statement }).await? {
             connection::Reply::Page(page) => Ok(page),
             _ => Err(connection::failure(connection::code::MISUSE, "no page")),
@@ -790,12 +648,14 @@ impl Connection {
             reply: oneshot::channel().0,
         });
     }
-    pub async fn finish(&self, statement: u64) -> Result<(), SqlFailure> {
+    pub(crate) async fn finish(&self, statement: u64) -> Result<(), SqlFailure> {
         self.call(connection::Call::Finish { statement })
             .await
             .map(drop)
     }
-    pub async fn committed(&self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
+    pub(crate) async fn committed(
+        &self,
+    ) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
         match self.call(connection::Call::Committed).await? {
             connection::Reply::Token(token) => Ok(token),
             _ => Err(connection::failure(connection::code::MISUSE, "no token")),
@@ -809,13 +669,14 @@ impl Connection {
             _ => Err(connection::failure(connection::code::MISUSE, "no token")),
         }
     }
-    pub async fn in_transaction(&self) -> Result<bool, SqlFailure> {
+    #[cfg(test)]
+    pub(crate) async fn in_transaction(&self) -> Result<bool, SqlFailure> {
         match self.call(connection::Call::InTransaction).await? {
             connection::Reply::Flag(flag) => Ok(flag),
             _ => Err(connection::failure(connection::code::MISUSE, "no state")),
         }
     }
-    pub async fn close(&self) {
+    pub(crate) async fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
                 .shared
@@ -842,204 +703,6 @@ impl Drop for Connection {
     }
 }
 
-pub struct Session {
-    shared: Arc<Shared>,
-    id: u64,
-    closed: Arc<AtomicBool>,
-}
-impl Session {
-    pub(crate) async fn send<T>(
-        &self,
-        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
-        self.send_lending(None, |_, reply| request(reply)).await
-    }
-    pub(crate) async fn send_signed<T>(
-        &self,
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
-        self.send_lending(identity, |loan, reply| match loan {
-            Some(loan) => crate::request::Request::WithIdentity(loan, Box::new(request(reply))),
-            None => request(reply),
-        })
-        .await
-    }
-    pub(crate) async fn send_rooted<T>(
-        &self,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-        request: impl FnOnce(node::Root, oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, Failure> {
-        self.send_lending(root, |loan, reply| request(node::Root::lent(loan), reply))
-            .await
-    }
-    async fn send_lending<T>(
-        &self,
-        provider: Option<Arc<dyn crate::IdentityProvider>>,
-        request: impl FnOnce(
-            Option<crate::identities::Loan>,
-            oneshot::Sender<Result<T, Failure>>,
-        ) -> crate::request::Request,
-    ) -> Result<T, Failure> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(ServiceError::Closed("session").into());
-        }
-        if self.shared.closed.load(Ordering::SeqCst) {
-            return Err(ServiceError::Closed("database").into());
-        }
-        let _permit = self
-            .shared
-            .budget
-            .try_acquire()
-            .map_err(|_| "pending call quota")?;
-        let (loan, returned) = provider.map(crate::identities::lend).unzip();
-        let result = self
-            .shared
-            .request(|reply| Command::Request {
-                session: self.id,
-                ending: self.closed.clone(),
-                request: Box::new(request(loan, reply)),
-            })
-            .await;
-        if let Some(returned) = returned {
-            returned.released().await;
-        }
-        result?.map_err(crate::CallFailure::boxed)
-    }
-    pub async fn network(&self) -> Result<crate::NetworkStatus, Failure> {
-        self.send(crate::request::Request::Network).await
-    }
-    pub async fn peers(&self) -> Result<Vec<crate::Peer>, Failure> {
-        self.send(crate::request::Request::Peers).await
-    }
-    pub async fn discovery(&self) -> Result<crate::DiscoveryStatus, Failure> {
-        Ok(self.network().await?.discovery)
-    }
-    pub async fn status(&self) -> Result<crate::DatabaseStatus, Failure> {
-        self.send(crate::request::Request::Status).await
-    }
-    pub async fn status_after(&self, token: String) -> Result<crate::DatabaseStatus, Failure> {
-        self.send(|reply| crate::request::Request::StatusAfter(token, reply))
-            .await
-    }
-    pub async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
-        self.send(crate::request::Request::Sync).await
-    }
-    pub async fn sync_once_with_identity(
-        &self,
-        identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::ReconciliationReport, Failure> {
-        self.send_signed(Some(identity), crate::request::Request::Sync)
-            .await
-    }
-    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::NetworkingEnabled(enabled, reply))
-            .await
-    }
-    pub async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::AutomaticSync(enabled, reply))
-            .await
-    }
-    pub async fn enter_foreground(&self) -> Result<(), Failure> {
-        self.send(crate::request::Request::Foreground).await
-    }
-    pub async fn enter_background(&self) -> Result<(), Failure> {
-        self.send(crate::request::Request::Background).await
-    }
-    pub async fn logout(&self, purge_on_close: bool) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::Logout(purge_on_close, reply))
-            .await
-    }
-    pub async fn trust(
-        &self,
-        identity: rocky_credentials::PublicKey,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TrustGrant, Failure> {
-        self.send_rooted(Some(root), |root, reply| {
-            crate::request::Request::Trust(identity, root, reply)
-        })
-        .await
-    }
-    pub async fn revoke_trusted(
-        &self,
-        identity: rocky_credentials::PublicKey,
-        mode: rocky_credentials::RevocationMode,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::RevocationResult, Failure> {
-        self.revoke_identity_with_root(identity, mode, Some(root), true)
-            .await
-    }
-    pub async fn revoke_identity(
-        &self,
-        identity: rocky_credentials::PublicKey,
-    ) -> Result<crate::RevocationResult, Failure> {
-        self.revoke_identity_with_root(
-            identity,
-            rocky_credentials::RevocationMode::Lost,
-            None,
-            true,
-        )
-        .await
-    }
-    pub async fn revoke_identity_with_root(
-        &self,
-        identity: rocky_credentials::PublicKey,
-        mode: rocky_credentials::RevocationMode,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-        keep: bool,
-    ) -> Result<crate::RevocationResult, Failure> {
-        self.send_rooted(root, |root, reply| {
-            crate::request::Request::RevokeIdentity(identity, mode, root, keep, reply)
-        })
-        .await
-    }
-    pub async fn install_trust(&self, grant: &str) -> Result<(), Failure> {
-        self.send(|reply| crate::request::Request::InstallTrust(grant.into(), reply))
-            .await
-    }
-    pub async fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            let _ = self
-                .shared
-                .request(|reply| Command::End(self.id, reply))
-                .await;
-        }
-    }
-}
-impl Drop for Session {
-    fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            let _ = self
-                .shared
-                .cleanup
-                .send(Command::End(self.id, oneshot::channel().0));
-        }
-    }
-}
-
-pub struct NetworkService {
-    shared: Arc<Shared>,
-    id: u64,
-    closed: AtomicBool,
-}
-impl NetworkService {
-    fn new(shared: &Arc<Shared>, id: u64) -> Self {
-        Self {
-            shared: shared.clone(),
-            id,
-            closed: AtomicBool::new(false),
-        }
-    }
-    pub async fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            let _ = self
-                .shared
-                .request(|reply| Command::Detach(self.id, reply))
-                .await;
-        }
-    }
-}
-
 type Link = (crate::transport::Connected, bool);
 
 async fn identity(
@@ -1061,7 +724,7 @@ async fn identity(
         return Err("no domain in this directory: create or join one".into());
     }
     match install {
-        Install::Create { ttl, root, .. } => {
+        Install::Create { root } => {
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
@@ -1070,7 +733,8 @@ async fn identity(
             let schema = schema
                 .as_ref()
                 .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
-            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
+            let settings =
+                Settings::create(schema, secrets, DEFAULT_TTL, setup.identity.clone(), &*root)?;
             drop(root);
             let vault = settings.vault(secrets);
             let started = async {
@@ -1666,11 +1330,14 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             error
         });
     }
-    let network = match link {
-        Some((transport, owned)) => Some(node.link(transport, owned).await?),
-        None => None,
+    let networked = match link {
+        Some((transport, owned)) => {
+            node.link(transport, owned).await?;
+            true
+        }
+        None => false,
     };
-    if hello.send(Ok((scope, network))).is_err() {
+    if hello.send(Ok(scope)).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
         let created_root_undelivered =
             fresh && matches!(setup.install, Install::Create { .. } | Install::Join { .. });
@@ -1680,7 +1347,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             abandoned
         });
     }
-    let bootstrapping = (node.bootstrap_intent.exists().await && network.is_some())
+    let bootstrapping = (node.bootstrap_intent.exists().await && networked)
     .then(|| {
         let joining = node.clone();
         let held = directory.clone();
@@ -1711,40 +1378,24 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                     let _ = resume.lock().unwrap().recv();
                 });
             }
-            Command::Request {
-                session,
-                ending,
-                request,
-            } => {
+            Command::Request(request) => {
                 let Ok(permit) = budget.clone().try_acquire_owned() else {
                     request.fail("active call quota".into());
                     continue;
                 };
-                let client = if request.waits() && ending.load(Ordering::SeqCst) {
-                    Err(ServiceError::Closed("session").into())
-                } else {
-                    node.client(session)
-                };
                 crate::reactor::spawn_in(&mut tasks, "request", async move {
                     let _permit = permit;
-                    node.request(*request, client).await;
-                    if ending.load(Ordering::SeqCst) {
-                        node.end_sessions(Some(session));
-                    }
+                    node.request(*request).await;
                 });
-            }
-            Command::End(session, reply) => {
-                node.end_sessions(Some(session));
-                let _ = reply.send(());
             }
             Command::Attach(network, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "attach", async move {
                     let _ = reply.send(node.attach(network).await);
                 });
             }
-            Command::Detach(id, reply) => {
+            Command::Detach(reply) => {
                 crate::reactor::spawn_in(&mut tasks, "detach", async move {
-                    node.detach(Some(id)).await;
+                    node.detach().await;
                     let _ = reply.send(());
                 });
             }
@@ -1866,9 +1517,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             }
             Command::Observe(tables, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "observe", async move {
-                    let tables: Option<Vec<&str>> = tables
-                        .as_ref()
-                        .map(|tables| tables.iter().map(String::as_str).collect());
+                    let named: Vec<&str> = tables.iter().map(String::as_str).collect();
+                    let tables = (!named.is_empty()).then_some(named);
                     let observed = node
                         .replica
                         .observe_tables(tables.as_deref())
@@ -1926,11 +1576,11 @@ async fn end_users_of_file(
     connections: &connection::Registry,
     tasks: &mut rocky_platform::task::JoinSet<()>,
 ) {
-    node.end_sessions(None);
+    node.end_waits();
     connections.close(None);
-    node.detach(None).await;
+    node.detach().await;
     while tasks.join_next().await.is_some() {}
-    node.detach(None).await;
+    node.detach().await;
     node.background.finish().await;
 }
 async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<(), String> {
@@ -2034,7 +1684,7 @@ async fn discard(
     install: &Install,
     error: Failure,
 ) -> Failure {
-    node.detach(None).await;
+    node.detach().await;
     let vault = node.vault.clone();
     let roles = node.settings.lock().await.roles();
     drop(node);
@@ -2042,8 +1692,9 @@ async fn discard(
     let created = install.discards_secrets().then_some((&vault, roles));
     unwind(directory, created, error)
 }
-const CREDENTIAL_TTL_SECONDS: std::ops::RangeInclusive<u64> = 60..=366 * 24 * 60 * 60;
 
+#[cfg(all(test, not(target_family = "wasm")))]
+mod driver_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2067,29 +1718,6 @@ mod tests {
         Ok(())
     }
 
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_create_without_a_credential_ttl_issues_thirty_days_and_refuses_one_outside_a_minute_to_a_year()
-    -> Result<(), Failure> {
-        let ttl_of = |credential_ttl| match Database::create_install(
-            credential_ttl,
-            Arc::new(crate::RootKey::generate()),
-        )? {
-            Install::Create { ttl, .. } => Ok::<_, Failure>(ttl),
-            _ => Err("a create installs as a create".into()),
-        };
-        assert_eq!(ttl_of(None)?, 30 * 24 * 60 * 60);
-        assert_eq!(ttl_of(None)?, DEFAULT_TTL);
-        assert_eq!(ttl_of(Some(60))?, 60);
-        assert_eq!(ttl_of(Some(366 * 24 * 60 * 60))?, 366 * 24 * 60 * 60);
-        for refused in [0, 59, 366 * 24 * 60 * 60 + 1] {
-            assert!(
-                ttl_of(Some(refused)).is_err(),
-                "a credential ttl of {refused} s is refused"
-            );
-        }
-        Ok(())
-    }
-
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn close_yields_while_the_database_thread_ends() -> Result<(), Failure> {
@@ -2103,17 +1731,10 @@ mod tests {
         let (reached, reaching) = oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         HOLD_END.with(|hold| *hold.borrow_mut() = Some((reached, released)));
-        let database = Database::create(
-            Open {
-                directory: directory.path(),
-                schema: &schema,
-                secrets: None,
-                identity: None,
-                network: None,
-            },
-            None,
-        )?
-        .database;
+        let database = Configuration::new(directory.path(), &schema)?
+            .create()
+            .await?
+            .database;
         let releasing = async {
             reaching
                 .await
@@ -2142,19 +1763,13 @@ mod tests {
     {
         let directory = rocky_platform::fs::Scratch::new().await;
         let hub = Arc::new(crate::transport::memory::Hub::default());
-        let open = || Open {
-            directory: directory.path(),
-            schema: held_schema(),
-            secrets: None,
-            identity: None,
-            network: Some(Network::Owned(hub.connector("held"))),
-        };
+        let configuration = Configuration::new(directory.path(), held_schema())?
+            .network(Network::Owned(hub.connector("held")));
         tokio::task::LocalSet::new()
             .run_until(async {
-                let create = Database::create_install(None, Arc::new(crate::RootKey::generate()))?;
-                Database::launch_local(open(), create)
+                let create = Install::create(Arc::new(crate::RootKey::generate()));
+                Database::launch_local(&configuration, create)
                     .await?
-                    .database
                     .close()
                     .await?;
                 BootstrapIntentFile::in_directory(directory.path())
@@ -2162,19 +1777,17 @@ mod tests {
                     .await?;
                 let (bootstrapping, _never_released) =
                     pause::arm(directory.path(), pause::Point::Bootstrap);
-                let database = Database::launch_local(open(), Install::Installed)
-                    .await?
-                    .database;
+                let database = Database::launch_local(&configuration, Install::Installed).await?;
                 bootstrapping
                     .await
                     .map_err(|_| -> Failure { "the bootstrap never started".into() })?;
                 database.close().await?;
-                let reopened = Database::launch_local(open(), Install::Installed)
+                let reopened = Database::launch_local(&configuration, Install::Installed)
                     .await
                     .map_err(|error| -> Failure {
                         format!("closed, yet the file is still held: {error}").into()
                     })?;
-                reopened.database.close().await
+                reopened.close().await
             })
             .await
     }
@@ -2184,28 +1797,15 @@ mod tests {
     async fn a_reopen_after_a_dropped_database_waits_for_its_teardown() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let path = directory.path().to_path_buf();
-        fn open(directory: &Path) -> Open<'_> {
-            Open {
-                directory,
-                schema: held_schema(),
-                secrets: None,
-                identity: None,
-                network: None,
-            }
-        }
-        let created = Database::create(open(&path), None)?;
+        let configuration = Configuration::new(&path, held_schema())?;
+        let created = configuration.create().await?;
         let (tearing_down, finish_teardown) = pause::arm(&path, pause::Point::Teardown);
         let (succeeding, let_successor_wait) = pause::arm(&path, pause::Point::Succeeding);
         drop(created);
         tearing_down
             .await
             .map_err(|_| -> Failure { "the dropped database never tore down".into() })?;
-        let reopening = {
-            let path = path.clone();
-            tokio::task::spawn_blocking(move || {
-                Database::open(open(&path)).map(|opened| opened.database)
-            })
-        };
+        let reopening = tokio::spawn(async move { configuration.open().await });
         tokio::pin!(reopening);
         let reopened = tokio::select! {
             reopened = &mut reopening => reopened?,
@@ -2228,14 +1828,10 @@ mod tests {
         rocky_storage::wal_recoveries::watch();
         let root = rocky_platform::fs::Scratch::new().await;
         let (live, crashed) = (root.path().join("live"), root.path().join("crashed"));
-        let open = |directory| Open {
-            directory,
-            schema: held_schema(),
-            secrets: None,
-            identity: None,
-            network: None,
-        };
-        let created = Database::create(open(&live), None)?.database;
+        let created = Configuration::new(&live, held_schema())?
+            .create()
+            .await?
+            .database;
         fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
             std::fs::create_dir_all(to)?;
             for entry in std::fs::read_dir(from)? {
@@ -2256,7 +1852,7 @@ mod tests {
             rocky_platform::fs::len(crashed.join("rocky.sqlite-wal"))? > 0,
             "the crash left frames to recover"
         );
-        let reopened = Database::open(open(&crashed))?.database;
+        let reopened = Configuration::new(&crashed, held_schema())?.open().await?;
         assert_eq!(
             rocky_storage::wal_recoveries::of(&replica),
             1,
@@ -2276,22 +1872,13 @@ mod tests {
                     .column(crate::Column::new("title", crate::Affinity::Text)),
             )
             .build()?;
-        let schema = serde_json::to_string(&schema)?;
-        let database = Database::create(
-            Open {
-                directory: directory.path(),
-                schema: &schema,
-                secrets: None,
-                identity: None,
-                network: None,
-            },
-            None,
-        )?
-        .database;
+        let database = Configuration::new(directory.path(), &schema)?
+            .create()
+            .await?
+            .database;
         let connection = database
             .connect(ConnectionOptions {
                 read_only: true,
-                durability: connection::Durability::Buffered,
                 transaction_timeout: None,
             })
             .await?;
@@ -2353,7 +1940,7 @@ mod tests {
             cleanup,
             budget: Semaphore::new(1),
             closed: AtomicBool::new(false),
-            sessions: AtomicU64::new(1),
+            worker: Mutex::new(None),
             _handles: residence::claim(Path::new("unread-connection-reply"))?.handles,
         });
         let connection = Connection {
@@ -2426,9 +2013,7 @@ mod tests {
         let stopped = config.create().await.err().ok_or("created past the stop")?;
         assert!(stopped.to_string().contains("injected stop"), "{stopped}");
         assert_eq!(installed_files(directory.path()), Vec::<&str>::new());
-        let created = config.create().await?;
-        assert!(created.root.is_some());
-        created.database.close().await
+        config.create().await?.database.close().await
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -2457,17 +2042,11 @@ mod tests {
             drop(conn);
             let before = rocky_platform::fs::read(&path)?;
             for create in [false, true] {
-                let options = Open {
-                    identity: None,
-                    directory: directory.path(),
-                    schema: &schema,
-                    secrets: None,
-                    network: None,
-                };
+                let configuration = Configuration::new(directory.path(), &schema)?;
                 let error = if create {
-                    Database::create(options, None)
+                    configuration.create().await.map(|created| created.database)
                 } else {
-                    Database::open(options)
+                    configuration.open().await
                 }
                 .err()
                 .ok_or("old database admitted")?
@@ -2499,14 +2078,8 @@ mod tests {
             r#"{"format":7,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         let directory = rocky_platform::fs::Scratch::new().await;
-        let options = || Open {
-            identity: None,
-            directory: directory.path(),
-            schema: &schema,
-            secrets: None,
-            network: None,
-        };
-        let database = Database::create(options(), None)?.database;
+        let configuration = Configuration::new(directory.path(), &schema)?;
+        let database = configuration.create().await?.database;
         let mut tx = database.transaction().await?;
         let first_id = tx.next_id("items", Vec::new()).await?;
         tx.execute(
@@ -2517,7 +2090,7 @@ mod tests {
         tx.commit().await?;
         database.close().await?;
 
-        let database = Database::open(options())?.database;
+        let database = configuration.open().await?;
         let rows = database
             .query("SELECT id FROM items", Vec::new())
             .await?
@@ -2549,67 +2122,47 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn saturated_waits_cannot_block_session_shutdown() -> Result<(), Failure> {
+    async fn saturated_waits_cannot_block_close() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
             r#"{"application":"saturation","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
-        let opened = Database::create(
-            Open {
-                identity: None,
-                directory: directory.path(),
-                schema: &schema,
-                secrets: None,
-                network: None,
-            },
-            None,
-        )?;
-        let database = opened.database;
-        let session = database.session();
-        let status = session.status().await?;
+        let database = Configuration::new(directory.path(), &schema)?
+            .create()
+            .await?
+            .database;
+        let status = database.status().await?;
         let mut replies = Vec::new();
-        let saturating_waits_queued_before_end = ACTIVE_CALL_QUOTA + 1;
-        for _ in 0..saturating_waits_queued_before_end {
+        let saturating_waits_queued_before_close = ACTIVE_CALL_QUOTA + 1;
+        for _ in 0..saturating_waits_queued_before_close {
             let (reply, receiver) = oneshot::channel();
             database
                 .shared
                 .input
-                .send(Command::Request {
-                    session: session.id,
-                    ending: session.closed.clone(),
-                    request: Box::new(crate::request::Request::StatusAfter(
-                        status.token.clone(),
-                        reply,
-                    )),
-                })
+                .send(Command::Request(Box::new(
+                    crate::request::Request::StatusAfter(status.token.clone(), reply),
+                )))
                 .await?;
             replies.push(receiver);
         }
-        rocky_platform::time::timeout(std::time::Duration::from_secs(5), session.close()).await?;
+        rocky_platform::time::timeout(std::time::Duration::from_secs(5), database.close())
+            .await??;
         drop(replies);
-        database.close().await?;
         Ok(())
     }
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn pooled_queries_preserve_sql_errors_and_reset_query_only() -> Result<(), Failure> {
-        use crate::{Durability, SqlFailure, SqlValue};
+        use crate::{SqlFailure, SqlValue};
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
             r#"{"application":"poolcheck","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
-        let opened = Database::create(
-            Open {
-                identity: None,
-                directory: directory.path(),
-                schema: &schema,
-                secrets: None,
-                network: None,
-            },
-            None,
-        )?;
-        let database = opened.database;
+        let database = Configuration::new(directory.path(), &schema)?
+            .create()
+            .await?
+            .database;
         let mut tx = database.transaction().await?;
         let first_id = tx.next_id("items", Vec::new()).await?;
         tx.execute(
@@ -2655,7 +2208,6 @@ mod tests {
         let conn = database
             .connect(ConnectionOptions {
                 read_only: false,
-                durability: Durability::Buffered,
                 transaction_timeout: None,
             })
             .await?;
@@ -2683,7 +2235,6 @@ mod tests {
         let fresh = database
             .connect(ConnectionOptions {
                 read_only: false,
-                durability: Durability::Buffered,
                 transaction_timeout: None,
             })
             .await?;

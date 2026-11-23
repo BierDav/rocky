@@ -28,11 +28,12 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(Database::create(open(&a_dir, ITEMS, network("a")), None)?)?;
-    let b = Device::new(Database::join(
-        open(&b_dir, ITEMS, network("b")),
-        &a.invite().await,
-    )?)?;
+    let a = Device::new(open(&a_dir, ITEMS, network("a")).create().await?)?;
+    let b = Device::new(
+        open(&b_dir, ITEMS, network("b"))
+            .join(&a.invite().await)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     insert(&a, "k1", "apples").await;
     insert(&a, "k2", "bread").await;
@@ -40,17 +41,9 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     a.close().await;
     b.close().await;
 
-    let a = Device::new(Database::open(open(
-        &a_dir,
-        POSITIONED_ITEMS,
-        network("a"),
-    ))?)?;
+    let a = Device::new(open(&a_dir, POSITIONED_ITEMS, network("a")).open().await?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
-    let b = Device::new(Database::open(open(
-        &b_dir,
-        POSITIONED_ITEMS,
-        network("b"),
-    ))?)?;
+    let b = Device::new(open(&b_dir, POSITIONED_ITEMS, network("b")).open().await?)?;
     introduce(&a, &b).await;
     for device in [&b, &a, &b] {
         sync(device).await;
@@ -120,12 +113,16 @@ impl Listed {
     fn path(&self, device: &str) -> std::path::PathBuf {
         self.root.path().join(device)
     }
-    fn open(&self, device: &str, schema: &str) -> Result<Device, Failure> {
-        Device::new(Database::open(open(
-            &self.path(device),
-            schema,
-            Some(Network::Owned(self.hub.connector(device))),
-        ))?)
+    async fn open(&self, device: &str, schema: &str) -> Result<Device, Failure> {
+        Device::new(
+            open(
+                &self.path(device),
+                schema,
+                Some(Network::Owned(self.hub.connector(device))),
+            )
+            .open()
+            .await?,
+        )
     }
     async fn create(lists: usize) -> Result<Self, Failure> {
         let listed = Self {
@@ -134,19 +131,21 @@ impl Listed {
             lists,
         };
         let network = |name: &str| Some(Network::Owned(listed.hub.connector(name)));
-        let a = Device::new(Database::create(
-            open(&listed.path("a"), LISTED, network("a")),
-            None,
-        )?)?;
-        let b = Device::new(Database::join(
-            open(&listed.path("b"), LISTED, network("b")),
-            &a.invite().await,
-        )?)?;
+        let a = Device::new(
+            open(&listed.path("a"), LISTED, network("a"))
+                .create()
+                .await?,
+        )?;
+        let b = Device::new(
+            open(&listed.path("b"), LISTED, network("b"))
+                .join(&a.invite().await)
+                .await?,
+        )?;
         introduce(&a, &b).await;
         let node = b.node().await;
         for index in 0..lists {
             snap::ok(
-                a.session
+                a.database
                     .create_partition(rocky_sdk::PartitionTarget::Table {
                         table: "items".to_owned(),
                         values: (list(index)).clone(),
@@ -154,7 +153,7 @@ impl Listed {
             )
             .await;
             snap::ok(
-                a.session.share_partition(
+                a.database.share_partition(
                     rocky_sdk::PartitionTarget::Table {
                         table: "items".to_owned(),
                         values: (list(index)).clone(),
@@ -175,11 +174,11 @@ impl Listed {
     }
     async fn seed(&self, rows: usize) -> Result<(), Failure> {
         for schema in [LISTED_SEEDED, LISTED_TAGGED] {
-            let a = Device::new(Database::open(open(
-                &self.path("a"),
-                &listed(schema, rows, self.lists),
-                None,
-            ))?)?;
+            let a = Device::new(
+                open(&self.path("a"), &listed(schema, rows, self.lists), None)
+                    .open()
+                    .await?,
+            )?;
             a.close().await;
         }
         Ok(())
@@ -190,7 +189,9 @@ impl Listed {
     }
     async fn fill(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         let clock = std::time::Instant::now();
-        let a = self.open("a", &listed(LISTED_FILLED, rows, self.lists))?;
+        let a = self
+            .open("a", &listed(LISTED_FILLED, rows, self.lists))
+            .await?;
         let filled = clock.elapsed();
         assert_eq!(generation(&a).await["current"]["schema"], 4);
         a.close().await;
@@ -198,9 +199,9 @@ impl Listed {
     }
     async fn pull(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         let schema = listed(LISTED_FILLED, rows, self.lists);
-        let a = self.open("a", &schema)?;
+        let a = self.open("a", &schema).await?;
         let clock = std::time::Instant::now();
-        let b = self.open("b", &schema)?;
+        let b = self.open("b", &schema).await?;
         let expected = json!([[{"type": "integer", "value": rows.to_string()}, {"type": "integer", "value": rows.to_string()}]]);
         let mut syncs = 0;
         while snap::observe(snap::read(&b.database, FILLED_COUNT, Vec::new()))
@@ -333,11 +334,15 @@ const CRASH_ROWS: usize = 256;
 #[ignore = "invoked by an_interrupted_fill_resumes_and_converges"]
 async fn crash_fill_child() -> Result<(), Failure> {
     let directory = std::env::var("ROCKY_CRASH_DIRECTORY")?;
-    let a = Device::new(Database::open(open(
-        Path::new(&directory),
-        &listed(LISTED_FILLED, CRASH_ROWS, FEW_LISTS),
-        None,
-    ))?)?;
+    let a = Device::new(
+        open(
+            Path::new(&directory),
+            &listed(LISTED_FILLED, CRASH_ROWS, FEW_LISTS),
+            None,
+        )
+        .open()
+        .await?,
+    )?;
     a.close().await;
     Ok(())
 }

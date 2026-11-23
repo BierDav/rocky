@@ -1,5 +1,5 @@
 use common::{Device, Failure};
-use rocky_sdk::{Database, Network, Open, RevocationStatus, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Network, RevocationStatus, SqlValue, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -7,17 +7,17 @@ use crate::common;
 
 const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"text","type":"text","not_null":true}],"primary_key":["key"]}],"roles":[{"name":"item_reader","tables":[{"table":"items","access":"read"}]},{"name":"note_reader","tables":[{"table":"notes","access":"read"}]}]}"#;
 
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
-fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
-    Device::new(Database::create(open(&root.join(name), hub, name), None)?)
+async fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
+    Device::new(open(&root.join(name), hub, name).create().await?)
 }
 async fn join(
     root: &Path,
@@ -26,12 +26,9 @@ async fn join(
     issuer: &Device,
     profile: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
-    let invitation = issuer.session().provision(profile, None).await?.uri;
-    let device = Device::new(Database::join(
-        open(&root.join(name), hub, name),
-        &invitation,
-    )?)?;
-    issuer.session().add_peer(&device.contact().await).await?;
+    let invitation = issuer.database.provision(profile, None).await?.uri;
+    let device = Device::new(open(&root.join(name), hub, name).join(&invitation).await?)?;
+    issuer.database.add_peer(&device.contact().await).await?;
     Ok(device)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
@@ -44,7 +41,12 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     Ok(identity)
 }
 async fn revocations(device: &Device) -> RevocationStatus {
-    device.session().info().await.expect("session").revocations
+    device
+        .database
+        .info()
+        .await
+        .expect("device info")
+        .revocations
 }
 const INSERT_ITEM: &str = "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)";
 const INSERT_NOTE: &str = "INSERT INTO notes(key,id,text) VALUES(?,?,?)";
@@ -88,7 +90,7 @@ struct Domain {
 }
 impl Domain {
     async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
-        let a = create(root, hub, "a")?;
+        let a = create(root, hub, "a").await?;
         let b = join(root, hub, "b", &a, rocky_sdk::Access::Full).await?;
         a.admit(&b).await;
         let writer = rocky_sdk::Access::Full;
@@ -121,11 +123,11 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     assert_eq!(empty.statements, 0);
 
     let by_a = a
-        .session()
+        .database
         .revoke_identity(x.identity().await.parse()?)
         .await?;
     let by_b = b
-        .session()
+        .database
         .revoke_identity(y.identity().await.parse()?)
         .await?;
     assert_ne!(by_a.statement, by_b.statement);
@@ -192,7 +194,7 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
             json!({"items": [1, 2], "notes": [1, 2]}),
             "{name}"
         );
-        assert!(!device.session().status().await?.data.bootstrap_pending);
+        assert!(!device.database.status().await?.data.bootstrap_pending);
     }
     create_row(&m, 3, "items", INSERT_ITEM, "after").await;
     create_row(&n, 4, "notes", INSERT_NOTE, "after").await;
@@ -212,7 +214,7 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         assert!(common::exchange_failed(&device.sync().await));
         assert!(
             device
-                .session()
+                .database
                 .status()
                 .await?
                 .authority
@@ -245,43 +247,45 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     let hub = Arc::new(Hub::default());
-    let a = create(root, &hub, "a")?;
-    let early = Device::new(Database::join(
-        open(&root.join("early"), &hub, "early"),
-        &a.invite().await,
-    )?)?;
+    let a = create(root, &hub, "a").await?;
+    let early = Device::new(
+        open(&root.join("early"), &hub, "early")
+            .join(&a.invite().await)
+            .await?,
+    )?;
     let mut issuers = Vec::new();
     for name in ["b", "c"] {
-        let invitation = a.session().provision(rocky_sdk::Access::Full, None).await?;
-        let issuer = Device::new(Database::join(
-            open(&root.join(name), &hub, name),
-            &invitation.uri,
-        )?)?;
-        a.session().add_peer(&issuer.contact().await).await?;
+        let invitation = a.database.provision(rocky_sdk::Access::Full, None).await?;
+        let issuer = Device::new(
+            open(&root.join(name), &hub, name)
+                .join(&invitation.uri)
+                .await?,
+        )?;
+        a.database.add_peer(&issuer.contact().await).await?;
         let identity = issuer.identity().await;
         let grant = a
-            .session()
+            .database
             .trust(identity.parse()?, a.root_signer()?)
             .await?;
-        issuer.session().install_trust(&grant.grant).await?;
+        issuer.database.install_trust(&grant.grant).await?;
         issuers.push(issuer);
     }
     let [b, c]: [Device; 2] = issuers.try_into().map_err(|_| "two issuers")?;
     for device in [&b, &c, &b] {
-        device.session().sync_once().await?;
+        device.sync_now().await?;
     }
-    early.session().renew().await?;
+    early.database.renew().await?;
     let creator = a.identity().await;
     let root_signer = a.root_signer()?;
     a.close().await;
     drop(a);
 
     let lost = b
-        .session()
+        .database
         .revoke_trusted(creator.parse()?, RevocationMode::Lost, root_signer.clone())
         .await?;
     let compromised = c
-        .session()
+        .database
         .revoke_trusted(creator.parse()?, RevocationMode::Compromised, root_signer)
         .await?;
     assert_eq!(lost.revocations.statements, 1);
@@ -289,15 +293,15 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     assert_ne!(lost.statement, compromised.statement);
 
     let (first, second) = if b_first { (&b, &c) } else { (&c, &b) };
-    let _ = first.session().sync_once().await;
-    let _ = second.session().sync_once().await;
-    let left = b.session().info().await?.revocations;
-    let right = c.session().info().await?.revocations;
+    let _ = first.sync_now().await;
+    let _ = second.sync_now().await;
+    let left = b.database.info().await?.revocations;
+    let right = c.database.info().await?.revocations;
     assert_eq!(left.statements, 2);
     assert_eq!(left.digest, right.digest);
     assert_eq!(right.statements, 2);
     let error = early
-        .session()
+        .database
         .renew()
         .await
         .err()
@@ -307,7 +311,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
         "revoked",
         "{error}"
     );
-    let status = early.session().status().await?;
+    let status = early.database.status().await?;
     assert_eq!(
         status
             .authority

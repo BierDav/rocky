@@ -260,63 +260,6 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
 }
 
 #[tokio::test]
-async fn discovery_topics_keep_a_value_minted_for_a_statement_under_the_settings_lock()
--> Result<(), Failure> {
-    use rocky_credentials::{Revocation, RevocationMode, RevocationSet, SignedRevocation, Signer};
-    let directory = tempfile::tempdir()?;
-    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
-    let topics = || async {
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        node.request(
-            crate::request::Request::DiscoveryTopics(reply),
-            node.client(1),
-        )
-        .await;
-        answer.await?
-    };
-    let key = Settings::node_key(&node.vault)?;
-    let mut held = node.settings.lock().await;
-    let statement = Revocation {
-        app: held.domain()?.manifest().app,
-        issuer: held.identity,
-        time: now()?,
-        nodes: Default::default(),
-        identities: [PrivateKey::new().public_key()].into(),
-        capabilities: Default::default(),
-        cut: Default::default(),
-        mode: RevocationMode::Lost,
-    };
-    let credentials = held.credentials.clone();
-    let links = held.issuer_links();
-    let signed =
-        SignedRevocation::sign(statement.clone(), Signer::node(&key, &credentials)?, &links)?;
-    let mut draft = held.clone();
-    draft.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
-    crate::mesh::mint_value(
-        &node.vault,
-        (Signer::node(&key, &credentials)?, &links),
-        (draft.publisher, draft.domain()?.scope),
-        &draft.revocations,
-        &statement,
-    )?;
-    topics().await?;
-    assert!(
-        crate::mesh::holds_value(&node.vault, &statement)?,
-        "a topics request keeps a value minted for a statement not yet committed"
-    );
-    held.commit(draft, &node.replica).await?;
-    topics().await?;
-    assert!(
-        crate::mesh::holds_value(&node.vault, &statement)?,
-        "a topics request keeps a value minted for a statement committed under the lock"
-    );
-    drop(held);
-    topics().await?;
-    assert!(crate::mesh::holds_value(&node.vault, &statement)?);
-    Ok(())
-}
-
-#[tokio::test]
 async fn an_exposure_rotation_that_fails_while_absorbing_revocations_leaves_memory_as_saved()
 -> Result<(), Failure> {
     use rocky_credentials::{Revocation, RevocationMode, RevocationSet, SignedRevocation, Signer};
@@ -497,24 +440,16 @@ async fn stop_at(
     let vault = node.vault.clone();
     drop(node);
     let schema = crate::Schema::parse(SCHEMA)?;
-    let open = || crate::Open {
-        identity: None,
-        directory: root.path(),
-        schema: &schema,
-        secrets: Some(store.clone()),
-        network: None,
-    };
-    let reopened = crate::Database::open(open())?.database;
+    let configuration = crate::Configuration::new(root.path(), &schema)?.secrets(store.clone());
+    let reopened = configuration.open().await?;
     let completed = Settings::load(&root.path().join("rocky.sqlite"))?;
-    let session = reopened.session();
     for list in ["L", "M"] {
-        let status = session.partition_status(list_partition(list)).await?;
+        let status = reopened.partition_status(list_partition(list)).await?;
         for table in status.tables {
             assert_eq!(table.epochs, status.epochs, "{stop:?}");
             assert_eq!(table.current, status.current, "{stop:?}");
         }
     }
-    session.close().await;
     assert!(
         completed
             .authority
@@ -559,7 +494,7 @@ async fn stop_at(
     }
     assert_eq!(tombstones(root.path(), revoked)?, 1, "{stop:?}");
     reopened.close().await?;
-    let again = crate::Database::open(open())?.database;
+    let again = configuration.open().await?;
     assert_eq!(tombstones(root.path(), revoked)?, 1);
     assert_eq!(
         Settings::load(&root.path().join("rocky.sqlite"))?.keys,
@@ -620,25 +555,19 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         );
         drop(node);
         let schema = crate::Schema::parse(SCHEMA)?;
-        let database = crate::Database::open(crate::Open {
-            identity: None,
-            directory: root.path(),
-            schema: &schema,
-            secrets: Some(store),
-            network: None,
-        })?
-        .database;
+        let database = crate::Configuration::new(root.path(), &schema)?
+            .secrets(store)
+            .open()
+            .await?;
         let settings = Settings::load(&root.path().join("rocky.sqlite"))?;
         let epochs = &settings.groups.values().next().ok_or("group")?.epochs;
         assert_eq!(epochs.len(), 2);
         assert!(epochs.contains(&rocky_core::KeyEpoch::new(1, &secret)));
-        let session = database.session();
-        let status = session.partition_status(list_partition("L")).await?;
+        let status = database.partition_status(list_partition("L")).await?;
         for table in status.tables {
             assert_eq!(table.epochs, status.epochs);
             assert_eq!(table.current, status.current);
         }
-        session.close().await;
         database.close().await?;
     }
     Ok(())

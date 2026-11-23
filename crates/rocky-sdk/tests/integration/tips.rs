@@ -22,29 +22,29 @@ fn seal_of(inspection: &Value, tip: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_continue_seal_moves_the_bookmark_and_keeps_every_row() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let a = Device::create(root.path(), None)?;
-    let before = snap::ok(a.session.tip_status()).await;
+    let a = Device::create(root.path(), None).await?;
+    let before = snap::ok(a.database.tip_status()).await;
     assert_eq!(before["bookmark"], "main");
     let genesis = before["tip"].clone();
     a.add(1, "milk").await;
     a.add(2, "eggs").await;
-    let written = snap::ok(a.session.tip_status()).await;
+    let written = snap::ok(a.database.tip_status()).await;
     assert_eq!(written["bookmark"], "main");
     assert_eq!(written["operations_since_seal"], 2);
     assert_eq!(written["evidence_releasable"], Value::Null);
 
-    let sealed = snap::ok(a.session.seal()).await;
+    let sealed = snap::ok(a.database.seal()).await;
     assert_ne!(sealed["tip"], genesis);
     assert_eq!(sealed["bookmark"], "main");
     assert_eq!(sealed["operations_since_seal"], 0);
     assert_eq!(a.titles().await, ["eggs", "milk"]);
     a.add(3, "bread").await;
     assert_eq!(
-        snap::ok(a.session.tip_status()).await["operations_since_seal"],
+        snap::ok(a.database.tip_status()).await["operations_since_seal"],
         1
     );
 
-    let inspection = snap::ok(a.session.inspect_tips()).await;
+    let inspection = snap::ok(a.database.inspect_tips()).await;
     assert_eq!(inspection["genesis"], genesis);
     let seal = seal_of(&inspection, genesis.as_str().ok_or("tip")?);
     assert_eq!(seal["action"], "continue");
@@ -64,8 +64,8 @@ async fn a_continue_seal_moves_the_bookmark_and_keeps_every_row() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let a = Device::create(root.path(), None)?;
-    let none = snap::ok(a.session.compaction()).await;
+    let a = Device::create(root.path(), None).await?;
+    let none = snap::ok(a.database.compaction()).await;
     assert_eq!(
         (none["compacted"].clone(), none["pruned"].clone()),
         (Value::Null, json!(0))
@@ -73,23 +73,23 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     a.add(1, "milk").await;
     let eggs = a.add(2, "eggs").await;
     a.set(3, &eggs, "completed", json!(true)).await;
-    let first = snap::ok(a.session.seal()).await["tip"].clone();
+    let first = snap::ok(a.database.seal()).await["tip"].clone();
     a.add(4, "bread").await;
-    let second = snap::ok(a.session.seal()).await["tip"].clone();
+    let second = snap::ok(a.database.seal()).await["tip"].clone();
 
     assert_eq!(
-        snap::ok(a.session.compaction()).await["compacted"],
+        snap::ok(a.database.compaction()).await["compacted"],
         Value::Null
     );
-    let kept = snap::ok(a.session.compact(1)).await;
+    let kept = snap::ok(a.database.compact(1)).await;
     assert_eq!(kept["finalized"], second);
     assert_eq!(kept["compacted"], first);
     assert_eq!(kept["uncompacted"], json!([second]));
     assert_eq!(kept["rebootstrap"], Value::Null);
-    let all = snap::ok(a.session.compact(0)).await;
+    let all = snap::ok(a.database.compact(0)).await;
     assert_eq!(all["compacted"], second);
     assert_eq!(all["uncompacted"], json!([]));
-    let inspected = snap::ok(a.session.inspect_tips()).await;
+    let inspected = snap::ok(a.database.inspect_tips()).await;
     let checkpoints_beside_seal = |seal: &Value| -> Vec<Value> {
         inspected["seals"]
             .as_array()
@@ -135,9 +135,9 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     assert_eq!(a.items().await, items);
     a.close().await;
 
-    let a = Device::open(root.path(), None)?;
+    let a = Device::open(root.path(), None).await?;
     assert_eq!(a.items().await, items);
-    let reopened = snap::ok(a.session.compaction()).await;
+    let reopened = snap::ok(a.database.compaction()).await;
     assert_eq!(reopened["compacted"], second);
     Ok(())
 }
@@ -149,17 +149,22 @@ async fn only_trusted_devices_and_issuers_seal() -> Result<(), Failure> {
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
-    )?;
+    )
+    .await?;
     let b = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     introduce(&a, &b).await;
-    let sealed = snap::ok(a.session.seal()).await;
+    let sealed = snap::ok(a.database.seal()).await;
     b.sync().await.expect("sync");
-    assert_eq!(snap::ok(b.session.tip_status()).await["tip"], sealed["tip"]);
-    let refused = message(snap::observe(b.session.seal()).await.unwrap_err());
+    assert_eq!(
+        snap::ok(b.database.tip_status()).await["tip"],
+        sealed["tip"]
+    );
+    let refused = message(snap::observe(b.database.seal()).await.unwrap_err());
     assert!(
         refused.contains("only a trusted identity or an issuer"),
         "a writer never seals: {refused}"
@@ -169,18 +174,19 @@ async fn only_trusted_devices_and_issuers_seal() -> Result<(), Failure> {
         &root.path().join("c"),
         &a.invite_as(rocky_sdk::Access::Full).await,
         Network::Owned(hub.connector("c")),
-    )?;
+    )
+    .await?;
     a.admit(&issuer).await;
     introduce(&a, &issuer).await;
     issuer.sync().await.expect("issuer sync");
     issuer.add(1, "issued").await;
-    let resealed = snap::ok(issuer.session.seal()).await;
+    let resealed = snap::ok(issuer.database.seal()).await;
     assert_ne!(
         resealed["tip"], sealed["tip"],
         "an issuer seals and moves main forward"
     );
     assert_eq!(
-        snap::ok(issuer.session.tip_status()).await["tip"],
+        snap::ok(issuer.database.tip_status()).await["tip"],
         resealed["tip"]
     );
     Ok(())
@@ -200,7 +206,8 @@ mod trusted {
         let owner = Device::create(
             &root.path().join("owner"),
             Some(Network::Owned(hub.connector("owner"))),
-        )?;
+        )
+        .await?;
         let mut devices = Vec::new();
         for index in 0..count {
             let name = format!("d{index}");
@@ -208,7 +215,8 @@ mod trusted {
                 &root.path().join(&name),
                 &owner.invite().await,
                 Network::Owned(hub.connector(&name)),
-            )?;
+            )
+            .await?;
             introduce(&owner, &device).await;
             for other in &devices {
                 introduce(other, &device).await;
@@ -217,7 +225,7 @@ mod trusted {
             devices.push(device);
         }
         owner.add(1, "before").await;
-        snap::ok(owner.session.seal()).await;
+        snap::ok(owner.database.seal()).await;
         let all: Vec<&Device> = std::iter::once(&owner).chain(&devices).collect();
         settle(&all).await;
         for device in &devices {
@@ -230,20 +238,20 @@ mod trusted {
         })
     }
     async fn identity(device: &Device) -> String {
-        snap::ok(device.session.info()).await["principal"]
+        snap::ok(device.database.info()).await["principal"]
             .as_str()
             .unwrap_or_default()
             .to_owned()
     }
     async fn trust(owner: &Device, device: &Device) -> Value {
-        let granted = snap::ok(owner.session.trust(
+        let granted = snap::ok(owner.database.trust(
             snap::public_key(&(identity(device).await)),
             (owner.root()).clone(),
         ))
         .await;
         snap::ok(
             device
-                .session
+                .database
                 .install_trust(&(snap::text(&(granted["grant"])))),
         )
         .await;
@@ -265,7 +273,7 @@ mod trusted {
         let t = &house.devices[0];
         let granted = trust(owner, t).await;
         assert!(
-            snap::observe(t.session.trust(
+            snap::observe(t.database.trust(
                 snap::public_key(&(identity(owner).await)),
                 std::sync::Arc::new(rocky_sdk::RootKey::generate())
             ))
@@ -276,7 +284,7 @@ mod trusted {
         assert!(
             snap::observe(
                 owner
-                    .session
+                    .database
                     .install_trust(&(snap::text(&(granted["grant"]))))
             )
             .await
@@ -284,9 +292,9 @@ mod trusted {
             "only the trusted identity's own device installs its grant"
         );
         snap::ok(
-            owner.session.revoke_identity_with_root(
+            owner.database.revoke_identity_with_root(
                 owner
-                    .session
+                    .database
                     .identities()
                     .await?
                     .into_iter()
@@ -305,10 +313,10 @@ mod trusted {
         )
         .await;
         settle(&[owner, t]).await;
-        snap::observe(t.session.seal())
+        snap::observe(t.database.seal())
             .await
             .expect_err("the revoked trusted node learned it and seals nothing more");
-        let status = snap::ok(t.session.status()).await;
+        let status = snap::ok(t.database.status()).await;
         assert!(
             status["authority"]["verified_revocation"].is_object(),
             "{status}"
@@ -334,7 +342,8 @@ mod races {
         let owner = Device::create(
             &root.path().join("owner"),
             Some(Network::Owned(hub.connector("owner"))),
-        )?;
+        )
+        .await?;
         let mut joined = Vec::new();
         for name in ["t0", "t1", "m"] {
             let invitation = if name == "m" {
@@ -346,7 +355,8 @@ mod races {
                 &root.path().join(name),
                 &invitation,
                 Network::Owned(hub.connector(name)),
-            )?;
+            )
+            .await?;
             if name != "m" {
                 owner.admit(&device).await;
             }
@@ -359,23 +369,23 @@ mod races {
         }
         let mut grants = Vec::new();
         for device in &joined[..2] {
-            let identity = snap::ok(device.session.info()).await["principal"].clone();
+            let identity = snap::ok(device.database.info()).await["principal"].clone();
             let granted = snap::ok(
                 owner
-                    .session
+                    .database
                     .trust(snap::public_key(&(identity)), (owner.root()).clone()),
             )
             .await;
             snap::ok(
                 device
-                    .session
+                    .database
                     .install_trust(&(snap::text(&(granted["grant"])))),
             )
             .await;
             grants.push(granted);
         }
         owner.add(1, "before").await;
-        snap::ok(owner.session.seal()).await;
+        snap::ok(owner.database.seal()).await;
         let mut joined = joined.into_iter();
         let (t0, t1, member) = (
             joined.next().ok_or("t0")?,
@@ -390,7 +400,7 @@ mod races {
             member,
             grants: [grants[0].clone(), grants[1].clone()],
         };
-        let tip = snap::ok(house.owner.session.tip_status()).await["tip"].clone();
+        let tip = snap::ok(house.owner.database.tip_status()).await["tip"].clone();
         settle_on(&house.all(), &tip, &["before"]).await;
         for device in house.all() {
             assert_eq!(device.titles().await, ["before"]);
@@ -421,7 +431,7 @@ mod races {
             }
             let mut ready = true;
             for device in devices {
-                if snap::ok(device.session.tip_status()).await["tip"] != *tip {
+                if snap::ok(device.database.tip_status()).await["tip"] != *tip {
                     ready = false;
                     break;
                 }
@@ -460,10 +470,10 @@ mod races {
     -> Result<(), Failure> {
         let house = household().await?;
         let (owner, member) = (&house.owner, &house.member);
-        let tip = snap::ok(owner.session.tip_status()).await["tip"].clone();
+        let tip = snap::ok(owner.database.tip_status()).await["tip"].clone();
         let continuations = [
-            snap::ok(house.trusted[0].session.seal()).await["tip"].clone(),
-            snap::ok(house.trusted[1].session.seal()).await["tip"].clone(),
+            snap::ok(house.trusted[0].database.seal()).await["tip"].clone(),
+            snap::ok(house.trusted[1].database.seal()).await["tip"].clone(),
         ];
         let lower_digest_wins = continuations[1].as_str() < continuations[0].as_str();
         let winner = usize::from(lower_digest_wins);
@@ -471,7 +481,7 @@ mod races {
         let next = continuations[1 - winner].clone();
         for device in house.all() {
             assert_eq!(
-                snap::ok(device.session.tip_status()).await["tip"],
+                snap::ok(device.database.tip_status()).await["tip"],
                 continuations[winner]
             );
         }
@@ -486,9 +496,9 @@ mod races {
 
         let without_cut = false;
         snap::ok(
-            owner.session.revoke_identity_with_root(
+            owner.database.revoke_identity_with_root(
                 owner
-                    .session
+                    .database
                     .identities()
                     .await?
                     .into_iter()
@@ -513,16 +523,16 @@ mod races {
             .filter(|device| !std::ptr::eq(*device, revoked))
             .collect();
         settle(&rest).await;
-        let followed = snap::ok(owner.session.tip_status()).await["tip"].clone();
+        let followed = snap::ok(owner.database.tip_status()).await["tip"].clone();
         let rotation_resealed_next = followed != next;
         if rotation_resealed_next {
-            let inspection = snap::ok(owner.session.inspect_tips()).await;
+            let inspection = snap::ok(owner.database.inspect_tips()).await;
             assert_eq!(seal_by_id(&inspection, &followed)["tip"], next);
         }
         settle_on(&rest, &followed, &["before"]).await;
         for device in rest {
             assert_eq!(device.titles().await, ["before"]);
-            let inspection = snap::ok(device.session.inspect_tips()).await;
+            let inspection = snap::ok(device.database.inspect_tips()).await;
             let revoked = seal_by_id(&inspection, &continuations[winner]);
             assert_eq!(
                 (revoked["revoked"].clone(), revoked["canonical"].clone()),
@@ -532,7 +542,7 @@ mod races {
             assert_eq!(seal_by_id(&inspection, &next)["canonical"], true);
             assert_eq!(seal_by_id(&inspection, &next)["tip"], tip);
         }
-        let held = snap::ok(member.session.held_changes()).await;
+        let held = snap::ok(member.database.held_changes()).await;
         assert_eq!(
             held["count"], 0,
             "the write on the revoked continuation goes with it: {held}"
@@ -541,7 +551,7 @@ mod races {
     }
 
     async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
-        snap::ok(device.session.status()).await["alerts"]
+        snap::ok(device.database.status()).await["alerts"]
             .as_array()
             .into_iter()
             .flatten()
@@ -556,13 +566,13 @@ mod races {
         let house = household().await?;
         let (owner, member) = (&house.owner, &house.member);
         owner.add(2, "sealed by the creator").await;
-        let sealed = snap::ok(owner.session.seal()).await["tip"].clone();
+        let sealed = snap::ok(owner.database.seal()).await["tip"].clone();
         let titles = ["before", "sealed by the creator"];
         settle_on(&house.all(), &sealed, &titles).await;
 
-        let creator = snap::ok(owner.session.info()).await["principal"].clone();
+        let creator = snap::ok(owner.database.info()).await["principal"].clone();
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
-        snap::ok(t0.session.revoke_identity_with_root(
+        snap::ok(t0.database.revoke_identity_with_root(
             snap::public_key(&(creator)),
             rocky_sdk::RevocationMode::Compromised,
             Some((owner.root()).clone()),
@@ -571,10 +581,10 @@ mod races {
         .await;
         let rest = [t0, t1];
         settle(&rest).await;
-        let followed = snap::ok(t0.session.tip_status()).await["tip"].clone();
+        let followed = snap::ok(t0.database.tip_status()).await["tip"].clone();
         settle_on(&rest, &followed, &titles).await;
         for device in rest {
-            let inspection = snap::ok(device.session.inspect_tips()).await;
+            let inspection = snap::ok(device.database.inspect_tips()).await;
             let kept = seal_by_id(&inspection, &sealed);
             assert_eq!(
                 (kept["revoked"].clone(), kept["canonical"].clone()),
@@ -590,7 +600,7 @@ mod races {
         assert!(ended.to_string().contains("revoked"), "{ended}");
         t0.add(3, "after").await;
         settle(&rest).await;
-        let next = snap::ok(t1.session.seal()).await["tip"].clone();
+        let next = snap::ok(t1.database.seal()).await["tip"].clone();
         assert_ne!(
             next, followed,
             "main keeps moving through the other trusted node"
@@ -609,11 +619,11 @@ mod races {
         let (owner, member) = (&house.owner, &house.member);
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
         isolate_t0(&house.hub, true);
-        let late = snap::ok(owner.session.seal()).await["tip"].clone();
+        let late = snap::ok(owner.database.seal()).await["tip"].clone();
         settle(&[owner, t1, member]).await;
-        assert!(!seal_by_id(&snap::ok(t1.session.inspect_tips()).await, &late).is_null());
-        let creator = snap::ok(owner.session.info()).await["principal"].clone();
-        snap::ok(t0.session.revoke_identity_with_root(
+        assert!(!seal_by_id(&snap::ok(t1.database.inspect_tips()).await, &late).is_null());
+        let creator = snap::ok(owner.database.info()).await["principal"].clone();
+        snap::ok(t0.database.revoke_identity_with_root(
             snap::public_key(&(creator)),
             rocky_sdk::RevocationMode::Compromised,
             Some((owner.root()).clone()),
@@ -634,7 +644,7 @@ mod races {
         );
         assert_eq!(past[0]["kind"]["signer"], creator, "{past:?}");
         for device in [t0, t1] {
-            let inspection = snap::ok(device.session.inspect_tips()).await;
+            let inspection = snap::ok(device.database.inspect_tips()).await;
             assert!(seal_by_id(&inspection, &late).is_null(), "{inspection}");
         }
         for device in house.all() {

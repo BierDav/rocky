@@ -29,6 +29,7 @@ mod node;
 mod partitions;
 mod pause;
 mod peer;
+mod people;
 mod reactor;
 mod registry;
 mod request;
@@ -38,7 +39,6 @@ mod schema;
 mod secrets;
 mod self_enrollment;
 mod service;
-mod session;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod simulation;
 mod sql;
@@ -55,10 +55,8 @@ pub mod transport;
 pub use access::Access;
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use configuration::Configuration;
-pub use connection::{
-    ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
-};
-pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
+pub use connection::{ChangeCause, SqlFailure, TableChange, TableEvents};
+pub use database::{Created, Database, Joined};
 pub use delivery::State as DeliveryState;
 pub use enrollment::PublisherRequired;
 pub use error::{Error, ErrorKind};
@@ -69,6 +67,10 @@ pub use invitation::{
     MAX_OPEN_INVITATIONS, OpenInvitation,
 };
 pub use partitions::*;
+pub use people::{
+    DeviceInfo, DeviceRevocationReceipt, Discovered, DroppedStage, LinkRequest, Provisioning,
+    RevocationResult, SeenDevice, TrustGrant,
+};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use registry::{Grant as RecordedPartitionGrant, Kind as IdentityOrigin};
@@ -79,8 +81,8 @@ pub use rocky_core::{
     TableDefinition,
 };
 pub use rocky_core::{
-    Commitment, KeyEpoch, NodeId, PartitionName, PartitionTuple, PrincipalId, ResourceScope,
-    RowIdentity, Scope, SqlValue, TipId, TransactionToken, WriterId,
+    KeyEpoch, PartitionName, PartitionTuple, ResourceScope, RowIdentity, Scope, SqlValue,
+    TransactionToken, WriterId,
 };
 pub use rocky_core::{RoleError, SchemaError};
 pub use rocky_credentials::{
@@ -97,11 +99,7 @@ pub use schema::{
     Column, InvalidName, Migration, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,
 };
 pub use secrets::{FileSecretStore, SecretStore};
-pub use service::{Network, ServiceError};
-pub use session::{
-    ContactInfo, DeviceRevocationReceipt, Discovered, DroppedStage, LinkRequest, Provisioning,
-    RevocationResult, SeenDevice, SessionInfo, TrustGrant,
-};
+pub use service::{ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use store_only::StoreOnlyRefusal;

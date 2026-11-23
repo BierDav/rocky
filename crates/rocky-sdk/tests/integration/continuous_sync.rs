@@ -1,5 +1,5 @@
 use crate::common::{Device, Failure, introduce};
-use rocky_sdk::{Database, Session, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Database, SqlValue, transport::memory::Hub};
 use std::{
     sync::{
         Arc, Mutex,
@@ -70,10 +70,10 @@ async fn write_until(
     written
 }
 
-async fn sync_until(session: &Session, stop: &AtomicBool) -> u64 {
+async fn sync_until(database: &Database, stop: &AtomicBool) -> u64 {
     let mut syncs = 0u64;
     while !stop.load(Ordering::SeqCst) {
-        if session.sync_once().await.is_ok() {
+        if database.sync_now().await.is_ok() {
             syncs += 1;
         }
         tokio::task::yield_now().await;
@@ -96,10 +96,10 @@ async fn soak_replicas_stay_usable_while_applying_a_steady_trickle_of_remote_wri
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| rocky_sdk::Network::Owned(hub.connector(name));
-    let mut devices = vec![Device::create(&root.path().join("a"), Some(network("a")))?];
+    let mut devices = vec![Device::create(&root.path().join("a"), Some(network("a"))).await?];
     for name in ["b", "c", "reader"] {
         let invitation = devices[0].invite().await;
-        let joined = Device::join(&root.path().join(name), &invitation, network(name))?;
+        let joined = Device::join(&root.path().join(name), &invitation, network(name)).await?;
         for known in &devices {
             introduce(known, &joined).await;
         }
@@ -144,7 +144,7 @@ async fn soak_replicas_stay_usable_while_applying_a_steady_trickle_of_remote_wri
     let syncers = futures_util::future::join_all(
         devices
             .iter()
-            .map(|device| sync_until(device.session(), &stop)),
+            .map(|device| sync_until(&device.database, &stop)),
     );
     let (remote_changes, written, syncs) = tokio::join!(observed, writers, syncers);
     for device in &devices {

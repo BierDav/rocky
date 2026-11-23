@@ -3,7 +3,7 @@ use crate::registry_revocation::fixture;
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_credentials::PrivateKey;
-use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":7,"tables":[
@@ -11,14 +11,17 @@ const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":7,"tables
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
-fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
-        directory: root,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: Some(fixture::keys(root)),
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+fn open(root: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    open_with(root, hub, name, SCHEMA)
+}
+fn open_with(root: &Path, hub: &Arc<Hub>, name: &str, schema: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
+        root,
+        crate::support::snapshot::schema(schema),
+        Some(fixture::keys(root)),
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 async fn join(
     root: &Path,
@@ -30,10 +33,9 @@ async fn join(
 ) -> Result<Device, Failure> {
     let invitation = a.invite_as(access).await;
     let directory = root.join(name);
-    let mut options = open(&directory, hub, name);
-    options.schema = crate::support::snapshot::schema(schema);
-    let device = Device::new(Database::join(options, &invitation)?)?;
-    a.session.add_peer(&device.contact().await).await?;
+    let options = open_with(&directory, hub, name, schema);
+    let device = Device::new(options.join(&invitation).await?)?;
+    a.database.add_peer(&device.contact().await).await?;
     fixture::settle(&device).await;
     Ok(device)
 }
@@ -62,7 +64,7 @@ fn values() -> Vec<rocky_sdk::SqlValue> {
 async fn partition(device: &Device) -> Value {
     snap::ok(
         device
-            .session
+            .database
             .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".into(),
                 values: values(),
@@ -73,7 +75,7 @@ async fn partition(device: &Device) -> Value {
 async fn create_partition(device: &Device) -> Value {
     snap::ok(
         device
-            .session
+            .database
             .create_partition(rocky_sdk::PartitionTarget::Group {
                 group: "list".into(),
                 values: values(),
@@ -96,24 +98,24 @@ async fn write_group(device: &Device, prefix: &str) {
 }
 async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
     for issuer in issuers {
-        snap::ok(issuer.session.set_networking_enabled(false)).await;
+        snap::ok(issuer.database.set_sync(rocky_sdk::SyncMode::Off)).await;
         issuer.seal_and_compact().await;
     }
     for issuer in issuers {
-        snap::ok(issuer.session.set_networking_enabled(true)).await;
+        snap::ok(issuer.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     }
 }
 
 async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> Result<(), Failure> {
-    snap::ok(revoking.session.set_networking_enabled(false)).await;
+    snap::ok(revoking.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     snap::ok(async {
-        reader.session.renew().await?;
-        reader.session.info().await
+        reader.database.renew().await?;
+        reader.database.info().await
     })
     .await;
     snap::ok(
         reader
-            .session
+            .database
             .remove_peer(snap::public_key(&(revoking.node().await))),
     )
     .await;
@@ -121,7 +123,7 @@ async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> R
         .sync()
         .await
         .map_err(|e| format!("reader sync: {e}"))?;
-    snap::ok(revoking.session.set_networking_enabled(true)).await;
+    snap::ok(revoking.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     Ok(())
 }
 
@@ -146,7 +148,7 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
     let root = crate::support::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(open(&root.join("a"), &hub, "a"), None)?)?;
+    let a = Device::new(open(&root.join("a"), &hub, "a").create().await?)?;
     let b = join_admin(root, &hub, "b", &a, SCHEMA).await?;
     let ea = create_partition(&a).await["epoch"].clone();
     let eb = create_partition(&b).await["epoch"].clone();
@@ -186,9 +188,8 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");
-    let mut options = open(&directory, &hub, "a");
-    options.schema = crate::support::snapshot::schema(common::SCHEMA);
-    let a = Device::new(Database::create(options, None)?)?;
+    let options = open_with(&directory, &hub, "a", common::SCHEMA);
+    let a = Device::new(options.create().await?)?;
     let b = join_admin(root, &hub, "b", &a, common::SCHEMA).await?;
     let offline = join(
         root,
@@ -203,7 +204,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     for device in [&a, &b] {
         snap::ok(
             device
-                .session
+                .database
                 .revoke_identity(PrivateKey::new().public_key()),
         )
         .await;
@@ -230,12 +231,11 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
         assert_eq!(winner(root, "b", "items"), current);
     }
     let directory = root.join("offline");
-    let mut options = open(&directory, &hub, "offline");
-    options.schema = crate::support::snapshot::schema(common::SCHEMA);
-    let offline = Device::new(Database::open(options)?)?;
+    let options = open_with(&directory, &hub, "offline", common::SCHEMA);
+    let offline = Device::new(options.open().await?)?;
     snap::ok(async {
-        offline.session.renew().await?;
-        offline.session.info().await
+        offline.database.renew().await?;
+        offline.database.info().await
     })
     .await;
     assert_eq!(winner(root, "offline", "items"), current);
@@ -265,9 +265,8 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");
-    let mut options = open(&directory, &hub, "a");
-    options.schema = crate::support::snapshot::schema(LIST_SCHEMA);
-    let a = Device::new(Database::create(options, None)?)?;
+    let options = open_with(&directory, &hub, "a", LIST_SCHEMA);
+    let a = Device::new(options.create().await?)?;
     create_partition(&a).await;
     write(&a, "before").await;
     let b = join_admin(root, &hub, "b", &a, LIST_SCHEMA).await?;
@@ -284,18 +283,18 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         common::introduce(device, other).await;
         snap::ok(
             device
-                .session
+                .database
                 .remove_peer(snap::public_key(&(original.node().await))),
         )
         .await;
     }
     snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&(carol.identity().await))),
     )
     .await;
     snap::ok(
-        b.session
+        b.database
             .revoke_identity(snap::public_key(&(dave.identity().await))),
     )
     .await;

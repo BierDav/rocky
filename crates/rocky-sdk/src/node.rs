@@ -31,7 +31,7 @@ use crate::{
     domain::Domain,
     enrollment::{Contact, Settings, exchange, now},
     peer::{PeerReply, PeerRequest},
-    request::{Kind as RequestKind, Lifecycle},
+    request::Lifecycle,
     secrets::Vault,
     service::{Network, ServiceError},
     sync::{self, Upstream},
@@ -58,7 +58,6 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock, Semaphore, watch};
 
-const MAX_SESSIONS: usize = 64;
 const INBOUND: usize = 32;
 const MET: usize = 64;
 const DRAIN: Duration = Duration::from_secs(5);
@@ -117,10 +116,6 @@ impl SyncStatus {
             ..Self::new(state)
         }
     }
-}
-
-pub(crate) struct Client {
-    closing: watch::Sender<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -233,7 +228,7 @@ pub(crate) struct Node {
     current: std::sync::Mutex<Option<Arc<Link>>>,
     detaching: Mutex<()>,
     links: AtomicU64,
-    clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
+    closing: watch::Sender<bool>,
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
     redeeming: Mutex<()>,
@@ -292,7 +287,7 @@ pub(crate) struct Node {
     node_identity: Result<String, String>,
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
-    last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
+    last_reconciliation: std::sync::Mutex<Option<crate::SyncReport>>,
     last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
@@ -354,7 +349,7 @@ impl Node {
             current: std::sync::Mutex::new(None),
             detaching: Mutex::new(()),
             links: AtomicU64::new(1),
-            clients: std::sync::Mutex::new(BTreeMap::new()),
+            closing: watch::channel(false).0,
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
             redeeming: Mutex::new(()),
@@ -457,29 +452,8 @@ impl Node {
             .collect()
     }
 
-    pub fn client(&self, id: u64) -> Result<Arc<Client>, Failure> {
-        let mut clients = self.clients.lock().map_err(|_| "sessions poisoned")?;
-        if let Some(client) = clients.get(&id) {
-            return Ok(client.clone());
-        }
-        if clients.len() >= MAX_SESSIONS {
-            return Err("session quota".into());
-        }
-        let client = Arc::new(Client {
-            closing: watch::channel(false).0,
-        });
-        clients.insert(id, client.clone());
-        Ok(client)
-    }
-    pub fn end_sessions(&self, id: Option<u64>) {
-        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
-        let ended: Vec<_> = match id {
-            Some(id) => clients.remove(&id).into_iter().collect(),
-            None => std::mem::take(&mut *clients).into_values().collect(),
-        };
-        for client in ended {
-            client.closing.send_replace(true);
-        }
+    pub fn end_waits(&self) {
+        self.closing.send_replace(true);
     }
     pub(crate) async fn admit_sql(&self) -> Result<(), Failure> {
         if self.lifecycle.lock().await.is_logged_out() {
@@ -504,7 +478,7 @@ impl Node {
         slot: &mut Option<Arc<Link>>,
         transport: crate::transport::Connected,
         owned: bool,
-    ) -> Result<u64, Failure> {
+    ) -> Result<(), Failure> {
         let _ = self.owner.set(Arc::downgrade(self));
         let link = Arc::new(Link {
             id: self.links.fetch_add(1, Ordering::Relaxed),
@@ -550,20 +524,19 @@ impl Node {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Some(discoverer);
         }
-        let id = link.id;
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(link.clone());
         *slot = Some(link);
         self.wake_sync();
-        Ok(id)
+        Ok(())
     }
     pub async fn link(
         self: &Arc<Self>,
         transport: impl Into<crate::transport::Connected>,
         owned: bool,
-    ) -> Result<u64, Failure> {
+    ) -> Result<(), Failure> {
         self.install(&mut *self.network.write().await, transport.into(), owned)
     }
-    pub async fn attach(self: &Arc<Self>, network: Network) -> Result<u64, Failure> {
+    pub async fn attach(self: &Arc<Self>, network: Network) -> Result<(), Failure> {
         let mut slot = self.network.write().await;
         if slot.is_some() {
             return Err(ServiceError::NetworkAttached.into());
@@ -576,10 +549,10 @@ impl Node {
         let (transport, owned) = network.start(issuer, key).await?;
         self.install(&mut slot, transport, owned)
     }
-    pub async fn detach(&self, id: Option<u64>) {
+    pub async fn detach(&self) {
         let _detaching = self.detaching.lock().await;
         let attached = self.network.read().await.clone();
-        let Some(link) = attached.filter(|link| id.is_none_or(|id| link.id == id)) else {
+        let Some(link) = attached else {
             return;
         };
         link.stage.send_replace(Stage::Draining);
@@ -831,8 +804,11 @@ impl Node {
         Ok(())
     }
 
-    pub(crate) async fn admit_request(&self, kind: RequestKind) -> Result<(), Failure> {
-        if self.lifecycle.lock().await.is_logged_out() && !kind.allowed_after_logout() {
+    pub(crate) async fn admit_request(
+        &self,
+        request: &crate::request::Request,
+    ) -> Result<(), Failure> {
+        if self.lifecycle.lock().await.is_logged_out() && !request.allowed_after_logout() {
             return Err(refused("this device logged out of the domain"));
         }
         Ok(())
@@ -896,14 +872,14 @@ impl Node {
             checkpoint: status,
         })
     }
-    async fn session_info(&self) -> Result<crate::SessionInfo, Failure> {
+    async fn device_info(&self) -> Result<crate::DeviceInfo, Failure> {
         let session = self
             .replica
             .session(self.app_scopes().into_iter().collect())
             .await?;
         let status = session.status().await?;
         let settings = self.settings.published();
-        Ok(crate::SessionInfo {
+        Ok(crate::DeviceInfo {
             principal: status.principal,
             node: status.node,
             revocations: settings.revocation_status()?,
@@ -944,16 +920,12 @@ impl Node {
             scopes_total: totals.len() as u64,
         }))
     }
-    async fn readiness_after(
-        &self,
-        client: &Client,
-        after: &str,
-    ) -> Result<crate::DatabaseStatus, Failure> {
+    async fn readiness_after(&self, after: &str) -> Result<crate::DatabaseStatus, Failure> {
         let mut revisions = self.replica.observe_revision();
         let mut imports = self.replica.observe_imports().await;
         let mut authority = self.replica.observe_authority().await;
         let mut sync_state = self.sync_state.subscribe();
-        let mut closing = client.closing.subscribe();
+        let mut closing = self.closing.subscribe();
         let mut events = self.sync_events.subscribe();
         let mut network = self.sync_status.subscribe();
         let mut observations = self.observations.subscribe();
@@ -972,7 +944,7 @@ impl Node {
                     changed.map_err(|_| ServiceError::Closed("database"))?
                 }
                 _ = closing.wait_for(|closing| *closing) => {
-                    return Err(ServiceError::Closed("session").into());
+                    return Err(ServiceError::Closed("database").into());
                 }
                 changed = sync_state.changed() => {
                     changed.map_err(|_| ServiceError::Closed("database"))?
@@ -1000,24 +972,6 @@ impl Node {
                 } => {},
             }
         }
-    }
-    async fn domain_info(&self) -> Result<crate::DomainInfo, Failure> {
-        let settings = self.settings.lock().await;
-        Ok(crate::DomainInfo {
-            scope: self.domain().scope,
-            issuer: settings.issuer(),
-            access: settings.access.clone(),
-            collections: settings
-                .schema
-                .names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            transport: self.kind(),
-        })
-    }
-    async fn generation(&self) -> Result<crate::GenerationStatus, Failure> {
-        Ok(self.observed_status().await?.data.generation)
     }
     async fn revoke_identity(
         &self,
@@ -1658,7 +1612,7 @@ impl Node {
     async fn sync_optional(
         &self,
         transport: Option<&dyn Transport>,
-    ) -> Result<(crate::ReconciliationReport, bool), Failure> {
+    ) -> Result<(crate::SyncReport, bool), Failure> {
         let result = self.reconciliation_pass(transport, false, false).await;
         self.topics_changed();
         let (report, outcome) = result?;

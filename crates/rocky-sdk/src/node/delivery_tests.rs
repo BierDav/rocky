@@ -1,6 +1,6 @@
 use crate::test_snapshot as snap;
 use crate::{
-    Database, Open, SecretStore, Session,
+    Configuration, Database, SecretStore,
     delivery::{Mailbox, fault},
     transport::memory::Hub,
 };
@@ -30,9 +30,7 @@ fn keys(directory: &Path) -> Arc<dyn SecretStore> {
 }
 
 struct Device {
-    database: Arc<Database>,
-    session: Session,
-
+    database: Database,
     directory: PathBuf,
     name: String,
     hub: Arc<Hub>,
@@ -42,20 +40,14 @@ fn parsed_schema() -> &'static crate::Schema {
         std::sync::LazyLock::new(|| crate::Schema::parse(SCHEMA).unwrap());
     &PARSED
 }
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
-        directory,
-        schema: parsed_schema(),
-        secrets: Some(keys(directory)),
-        network: Some(crate::Network::Owned(hub.connector(name))),
-    }
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> Result<Configuration, Failure> {
+    Ok(Configuration::new(directory, parsed_schema())?
+        .secrets(keys(directory))
+        .network(crate::Network::Owned(hub.connector(name))))
 }
 impl Device {
-    fn new(database: Arc<Database>, directory: PathBuf, name: &str, hub: &Arc<Hub>) -> Self {
+    fn new(database: Database, directory: PathBuf, name: &str, hub: &Arc<Hub>) -> Self {
         Self {
-            session: database.session(),
-
             database,
             directory,
             name: name.into(),
@@ -64,42 +56,44 @@ impl Device {
     }
 
     async fn node(&self) -> Result<String, Failure> {
-        Ok(snap::value(self.session.info()).await?["node"]
+        Ok(snap::value(self.database.info()).await?["node"]
             .as_str()
             .ok_or("node")?
             .to_owned())
     }
     async fn identity(&self) -> Result<String, Failure> {
-        Ok(snap::value(self.session.info()).await?["principal"]
+        Ok(snap::value(self.database.info()).await?["principal"]
             .as_str()
             .ok_or("principal")?
             .to_owned())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        snap::value(self.session.set_networking_enabled(online))
-            .await
-            .map(drop)
+        snap::value(self.database.set_sync(if online {
+            crate::SyncMode::Manual
+        } else {
+            crate::SyncMode::Off
+        }))
+        .await
+        .map(drop)
     }
     async fn restart(self) -> Result<Self, Failure> {
         let Self {
             database,
-            session,
             directory,
             name,
             hub,
             ..
         } = self;
-        drop(session);
         database.close().await?;
-        let database = Database::open(open(&directory, &hub, &name))?.database;
+        let database = open(&directory, &hub, &name)?.open().await?;
         Ok(Self::new(database, directory, &name, &hub))
     }
     async fn invite(&self, profile: crate::Access) -> Result<String, Failure> {
-        Ok(self.session.provision(profile, None).await?.uri)
+        Ok(self.database.provision(profile, None).await?.uri)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
         Ok(snap::value(
-            self.session
+            self.database
                 .partition_status(rocky_sdk::PartitionTarget::Group {
                     group: "list".to_owned(),
                     values: (values()).clone(),
@@ -113,7 +107,7 @@ impl Device {
             .collect())
     }
     async fn state(&self, node: &str) -> Result<Value, Failure> {
-        let status = snap::value(self.session.partition_status(
+        let status = snap::value(self.database.partition_status(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values()).clone(),
@@ -130,7 +124,7 @@ impl Device {
             .unwrap_or_default())
     }
     async fn events(&self, kind: &str) -> Result<Vec<Value>, Failure> {
-        Ok(snap::value(self.session.activity(0)).await?["events"]
+        Ok(snap::value(self.database.activity(0)).await?["events"]
             .as_array()
             .ok_or("events")?
             .iter()
@@ -142,7 +136,6 @@ impl Device {
         Mailbox::open(&self.directory.join("mailbox.json"))
     }
     async fn close(self) -> Result<(), Failure> {
-        drop(self.session);
         self.database.close().await
     }
 }
@@ -151,10 +144,10 @@ fn values() -> Vec<rocky_sdk::SqlValue> {
 }
 async fn introduce(left: &Device, right: &Device) -> Result<(), Failure> {
     for (from, to) in [(left, right), (right, left)] {
-        let contact = snap::value(to.session.contact_info()).await?;
+        let contact = snap::value(to.database.contact()).await?;
         snap::value(async {
             let value = from
-                .session
+                .database
                 .add_peer(&(snap::text(&(contact["uri"]))))
                 .await?;
             Ok(json!({"node":value}))
@@ -178,7 +171,7 @@ impl Mesh {
         let hub = Arc::new(Hub::default());
         let directory = root.path().join("a");
         let a = Device::new(
-            Database::create(open(&directory, &hub, "a"), None)?.database,
+            open(&directory, &hub, "a")?.create().await?.database,
             directory,
             "a",
             &hub,
@@ -188,7 +181,7 @@ impl Mesh {
         introduce(&a, &custody).await?;
         introduce(&b, &custody).await?;
         snap::value(
-            a.session
+            a.database
                 .create_partition(rocky_sdk::PartitionTarget::Group {
                     group: "list".to_owned(),
                     values: (values()).clone(),
@@ -225,22 +218,23 @@ async fn join(
     let directory = root.path().join(name);
     let invitation = issuer.invite(profile).await?;
     let device = Device::new(
-        Database::join(open(&directory, hub, name), &invitation)?.database,
+        open(&directory, hub, name)?.join(&invitation).await?,
         directory,
         name,
         hub,
     );
-    let mut status = snap::value(device.session.status()).await?;
+    let mut changes = device.database.status_changes();
+    let mut status = snap::value(changes.next()).await?;
     let first_sync_in_flight = |status: &Value| status["data"]["bootstrap_pending"] == true;
     while first_sync_in_flight(&status) {
-        status = snap::value(device.session.status_after(snap::text(&(status["token"])))).await?;
+        status = snap::value(changes.next()).await?;
     }
     Ok(device)
 }
 async fn relay(from: &Device, to: &Device) -> Result<Value, String> {
     to.online(false).await.map_err(|error| error.to_string())?;
     from.online(true).await.map_err(|error| error.to_string())?;
-    snap::observe(from.session.sync_once())
+    snap::observe(from.database.sync_now())
         .await
         .map_err(|error| error.to_string())
 }
@@ -249,7 +243,7 @@ async fn share(device: &Device, recipients: &[&str]) -> Result<Value, Failure> {
         .iter()
         .map(|key| key.parse())
         .collect::<Result<_, _>>()?;
-    snap::value(device.session.share_partition(
+    snap::value(device.database.share_partition(
         crate::PartitionTarget::Group {
             group: "list".into(),
             values: values(),
@@ -269,7 +263,7 @@ async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
 }
 async fn explicit_syncs_only(devices: &[&Device]) -> Result<(), Failure> {
     for device in devices {
-        snap::value(device.session.set_automatic_sync(false)).await?;
+        snap::value(device.database.set_sync(rocky_sdk::SyncMode::Manual)).await?;
     }
     Ok(())
 }
@@ -290,7 +284,7 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     let removed_node = removed.node().await?;
     share(a, &[&node, &third.node().await?, &removed_node]).await?;
     snap::value(
-        a.session
+        a.database
             .revoke_identity(removed.identity().await?.parse()?),
     )
     .await?;
@@ -304,7 +298,7 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     );
     let held = std::fs::read(custody.directory.join("mailbox.json"))?;
     let address = snap::value(
-        a.session
+        a.database
             .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values()).clone(),
@@ -326,7 +320,7 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
         [json!(1), json!(2)],
         "B meets only custody, and both envelopes arrive and install"
     );
-    snap::value(third.session.sync_once()).await?;
+    snap::value(third.database.sync_now()).await?;
     relay(a, b).await?;
     assert_eq!(
         a.state(&node).await?,
@@ -365,12 +359,12 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
     assert_eq!(second.mailbox()?.len(), 1);
     introduce(a, b).await?;
     b.online(true).await?;
-    snap::value(b.session.sync_once()).await?;
+    snap::value(b.database.sync_now()).await?;
     assert_eq!(delivered(b, "received").await?, 3);
     assert_eq!(b.events("partition_key_installed").await?.len(), 1);
     assert_eq!(b.epochs().await?, [json!(1)]);
     assert_eq!(a.state(&node).await?, "delivered");
-    snap::value(a.session.sync_once()).await?;
+    snap::value(a.database.sync_now()).await?;
     assert_eq!(
         custody.mailbox()?.len() + second.mailbox()?.len(),
         0,
@@ -405,7 +399,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     b.online(false).await?;
     share(&a, &[&node]).await?;
     relay(&a, &b).await?;
-    snap::value(other.session.sync_once()).await?;
+    snap::value(other.database.sync_now()).await?;
     assert_eq!(
         delivered(&other, "received").await?,
         0,
@@ -426,12 +420,12 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
     snap::value(
-        a.session
+        a.database
             .revoke_identity(removed.identity().await?.parse()?),
     )
     .await?;
     relay(&a, &b).await?;
-    snap::value(a.session.sync_once()).await?;
+    snap::value(a.database.sync_now()).await?;
     let mailbox = custody.node().await?;
     let mut rounds = a.events("envelopes_delivered").await?.split_off(before);
     rounds.retain(|round| round["peer"] == mailbox.as_str());
@@ -440,7 +434,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         assert_eq!(round["refused"], 1, "no room for B's rotation: {round}");
     }
     let status = snap::value(
-        a.session
+        a.database
             .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values()).clone(),
@@ -520,9 +514,9 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         1,
         "a restarted mailbox keeps the deposit"
     );
-    snap::value(a.session.revoke_identity(b.identity().await?.parse()?)).await?;
+    snap::value(a.database.revoke_identity(b.identity().await?.parse()?)).await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
-    snap::value(a.session.sync_once()).await?;
+    snap::value(a.database.sync_now()).await?;
     assert_eq!(
         custody.mailbox()?.len(),
         0,
@@ -544,18 +538,16 @@ impl Device {
     ) -> Result<Self, Failure> {
         let Self {
             database,
-            session,
             directory,
             name,
             hub,
             ..
         } = self;
-        drop(session);
         database.close().await?;
         let mut mailbox = Mailbox::open(&directory.join("mailbox.json"))?;
         change(&mut mailbox)?;
         mailbox.save()?;
-        let database = Database::open(open(&directory, &hub, &name))?.database;
+        let database = open(&directory, &hub, &name)?.open().await?;
         Ok(Self::new(database, directory, &name, &hub))
     }
 }
@@ -585,7 +577,7 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
     };
     b.online(direct).await?;
     snap::value(
-        a.session.share_partition(
+        a.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: (values()).clone(),
@@ -624,7 +616,7 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
                 receiver.online(false).await?;
             }
             sender.online(true).await?;
-            let _ = snap::observe(sender.session.sync_once()).await;
+            let _ = snap::observe(sender.database.sync_now()).await;
             if !restarted && !pending()? {
                 restarted = true;
                 let device = devices[index].take().ok_or("stopped device")?;
@@ -728,7 +720,7 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     mesh.b.online(false).await?;
     share(&mesh.a, &[&recipient]).await?;
     let _row_exchange_may_be_refused_without_a_list_grant =
-        snap::observe(mesh.a.session.sync_once()).await;
+        snap::observe(mesh.a.database.sync_now()).await;
     assert_eq!(
         mesh.a.state(&recipient).await?,
         "deposited",
@@ -737,7 +729,7 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     assert_eq!(mailbox.mailbox()?.len(), 1);
     mesh.a.online(false).await?;
     mesh.b.online(true).await?;
-    let _ = snap::observe(mesh.b.session.sync_once()).await;
+    let _ = snap::observe(mesh.b.database.sync_now()).await;
     assert_eq!(mesh.b.epochs().await?, [json!(1)]);
     mailbox.close().await?;
     mesh.close().await

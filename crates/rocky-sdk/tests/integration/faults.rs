@@ -17,8 +17,8 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
 async fn diverged(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Device, Device), Failure> {
-    let a = Device::create(&root.join("a"), Some(memory(hub, "a")))?;
-    let b = Device::join(&root.join("b"), &a.invite().await, memory(hub, "b"))?;
+    let a = Device::create(&root.join("a"), Some(memory(hub, "a"))).await?;
+    let b = Device::join(&root.join("b"), &a.invite().await, memory(hub, "b")).await?;
     b.sync().await.map_err(|error| error.to_string())?;
     for row in 0..ROWS {
         a.add(row + 1, &format!("a{row:02}")).await;
@@ -45,7 +45,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     let (a, b) = diverged(root.path(), &hub).await?;
     let mut failed = 0;
     for bytes in CUTS_THROUGH_HANDSHAKE_PUSH_AND_PULL {
-        snap::ok(b.session.set_networking_enabled(true)).await;
+        snap::ok(b.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
         hub.cut_after(Some(bytes));
         failed += usize::from(common::exchange_failed(&b.sync().await));
         hub.cut_after(None);
@@ -70,7 +70,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
         .expect("reconciliation");
     assert_eq!(last["outcome"] == "completed", b.items().await == union());
 
-    snap::ok(b.session.set_networking_enabled(true)).await;
+    snap::ok(b.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     for _ in 0..2 {
         b.sync().await.map_err(|error| error.to_string())?;
         assert_eq!(
@@ -82,7 +82,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     }
     a.close().await;
     b.close().await;
-    let a = Device::open(&root.path().join("a"), None)?;
+    let a = Device::open(&root.path().join("a"), None).await?;
     assert_eq!(a.items().await, union());
     a.close().await;
     Ok(())
@@ -135,9 +135,10 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
     }
     assert_eq!(hub.rpc_admission("a").ok_or("RPC listener")?.active, limit);
     assert_eq!(
-        a.session
-            .network()
+        a.database
+            .status()
             .await?
+            .network
             .inbound
             .ok_or("database admission")?
             .active,

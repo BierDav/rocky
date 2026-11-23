@@ -4,12 +4,12 @@ use rocky_sdk::{Network, transport::memory::Hub};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its_wait()
+async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let device = Device::create(root.path(), None)?;
-    let session = device.database.session();
-    let status = session.status().await?;
+    let device = Device::create(root.path(), None).await?;
+    let mut changes = device.database.status_changes();
+    let status = changes.next().await?;
     assert!(!status.authority.expired);
     assert_eq!(
         status.network.attachment,
@@ -17,44 +17,45 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
     );
     assert!(matches!(status.authority.access, rocky_sdk::Access::Full));
     device.add(1, "apples").await;
-    let next = session.status_after(status.token.clone()).await?;
+    let next = changes.next().await?;
     assert_ne!(
         next.token, status.token,
         "a revision racing registration is returned immediately, never lost"
     );
-    let wait = session.status_after(next.token);
-    let close = session.close();
-    let (ended, ()) = tokio::join!(wait, close);
+    assert_eq!(device.titles().await, ["apples"]);
+    let (ended, closed) = tokio::join!(changes.next(), device.database.close());
+    closed?;
     assert!(matches!(
         ended.unwrap_err().downcast_ref::<rocky_sdk::ServiceError>(),
-        Some(rocky_sdk::ServiceError::Closed("session"))
+        Some(rocky_sdk::ServiceError::Closed("database"))
     ));
-    assert_eq!(device.titles().await, ["apples"]);
-    device.close().await;
     let hub = Arc::new(Hub::default());
     let issuer = Device::create(
         &root.path().join("issuer"),
         Some(Network::Owned(hub.connector("issuer"))),
-    )?;
+    )
+    .await?;
     let member = Device::join(
         &root.path().join("member"),
         &issuer.invite().await,
         Network::Owned(hub.connector("member")),
-    )?;
-    let session = member.database.session();
-    session.logout(false).await?;
-    let logged_out = session.status().await?;
+    )
+    .await?;
+    let database = &member.database;
+    database.logout(false).await?;
+    let logged_out = database.status().await?;
     assert!(logged_out.authority.logged_out);
     assert_eq!(logged_out.network.connected_peer_count, 0);
-    assert_eq!(session.network().await?.connected_peer_count, 0);
-    session.peers().await?;
-    assert!(session.sync_once().await.is_err());
-    assert!(session.set_networking_enabled(true).await.is_err());
-    assert!(session.set_automatic_sync(true).await.is_err());
-    assert!(session.enter_foreground().await.is_err());
-    assert!(session.enter_background().await.is_err());
-    assert!(session.logout(true).await.is_err());
-    session.close().await;
+    assert!(database.sync_now().await.is_err());
+    for mode in [
+        rocky_sdk::SyncMode::Off,
+        rocky_sdk::SyncMode::Manual,
+        rocky_sdk::SyncMode::Foreground,
+        rocky_sdk::SyncMode::Background,
+    ] {
+        assert!(database.set_sync(mode).await.is_err(), "{mode:?}");
+    }
+    assert!(database.logout(true).await.is_err());
     member.close().await;
     issuer.close().await;
     Ok(())

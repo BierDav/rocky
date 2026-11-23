@@ -76,7 +76,7 @@ fn write_manifest(destination: &Path, manifest: &Manifest) -> Result<(), Failure
     Ok(())
 }
 
-fn restore(source: &Path) -> Result<MemberFixture, Failure> {
+async fn restore(source: &Path) -> Result<MemberFixture, Failure> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(source.join("fixture.json"))?)?;
     if manifest.version != 1
         || manifest.rows != 8
@@ -89,11 +89,15 @@ fn restore(source: &Path) -> Result<MemberFixture, Failure> {
         copy_directory(&source.join(role), &root.path().join(role))?;
     }
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::open(open(
-        &root.path().join("a"),
-        &manifest.schema,
-        Some(Network::Owned(hub.connector("a"))),
-    ))?)?;
+    let a = Device::new(
+        open(
+            &root.path().join("a"),
+            &manifest.schema,
+            Some(Network::Owned(hub.connector("a"))),
+        )
+        .open()
+        .await?,
+    )?;
     Ok(MemberFixture {
         root,
         large: manifest.rows,
@@ -111,7 +115,7 @@ async fn relocated_fixture_can_be_pulled_twice() -> Result<(), Failure> {
     retain(prepare_member_fixture(8, 0).await?, &fixture).await?;
     let independent_trials_after_the_originals_were_dropped = 2;
     for _ in 0..independent_trials_after_the_originals_were_dropped {
-        pull_member_fixture(restore(&fixture)?).await?;
+        pull_member_fixture(restore(&fixture).await?).await?;
     }
     Ok(())
 }

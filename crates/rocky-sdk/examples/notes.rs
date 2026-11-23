@@ -18,13 +18,14 @@ async fn main() -> Result<(), Failure> {
         .find(|arg| arg != "--create")
         .unwrap_or_else(|| "local/notes".into());
     let configuration = Configuration::new(directory, &schema)?;
-    let opened = if std::env::args().any(|arg| arg == "--create") {
-        configuration.create().await?
+    let database = if std::env::args().any(|arg| arg == "--create") {
+        let created = configuration.create().await?;
+        println!("Root phrase, keep it offline: {}", created.root.phrase());
+        created.database
     } else {
         configuration.open().await?
     };
-    let database = opened.database;
-    let changes = database.observe_tables(Some(vec!["notes".into()])).await?;
+    let changes = database.observe(&["notes"]).await?;
     let mut transaction = database.transaction().await?;
     let id = transaction.next_id("notes", vec![]).await?;
     transaction

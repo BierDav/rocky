@@ -96,8 +96,8 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             assert!(link.served.load(Ordering::Relaxed) > served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
             dialer.close().await;
-            b.detach(None).await;
-            a.detach(None).await;
+            b.detach().await;
+            a.detach().await;
             Ok(())
         })
         .await
@@ -150,8 +150,8 @@ async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), F
             admitted.ready(false).await?;
             drop(admitted);
             impostor.close().await;
-            b.detach(None).await;
-            a.detach(None).await;
+            b.detach().await;
+            a.detach().await;
             Ok(())
         })
         .await

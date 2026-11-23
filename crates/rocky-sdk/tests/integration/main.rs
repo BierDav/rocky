@@ -16,8 +16,6 @@ mod credentials;
 #[cfg(not(target_family = "wasm"))]
 mod discovery;
 #[cfg(not(target_family = "wasm"))]
-mod driver;
-#[cfg(not(target_family = "wasm"))]
 mod engine;
 #[cfg(not(target_family = "wasm"))]
 mod exact;

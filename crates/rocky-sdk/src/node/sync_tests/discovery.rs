@@ -75,7 +75,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                 titles(&c).await?.as_array().is_some_and(Vec::is_empty),
                 "C met the issuer before the row existed"
             );
-            a.detach(None).await;
+            a.detach().await;
             for node in [&b, &c] {
                 node.configure(|settings| {
                     settings.remove_peer(a_key)?;
@@ -155,7 +155,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                     }
                 }
             }
-            b.detach(None).await;
+            b.detach().await;
             assert!(
                 hub.topics(b_route).is_empty(),
                 "detaching withdraws the announcement"
@@ -164,7 +164,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                 b.discovery_status().local.state,
                 crate::DiscoveryPathState::Off
             );
-            c.detach(None).await;
+            c.detach().await;
             Ok(())
         })
         .await
@@ -238,7 +238,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             let _ = pass(&c).await;
             announced(&hub, |hub| hub.topics("c").is_empty()).await?;
             for node in [&a, &b, &c, &outsider_domain] {
-                node.detach(None).await;
+                node.detach().await;
             }
             Ok(())
         })
@@ -269,8 +269,8 @@ async fn a_transport_without_the_capability_reports_each_path_unavailable() -> R
                 1,
                 "contacts still carry the sync"
             );
-            a.detach(None).await;
-            b.detach(None).await;
+            a.detach().await;
+            b.detach().await;
             Ok(())
         })
         .await

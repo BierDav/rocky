@@ -31,7 +31,7 @@ async fn main() -> Result<(), Failure> {
 async fn open_tenants(
     tenants: &[String],
     identity: &Arc<dyn IdentityProvider>,
-    databases: &mut Vec<Arc<Database>>,
+    databases: &mut Vec<Database>,
 ) -> Result<(), Failure> {
     for tenant in tenants {
         let (directory, invitation) = match tenant.split_once('=') {
@@ -41,15 +41,13 @@ async fn open_tenants(
         let configuration = Configuration::store_only(directory)
             .network(Network::Owned(Arc::new(rocky_iroh::Options::default())))
             .identity(identity.clone());
-        let opened = match invitation {
+        let database = match invitation {
             Some(invitation) => configuration.accept_invitation(invitation).await?,
             None => configuration.open().await?,
         };
-        databases.push(opened.database.clone());
-        let session = opened.database.session();
-        session.set_automatic_sync(true).await?;
-        println!("{directory}: {}", session.contact().await?);
-        session.close().await;
+        database.set_sync(rocky_sdk::SyncMode::Foreground).await?;
+        println!("{directory}: {}", database.contact().await?.uri);
+        databases.push(database);
     }
     Ok(())
 }

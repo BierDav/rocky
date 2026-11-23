@@ -1,5 +1,5 @@
 use crate::support::snapshot as snap;
-use rocky_sdk::{Database, Network, NetworkService, Open, Opened, Session};
+use rocky_sdk::{Configuration, Created, Database, Network};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -35,32 +35,73 @@ pub fn prepared_identity(directory: &Path) -> Option<Arc<dyn rocky_sdk::Identity
         .exists()
         .then(|| external_identity(directory))
 }
+pub struct Opened {
+    database: Database,
+    root: Option<rocky_sdk::RootKey>,
+}
+impl From<Database> for Opened {
+    fn from(database: Database) -> Self {
+        Self {
+            database,
+            root: None,
+        }
+    }
+}
+impl From<Created> for Opened {
+    fn from(created: Created) -> Self {
+        Self {
+            database: created.database,
+            root: Some(created.root),
+        }
+    }
+}
 pub struct Device {
-    pub database: Arc<Database>,
-    pub network: Option<NetworkService>,
-    pub session: Session,
+    pub database: Database,
     scope: rocky_sdk::Scope,
     root: Option<String>,
     signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
 }
 pub fn parsed_schema() -> &'static rocky_sdk::Schema {
     static PARSED: std::sync::LazyLock<rocky_sdk::Schema> =
-        std::sync::LazyLock::new(|| rocky_sdk::Schema::parse(SCHEMA).unwrap());
+        std::sync::LazyLock::new(|| serde_json::from_str(SCHEMA).unwrap());
     &PARSED
 }
-fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
-    Open {
-        identity: prepared_identity(directory),
-        directory,
-        schema: parsed_schema(),
-        secrets: None,
-        network,
+pub fn configuration(
+    directory: &Path,
+    schema: &rocky_sdk::Schema,
+    secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
+    identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
+    network: Option<Network>,
+) -> Configuration {
+    let mut configuration = Configuration::new(directory, schema).expect("fixture schema");
+    if let Some(secrets) = secrets {
+        configuration = configuration.secrets(secrets);
     }
+    if let Some(identity) = identity {
+        configuration = configuration.identity(identity);
+    }
+    if let Some(network) = network {
+        configuration = configuration.network(network);
+    }
+    configuration
+}
+fn open(
+    directory: &Path,
+    identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
+    network: Option<Network>,
+) -> Configuration {
+    configuration(
+        directory,
+        parsed_schema(),
+        None,
+        identity.or_else(|| prepared_identity(directory)),
+        network,
+    )
 }
 impl Device {
-    pub fn new(opened: Opened) -> Result<Self, Failure> {
+    pub fn new(opened: impl Into<Opened>) -> Result<Self, Failure> {
+        let opened = opened.into();
         Ok(Self {
-            session: opened.database.session(),
             scope: opened.database.scope(),
             root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
             signer: opened
@@ -68,28 +109,29 @@ impl Device {
                 .as_ref()
                 .map(|root| Arc::new(root.identity()) as Arc<dyn rocky_sdk::IdentityProvider>),
             database: opened.database,
-            network: opened.network,
         })
     }
-    pub fn create(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
+    pub async fn create(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
         let signer = external_identity(directory);
-        let mut options = open(directory, network);
-        options.identity = Some(signer.clone());
-        Self::new(Database::create(options, None)?).map(|device| device.with_identity(signer))
+        let created = open(directory, Some(signer.clone()), network)
+            .create()
+            .await?;
+        Self::new(created).map(|device| device.with_identity(signer))
     }
-    pub fn join(directory: &Path, invitation: &str, network: Network) -> Result<Self, Failure> {
+    pub async fn join(
+        directory: &Path,
+        invitation: &str,
+        network: Network,
+    ) -> Result<Self, Failure> {
         let signer = external_identity(directory);
-        let mut options = open(directory, Some(network));
-        options.identity = Some(signer.clone());
-        let opened = Database::join(options, invitation)?;
-        let signer: Arc<dyn rocky_sdk::IdentityProvider> = match opened.identity.as_deref() {
-            Some(phrase) => Arc::new(rocky_sdk::IdentityKey::from_phrase(phrase)?),
-            None => signer,
-        };
-        Self::new(opened).map(|device| device.with_identity(signer))
+        let joined = open(directory, Some(signer), Some(network))
+            .join_linkable(invitation)
+            .await?;
+        let signer = Arc::new(rocky_sdk::IdentityKey::from_phrase(&joined.identity)?);
+        Self::new(joined.database).map(|device| device.with_identity(signer))
     }
-    pub fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
-        Self::new(Database::open(open(directory, network))?)
+    pub async fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
+        Self::new(open(directory, None, network).open().await?)
             .map(|device| device.with_identity(external_identity(directory)))
     }
     pub fn with_identity(mut self, signer: Arc<dyn rocky_sdk::IdentityProvider>) -> Self {
@@ -102,9 +144,6 @@ impl Device {
     pub fn scope(&self) -> &rocky_sdk::Scope {
         &self.scope
     }
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
     pub fn root_signer(&self) -> Result<Arc<dyn rocky_sdk::IdentityProvider>, Failure> {
         Ok(Arc::new(rocky_sdk::RootKey::from_phrase(
             self.root.as_deref().ok_or("no root")?,
@@ -112,7 +151,7 @@ impl Device {
     }
     async fn handle(&self, handle: u8) -> rocky_core::Commitment {
         let mut bytes = self
-            .session
+            .database
             .info()
             .await
             .expect("session")
@@ -212,46 +251,46 @@ impl Device {
             .filter_map(|item| item.split('/').next().map(String::from))
             .collect()
     }
-    pub async fn sync_once(&self) -> Result<rocky_sdk::ReconciliationReport, Failure> {
+    pub async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, Failure> {
         match self.signer.clone() {
-            Some(identity) => self.session.sync_once_with_identity(identity).await,
-            None => self.session.sync_once().await,
+            Some(identity) => self.database.sync_now_with_identity(identity).await,
+            None => self.database.sync_now().await,
         }
     }
     pub async fn sync(&self) -> Result<Value, Value> {
-        snap::observe(self.sync_once()).await
+        snap::observe(self.sync_now()).await
     }
     pub async fn invite(&self) -> String {
         self.invite_as(rocky_sdk::Access::Full).await
     }
     pub async fn invite_as(&self, access: rocky_sdk::Access) -> String {
-        self.session
+        self.database
             .provision(access, None)
             .await
             .expect("invitation")
             .uri
     }
     pub async fn admit(&self, admin: &Device) {
-        let identity = admin.session.info().await.expect("session").principal;
+        let identity = admin.database.info().await.expect("session").principal;
         let grant = self
-            .session
+            .database
             .trust(identity, self.root())
             .await
             .expect("trust");
         admin
-            .session
+            .database
             .install_trust(&grant.grant)
             .await
             .expect("install trust");
     }
     pub async fn contact(&self) -> String {
-        self.session.contact().await.expect("contact")
+        self.database.contact().await.expect("contact").uri
     }
     pub async fn node(&self) -> String {
-        self.session.info().await.expect("session").node.to_hex()
+        self.database.info().await.expect("session").node.to_hex()
     }
     pub async fn identity(&self) -> String {
-        self.session
+        self.database
             .info()
             .await
             .expect("session")
@@ -260,14 +299,14 @@ impl Device {
     }
     pub async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {
-            let value = self.session.add_peer(&(snap::text(&(contact)))).await?;
+            let value = self.database.add_peer(&(snap::text(&(contact)))).await?;
             Ok(json!({"node":value}))
         })
         .await
     }
     pub async fn peer(&self, node: &str) -> Value {
         let peers = snap::ok(async {
-            let network = self.session.network().await?;
+            let network = self.database.status().await?.network;
             Ok(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;
@@ -283,8 +322,8 @@ impl Device {
         self.database.close().await.expect("close");
     }
     pub async fn seal_and_compact(&self) -> Value {
-        self.session.seal().await.expect("seal");
-        serde_json::to_value(self.session.compact(0).await.expect("compact")).expect("report")
+        self.database.seal().await.expect("seal");
+        serde_json::to_value(self.database.compact(0).await.expect("compact")).expect("report")
     }
 }
 pub async fn introduce(left: &Device, right: &Device) {
@@ -311,36 +350,22 @@ pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
     }
 }
 
-pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
-    let directory = open.directory;
-    let schema = open.schema;
-    let secrets = open.secrets.clone();
-    let report = Database::open(Open {
-        identity: None,
-        directory,
-        schema,
-        secrets,
-        network: None,
-    })
-    .err()
-    .ok_or("expected removal confirmation")?
-    .downcast::<rocky_sdk::RolloutConfirmationRequired>()?;
-    Database::open_confirmed(open, &report.report.digest)
+pub async fn confirmed(configuration: Configuration) -> Result<Database, Failure> {
+    let report = configuration
+        .open()
+        .await
+        .err()
+        .ok_or("expected removal confirmation")?
+        .downcast::<rocky_sdk::RolloutConfirmationRequired>()?;
+    configuration.open_confirmed(&report.report.digest).await
 }
 
-pub async fn link(open: Open<'_>, contact: &str, responder: &Session) -> Result<Opened, Failure> {
-    let config = rocky_sdk::Configuration::new(open.directory, open.schema)?;
-    let config = if let Some(store) = open.secrets {
-        config.secrets(store)
-    } else {
-        config
-    };
-    let config = if let Some(network) = open.network {
-        config.network(network)
-    } else {
-        config
-    };
-    let identity = open.identity.ok_or("linking needs an identity")?;
+pub async fn link(
+    config: Configuration,
+    identity: Arc<dyn rocky_sdk::IdentityProvider>,
+    contact: &str,
+    responder: &Database,
+) -> Result<Database, Failure> {
     let error = match config.link(contact, identity.clone()).await {
         Ok(_) => return Err("unconfirmed link succeeded".into()),
         Err(error) => error,

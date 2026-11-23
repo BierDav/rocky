@@ -46,7 +46,7 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     Ok(reply)
 }
 async fn signal_renewed_reachability(device: &Device) {
-    snap::ok(device.session.set_networking_enabled(true)).await;
+    snap::ok(device.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -62,7 +62,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Borrowed(attachment.transport())),
-    )?;
+    )
+    .await?;
     let starter = Network::Owned(Arc::new(rocky_iroh::Options {
         relay: Some("disabled".into()),
         lookup: Some("disabled".into()),
@@ -70,19 +71,19 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
         local: false,
         bind: Some("127.0.0.1:0".into()),
     }));
-    let b = Device::join(&root.path().join("b"), &a.invite().await, starter)?;
+    let b = Device::join(&root.path().join("b"), &a.invite().await, starter).await?;
     a.add(1, "Milk").await;
     b.add(2, "Eggs").await;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
-    let status = snap::ok(a.session.network()).await;
+    let status = snap::ok(async { a.database.status().await.map(|status| status.network) }).await;
     assert_eq!(
         (&status["kind"], &status["ownership"]),
         (&json!("iroh"), &json!("application"))
     );
 
-    a.network.as_ref().ok_or("attached")?.close().await;
+    a.database.detach().await?;
     a.add(3, "Jam").await;
     assert!(
         common::exchange_failed(&b.sync().await),
@@ -113,7 +114,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     let a = Device::open(
         &root.path().join("a"),
         Some(Network::Borrowed(attachment.transport())),
-    )?;
+    )
+    .await?;
     assert_eq!(a.titles().await, ["Eggs", "Jam", "Milk"]);
     a.close().await;
 
@@ -143,22 +145,26 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
     let a = Device::create(
         &root.path().join("a"),
         Some(Network::Borrowed(left_harness.transport())),
-    )?;
+    )
+    .await?;
     let b = Device::create(
         &root.path().join("b"),
         Some(Network::Borrowed(left_harness.transport())),
-    )?;
+    )
+    .await?;
     assert_ne!(a.scope(), b.scope());
     let a_member = Device::join(
         &root.path().join("a-member"),
         &a.invite().await,
         Network::Borrowed(right_harness.transport()),
-    )?;
+    )
+    .await?;
     let b_member = Device::join(
         &root.path().join("b-member"),
         &b.invite().await,
         Network::Borrowed(right_harness.transport()),
-    )?;
+    )
+    .await?;
     a.add(1, "Only A").await;
     b.add(1, "Only B").await;
     a_member.sync().await.map_err(|error| error.to_string())?;
@@ -188,7 +194,7 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
         Some(&ScopeRefusal::UnknownScope)
     );
 
-    a.network.as_ref().ok_or("a network")?.close().await;
+    a.database.detach().await?;
     b.add(2, "B after A detached").await;
     b_member.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b_member.titles().await, ["B after A detached", "Only B"]);

@@ -113,15 +113,15 @@ impl Launch {
     }
 }
 async fn introduce_in_process_peers(todos: &Todos, others: Vec<Todos>) -> Result<(), Failure> {
-    let contact = todos.database().session().contact().await?;
+    let contact = todos.database().contact().await?.uri;
     let scope = todos.database().scope();
     for other in others
         .into_iter()
         .filter(|other| other.database().scope() == scope)
     {
-        other.database().session().add_peer(&contact).await?;
-        let theirs = other.database().session().contact().await?;
-        todos.database().session().add_peer(&theirs).await?;
+        other.database().add_peer(&contact).await?;
+        let theirs = other.database().contact().await?.uri;
+        todos.database().add_peer(&theirs).await?;
     }
     Ok(())
 }
@@ -210,9 +210,7 @@ fn Installation(name: String, closing: bool) -> Element {
                 return phase.set(Phase::Start);
             }
             let opened = async {
-                Ok::<_, Failure>(Todos::new(
-                    workspace.configuration(&name)?.open().await?.database,
-                ))
+                Ok::<_, Failure>(Todos::new(workspace.configuration(&name)?.open().await?))
             }
             .await;
             match opened {
@@ -273,7 +271,7 @@ fn Installation(name: String, closing: bool) -> Element {
 struct Shared(Todos);
 impl PartialEq for Shared {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self.0.database(), other.0.database())
+        self.0.database() == other.0.database()
     }
 }
 
@@ -448,7 +446,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
     use_future(move || {
         let todos = observed.clone();
         async move {
-            let events = match todos.database().observe_tables(None).await {
+            let events = match todos.database().observe(&[]).await {
                 Ok(events) => events,
                 Err(failure) => return error.set(Some(failure.to_string())),
             };

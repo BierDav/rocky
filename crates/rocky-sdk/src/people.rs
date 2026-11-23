@@ -1,5 +1,6 @@
 use crate::request::Request;
-use crate::{Access, Failure, PublicKey, Session};
+use crate::{Access, Database, Failure, PublicKey};
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Provisioning {
@@ -44,13 +45,6 @@ pub struct LinkRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ContactInfo {
-    pub uri: String,
-    pub node: PublicKey,
-    pub routes: Vec<crate::Route>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevocationResult {
     pub statement: String,
     pub revocations: crate::RevocationStatus,
@@ -81,7 +75,7 @@ pub struct TrustGrant {
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionInfo {
+pub struct DeviceInfo {
     pub principal: rocky_credentials::PublicKey,
     pub node: rocky_credentials::PublicKey,
     pub revocations: crate::RevocationStatus,
@@ -94,15 +88,15 @@ pub struct SessionInfo {
     pub writer: crate::WriterId,
 }
 
-impl Session {
-    pub async fn info(&self) -> Result<SessionInfo, Failure> {
+impl Database {
+    pub async fn info(&self) -> Result<DeviceInfo, Failure> {
         self.send(Request::Info).await
     }
 
     pub async fn unlink(
         &self,
         node: crate::PeerId,
-        identity: std::sync::Arc<dyn crate::IdentityProvider>,
+        identity: Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), Failure> {
         self.send_signed(Some(identity), |reply| Request::Unlink(node, reply))
             .await
@@ -148,17 +142,53 @@ impl Session {
         self.send(|reply| Request::ConfirmLink(node, code.into(), reply))
             .await
     }
-    pub async fn contact(&self) -> Result<String, Failure> {
-        self.contact_info().await.map(|contact| contact.uri)
+    pub async fn sync_now_with_identity(
+        &self,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::SyncReport, Failure> {
+        self.send_signed(Some(identity), Request::Sync).await
     }
-    pub async fn contact_info(&self) -> Result<ContactInfo, Failure> {
-        self.send(Request::Contact).await
-    }
-    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
-        self.send(|reply| Request::AddPeer(contact.into(), reply))
+    pub async fn logout(&self, purge_on_close: bool) -> Result<(), Failure> {
+        self.send(|reply| Request::Logout(purge_on_close, reply))
             .await
     }
-    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
-        self.send(|reply| Request::RemovePeer(node, reply)).await
+    pub async fn trust(
+        &self,
+        identity: PublicKey,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<TrustGrant, Failure> {
+        self.send_rooted(Some(root), |root, reply| {
+            Request::Trust(identity, root, reply)
+        })
+        .await
+    }
+    pub async fn revoke_trusted(
+        &self,
+        identity: PublicKey,
+        mode: crate::RevocationMode,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<RevocationResult, Failure> {
+        self.revoke_identity_with_root(identity, mode, Some(root), true)
+            .await
+    }
+    pub async fn revoke_identity(&self, identity: PublicKey) -> Result<RevocationResult, Failure> {
+        self.revoke_identity_with_root(identity, crate::RevocationMode::Lost, None, true)
+            .await
+    }
+    pub async fn revoke_identity_with_root(
+        &self,
+        identity: PublicKey,
+        mode: crate::RevocationMode,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        keep: bool,
+    ) -> Result<RevocationResult, Failure> {
+        self.send_rooted(root, |root, reply| {
+            Request::RevokeIdentity(identity, mode, root, keep, reply)
+        })
+        .await
+    }
+    pub async fn install_trust(&self, grant: &str) -> Result<(), Failure> {
+        self.send(|reply| Request::InstallTrust(grant.into(), reply))
+            .await
     }
 }

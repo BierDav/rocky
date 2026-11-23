@@ -102,12 +102,6 @@ pub(crate) fn mint_value(
     }
     Ok(())
 }
-#[cfg(test)]
-pub(crate) fn holds_value(vault: &Vault, statement: &Revocation) -> Result<bool, Failure> {
-    Ok(Discovery::load(vault)?
-        .values
-        .contains_key(&HEXLOWER.encode(&statement.id()?)))
-}
 impl Settings {
     pub(crate) fn learn_contact(
         &mut self,
@@ -391,6 +385,7 @@ impl Settings {
         state.previous = state.previous.filter(|(_, until)| time < *until);
         Ok((state, topic))
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn discovery_topics(
         &self,
         vault: &Vault,

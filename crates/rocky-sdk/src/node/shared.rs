@@ -48,6 +48,7 @@ impl SettingsCell {
             published: &self.published,
         }
     }
+    #[cfg(test)]
     pub fn try_lock(&self) -> Result<SettingsGuard<'_>, tokio::sync::TryLockError> {
         Ok(SettingsGuard {
             held: self.current.try_lock()?,

@@ -1,7 +1,7 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_credentials::CredentialChain;
-use rocky_sdk::{Database, transport::memory::Hub};
+use rocky_sdk::transport::memory::Hub;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
-    let revocation = snap::ok(b.session.revoke_identity(snap::public_key(&(member)))).await;
+    let revocation = snap::ok(b.database.revoke_identity(snap::public_key(&(member)))).await;
     let state = identity(root, "b")?;
     assert_eq!(
         state["keys"],
@@ -99,13 +99,13 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
 
     assert_eq!(listed(&b, &member).await["revoked"], true);
     assert!(
-        snap::observe(b.session.revoke_identity(snap::public_key(&(node))))
+        snap::observe(b.database.revoke_identity(snap::public_key(&(node))))
             .await
             .is_err(),
         "an issuer never revokes a node"
     );
     assert!(
-        snap::observe(b.session.revoke_identity(snap::public_key(&(member))))
+        snap::observe(b.database.revoke_identity(snap::public_key(&(member))))
             .await
             .is_err(),
         "an issuer never revokes an identity twice"
@@ -124,7 +124,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     assert!(common::exchange_failed(&m.sync().await));
     assert_eq!(m.titles().await, ["before"]);
     assert_eq!(identity(root, "m")?["keys"]["items"], json!([1]));
-    let a = Device::new(Database::open(open(&root.join("a"), &hub, "a"))?)?;
+    let a = Device::new(open(&root.join("a"), &hub, "a").open().await?)?;
     sync(&a)
         .await
         .map_err(|error| format!("enrolling issuer after revocation: {error}"))?;
@@ -134,7 +134,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         "the returning enrolling issuer learns the statement and tombstone in one sync"
     );
     assert!(
-        snap::observe(a.session.grant_partition(
+        snap::observe(a.database.grant_partition(
             snap::public_key(&member),
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
@@ -156,13 +156,13 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = a.session.provision(role("lister"), None).await?;
+    let keys = a.database.provision(role("lister"), None).await?;
     grant(&a, &keys.identity.to_hex(), "L").await;
     sync(&b).await?;
     a.close().await;
     let before = identity(root, "b")?["keys"].clone();
     snap::ok(
-        b.session
+        b.database
             .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
@@ -182,20 +182,20 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
     let grant = snap::ok(
-        a.session
+        a.database
             .trust(snap::public_key(&(b.identity().await)), (a.root()).clone()),
     )
     .await;
-    snap::ok(b.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
+    snap::ok(b.database.install_trust(&(snap::text(&(grant["grant"]))))).await;
     sync(&b).await?;
     let refused = snap::observe(
-        b.session
+        b.database
             .revoke_identity(snap::public_key(&(a.identity().await))),
     )
     .await
     .expect_err("revoking the creating device's trusted node needs the root");
     assert_eq!(refused["code"], "publisher_required", "{refused}");
-    snap::ok(b.session.revoke_identity_with_root(
+    snap::ok(b.database.revoke_identity_with_root(
         snap::public_key(&(a.identity().await)),
         rocky_sdk::RevocationMode::Compromised,
         Some((a.root()).clone()),
@@ -232,17 +232,17 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = a.session.provision(rocky_sdk::Access::Store, None).await?;
+    let keys = a.database.provision(rocky_sdk::Access::Store, None).await?;
     sync(&b).await?;
     let before_a = identity(root, "a")?["keys"].clone();
     let before_b = identity(root, "b")?["keys"].clone();
     let by_a = snap::ok(
-        a.session
+        a.database
             .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
     let by_b = snap::ok(
-        b.session
+        b.database
             .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
@@ -251,7 +251,7 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     assert_eq!(identity(root, "b")?["keys"], before_b);
     sync(&a).await?;
     assert_eq!(
-        snap::ok(a.session.info()).await["revocations"]["statements"],
+        snap::ok(a.database.info()).await["revocations"]["statements"],
         2,
         "the handshake gives each issuer the other's statement"
     );
@@ -259,7 +259,7 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     sync(&a).await?;
     for (name, device) in [("a", &a), ("b", &b)] {
         assert_eq!(
-            snap::ok(device.session.info()).await["revocations"]["statements"],
+            snap::ok(device.database.info()).await["revocations"]["statements"],
             2
         );
         assert_eq!(

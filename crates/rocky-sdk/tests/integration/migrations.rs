@@ -3,7 +3,7 @@ mod prepared_pull;
 mod replayed;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
-use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -22,22 +22,42 @@ const FIXED: &str = r#"{"application":"shopping","version":3,"format":7,"tables"
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
 
-fn reopen(options: Open<'_>) -> Result<Device, Failure> {
-    let signer = options
-        .identity
-        .clone()
-        .unwrap_or_else(|| common::external_identity(options.directory));
-    Device::new(Database::open(options)?).map(|device| device.with_identity(signer))
+async fn reopen(
+    directory: &Path,
+    schema: &str,
+    network: Option<Network>,
+) -> Result<Device, Failure> {
+    reopen_as(
+        directory,
+        schema,
+        network,
+        common::external_identity(directory),
+    )
+    .await
 }
 
-fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
-    Open {
-        identity: Some(common::external_identity(directory)),
+async fn reopen_as(
+    directory: &Path,
+    schema: &str,
+    network: Option<Network>,
+    signer: Arc<dyn rocky_sdk::IdentityProvider>,
+) -> Result<Device, Failure> {
+    let configuration = open(directory, schema, network).identity(signer.clone());
+    Device::new(configuration.open().await?).map(|device| device.with_identity(signer))
+}
+
+fn open<'a>(
+    directory: &'a Path,
+    schema: &'a str,
+    network: Option<Network>,
+) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(schema),
-        secrets: None,
+        crate::support::snapshot::schema(schema),
+        None,
+        Some(common::external_identity(directory)),
         network,
-    }
+    )
 }
 async fn sync(device: &Device) {
     let report = device.sync().await.expect("sync");
@@ -53,7 +73,14 @@ async fn sync(device: &Device) {
     }
 }
 async fn generation(device: &Device) -> Value {
-    snap::ok(device.session.generation()).await
+    snap::ok(async {
+        device
+            .database
+            .status()
+            .await
+            .map(|status| status.data.generation)
+    })
+    .await
 }
 async fn rows(device: &Device, sql: &str) -> Value {
     snap::ok(snap::read(&device.database, sql, Vec::new())).await["rows"].clone()
@@ -71,8 +98,8 @@ const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":7,"ta
   {"insert":"tags","select":"SELECT 'same' AS key, title AS label FROM items"}]}]}"#;
 
 async fn graph(device: &Device) -> (Value, usize) {
-    let tip = snap::ok(device.session.tip_status()).await["tip"].clone();
-    let seals = snap::ok(device.session.inspect_tips()).await["seals"]
+    let tip = snap::ok(device.database.tip_status()).await["tip"].clone();
+    let seals = snap::ok(device.database.inspect_tips()).await["seals"]
         .as_array()
         .map_or(0, Vec::len);
     (tip, seals)
@@ -81,20 +108,24 @@ async fn graph(device: &Device) -> (Value, usize) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
-    let a = Device::create(root.path(), None)?;
+    let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     let before = graph(&a).await;
     a.close().await;
 
-    let refused = Database::open(open(root.path(), ASKS_FOR_IDS, None))
+    let refused = open(root.path(), ASKS_FOR_IDS, None)
+        .open()
+        .await
         .err()
         .ok_or("a migration asking for ids opened")?;
     assert!(
         refused.to_string().contains("rocky_next_id"),
         "a migration asking for an id is refused before anything is signed: {refused}"
     );
-    let failed = Database::open(open(root.path(), DUPLICATES, None))
+    let failed = open(root.path(), DUPLICATES, None)
+        .open()
+        .await
         .err()
         .ok_or("a failing migration opened")?;
     assert!(
@@ -103,7 +134,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
             .contains("migration to version 2 failed at statement 2"),
         "{failed}"
     );
-    let a = reopen(open(root.path(), common::SCHEMA, None))?;
+    let a = reopen(root.path(), common::SCHEMA, None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -119,7 +150,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     );
     a.close().await;
 
-    let a = reopen(open(root.path(), FIXED, None))?;
+    let a = reopen(root.path(), FIXED, None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 3, "{status}");
     assert_eq!(
@@ -139,7 +170,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     assert_eq!(tags.as_array().map(Vec::len), Some(2));
     a.close().await;
 
-    let a = reopen(open(root.path(), FIXED, None))?;
+    let a = reopen(root.path(), FIXED, None).await?;
     assert_eq!(rows(&a, POSITIONS).await, positions);
     assert_eq!(
         rows(&a, TAGS).await,
@@ -160,16 +191,13 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::create(&a_dir, network("a"))?;
-    let b_opened = Database::join(
-        open(&b_dir, common::SCHEMA, network("b")),
-        &a.invite_as(rocky_sdk::Access::Full).await,
-    )?;
+    let a = Device::create(&a_dir, network("a")).await?;
+    let b_opened = open(&b_dir, common::SCHEMA, network("b"))
+        .join_linkable(&a.invite_as(rocky_sdk::Access::Full).await)
+        .await?;
     let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::IdentityKey::from_phrase(
-            b_opened.identity.as_deref().ok_or("linkable identity")?,
-        )?);
-    let b = Device::new(b_opened)?;
+        Arc::new(rocky_sdk::IdentityKey::from_phrase(&b_opened.identity)?);
+    let b = Device::new(b_opened.database)?;
     a.admit(&b).await;
     introduce(&a, &b).await;
     a.add(1, "apples").await;
@@ -179,11 +207,10 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     b.close().await;
 
     for (directory, id) in [(&a_dir, None), (&b_dir, Some(b_identity.clone()))] {
-        let mut opts = open(directory, POSITIONED, None);
-        if let Some(id) = id {
-            opts.identity = Some(id);
-        }
-        let device = reopen(opts)?;
+        let device = match id {
+            Some(id) => reopen_as(directory, POSITIONED, None, id).await?,
+            None => reopen(directory, POSITIONED, None).await?,
+        };
         assert_eq!(
             generation(&device).await["current"]["schema"],
             2,
@@ -191,10 +218,8 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
         );
         device.close().await;
     }
-    let a = reopen(open(&a_dir, POSITIONED, network("a")))?;
-    let mut b_opts = open(&b_dir, POSITIONED, network("b"));
-    b_opts.identity = Some(b_identity);
-    let b = reopen(b_opts)?;
+    let a = reopen(&a_dir, POSITIONED, network("a")).await?;
+    let b = reopen_as(&b_dir, POSITIONED, network("b"), b_identity).await?;
     sync(&b).await;
     sync(&a).await;
     sync(&b).await;
@@ -218,14 +243,14 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     assert_eq!(rows(&a, TAGS).await, rows(&b, TAGS).await);
     let (tip, _) = graph(&a).await;
     assert_eq!(graph(&b).await.0, tip);
-    let inspected = snap::ok(b.session.inspect_tips()).await;
+    let inspected = snap::ok(b.database.inspect_tips()).await;
     let losers = inspected["bookmarks"][0]["losers"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     assert_eq!(losers.len(), 1, "{inspected}");
     assert_eq!(losers[0]["name"], "main/1");
-    assert_eq!(snap::ok(b.session.held_changes()).await["count"], 0);
+    assert_eq!(snap::ok(b.database.held_changes()).await["count"], 0);
     b.close().await;
     a.close().await;
     Ok(())
@@ -240,7 +265,7 @@ const POSITIONED_LISTS: &str = r#"{"format":7,"application":"lists","version":2,
  "migrations":[{"version":2,"statements":["UPDATE lists SET position = title"]}]}"#;
 
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
-    snap::ok(device.session.next_partition("lists")).await;
+    snap::ok(device.database.next_partition("lists")).await;
     let mut tx = device.database.transaction().await?;
     let id = tx.next_id("lists", Vec::new()).await?;
     tx.execute(
@@ -259,22 +284,19 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
-    let b_opened = Database::join(
-        open(&b_dir, LISTS, network("b")),
-        &a.invite_as(rocky_sdk::Access::Full).await,
-    )?;
+    let a = Device::new(open(&a_dir, LISTS, network("a")).create().await?)?;
+    let b_opened = open(&b_dir, LISTS, network("b"))
+        .join_linkable(&a.invite_as(rocky_sdk::Access::Full).await)
+        .await?;
     let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::IdentityKey::from_phrase(
-            b_opened.identity.as_deref().ok_or("linkable identity")?,
-        )?);
-    let b = Device::new(b_opened)?;
+        Arc::new(rocky_sdk::IdentityKey::from_phrase(&b_opened.identity)?);
+    let b = Device::new(b_opened.database)?;
     a.admit(&b).await;
     introduce(&a, &b).await;
     list(&a, "From a").await?;
     let theirs = list(&b, "From b").await?;
     snap::ok(
-        a.session.register_partition(
+        a.database.register_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: vec![snap::row_id(&(theirs))],
@@ -289,7 +311,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     .await;
     a.close().await;
 
-    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
+    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
     let status = generation(&a).await;
     assert_eq!(
         status["current"]["schema"], 1,
@@ -315,7 +337,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         sync(&a).await;
     }
     a.close().await;
-    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
+    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
     assert_eq!(
         generation(&a).await["current"]["schema"],
         2,
@@ -329,9 +351,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         ])
     );
     b.close().await;
-    let mut b_opts = open(&b_dir, POSITIONED_LISTS, network("b"));
-    b_opts.identity = Some(b_identity);
-    let b = reopen(b_opts)?;
+    let b = reopen_as(&b_dir, POSITIONED_LISTS, network("b"), b_identity).await?;
     sync(&b).await;
     sync(&b).await;
     assert_eq!(
@@ -390,23 +410,24 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::create(&a_dir, network("a"))?;
+    let a = Device::create(&a_dir, network("a")).await?;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
         Network::Owned(hub.connector("b")),
-    )?;
+    )
+    .await?;
     introduce(&a, &b).await;
     sync(&b).await;
     let history_clock = std::time::Instant::now();
     for index in 0..history {
-        snap::ok(a.session.seal()).await;
+        snap::ok(a.database.seal()).await;
         if index == 0 {
-            snap::ok(a.session.compact(0)).await;
+            snap::ok(a.database.compact(0)).await;
         }
     }
     if history > 1 {
-        snap::ok(a.session.compact(0)).await;
+        snap::ok(a.database.compact(0)).await;
     }
     let history_time = history_clock.elapsed();
     eprintln!("STAGE rows={large} history={history_time:?}");
@@ -424,19 +445,19 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     } else {
         seed.clone()
     };
-    let a = reopen(open(&a_dir, &seed, None))?;
+    let a = reopen(&a_dir, &seed, None).await?;
     let seeded = clock.elapsed();
     eprintln!("STAGE rows={large} seed_open={seeded:?}");
     a.close().await;
     let between = size(&a_dir)?;
     if multi_step {
         let tagged_schema = TAGGED.replace("100000", &large.to_string());
-        let a = reopen(open(&a_dir, &tagged_schema, None))?;
+        let a = reopen(&a_dir, &tagged_schema, None).await?;
         assert_eq!(generation(&a).await["current"]["schema"], 3);
         a.close().await;
     }
     let clock = std::time::Instant::now();
-    let a = reopen(open(&a_dir, &fill, network("a")))?;
+    let a = reopen(&a_dir, &fill, network("a")).await?;
     let filled = clock.elapsed();
     let open_stage = if multi_step {
         "fill_open"
@@ -486,10 +507,11 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let network_bytes = hub.written();
     let publication_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
-    let c = Device::new(Database::join(
-        open(&c_dir, &fill, network("publication-peer")),
-        &a.invite().await,
-    )?)?;
+    let c = Device::new(
+        open(&c_dir, &fill, network("publication-peer"))
+            .join(&a.invite().await)
+            .await?,
+    )?;
     sync(&c).await;
     let published = clock.elapsed();
     eprintln!("STAGE rows={large} publication={published:?}");
@@ -508,7 +530,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     );
     assert_eq!(generation(&a).await["migration"], Value::Null);
     if history > 0 {
-        let inspection = snap::ok(a.session.inspect_tips()).await;
+        let inspection = snap::ok(a.database.inspect_tips()).await;
         let seals = inspection["seals"].as_array().ok_or("missing seals")?;
         assert!(seals.len() >= history + 2, "only {} seals", seals.len());
         assert!(
@@ -562,7 +584,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     let network_bytes = hub.written();
     let member_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
-    let b = reopen(open(&b_dir, &fill, network("b")))?;
+    let b = reopen(&b_dir, &fill, network("b")).await?;
     let member_open = clock.elapsed();
     eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
@@ -639,7 +661,7 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
             .ok_or("columns")?
             .push(json!({"name":"later", "type":"text"}));
         let later = later.to_string();
-        let a = reopen(open(&a_dir, &later, None))?;
+        let a = reopen(&a_dir, &later, None).await?;
         assert_eq!(
             generation(&a).await["migration"],
             Value::Null,
@@ -656,16 +678,17 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
-    let b = Device::new(Database::join(
-        open(&b_dir, LISTS, network("b")),
-        &a.invite().await,
-    )?)?;
+    let a = Device::new(open(&a_dir, LISTS, network("a")).create().await?)?;
+    let b = Device::new(
+        open(&b_dir, LISTS, network("b"))
+            .join(&a.invite().await)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     let id = list(&a, "Weekly").await?;
     let node = b.node().await;
     snap::ok(
-        a.session.share_partition(
+        a.database.share_partition(
             rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
                 values: vec![snap::row_id(&(id))],
@@ -680,10 +703,10 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     .await;
     sync(&b).await;
     a.close().await;
-    let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
+    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
     b.close().await;
     let member_on_the_first_version = LISTS;
-    let b = reopen(open(&b_dir, member_on_the_first_version, network("b")))?;
+    let b = reopen(&b_dir, member_on_the_first_version, network("b")).await?;
     introduce(&a, &b).await;
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -738,20 +761,25 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
         provider: rocky_sdk::FileIdentityProvider::open(root.path().join("identity"))?,
         attempts: Default::default(),
     });
-    let options = |schema| Open {
-        identity: Some(identity.clone() as Arc<dyn rocky_sdk::IdentityProvider>),
-        ..open(&directory, schema, None)
+    let options = |schema| {
+        crate::common::configuration(
+            &directory,
+            crate::support::snapshot::schema(schema),
+            None,
+            Some(identity.clone() as Arc<dyn rocky_sdk::IdentityProvider>),
+            None,
+        )
     };
-    let a = Device::new(Database::create(options(common::SCHEMA), None)?)?;
+    let a = Device::new(options(common::SCHEMA).create().await?)?;
     a.add(1, "once").await;
     a.close().await;
-    let a = Device::new(Database::open(options(POSITIONED))?)?;
+    let a = Device::new(options(POSITIONED).open().await?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
         json!([[snap::cell(text("once")), snap::cell(text("once"))]])
     );
     a.close().await;
-    let a = Device::new(Database::open(options(POSITIONED))?)?;
+    let a = Device::new(options(POSITIONED).open().await?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
         json!([[snap::cell(text("once")), snap::cell(text("once"))]])
@@ -767,15 +795,16 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let source = root.path().join("source");
-    let a = Device::create(&source, network("a"))?;
+    let a = Device::create(&source, network("a")).await?;
     a.add(1, "inherited").await;
     a.close().await;
-    let a = reopen(open(&source, POSITIONED, network("a")))?;
+    let a = reopen(&source, POSITIONED, network("a")).await?;
     let invitation = a.invite().await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("member"), POSITIONED, network("b")),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("member"), POSITIONED, network("b"))
+            .join(&invitation)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     for _ in 0..4 {
         b.sync().await.map_err(|e| e.to_string())?;
@@ -797,7 +826,7 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
 #[tokio::test(flavor = "multi_thread")]
 async fn a_migration_open_drives_maintenance_before_the_first_request() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
-    let a = Device::create(root.path(), None)?;
+    let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
     let finalized = || -> Result<i64, Failure> {
@@ -812,7 +841,7 @@ async fn a_migration_open_drives_maintenance_before_the_first_request() -> Resul
         )
     };
     let before = finalized()?;
-    let database = Database::open(open(root.path(), POSITIONED, None))?;
+    let database = open(root.path(), POSITIONED, None).open().await?;
     assert!(
         finalized()? > before,
         "open left its migration seal for a later request"
@@ -831,28 +860,25 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let source = root.path().join("source");
-    let a = Device::create(&source, None)?;
+    let a = Device::create(&source, None).await?;
     a.close().await;
-    let a = reopen(open(&source, &SEEDED.replace("100000", "8"), None))?;
+    let a = reopen(&source, &SEEDED.replace("100000", "8"), None).await?;
     a.close().await;
-    let a = reopen(open(&source, &TAGGED.replace("100000", "8"), None))?;
-    snap::ok(a.session.compact(0)).await;
+    let a = reopen(&source, &TAGGED.replace("100000", "8"), None).await?;
+    snap::ok(a.database.compact(0)).await;
     a.close().await;
     let hub = Arc::new(Hub::default());
     let schema = FILLED.replace("100000", "8");
-    let a = reopen(open(
-        &source,
-        &schema,
-        Some(Network::Owned(hub.connector("a"))),
-    ))?;
-    let c = Device::new(Database::join(
+    let a = reopen(&source, &schema, Some(Network::Owned(hub.connector("a")))).await?;
+    let c = Device::new(
         open(
             &root.path().join("member"),
             &schema,
             Some(Network::Owned(hub.connector("c"))),
-        ),
-        &a.invite().await,
-    )?)?;
+        )
+        .join(&a.invite().await)
+        .await?,
+    )?;
     c.sync().await.map_err(|e| e.to_string())?;
     assert_eq!(
         rows(&c, FILLED_COUNT).await,
@@ -875,12 +901,14 @@ const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format"
 async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holding_it()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
-    let a = Device::new(Database::create(open(root.path(), LISTED, None), None)?)?
+    let a = Device::new(open(root.path(), LISTED, None).create().await?)?
         .with_identity(common::external_identity(root.path()));
     a.add(1, "apples").await;
     a.close().await;
 
-    let failed = Database::open(open(root.path(), UNLISTED_FAILING, None))
+    let failed = open(root.path(), UNLISTED_FAILING, None)
+        .open()
+        .await
         .err()
         .ok_or("a failing migration opened")?;
     assert!(
@@ -889,7 +917,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
             .contains("migration to version 2 failed at statement 1"),
         "withdrawing the stage returns to the schema whose reference its rows satisfy: {failed}"
     );
-    let a = reopen(open(root.path(), LISTED, None))?;
+    let a = reopen(root.path(), LISTED, None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -906,11 +934,12 @@ const UNTITLED_FAILING: &str = r#"{"application":"shopping","version":2,"format"
 async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_schema()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
-    let a = Device::create(root.path(), None)?;
+    let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
 
     let failed = common::confirmed(open(root.path(), UNTITLED_FAILING, None))
+        .await
         .err()
         .ok_or("a failing migration opened")?;
     assert!(
@@ -919,7 +948,7 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
             .contains("migration to version 2 failed at statement 1"),
         "the withdrawal restores the dropped field from history instead of refusing: {failed}"
     );
-    let a = reopen(open(root.path(), common::SCHEMA, None))?;
+    let a = reopen(root.path(), common::SCHEMA, None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");

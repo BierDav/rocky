@@ -2,7 +2,6 @@ use crate::common;
 
 use common::{World, titles};
 use rocky_sdk::{DropReason, Failure};
-use std::sync::Arc;
 use todo_app::Role;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -71,7 +70,7 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
     laptop.remove_device(&watch_node).await?;
     world
         .devices
-        .retain(|device| !Arc::ptr_eq(device.database(), watch.database()));
+        .retain(|device| device.database() != watch.database());
     watch.database().close().await?;
     world.sync().await?;
     for device in [&laptop, &phone, &tablet] {

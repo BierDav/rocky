@@ -1,6 +1,6 @@
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
-    Database, DropReason, Network, Open, SqlValue, Timestamp, TransactionOutcome, TransactionToken,
+    Database, DropReason, Network, SqlValue, Timestamp, TransactionOutcome, TransactionToken,
     params, transport::memory::Hub,
 };
 use serde_json::json;
@@ -26,14 +26,14 @@ const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":7,
     "assertions":[{"name":"bonus_fits",
                    "select_sql":"SELECT key FROM balances WHERE amount + bonus < amount"}]}"#;
 
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
-    Open {
-        identity: None,
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        None,
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 
 async fn write(
@@ -90,10 +90,7 @@ async fn refused(database: &Database, sql: &str, params: Vec<SqlValue>) -> Strin
 async fn overflow_fails_the_author_commit_instead_of_becoming_real() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     create(&a.database, "low", i64::MIN + 1).await?;
     create(&a.database, "high", i64::MAX - 1).await?;
     let before = balances(&a.database).await?;
@@ -144,15 +141,13 @@ async fn overflow_fails_the_author_commit_instead_of_becoming_real() -> Result<(
 async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(Database::join(
-        open(&root.path().join("b"), &hub, "b"),
-        &invitation,
-    )?)?;
+    let b = Device::new(
+        open(&root.path().join("b"), &hub, "b")
+            .join(&invitation)
+            .await?,
+    )?;
     b.sync().await.map_err(|error| error.to_string())?;
     introduce(&a, &b).await;
     let sync = || async {
@@ -234,10 +229,7 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
 async fn uuids_timestamps_json_and_extreme_integers_round_trip() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let a = Device::new(Database::create(
-        open(&root.path().join("a"), &hub, "a"),
-        None,
-    )?)?;
+    let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let uuid: [u8; 16] = *b"\x67\xe5\x50\x44\x10\xb1\x42\x6f\x92\x47\xbb\x68\x0e\x5f\xe0\xc8";
     let at = Timestamp::from_unix_micros(-1_234_567);
     let doc = json!({"b": [1, 2.5, null], "a": {"z": "x", "y": true}});

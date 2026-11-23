@@ -1,18 +1,18 @@
 use crate::common;
 use crate::support::snapshot as snap;
-use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"format":7,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}],"roles":[{"name":"reader","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#;
-fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
+fn open(directory: &Path, hub: &Arc<Hub>) -> rocky_sdk::Configuration {
     let name = directory.file_name().unwrap().to_str().unwrap();
-    Open {
-        identity: common::prepared_identity(directory),
+    crate::common::configuration(
         directory,
-        schema: crate::support::snapshot::schema(SCHEMA),
-        secrets: None,
-        network: Some(Network::Owned(hub.connector(name))),
-    }
+        crate::support::snapshot::schema(SCHEMA),
+        None,
+        common::prepared_identity(directory),
+        Some(Network::Owned(hub.connector(name))),
+    )
 }
 
 fn values(name: &str) -> Vec<rocky_sdk::SqlValue> {
@@ -23,10 +23,9 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("writer");
     let hub = Arc::new(Hub::default());
-    let db = Database::create(open(&path, &hub), None).unwrap().database;
-    let session = db.session();
+    let db = open(&path, &hub).create().await.unwrap().database;
     for name in ["A", "B"] {
-        snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
+        snap::ok(db.create_partition(rocky_sdk::PartitionTarget::Table {
             table: "items".to_owned(),
             values: (values(name)).clone(),
         }))
@@ -51,39 +50,24 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         tx.commit().await.unwrap();
     }
     assert_ne!(ids[0], ids[1], "one creation log per author and table");
-    let driver = db
-        .connect(rocky_sdk::ConnectionOptions {
-            read_only: false,
-            durability: rocky_sdk::Durability::Buffered,
-            transaction_timeout: None,
-        })
-        .await
-        .unwrap();
-    driver
-        .execute(driver.statement(), "BEGIN".into(), vec![])
-        .await
-        .unwrap();
-    let a_id = driver
-        .execute(
-            driver.statement(),
-            "SELECT rocky_next_id('items', ?)".into(),
-            vec![rocky_sdk::SqlValue::Text("A".into())],
+    let mut tx = db.transaction().await.unwrap();
+    let mut next_id = async |list: &str| {
+        tx.query(
+            "SELECT rocky_next_id('items', ?)",
+            vec![rocky_sdk::SqlValue::Text(list.into())],
         )
         .await
-        .unwrap();
-    let b_id = driver
-        .execute(
-            driver.statement(),
-            "SELECT rocky_next_id('items', ?)".into(),
-            vec![rocky_sdk::SqlValue::Text("B".into())],
-        )
+        .unwrap()
+        .collect()
         .await
-        .unwrap();
-    assert_ne!(a_id.rows, b_id.rows);
-    driver
-        .execute(driver.statement(), "ROLLBACK".into(), vec![])
-        .await
-        .unwrap();
+        .unwrap()[0]
+            .get_at::<rocky_sdk::SqlValue>(0)
+            .unwrap()
+    };
+    let a_id = next_id("A").await;
+    let b_id = next_id("B").await;
+    assert_ne!(a_id, b_id);
+    tx.rollback().await.unwrap();
 
     let data = snap::ok(snap::read(
         &db,
@@ -93,18 +77,18 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .await;
     assert_eq!(data["rows"][0][0]["value"], "30");
     let reader_path = root.path().join("reader");
-    let provisioned = session
+    let provisioned = db
         .provision(
             rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("reader")),
             None,
         )
         .await
         .unwrap();
-    let reader = Database::join(open(&reader_path, &hub), &provisioned.uri)
-        .unwrap()
-        .database;
-    let reader_session = reader.session();
-    snap::ok(session.grant_partition(
+    let reader = open(&reader_path, &hub)
+        .join(&provisioned.uri)
+        .await
+        .unwrap();
+    snap::ok(db.grant_partition(
         provisioned.identity,
         rocky_sdk::PartitionTarget::Table {
             table: "items".to_owned(),
@@ -112,22 +96,18 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         },
     ))
     .await;
-    let contact = snap::ok(session.contact_info()).await;
+    let contact = snap::ok(db.contact()).await;
     snap::ok(async {
-        let value = reader_session
-            .add_peer(&(snap::text(&(contact["uri"]))))
-            .await?;
+        let value = reader.add_peer(&(snap::text(&(contact["uri"])))).await?;
         Ok(json!({"node":value}))
     })
     .await;
-    snap::ok(reader_session.sync_once()).await;
+    snap::ok(reader.sync_now()).await;
     assert_eq!(
-        snap::ok(
-            reader_session.partition_status(rocky_sdk::PartitionTarget::Table {
-                table: "items".to_owned(),
-                values: (values("A")).clone()
-            })
-        )
+        snap::ok(reader.partition_status(rocky_sdk::PartitionTarget::Table {
+            table: "items".to_owned(),
+            values: (values("A")).clone()
+        }))
         .await["epochs"]
             .as_array()
             .unwrap()
@@ -136,7 +116,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     );
     assert_ne!(
         snap::reply(
-            reader_session.register_partition(
+            reader.register_partition(
                 rocky_sdk::PartitionTarget::Table {
                     table: "items".to_owned(),
                     values: (values("B")).clone()
@@ -153,7 +133,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     );
     assert!(
         !snap::ok(async {
-            let value = reader_session.partition_complete("items").await?;
+            let value = reader.partition_complete("items").await?;
             Ok(json!({"complete":value}))
         })
         .await["complete"]
@@ -161,20 +141,20 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
             .unwrap()
     );
     snap::ok(async {
-        reader_session.renew().await?;
-        reader_session.info().await
+        reader.renew().await?;
+        reader.info().await
     })
     .await;
     reader.close().await.unwrap();
-    Database::open(open(&reader_path, &hub))
+    open(&reader_path, &hub)
+        .open()
+        .await
         .unwrap()
-        .database
         .close()
         .await
         .unwrap();
     db.close().await.unwrap();
-    let db = Database::open(open(&path, &hub)).unwrap().database;
-    let session = db.session();
+    let db = open(&path, &hub).open().await.unwrap();
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();
     let first = ids[0];
@@ -183,14 +163,13 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         (first.writer(), first.sequence() + 2)
     );
     tx.rollback().await.unwrap();
-    snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
+    snap::ok(db.create_partition(rocky_sdk::PartitionTarget::Table {
         table: "items".to_owned(),
         values: (values("C")).clone(),
     }))
     .await;
     let revoked =
-        snap::ok(session.revoke_identity(snap::public_key(&(provisioned.identity.to_string()))))
-            .await;
+        snap::ok(db.revoke_identity(snap::public_key(&(provisioned.identity.to_string())))).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();
@@ -202,9 +181,10 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .unwrap();
     tx.commit().await.unwrap();
     db.close().await.unwrap();
-    Database::open(open(&path, &hub))
+    open(&path, &hub)
+        .open()
+        .await
         .unwrap()
-        .database
         .close()
         .await
         .unwrap();
@@ -214,24 +194,24 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
 async fn own_id_partitions_continue_the_table_log() {
     let root = tempfile::tempdir().unwrap();
     let schema = r#"{"format":7,"application":"ownid","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
-    let options = || Open {
-        identity: None,
-        directory: root.path(),
-        schema: crate::support::snapshot::schema(schema),
-        secrets: None,
-        network: None,
+    let options = || {
+        crate::common::configuration(
+            root.path(),
+            crate::support::snapshot::schema(schema),
+            None,
+            None,
+            None,
+        )
     };
-    let mut db = Database::create(options(), None).unwrap().database;
+    let mut db = options().create().await.unwrap().database;
     let _scope: Value = serde_json::to_value(db.scope()).unwrap();
-    let _session = db.session();
     let mut previous: Option<rocky_sdk::RowIdentity> = None;
     for index in 0..3 {
         if index == 2 {
             db.close().await.unwrap();
-            db = Database::open(options()).unwrap().database;
+            db = options().open().await.unwrap();
         }
-        let session = db.session();
-        let prepared = snap::ok(session.next_partition("lists")).await;
+        let prepared = snap::ok(db.next_partition("lists")).await;
         let mut tx = db.transaction().await.unwrap();
         let id = tx.next_id("lists", Vec::new()).await.unwrap();
         assert_eq!(id.to_string(), prepared["id"].as_str().unwrap());

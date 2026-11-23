@@ -42,38 +42,48 @@ impl<A: RowApplication> EncryptedReplica<A> {
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
     pub async fn wanted_seals(&self, domain: Scope) -> Result<Vec<Commitment>, Error> {
+        Ok(self
+            .wanted_seals_of_every_domain()
+            .await?
+            .into_iter()
+            .filter(|(wanted, _)| *wanted == domain)
+            .map(|(_, seal)| seal)
+            .collect())
+    }
+    pub async fn wanted_seals_of_every_domain(&self) -> Result<Vec<(Scope, Commitment)>, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut wanted = Vec::new();
         for record in collect_rows(
             inner
                 .conn
                 .query(
-                    "SELECT seal FROM secure_wanted_seals WHERE domain=? ORDER BY rowid",
-                    [encode(&domain)?],
+                    "SELECT domain,seal FROM secure_wanted_seals ORDER BY rowid",
+                    (),
                 )
                 .await?,
         )
         .await?
         {
-            let [SqlValue::Blob(seal)] = record.as_slice() else {
+            let [SqlValue::Blob(domain), SqlValue::Blob(seal)] = record.as_slice() else {
                 return Err(Error::Corrupt("wanted seal".into()));
             };
-            wanted.push(row_of(seal)?);
+            wanted.push((decode::<Scope>(domain)?, row_of(seal)?));
         }
         let mut held = Vec::new();
-        for seal in &wanted {
-            if inner.graph_for(domain).is_err() || inner.held_seal(domain, *seal).await?.is_some() {
-                held.push(*seal);
+        for (domain, seal) in &wanted {
+            if inner.graph_for(*domain).is_err() || inner.held_seal(*domain, *seal).await?.is_some()
+            {
+                held.push((*domain, *seal));
             }
         }
         if !held.is_empty() {
             transaction!(inner, |inner| {
-                for seal in &held {
+                for (domain, seal) in &held {
                     inner
                         .conn
                         .execute(
                             "DELETE FROM secure_wanted_seals WHERE domain=? AND seal=?",
-                            [encode(&domain)?, seal.to_vec()],
+                            [encode(domain)?, seal.to_vec()],
                         )
                         .await?;
                 }
@@ -81,7 +91,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             })?;
             drop(flush_guard(inner, &self.inner).await?);
         }
-        wanted.retain(|seal| !held.contains(seal));
+        wanted.retain(|wanted| !held.contains(wanted));
         Ok(wanted)
     }
     pub async fn seal_pull_scopes(

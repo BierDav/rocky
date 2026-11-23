@@ -1,4 +1,5 @@
 use super::*;
+use rocky_core::Scope;
 use rows::{CatchUp, ScopeSync};
 
 pub(super) const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
@@ -111,22 +112,12 @@ impl NativeSession {
             }
         }
     }
-    pub async fn pull_seal<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        seal: Commitment,
-    ) -> Result<SealPull, Error> {
-        self.pull_seal_scopes(replica, seal, &[]).await
-    }
     async fn pull_seal_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
-        seal: Commitment,
+        (domain, seal): (Scope, Commitment),
         selected: &[ResourceScope],
     ) -> Result<SealPull, Error> {
-        let Some((domain, _)) = replica.followed_bookmark().await else {
-            return Err(denied("follow a bookmark before pulling a seal"));
-        };
         let scopes: Vec<_> = replica
             .seal_pull_scopes(domain, seal)
             .await?
@@ -198,15 +189,24 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
     ) -> Result<bool, Error> {
-        let Some((domain, _)) = replica.followed_bookmark().await else {
-            return Ok(true);
-        };
-        for seal in replica.wanted_seals(domain).await? {
-            if self.pull_seal_scopes(replica, seal, scopes).await? == SealPull::Exhausted {
+        let wanted = replica.wanted_seals_of_every_domain().await?;
+        for (domain, seal) in &wanted {
+            if self
+                .pull_seal_scopes(replica, (*domain, *seal), scopes)
+                .await?
+                == SealPull::Exhausted
+            {
                 return Ok(false);
             }
         }
-        replica.finish_seal_rebootstrap(domain).await?;
+        let domains: std::collections::BTreeSet<Scope> = wanted
+            .into_iter()
+            .map(|(domain, _)| domain)
+            .chain(replica.followed_bookmark().await.map(|(domain, _)| domain))
+            .collect();
+        for domain in domains {
+            replica.finish_seal_rebootstrap(domain).await?;
+        }
         Ok(true)
     }
     pub async fn rebootstrap<A: RowApplication>(

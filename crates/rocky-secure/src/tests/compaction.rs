@@ -992,6 +992,7 @@ mod readiness;
 mod receipts;
 mod scope_local;
 mod staged_switches;
+mod wanted;
 
 mod restoration;
 

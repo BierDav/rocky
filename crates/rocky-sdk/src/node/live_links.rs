@@ -833,10 +833,6 @@ impl Node {
                 .run_link(&service, opened, close_rx, changed_tx, authority)
                 .await;
             node.link_ended(peer);
-            let reconciled_both_stores = result.is_ok();
-            if reconciled_both_stores && let Err(error) = node.witnessed_by(peer).await {
-                tracing::warn!(%error, "the witnessing owner device could not be recorded");
-            }
             let removed = {
                 let mut entries = service
                     .live

@@ -200,21 +200,8 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
     Ok(())
 }
 
-fn personal(name: &str) -> (rocky_sdk::VerifiedPasskeyPrf, rocky_sdk::PersonalNamespace) {
-    let namespace = rocky_sdk::PersonalNamespace::new(format!("{name}.example"), "account root")
-        .expect("namespace");
-    let input = namespace.prf_input().expect("input");
-    (
-        rocky_sdk::VerifiedPasskeyPrf::new(
-            &input,
-            rocky_core::commitment("fixture", name.as_bytes()),
-        ),
-        namespace,
-    )
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_independently()
+async fn two_databases_share_an_endpoint_and_a_coordinator_and_detach_independently()
 -> Result<(), Failure> {
     use rocky_sdk::{Configuration, GrantProfile, Schema, counters};
     let root = tempfile::tempdir()?;
@@ -235,14 +222,12 @@ async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_i
     let mut owners = Vec::new();
     let mut custodians = Vec::new();
     for name in ["a", "b"] {
-        let (prf, namespace) = personal(name);
         let owner = Device::new(
             Configuration::new(root.path().join(name), &schema)?
                 .network(Network::Borrowed(left_harness.transport()))
                 .coordination(shared_coordinator.clone())
-                .create_personal(prf, namespace)
-                .await?
-                .opened,
+                .create()
+                .await?,
         )?;
         let invitation = owner
             .session

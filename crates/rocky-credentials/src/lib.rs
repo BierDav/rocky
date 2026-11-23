@@ -41,10 +41,8 @@ mod migration;
 pub use membership::{MAX_MEMBERSHIP_NODES, MembershipLink, MembershipSet};
 pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
-mod passkey;
 mod peer;
 mod peer_rpc;
-mod personal;
 mod phrase_key;
 mod possession;
 mod reset;
@@ -68,9 +66,7 @@ pub use coordination::{
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
-pub use escrow::{
-    CarriedEscrow, MAX_ESCROW_PAYLOAD, MetadataEscrow, RootEscrow, VouchedEscrow, escrow_tag,
-};
+pub use escrow::{CarriedEscrow, MAX_ESCROW_PAYLOAD, RootEscrow, VouchedEscrow, escrow_tag};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use finality::{
@@ -88,22 +84,12 @@ pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_c
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::{PartitionContext, PartitionGrant};
-pub use passkey::{
-    DiscoveryCapability, PersonalAccount, PersonalLocator, PrfInput, PrfUnsupported,
-    VerifiedPasskeyPrf,
-};
 pub use peer::PeerId;
 pub use peer_rpc::{
     EpochRequest, IdentityEnrollment, IdentityEnrollmentRequest, IdentityReply,
-    InvitedEnrollmentRequest, LinkEnrollment, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission,
-    PeerError, PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame, PeerResolutionProof,
+    InvitedEnrollmentRequest, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission, PeerError,
+    PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame, PeerResolutionProof,
     PeerResolutionRequest, PeerTrust, StagedCloseStatus, UnlinkReply, VERSION as PEER_RPC_VERSION,
-};
-pub use personal::{
-    DatabaseKind, MAX_PERSONAL_DEVICES, PersonalAct, PersonalAnswer, PersonalAudience,
-    PersonalAuthorization, PersonalBinding, PersonalChallenge, PersonalContext,
-    PersonalCustodyRenewal, PersonalError, PersonalHello, PersonalLink, PersonalNamespace,
-    PersonalPublication,
 };
 pub use possession::NodePossession;
 pub use reset::{
@@ -140,7 +126,6 @@ pub enum Error {
     Denied(String),
     Protocol(rocky_core::ProtocolError),
     Provider(ProviderError),
-    Personal(PersonalError),
     UnsupportedFormat {
         record: &'static str,
         format: u32,
@@ -153,7 +138,6 @@ impl std::fmt::Display for Error {
             Self::Denied(message) => f.write_str(message),
             Self::Protocol(error) => write!(f, "{error}"),
             Self::Provider(error) => write!(f, "{error}"),
-            Self::Personal(error) => write!(f, "{error}"),
             Self::UnsupportedFormat {
                 record,
                 format,

@@ -179,10 +179,7 @@ impl Plan {
                     .map(rocky_credentials::VouchedEscrow::carried)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(credential)?;
-                messages.push(Message::Escrow(EscrowMessage::Carry {
-                    records,
-                    metadata: None,
-                }));
+                messages.push(Message::Escrow(EscrowMessage::Carry { records }));
             }
             items += page.frames.len() + page.voids.len();
             messages.push(Message::Publication(PublicationMessage::Page {
@@ -466,7 +463,7 @@ impl NativeSession {
                     }
                     self.learn_chains(ChainMessage::Carry { chains });
                 }
-                Message::Escrow(EscrowMessage::Carry { records, metadata }) => {
+                Message::Escrow(EscrowMessage::Carry { records }) => {
                     if records.is_empty() {
                         return Err(denied("publication empty escrow"));
                     }
@@ -476,7 +473,7 @@ impl NativeSession {
                             return Err(denied("publication duplicate escrow"));
                         }
                     }
-                    self.learn_escrow(EscrowMessage::Carry { records, metadata })?;
+                    self.learn_escrow(EscrowMessage::Carry { records })?;
                 }
                 Message::Publication(PublicationMessage::Page { frames, voids }) => {
                     let mut scopes = BTreeSet::new();

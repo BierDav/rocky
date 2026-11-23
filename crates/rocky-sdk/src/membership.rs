@@ -225,8 +225,7 @@ pub(crate) fn observe_trusted(
         let node = certificate.capability.subject;
         if !trusted.contains(&identity)
             || known.contests_node(node)
-            || (!membership.accepts(certificate.id()?)
-                && rocky_credentials::PersonalLink::of(certificate)?.is_none())
+            || !membership.accepts(certificate.id()?)
         {
             continue;
         }

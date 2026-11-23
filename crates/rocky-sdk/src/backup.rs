@@ -37,7 +37,7 @@ pub(crate) enum Recovery {
     Keyed,
 }
 
-pub(crate) use archive::{Unsupported, inspect, open, place, write};
+pub(crate) use archive::{open, place, write};
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};
@@ -248,41 +248,6 @@ mod archive {
         )?;
         Ok(identity)
     }
-    pub(crate) fn inspect(archive: &Path) -> Result<(Inventory, Settings, String), Failure> {
-        let mut input = reader(archive)?;
-        let (inventory, header) = header(&mut input)?;
-        let mut identity = Vec::new();
-        for entry in &inventory.files {
-            let mut hash = Sha256::new();
-            let mut taken = (&mut input).take(entry.length);
-            let mut buffer = vec![0; 64 * 1024];
-            let mut length = 0u64;
-            loop {
-                let read = taken.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                hash.update(&buffer[..read]);
-                if entry.name == IDENTITY {
-                    if identity.len() + read > MAX_HEADER * 64 {
-                        return Err("backup identity quota".into());
-                    }
-                    identity.extend_from_slice(&buffer[..read]);
-                }
-                length += read as u64;
-            }
-            if (length, HEXLOWER.encode(&hash.finalize())) != (entry.length, entry.sha256.clone()) {
-                return Err(format!("{} differs from the backup inventory", entry.name).into());
-            }
-        }
-        if input.read(&mut [0])? != 0 {
-            return Err("the backup archive has trailing bytes".into());
-        }
-        let identity = self::identity(&inventory, &identity)?;
-        let id = HEXLOWER.encode(&rocky_core::commitment("rocky.backup.id.v1", &header));
-        Ok((inventory, identity, id))
-    }
-
     pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
         let mut input = reader(archive)?;
         let (inventory, header) = header(&mut input)?;

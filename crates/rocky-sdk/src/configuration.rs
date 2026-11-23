@@ -1,8 +1,6 @@
 use crate::{Database, Failure, IdentityProvider, Network, Open, Opened, Schema, SecretStore};
 use std::{path::PathBuf, sync::Arc};
 
-const DEFAULT_SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
-
 #[derive(Clone)]
 pub struct Configuration {
     directory: PathBuf,
@@ -11,7 +9,6 @@ pub struct Configuration {
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
     coordination: Option<crate::CoordinatorSlot>,
-    sign_in_wait: std::time::Duration,
 }
 impl Configuration {
     pub const BOOKMARK: &'static str = "main";
@@ -24,7 +21,6 @@ impl Configuration {
             identity: None,
             network: None,
             coordination: None,
-            sign_in_wait: DEFAULT_SIGN_IN_WAIT,
         })
     }
     #[must_use]
@@ -40,11 +36,6 @@ impl Configuration {
     #[must_use]
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
-        self
-    }
-    #[must_use]
-    pub fn sign_in_wait(mut self, wait: std::time::Duration) -> Self {
-        self.sign_in_wait = wait;
         self
     }
     #[must_use]
@@ -81,120 +72,7 @@ impl Configuration {
         &self,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Database::launch_create(self.options(), None, root, (Self::BOOKMARK, None)).await
-    }
-    pub async fn create_personal(
-        &self,
-        prf: crate::VerifiedPasskeyPrf,
-        namespace: crate::PersonalNamespace,
-    ) -> Result<crate::PersonalOpened, crate::PersonalSignInError> {
-        use crate::PersonalSignInError as Refused;
-        let account = rocky_credentials::PersonalAccount::derive(prf, &namespace)
-            .map_err(|_| Refused::PrfUnsupported)?;
-        if self.identity.is_some() {
-            return Err(Refused::Failed(crate::enrollment::personal_refusal(
-                rocky_credentials::PersonalError::WrongOwner,
-            )));
-        }
-        crate::personal::check_empty(&self.directory, &account)?;
-        let (root, discovery) = account.into_parts();
-        let coverage = Arc::new(std::sync::Mutex::new(None));
-        let personal = crate::personal::Create {
-            namespace,
-            discovery: std::sync::Mutex::new(Some(discovery)),
-            coverage: coverage.clone(),
-        };
-        let opened = Database::launch_create(
-            self.options(),
-            None,
-            Arc::new(root),
-            (Self::BOOKMARK, Some(Box::new(personal))),
-        )
-        .await
-        .map_err(Refused::from_failure)?;
-        let restored = coverage
-            .lock()
-            .map_err(|_| Refused::Failed("coverage poisoned".into()))?
-            .take()
-            .unwrap_or_default();
-        Ok(crate::PersonalOpened {
-            opened,
-            restored,
-            freshness: crate::Freshness::LocallyAnchored,
-        })
-    }
-    pub async fn sign_in(
-        &self,
-        prf: crate::VerifiedPasskeyPrf,
-        namespace: crate::PersonalNamespace,
-        source: crate::SignInSource,
-    ) -> Result<crate::PersonalOpened, crate::PersonalSignInError> {
-        use crate::PersonalSignInError as Refused;
-        let account = rocky_credentials::PersonalAccount::derive(prf, &namespace)
-            .map_err(|_| Refused::PrfUnsupported)?;
-        if self.identity.is_some() {
-            return Err(Refused::Failed(crate::enrollment::personal_refusal(
-                rocky_credentials::PersonalError::WrongOwner,
-            )));
-        }
-        let secrets = self.secrets.clone().unwrap_or_else(|| {
-            Arc::new(crate::secrets::FileSecretStore::new(
-                self.directory.join("secrets"),
-            ))
-        });
-        if let Some(saved_but_never_handed_out) =
-            crate::personal::prepare_sign_in(&self.directory, &account, &secrets)?
-        {
-            drop(account);
-            let opened = Database::launch_open(self.options())
-                .await
-                .map_err(Refused::from_failure)?;
-            return Ok(crate::PersonalOpened {
-                opened,
-                restored: saved_but_never_handed_out.restored,
-                freshness: saved_but_never_handed_out.freshness,
-            });
-        }
-        match &source {
-            crate::SignInSource::Discover if self.network.is_none() => {
-                return Err(Refused::SourceUnavailable);
-            }
-            crate::SignInSource::Backup(backup) => {
-                let locator = account.locator();
-                let database = rocky_credentials::DatabaseContext {
-                    publisher: locator.publisher,
-                    scope: locator.scope(&self.schema.application),
-                };
-                backup.check(&account, &database)?;
-            }
-            crate::SignInSource::Discover => {}
-        }
-        let before = rocky_platform::fs::exists(&self.directory)
-            .then(|| rocky_platform::fs::read_dir(&self.directory).unwrap_or_default());
-        let outcome = Arc::new(std::sync::Mutex::new(None));
-        let sign_in = crate::personal::SignIn {
-            account: std::sync::Mutex::new(Some(account)),
-            source: std::sync::Mutex::new(Some(source)),
-            wait: self.sign_in_wait,
-            outcome: outcome.clone(),
-        };
-        let opened = match Database::launch_sign_in(self.options(), sign_in).await {
-            Ok(opened) => opened,
-            Err(error) => {
-                crate::personal::tidy(&self.directory, before.as_deref());
-                return Err(Refused::from_failure(error));
-            }
-        };
-        let (restored, freshness) = outcome
-            .lock()
-            .map_err(|_| Refused::Failed("outcome poisoned".into()))?
-            .take()
-            .ok_or_else(|| Refused::Failed("the sign-in reported no outcome".into()))?;
-        Ok(crate::PersonalOpened {
-            opened,
-            restored,
-            freshness,
-        })
+        Database::launch_create(self.options(), None, root, Self::BOOKMARK).await
     }
     pub async fn recover(
         &self,
@@ -262,14 +140,6 @@ impl Configuration {
         installed
     }
     pub async fn open(&self) -> Result<Opened, Failure> {
-        let interrupted_personal_install = crate::personal::unfinished(&self.directory);
-        if interrupted_personal_install {
-            return Err(
-                "a personal install is unfinished in this directory: call the same \
-                 create_personal or sign_in again"
-                    .into(),
-            );
-        }
         Database::launch_open(self.options()).await
     }
     pub async fn link(

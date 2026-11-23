@@ -26,7 +26,6 @@ pub enum ErrorKind {
     StaleRecovery,
     GenesisMinimumMissing,
     MigrationPending,
-    Personal(rocky_credentials::PersonalError),
     Invitation(crate::InvitationRefusal),
     Service(String),
     Reset(String),
@@ -80,7 +79,6 @@ impl ErrorKind {
             Self::StaleRecovery => "stale_recovery",
             Self::GenesisMinimumMissing => "genesis_minimum_missing",
             Self::MigrationPending => "migration_pending",
-            Self::Personal(error) => error.code(),
             Self::Invitation(refusal) => refusal.code(),
             Self::Service(code) | Self::Reset(code) | Self::Other(code) => code,
         }

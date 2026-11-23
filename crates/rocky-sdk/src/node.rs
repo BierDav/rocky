@@ -15,9 +15,6 @@ mod live_links;
 mod membership;
 mod mesh;
 mod partition;
-mod personal;
-#[cfg(test)]
-pub(crate) use personal::FORGED_SCHEMA;
 mod recovery;
 mod registry;
 mod reset;
@@ -44,7 +41,7 @@ use crate::{
 use data_encoding::HEXLOWER;
 use futures_util::{StreamExt, stream};
 use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
-use rocky_credentials::{IdentityEnrollment, IdentityReply, LinkEnrollment, Profile};
+use rocky_credentials::{IdentityEnrollment, IdentityReply, Profile};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
     SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
@@ -265,7 +262,6 @@ pub(crate) struct Node {
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
-    personal_nonces: std::sync::Mutex<personal::Nonces>,
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
     coordination: Arc<health::Coordination>,
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
@@ -345,7 +341,6 @@ impl Node {
             coordination: Arc::new(health::Coordination::new(observations.clone())),
             mesh: Default::default(),
             link_requests: Default::default(),
-            personal_nonces: Default::default(),
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
@@ -513,9 +508,7 @@ impl Node {
         if self.lifecycle.lock().await.is_logged_out() {
             return Err(refused("this device logged out of the domain"));
         }
-        self.revocation_notice
-            .admit_personal(&self.settings.published())
-            .await
+        Ok(())
     }
     pub(crate) async fn sql_session(
         &self,
@@ -739,7 +732,6 @@ impl Node {
         {
             return Err(refused("device label exceeds 256 bytes"));
         }
-        self.settings.lock().await.admits(Some(&profile))?;
         let routes = self.own_routes().await;
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let bootstrap = self.enrollment_bootstrap().await?;
@@ -898,11 +890,6 @@ impl Node {
         if self.lifecycle.lock().await.is_logged_out() && !kind.allowed_after_logout() {
             return Err(refused("this device logged out of the domain"));
         }
-        if matches!(kind, RequestKind::Tips) {
-            self.revocation_notice
-                .admit_personal(&self.settings.published())
-                .await?;
-        }
         Ok(())
     }
 
@@ -935,7 +922,6 @@ impl Node {
         terms: Terms,
         delegate: bool,
     ) -> Result<crate::Supplied, Failure> {
-        self.settings.lock().await.admits(Some(&profile))?;
         let contact = match self.current() {
             Some(link) if !delegate => {
                 let settings = self.settings.lock().await.clone();
@@ -1143,12 +1129,7 @@ impl Node {
             let settings = self.settings.lock().await;
             let database = staging.join("rocky.sqlite");
             let revision = self.replica.backup_into(&database).await?;
-            let mut snapshot = settings.clone();
-            if let Some(naming) = self.replica.custody_naming_escrow().await? {
-                snapshot.naming_escrow = Some(naming);
-            }
-            drop(settings);
-            let settings = snapshot;
+            let settings = settings.clone();
             let identity = staging.join("identity.json");
             rocky_platform::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
             let staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
@@ -2208,13 +2189,6 @@ impl Node {
         {
             exchanged.work = PeerWork::Owed;
         }
-        if let Ok(Exchanged { transfer, .. }) = &result
-            && transfer.failed.is_empty()
-            && transfer.denied.is_empty()
-            && let Err(error) = self.witnessed_by(peer).await
-        {
-            tracing::warn!(%error, "the witnessing owner device could not be recorded");
-        }
         result
     }
     async fn owes_retry(&self, peer: PublicKey, transfer: &sync::Transfer) -> bool {
@@ -2453,14 +2427,6 @@ impl Node {
     }
 
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
-        if !matches!(
-            request,
-            PeerRequest::Unlink(_) | PeerRequest::Policy | PeerRequest::Resolve(_)
-        ) {
-            self.revocation_notice
-                .admit_personal(&self.settings.published())
-                .await?;
-        }
         let is_enrollment = matches!(
             request,
             PeerRequest::Renew(_)
@@ -2541,25 +2507,9 @@ impl Node {
             PeerRequest::Identity(IdentityEnrollment::Invited(request)) => Ok(PeerReply::Identity(
                 Box::pin(self.answer_invitation(request)).await?,
             )),
-            PeerRequest::Identity(IdentityEnrollment::PersonalHello(hello)) => {
-                Ok(PeerReply::Identity(IdentityReply::PersonalChallenge(
-                    Box::new(self.answer_personal_hello(hello).await?),
-                )))
-            }
-            PeerRequest::Identity(IdentityEnrollment::Personal(authorization)) => {
-                Ok(PeerReply::Identity(IdentityReply::Personal(Box::new(
-                    self.answer_personal_bootstrap(*authorization).await?,
-                ))))
-            }
-            PeerRequest::LinkEnroll(LinkEnrollment::Shared(certificate)) => {
+            PeerRequest::LinkEnroll(certificate) => {
                 Ok(PeerReply::LinkEnroll(self.accept_link(*certificate).await?))
             }
-            PeerRequest::LinkEnroll(LinkEnrollment::Personal(publication)) => Ok(
-                PeerReply::LinkEnroll(self.accept_personal(*publication).await?),
-            ),
-            PeerRequest::LinkEnroll(LinkEnrollment::PersonalCustody(renewal)) => Ok(
-                PeerReply::LinkEnroll(self.accept_custody_renewal(*renewal).await?),
-            ),
             PeerRequest::Unlink(known) => {
                 self.accept_unlink(known).await?;
                 let settings = self.settings.lock().await;
@@ -2769,9 +2719,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
         match credentials {
             rocky_credentials::Error::Provider(_) => (crate::ErrorKind::Storage, false),
-            rocky_credentials::Error::Personal(personal) => {
-                (crate::ErrorKind::Personal(personal.clone()), false)
-            }
             _ => (crate::ErrorKind::Denied, false),
         }
     } else {

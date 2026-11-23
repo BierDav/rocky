@@ -1,4 +1,4 @@
-use crate::{Error, PeerId, PersonalLink, PublicKey, SignedCapability, denied};
+use crate::{Error, PeerId, PublicKey, SignedCapability, denied};
 use rocky_core::Commitment;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,10 +7,7 @@ pub const MAX_MEMBERSHIP_NODES: usize = crate::MAX_CUT_LANES;
 pub(crate) fn node_database(
     certificate: &SignedCapability,
 ) -> Result<crate::DatabaseContext, Error> {
-    match PersonalLink::of(certificate)? {
-        Some(link) => Ok(link.database),
-        None => MembershipLink::from_certificate(certificate).map(|link| link.database),
-    }
+    MembershipLink::from_certificate(certificate).map(|link| link.database)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +53,6 @@ impl MembershipLink {
 pub struct MembershipSet {
     database: Option<crate::DatabaseContext>,
     links: BTreeMap<(PublicKey, u64), Vec<MembershipLink>>,
-    devices: BTreeMap<(PublicKey, PublicKey), BTreeSet<Commitment>>,
 }
 
 impl MembershipSet {
@@ -65,18 +61,7 @@ impl MembershipSet {
     }
 
     pub fn record(&mut self, certificate: &SignedCapability) -> Result<(), Error> {
-        match PersonalLink::of(certificate)? {
-            Some(link) => self.insert_personal(link),
-            None => self.insert(certificate).map(drop),
-        }
-    }
-    pub fn insert_personal(&mut self, link: PersonalLink) -> Result<(), Error> {
-        self.bind(link.database)?;
-        self.devices
-            .entry((link.owner, link.node))
-            .or_default()
-            .insert(link.certificate);
-        Ok(())
+        self.insert(certificate).map(drop)
     }
     fn bind(&mut self, database: crate::DatabaseContext) -> Result<(), Error> {
         if self.database.is_some_and(|held| held != database) {
@@ -84,12 +69,6 @@ impl MembershipSet {
         }
         self.database = Some(database);
         Ok(())
-    }
-    pub fn devices(&self, owner: PublicKey) -> impl Iterator<Item = PublicKey> + '_ {
-        self.devices
-            .keys()
-            .filter(move |(key, _)| *key == owner)
-            .map(|(_, node)| *node)
     }
 
     pub fn insert(&mut self, certificate: &SignedCapability) -> Result<MembershipLink, Error> {
@@ -129,10 +108,8 @@ impl MembershipSet {
     }
 
     pub fn accepts(&self, certificate: Commitment) -> bool {
-        self.devices.values().any(|ids| ids.contains(&certificate))
-            || self
-                .valid_links()
-                .any(|link| link.certificate == certificate)
+        self.valid_links()
+            .any(|link| link.certificate == certificate)
     }
 
     fn valid_links(&self) -> impl Iterator<Item = &MembershipLink> {
@@ -242,8 +219,7 @@ mod tests {
                 previous,
                 database: Some(database),
                 possession: Some(
-                    crate::NodePossession::sign(node, identity.public_key(), database, None)
-                        .unwrap(),
+                    crate::NodePossession::sign(node, identity.public_key(), database).unwrap(),
                 ),
                 ..Extended::default()
             })

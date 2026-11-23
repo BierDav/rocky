@@ -12,8 +12,6 @@ const CONTEXT: &str = "rocky.root-escrow.context.v1";
 const WRAPPING: &str = "rocky.root-escrow.key.v1";
 const TAG: &str = "rocky.root-escrow.tag.v1";
 const VOUCH: &str = "rocky.root-escrow.vouch.v1";
-const METADATA_VOUCH: &str = "rocky.metadata-escrow.vouch.v1";
-const METADATA_VERSION: u32 = 1;
 const MAX_VOUCHED_BYTES: usize = MAX_RECORD_BYTES + 64 * 1024;
 const LENGTH_HIDING_BLOCK: usize = 256;
 pub const MAX_ESCROW_PAYLOAD: usize = 16 * 1024;
@@ -243,77 +241,6 @@ impl VouchedEscrow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataEscrow {
-    body: MetadataVouch,
-    signature: Signature,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MetadataVouch {
-    version: u32,
-    database: crate::DatabaseContext,
-    descriptor: Commitment,
-    signer: PublicKey,
-    signed_at: u64,
-    chain: CredentialChain,
-    record: RootEscrow,
-}
-impl MetadataEscrow {
-    pub fn sign(
-        node: &PrivateKey,
-        chain: CredentialChain,
-        (database, descriptor): (crate::DatabaseContext, Commitment),
-        record: RootEscrow,
-        signed_at: u64,
-    ) -> Result<Self, Error> {
-        let body = MetadataVouch {
-            version: METADATA_VERSION,
-            database,
-            descriptor,
-            signer: node.public_key(),
-            signed_at,
-            chain,
-            record,
-        };
-        let signature = node.sign(&signing_bytes(METADATA_VOUCH, &body)?);
-        Ok(Self { body, signature })
-    }
-    pub fn verify(
-        &self,
-        database: crate::DatabaseContext,
-        descriptor: Commitment,
-    ) -> Result<(), Error> {
-        if self.body.version != METADATA_VERSION {
-            return Err(denied("unsupported metadata escrow version"));
-        }
-        if self.body.database != database || self.body.descriptor != descriptor {
-            return Err(denied("the metadata escrow belongs to another database"));
-        }
-        if !self
-            .body
-            .signer
-            .verify(&signing_bytes(METADATA_VOUCH, &self.body)?, &self.signature)
-        {
-            return Err(denied("metadata escrow vouch signature mismatch"));
-        }
-        self.body.record.validate()
-    }
-    pub fn signer(&self) -> PublicKey {
-        self.body.signer
-    }
-    pub fn signed_at(&self) -> u64 {
-        self.body.signed_at
-    }
-    pub fn chain(&self) -> &CredentialChain {
-        &self.body.chain
-    }
-    pub fn record(&self) -> &RootEscrow {
-        &self.body.record
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,45 +326,6 @@ mod tests {
             tag,
             "tags depend on the secret and the root"
         );
-        Ok(())
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_metadata_escrow_binds_its_database_descriptor_and_signer() -> Result<(), Error> {
-        let node = PrivateKey::new();
-        let root = RootKey::generate();
-        let record = RootEscrow::seal(root.public_key(), [9; 32], &[7; 32])?;
-        let database = crate::DatabaseContext {
-            publisher: root.public_key(),
-            scope: rocky_core::Scope {
-                mesh: rocky_core::MeshId([1; 16]),
-                app: rocky_core::AppId([2; 16]),
-                domain: rocky_core::DomainId([3; 16]),
-            },
-        };
-        let vouched = MetadataEscrow::sign(
-            &node,
-            CredentialChain::default(),
-            (database, [5; 32]),
-            record,
-            0,
-        )?;
-        vouched.verify(database, [5; 32])?;
-        let decoded: MetadataEscrow = decode_bounded(&encode(&vouched)?, MAX_VOUCHED_BYTES)?;
-        decoded.verify(database, [5; 32])?;
-        assert!(
-            vouched.verify(database, [6; 32]).is_err(),
-            "another descriptor is refused"
-        );
-        let mut elsewhere = database;
-        elsewhere.scope.domain = rocky_core::DomainId([4; 16]);
-        assert!(vouched.verify(elsewhere, [5; 32]).is_err());
-        let mut forged = vouched.clone();
-        forged.body.signed_at = 1;
-        assert!(forged.verify(database, [5; 32]).is_err());
-        let mut other = vouched;
-        other.body.version = METADATA_VERSION + 1;
-        assert!(other.verify(database, [5; 32]).is_err());
         Ok(())
     }
 }

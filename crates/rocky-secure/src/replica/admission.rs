@@ -29,11 +29,16 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
-        let pinned = self.config.revocations.pinned_only();
+        let no_revocations = RevocationSet::default();
         let (grants, selectors) = chain
-            .verified_with_families(self.config.publisher, &pinned, time, self.grant_families())
+            .verified_with_families(
+                self.config.publisher,
+                &no_revocations,
+                time,
+                self.grant_families(),
+            )
             .map_err(credential)?
-            .selectors(node, &pinned, time)
+            .selectors(node, &no_revocations, time)
             .map_err(credential)?;
         let app = self.definition.app;
         if grants.iter().any(|grant| grant.scope.domain.app != app)

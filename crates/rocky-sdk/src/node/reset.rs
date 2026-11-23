@@ -30,13 +30,6 @@ impl Node {
                 custodian: *custodian,
             }));
         }
-        let not_custodian = if settings.kind()?.is_personal() {
-            also.iter()
-                .find(|node| **node != PeerId::of(own) && !custodians.contains(node))
-                .copied()
-        } else {
-            None
-        };
         custodians.retain(|node| !except.contains(node));
         let mut keep = custodians;
         keep.extend(also.iter().copied());
@@ -76,9 +69,6 @@ impl Node {
                         custodian: *custodian,
                     }));
                 }
-                if let Some(node) = not_custodian {
-                    return Err(Box::new(crate::ResetRefused::NotCustodian { node }));
-                }
                 Ok(rocky_credentials::Authority::owner(root).revoke_in(
                     Revocation {
                         app,
@@ -113,9 +103,6 @@ impl Node {
             .unwrap_or_default();
         let mut draft = settings.clone();
         draft.learn_revocations(&RevocationSet::try_from(vec![signed.clone()])?)?;
-        if let Some(device) = &mut draft.personal {
-            device.unwitnessed = true;
-        }
         settings.commit(draft, &self.replica).await?;
         self.apply(&mut settings, Vec::new()).await?;
         drop(settings);
@@ -177,11 +164,6 @@ impl Node {
         if self.revocation_notice.revoked(&settings).await?.is_some() {
             return Ok(crate::Freshness::LocallyAnchored);
         }
-        let baseline = if settings.personal.is_some_and(|device| device.unwitnessed) {
-            crate::Freshness::Unwitnessed
-        } else {
-            crate::Freshness::LocallyAnchored
-        };
         let revocations = self.replica.revocations().await;
         let fenced = revocations
             .reset_heads()
@@ -195,6 +177,6 @@ impl Node {
             })
             .max_by_key(|(signed, id)| (signed.statement.time, *id))
             .map(|(_, reset)| crate::Freshness::FencedByOwner { reset });
-        Ok(fenced.unwrap_or(baseline))
+        Ok(fenced.unwrap_or(crate::Freshness::LocallyAnchored))
     }
 }

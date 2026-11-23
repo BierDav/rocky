@@ -127,12 +127,7 @@ impl Typed {
             table: schema.table_id(schema.table(name).unwrap()),
         };
         Self {
-            manifest: SignedManifest::sign(
-                &manifest,
-                rocky_credentials::DatabaseKind::Shared,
-                &publisher,
-            )
-            .unwrap(),
+            manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
             policy: RevocationSet::new(),
             items: scope("items"),
             salaries: scope("salaries"),

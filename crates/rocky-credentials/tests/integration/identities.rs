@@ -345,13 +345,8 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let none = RevocationSet::new();
     let mut next = domain.manifest.clone();
     next.schema = 2;
-    let earlier = SignedManifest::endorse(
-        &next,
-        rocky_credentials::DatabaseKind::Shared,
-        authority.signer.clone(),
-        &issuing,
-    )
-    .expect("before revocation the issuer endorses a manifest through its chain");
+    let earlier = SignedManifest::endorse(&next, authority.signer.clone(), &issuing)
+        .expect("before revocation the issuer endorses a manifest through its chain");
     assert_ne!(issuer.key(), domain.publisher());
     assert_eq!(
         earlier.endorsement().claimed_signer(domain.publisher()),
@@ -384,13 +379,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
         "nothing a revoked issuer signs verifies where its revocation is known"
     );
     next.schema = 3;
-    let later = SignedManifest::endorse(
-        &next,
-        rocky_credentials::DatabaseKind::Shared,
-        authority.signer.clone(),
-        &issuing,
-    )
-    .expect("signed");
+    let later = SignedManifest::endorse(&next, authority.signer.clone(), &issuing).expect("signed");
     assert!(
         later
             .verify_current(domain.publisher(), &revoked, NOW)

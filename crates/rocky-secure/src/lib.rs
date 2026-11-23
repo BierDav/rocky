@@ -38,8 +38,8 @@ pub use replica::{
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::{
-    Capability, CredentialChain, DatabaseKind, Hash, MAX_CREDENTIAL_DEPTH, PrivateKey, PublicKey,
-    Revocation, RevocationSet, SignedCapability, SignedManifest, SignedRevocation,
+    Capability, CredentialChain, Hash, MAX_CREDENTIAL_DEPTH, PrivateKey, PublicKey, Revocation,
+    RevocationSet, SignedCapability, SignedManifest, SignedRevocation,
 };
 pub use rocky_storage::sql::{
     AbortReason, Certainty, MAX_SAVEPOINTS, MAX_TRANSACTION_TIMEOUT, SqlError, SqlOptions,

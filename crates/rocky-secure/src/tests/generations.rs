@@ -382,12 +382,7 @@ impl Lineage {
         self.app(generation).manifest()
     }
     fn manifest(&self, generation: u32) -> SignedManifest {
-        SignedManifest::sign(
-            &self.definition(generation),
-            rocky_credentials::DatabaseKind::Shared,
-            &self.publisher,
-        )
-        .unwrap()
+        SignedManifest::sign(&self.definition(generation), &self.publisher).unwrap()
     }
     fn child_table(&self) -> &'static str {
         if self.children_first {

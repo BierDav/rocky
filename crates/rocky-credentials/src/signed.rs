@@ -40,8 +40,6 @@ impl Certificate {
 }
 fn check_node(capability: &Capability, identity: PublicKey) -> Result<(), Error> {
     let extended = capability.extended()?;
-    let is_shared_node = extended.sequence.is_some();
-    let is_personal_device = extended.personal.is_some();
     if capability.kind != PrincipalKind::Node
         || capability.delegations != 0
         || !capability.grants.is_empty()
@@ -54,10 +52,9 @@ fn check_node(capability: &Capability, identity: PublicKey) -> Result<(), Error>
         || extended.claims.is_some()
         || extended.origin.is_some()
         || extended.database.is_none()
-        || is_shared_node == is_personal_device
         || extended
             .sequence
-            .is_some_and(|sequence| (sequence == 0) != extended.previous.is_none())
+            .is_none_or(|sequence| (sequence == 0) != extended.previous.is_none())
     {
         return Err(denied("invalid node certificate"));
     }
@@ -357,33 +354,25 @@ impl Endorsement {
 #[serde(deny_unknown_fields)]
 pub struct SignedManifest {
     body: Vec<u8>,
-    kind: crate::DatabaseKind,
     endorsement: Endorsement,
 }
-const MANIFEST: &str = "rocky.signed-manifest.v4";
+const MANIFEST: &str = "rocky.signed-manifest.v5";
 impl SignedManifest {
     pub fn sign(
         manifest: &ApplicationManifest,
-        kind: crate::DatabaseKind,
         owner: &dyn IdentityProvider,
     ) -> Result<Self, Error> {
-        Self::endorse(manifest, kind, owner, &CredentialChain(Vec::new()))
+        Self::endorse(manifest, owner, &CredentialChain(Vec::new()))
     }
     pub fn endorse<'s>(
         manifest: &ApplicationManifest,
-        kind: crate::DatabaseKind,
         signer: impl Into<Signer<'s>>,
         chain: &CredentialChain,
     ) -> Result<Self, Error> {
         manifest.validate()?;
-        kind.validate(manifest)?;
         let body = manifest.canonical_body();
-        let endorsement = Endorsement::sign(signer, chain, MANIFEST, &(&body, &kind))?;
-        let signed = Self {
-            body,
-            kind,
-            endorsement,
-        };
+        let endorsement = Endorsement::sign(signer, chain, MANIFEST, &body)?;
+        let signed = Self { body, endorsement };
         let publisher = PublicKey::from_bytes(&manifest.publisher)
             .map_err(|_| denied("invalid manifest publisher"))?;
         signed.verify_historic(publisher)?;
@@ -398,44 +387,12 @@ impl SignedManifest {
             return Err(denied("invalid manifest signature"));
         }
         self.endorsement
-            .verify_historic(trusted_publisher, MANIFEST, &(&self.body, &self.kind))
+            .verify_historic(trusted_publisher, MANIFEST, &self.body)
             .map_err(|_| denied("invalid manifest signature"))?;
-        self.kind.validate(&manifest)?;
         Ok(manifest)
     }
-    pub fn verify_kind(
-        &self,
-        trusted_publisher: PublicKey,
-    ) -> Result<(ApplicationManifest, &crate::DatabaseKind), Error> {
-        Ok((self.verify_historic(trusted_publisher)?, &self.kind))
-    }
-    pub fn verify_personal(
-        &self,
-        publisher: PublicKey,
-        owner: PublicKey,
-        namespace: &crate::PersonalNamespace,
-    ) -> Result<ApplicationManifest, Error> {
-        let manifest = ApplicationManifest::from_body(&self.body)?;
-        if manifest.publisher != *publisher.as_bytes() {
-            return Err(crate::PersonalError::WrongPublisher.into());
-        }
-        let manifest = self.verify_historic(publisher)?;
-        match &self.kind {
-            crate::DatabaseKind::Shared => Err(crate::PersonalError::ModeMismatch.into()),
-            crate::DatabaseKind::Personal { owner: pinned, .. } if *pinned != owner => {
-                Err(crate::PersonalError::WrongOwner.into())
-            }
-            crate::DatabaseKind::Personal {
-                namespace: pinned, ..
-            } if pinned != namespace => Err(crate::PersonalError::NamespaceMismatch.into()),
-            crate::DatabaseKind::Personal { .. } => Ok(manifest),
-        }
-    }
-    pub fn descriptor(&self) -> Result<Commitment, Error> {
-        Ok(rocky_core::commitment(
-            "rocky.database-descriptor.v1",
-            &encode(&(&self.body, &self.kind))?,
-        ))
+    pub fn descriptor(&self) -> Commitment {
+        rocky_core::commitment("rocky.database-descriptor.v2", &self.body)
     }
     pub fn verify_current(
         &self,
@@ -450,11 +407,10 @@ impl SignedManifest {
         self.endorsement.verify_current(
             trusted_publisher,
             MANIFEST,
-            &(&self.body, &self.kind),
+            &self.body,
             revocations,
             time,
         )?;
-        self.kind.validate(&manifest)?;
         Ok(manifest)
     }
     pub fn endorsement(&self) -> &Endorsement {
@@ -999,20 +955,6 @@ impl CredentialChain {
                 return Err(denied("credential resource quota"));
             }
             Self::shape(capability, &extended, signed.issuer)?;
-            if node {
-                self.check_personal(index)?;
-            }
-            if let Some(genesis) = current.and_then(|(revocations, _)| revocations.genesis()) {
-                if extended.trusted.is_some() {
-                    genesis.check_trusted(capability.subject)?;
-                }
-                if node {
-                    genesis.check_node(signed.issuer, capability)?;
-                }
-                if let Some(signing_node) = signed.attestation.certificate() {
-                    genesis.check_node(signed.issuer, &signing_node.capability)?;
-                }
-            }
             if let Some((parent, parent_extended)) = &parent {
                 let authority = parent_extended.issues;
                 let narrows_grants = !authority && !node;

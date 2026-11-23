@@ -235,18 +235,6 @@ impl Node {
                     .get(&node)
                     .cloned()));
             }
-            Request::PersonalDeviceNotices(reply) => {
-                let _ = reply.send(self.personal_device_notices().await);
-            }
-            Request::PersonalDeviceNotice(node, acknowledge, reply) => {
-                let _ = reply.send(self.personal_device_notice(node, acknowledge).await);
-            }
-            Request::RevokePersonalDevice(node, prf, reply) => {
-                let _ = reply.send(self.revoke_personal_device(node, prf).await);
-            }
-            Request::PersonalReset(prf, keep, reply) => {
-                let _ = reply.send(self.reset_personal(prf, keep).await);
-            }
             Request::Unlink(node, reply) => {
                 let _ = reply.send(self.unlink(node).await.map(drop));
             }

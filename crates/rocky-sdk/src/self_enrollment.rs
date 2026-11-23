@@ -329,9 +329,7 @@ impl Settings {
             transport,
             &addresses,
             record.database.scope,
-            &PeerRequest::LinkEnroll(rocky_credentials::LinkEnrollment::Shared(Box::new(
-                certificate.clone(),
-            ))),
+            &PeerRequest::LinkEnroll(Box::new(certificate.clone())),
         )
         .await?;
         let PeerReply::LinkEnroll(accepted) = reply else {

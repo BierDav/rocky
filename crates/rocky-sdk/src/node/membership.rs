@@ -10,7 +10,6 @@ impl Node {
         let mut settings = self.settings.lock().await;
         let identity = settings.identity()?;
         let mut known = settings.revocations.clone();
-        known.pin(&settings.manifest()?, settings.publisher)?;
         known.merge_in(
             &self.replica.revocations().await,
             settings.database_context()?,
@@ -360,18 +359,6 @@ impl Node {
         let mut known = self.replica.revocations().await;
         if let Some(own) = current.credentials.certificate() {
             known.link(own.clone())?;
-        }
-        if let Some(context) = current.personal()? {
-            known.admit_personal(certificate.clone(), &context)?;
-            let mut draft = current.clone();
-            draft.learn_revocations(&known)?;
-            current
-                .commit_with_revocations(draft, &self.replica, &known)
-                .await?;
-            drop(current);
-            self.observations.touch();
-            self.wake_sync();
-            return Ok(known);
         }
         let membership = known.membership()?;
         let link = rocky_credentials::MembershipLink::from_certificate(&certificate)?;

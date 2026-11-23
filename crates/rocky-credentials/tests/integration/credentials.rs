@@ -830,7 +830,7 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 15,
+        version: 16,
         rotation: 9,
     })
     .expect("bytes");

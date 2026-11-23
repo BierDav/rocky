@@ -458,12 +458,6 @@ impl Node {
         let mut observed = base.clone();
         if registry.is_some() {
             crate::membership::observe_trusted(&known, &trusted, time, &mut observed)?;
-            if snapshot.personal()?.is_some()
-                && let Some(certificate) = snapshot.credentials.certificate()
-                && let Some(nodes) = observed.get_mut(&own)
-            {
-                nodes.remove(&certificate.capability.subject);
-            }
         }
         let save = {
             let mut watch = self

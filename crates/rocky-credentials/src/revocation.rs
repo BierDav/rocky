@@ -391,16 +391,7 @@ pub struct RevocationSet {
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
     recovery: Option<RootRecovery>,
     derived: Derived,
-    genesis: Pinned,
 }
-#[derive(Clone, Debug, Default)]
-struct Pinned(Option<std::sync::Arc<crate::personal::Genesis>>);
-impl PartialEq for Pinned {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-impl Eq for Pinned {}
 #[derive(Clone, Default)]
 struct Derived {
     membership_ended: OnceLock<MembershipEnded>,
@@ -476,7 +467,6 @@ impl TryFrom<ReplicatedAuthority> for RevocationSet {
             }
             set.add_link(certificate)?;
         }
-        set.prune_tombstoned();
         for admission in value.admissions {
             if set.add_admission(admission)?.is_none() {
                 return Err(denied("duplicate admission"));
@@ -575,41 +565,7 @@ impl RevocationSet {
         }
         Ok(())
     }
-    pub fn pin(
-        &mut self,
-        genesis: &crate::SignedManifest,
-        publisher: PublicKey,
-    ) -> Result<(), Error> {
-        let genesis = crate::personal::Genesis::of(genesis, publisher)?;
-        if let Some(held) = &self.genesis.0 {
-            return if **held == genesis {
-                Ok(())
-            } else {
-                Err(denied("authority set is pinned to another genesis"))
-            };
-        }
-        for certificate in self.certificates.values() {
-            genesis.check_node(certificate.issuer, &certificate.capability)?;
-        }
-        self.genesis = Pinned(Some(std::sync::Arc::new(genesis)));
-        self.derived = Derived::default();
-        Ok(())
-    }
-    pub fn pinned_only(&self) -> Self {
-        Self {
-            genesis: self.genesis.clone(),
-            ..Self::default()
-        }
-    }
-    pub(crate) fn genesis(&self) -> Option<&crate::personal::Genesis> {
-        self.genesis.0.as_deref()
-    }
     pub fn link(&mut self, certificate: SignedCapability) -> Result<bool, Error> {
-        if crate::PersonalLink::of(&certificate)?
-            .is_some_and(|link| self.tombstones(link.owner, link.node))
-        {
-            return Ok(false);
-        }
         let database = self.database.clone();
         let Some(id) = self.add_link(certificate)? else {
             return Ok(false);
@@ -628,9 +584,6 @@ impl RevocationSet {
             certificate.capability.not_before,
         )?;
         crate::membership::node_database(&certificate)?;
-        if let Some(genesis) = self.genesis() {
-            genesis.check_node(certificate.issuer, &certificate.capability)?;
-        }
         let id = certificate.id()?;
         if self.certificates.contains_key(&id) {
             return Ok(None);
@@ -684,34 +637,6 @@ impl RevocationSet {
             membership.record(certificate)?;
         }
         Ok(membership)
-    }
-    pub(crate) fn root_names(&self, node: PublicKey) -> bool {
-        self.root.subjects.contains(&node)
-            || self.root.references.contains(&crate::PeerId::of(node))
-    }
-    fn prune_tombstoned(&mut self) {
-        let carried: BTreeSet<Commitment> = self
-            .statements
-            .values()
-            .filter_map(|signed| signed.chain.certificate())
-            .filter_map(|certificate| certificate.id().ok())
-            .collect();
-        let ended: Vec<Commitment> = self
-            .certificates
-            .iter()
-            .filter(|(id, certificate)| {
-                !carried.contains(*id)
-                    && certificate
-                        .capability
-                        .extended()
-                        .is_ok_and(|extended| extended.personal.is_some())
-                    && self.tombstones(certificate.issuer, certificate.capability.subject)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ended {
-            self.certificates.remove(&id);
-        }
     }
     fn membership_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
         self.membership_ended().links.contains(&(identity, node))
@@ -860,11 +785,7 @@ impl RevocationSet {
             heads.statements.extend(cut.statements.iter().copied());
             heads.acknowledgments.extend(cut.acknowledgments);
         }
-        let permanent = signed.root() || signed.identity_unlink();
         self.statements.insert(id, signed);
-        if permanent {
-            self.prune_tombstoned();
-        }
         Ok(true)
     }
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<(), Error> {
@@ -879,9 +800,6 @@ impl RevocationSet {
             let database = crate::membership::node_database(certificate)?;
             if database.publisher != publisher || database.scope.app != app {
                 return Err(denied("membership certificate belongs to another database"));
-            }
-            if let Some(genesis) = self.genesis() {
-                genesis.check_node(certificate.issuer, &certificate.capability)?;
             }
         }
         for signed in self.admissions.values() {
@@ -931,11 +849,6 @@ impl RevocationSet {
             }
         }
         for certificate in other.certificates.values() {
-            let replayed_after_tombstone = crate::PersonalLink::of(certificate)?
-                .is_some_and(|link| next.tombstones(link.owner, link.node));
-            if replayed_after_tombstone {
-                continue;
-            }
             next.add_link(certificate.clone())?;
         }
         for admission in other.admissions.values() {
@@ -951,7 +864,6 @@ impl RevocationSet {
             database: self.database.clone(),
             certificates: self.certificates.clone(),
             admissions: self.admissions.clone(),
-            genesis: self.genesis.clone(),
             ..Self::default()
         };
         for signed in self.statements.values() {
@@ -1032,10 +944,7 @@ impl RevocationSet {
         }
         #[cfg(test)]
         tests::count_derivation();
-        let fingerprint = rocky_core::commitment(
-            "rocky.revocation-set.pinned.v1",
-            &encode(&(self, self.genesis()))?,
-        );
+        let fingerprint = rocky_core::commitment("rocky.revocation-set.v2", &encode(self)?);
         Ok(*self.derived.fingerprint.get_or_init(|| fingerprint))
     }
     pub fn replicated_commitment(&self) -> Result<Commitment, Error> {
@@ -1276,7 +1185,6 @@ impl RevocationSet {
             let mut set = Self {
                 database: self.database.clone(),
                 certificates: self.certificates.clone(),
-                genesis: self.genesis.clone(),
                 ..Self::default()
             };
             for signed in self.statements.values() {

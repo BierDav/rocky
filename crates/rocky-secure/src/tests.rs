@@ -278,7 +278,6 @@ pub(crate) fn proven(
             node,
             identity.public_key(),
             extended.database.unwrap(),
-            extended.personal.as_ref(),
         )
         .unwrap(),
     );
@@ -359,38 +358,10 @@ impl Fixture {
         let app = Employees::new(*publisher.public_key().as_bytes());
         let body = app.definition();
         Self {
-            manifest: SignedManifest::sign(
-                &body,
-                rocky_credentials::DatabaseKind::Shared,
-                &publisher,
-            )
-            .unwrap(),
+            manifest: SignedManifest::sign(&body, &publisher).unwrap(),
             policy: RevocationSet::new(),
             public: app.scope(MeshId([1; 16]), false),
             private: app.scope(MeshId([1; 16]), true),
-            publisher,
-        }
-    }
-    pub(crate) fn personal(
-        owner: PublicKey,
-        namespace: rocky_credentials::PersonalNamespace,
-    ) -> Self {
-        let publisher = PrivateKey::new();
-        let app = Employees::in_domain(
-            *publisher.public_key().as_bytes(),
-            namespace.domain(owner).unwrap(),
-        );
-        let mesh = namespace.mesh(owner).unwrap();
-        let kind = rocky_credentials::DatabaseKind::Personal {
-            owner,
-            namespace,
-            creation: [0; 16],
-        };
-        Self {
-            manifest: SignedManifest::sign(&app.definition(), kind, &publisher).unwrap(),
-            policy: RevocationSet::new(),
-            public: app.scope(mesh, false),
-            private: app.scope(mesh, true),
             publisher,
         }
     }
@@ -1672,7 +1643,6 @@ mod group;
 mod header_scans;
 mod kept;
 mod partitions;
-mod personal;
 mod placements;
 mod recovery;
 #[cfg(unix)]

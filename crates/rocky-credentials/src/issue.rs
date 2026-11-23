@@ -667,7 +667,7 @@ pub(crate) fn node_certificate(
     not_before: u64,
     (sequence, previous): (u64, Option<rocky_core::Commitment>),
 ) -> Result<SignedCapability, Error> {
-    let possession = crate::NodePossession::sign(node, holder.public_key()?, database, None)?;
+    let possession = crate::NodePossession::sign(node, holder.public_key()?, database)?;
     let leaf = Capability {
         subject: node.public_key(),
         kind: PrincipalKind::Node,

@@ -220,12 +220,8 @@ mod tests {
         let server_key = PrivateKey::new();
         let app = fixture.app();
         let manifest = app.manifest();
-        let signed = rocky_credentials::SignedManifest::sign(
-            &manifest,
-            rocky_credentials::DatabaseKind::Shared,
-            &fixture.publisher,
-        )
-        .unwrap();
+        let signed =
+            rocky_credentials::SignedManifest::sign(&manifest, &fixture.publisher).unwrap();
         let config = |node: &PrivateKey| {
             let user = crate::tests::identity_of(node);
             let root = rocky_credentials::Authority::owner(&fixture.publisher)

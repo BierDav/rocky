@@ -143,7 +143,7 @@ async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
         run(3, steps, &[" mesh ", " trust "]).await?,
         [
             "trusted",
-            r#"mesh ["a: alerts [\"c linked\", \"a linked\"]", "b: alerts [], via a"]"#,
+            r#"mesh ["a: alerts [\"a linked\", \"c linked\"]", "b: alerts [], via a"]"#,
             "mesh none"
         ]
     );
@@ -171,10 +171,10 @@ async fn a_trusted_node_flags_an_identity_it_has_not_heard_from() -> Result<(), 
         run(3, steps, &[" woken ", " alerts ", " stale after "]).await?,
         [
             "set",
-            r#"alerts ["c linked", "a linked"]"#,
-            r#"alerts ["c linked", "a linked", "c stale"]"#,
-            r#"alerts ["c linked", "a linked", "c stale"]"#,
-            r#"alerts ["c linked", "a linked"]"#
+            r#"alerts ["a linked", "c linked"]"#,
+            r#"alerts ["a linked", "c linked", "c stale"]"#,
+            r#"alerts ["a linked", "c linked", "c stale"]"#,
+            r#"alerts ["a linked", "c linked"]"#
         ]
     );
     Ok(())

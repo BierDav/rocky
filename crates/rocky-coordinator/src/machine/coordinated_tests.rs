@@ -623,13 +623,8 @@ fn certificate(
                 database: Some(database),
                 sequence: Some(0),
                 possession: Some(
-                    rocky_credentials::NodePossession::sign(
-                        node,
-                        identity.public_key(),
-                        database,
-                        None,
-                    )
-                    .unwrap(),
+                    rocky_credentials::NodePossession::sign(node, identity.public_key(), database)
+                        .unwrap(),
                 ),
                 ..Extended::default()
             })

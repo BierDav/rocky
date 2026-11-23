@@ -221,7 +221,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         additional: usize,
     ) -> Result<(), Error> {
-        let mut result = self.conn.query("SELECT (SELECT COALESCE(SUM(LENGTH(page)+LENGTH(vouch)),0) FROM secure_checkpoint_archive_pages)+(SELECT COALESCE(SUM(LENGTH(signed)),0) FROM secure_checkpoint_archive)+(SELECT COALESCE(SUM(LENGTH(record)),0) FROM secure_escrow)+(SELECT COALESCE(SUM(LENGTH(record)),0) FROM secure_custody_metadata)+(SELECT COALESCE(SUM(LENGTH(manifest)),0) FROM secure_custody_bootstrap)+(SELECT bytes FROM secure_retained WHERE id=1)", ()).await?;
+        let mut result = self.conn.query("SELECT (SELECT COALESCE(SUM(LENGTH(page)+LENGTH(vouch)),0) FROM secure_checkpoint_archive_pages)+(SELECT COALESCE(SUM(LENGTH(signed)),0) FROM secure_checkpoint_archive)+(SELECT COALESCE(SUM(LENGTH(record)),0) FROM secure_escrow)+(SELECT COALESCE(SUM(LENGTH(manifest)),0) FROM secure_custody_bootstrap)+(SELECT bytes FROM secure_retained WHERE id=1)", ()).await?;
         let used = result
             .next()
             .await?

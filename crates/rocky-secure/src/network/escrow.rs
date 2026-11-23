@@ -8,17 +8,12 @@ const RECONSTRUCTED_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum EscrowMessage {
-    Carry {
-        records: Vec<CarriedEscrow>,
-        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
-    },
+    Carry { records: Vec<CarriedEscrow> },
 }
 
 #[derive(Default)]
 pub(super) struct EscrowTable {
     sent: BTreeSet<Slot>,
-    metadata_sent: bool,
-    metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
     received: BTreeMap<Slot, Vec<VouchedEscrow>>,
     seen: BTreeSet<Commitment>,
     chain_bytes: BTreeMap<Commitment, usize>,
@@ -61,13 +56,7 @@ impl NativeSession {
             records.splice(0..0, std::mem::take(&mut self.escrow.forged));
             records
         };
-        let metadata = if self.escrow.metadata_sent {
-            None
-        } else {
-            self.escrow.metadata_sent = true;
-            replica.custody_naming_escrow().await?.map(Box::new)
-        };
-        if !records.is_empty() || metadata.is_some() {
+        if !records.is_empty() {
             self.carry_credentials(
                 records
                     .iter()
@@ -80,16 +69,12 @@ impl NativeSession {
                 .map(VouchedEscrow::carried)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(credential)?;
-            self.send(EscrowMessage::Carry { records, metadata })
-                .await?;
+            self.send(EscrowMessage::Carry { records }).await?;
         }
         Ok(())
     }
     pub(super) fn learn_escrow(&mut self, message: EscrowMessage) -> Result<(), Error> {
-        let EscrowMessage::Carry { records, metadata } = message;
-        if let Some(record) = metadata {
-            self.escrow.metadata = Some(record);
-        }
+        let EscrowMessage::Carry { records } = message;
         for record in records {
             if !self.escrow.seen.insert(rocky_core::commitment(
                 "rocky.carried-escrow.v1",
@@ -136,9 +121,7 @@ impl NativeSession {
         for slot in slots(frames)? {
             kept.extend(self.escrow.received.remove(&slot).unwrap_or_default());
         }
-        replica
-            .keep_carried_dependencies(self.peer, kept, self.escrow.metadata.take())
-            .await
+        replica.keep_carried_escrow(self.peer, kept).await
     }
     pub(super) async fn keep_pending_escrow<A: RowApplication>(
         &mut self,
@@ -156,9 +139,7 @@ impl NativeSession {
         for slot in slots {
             records.extend(self.escrow.received.remove(&slot).unwrap_or_default());
         }
-        replica
-            .keep_carried_dependencies(self.peer, records, self.escrow.metadata.take())
-            .await
+        replica.keep_carried_escrow(self.peer, records).await
     }
     #[cfg(test)]
     pub(crate) fn forge_escrow(&mut self, records: Vec<VouchedEscrow>) {
@@ -204,10 +185,7 @@ mod tests {
             .carried()
             .unwrap()
         };
-        let carried = |records| EscrowMessage::Carry {
-            records,
-            metadata: None,
-        };
+        let carried = |records| EscrowMessage::Carry { records };
         session
             .learn_escrow(carried(vec![carry(0), carry(0)]))
             .unwrap();

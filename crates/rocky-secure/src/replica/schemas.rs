@@ -878,10 +878,6 @@ impl<A: RowApplication> Inner<A> {
             }
             None => config_families(&security, &manifest)?,
         };
-        security
-            .revocations
-            .pin(&security.manifest, security.publisher)
-            .map_err(credential)?;
         check_config_with_families(&security, &manifest, &families)?;
         let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
         security.keys = current;

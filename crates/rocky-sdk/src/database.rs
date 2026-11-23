@@ -51,7 +51,6 @@ pub(crate) enum Install {
         ttl: u64,
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
         bookmark: Option<&'static str>,
-        personal: Option<Box<crate::personal::Create>>,
     },
     Join {
         provisioning: String,
@@ -67,7 +66,6 @@ pub(crate) enum Install {
         invitation: String,
     },
     Installed,
-    SignIn(Box<crate::personal::SignIn>),
     Restore {
         archive: PathBuf,
         invitation: String,
@@ -97,24 +95,11 @@ impl Install {
     fn unwinds_on_failure(&self) -> bool {
         matches!(
             self,
-            Self::Create { .. } | Self::Join { .. } | Self::SignIn(_) | Self::Supplied(_)
-        )
-    }
-    fn ends_personal_intent(&self) -> bool {
-        matches!(
-            self,
-            Self::Create {
-                personal: Some(_),
-                ..
-            } | Self::SignIn(_)
-                | Self::Installed
+            Self::Create { .. } | Self::Join { .. } | Self::Supplied(_)
         )
     }
     fn discards_secrets(&self) -> bool {
-        matches!(
-            self,
-            Self::Create { personal: None, .. } | Self::Join { .. }
-        )
+        matches!(self, Self::Create { .. } | Self::Join { .. })
     }
 }
 struct Setup {
@@ -357,7 +342,7 @@ impl Database {
         let created = crate::RootKey::from_secret(root.secret());
         let mut opened = Self::start(
             open,
-            Self::create_install(credential_ttl, Arc::new(root), None, None)?,
+            Self::create_install(credential_ttl, Arc::new(root), None)?,
         )?;
         opened.root = Some(created);
         Ok(opened)
@@ -367,10 +352,7 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::start(
-            open,
-            Self::create_install(credential_ttl, root, None, None)?,
-        )
+        Self::start(open, Self::create_install(credential_ttl, root, None)?)
     }
     pub fn join(open: Open<'_>, provisioning: &str) -> Result<Opened, Failure> {
         let single_use = open.identity.is_none();
@@ -455,7 +437,6 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
         bookmark: Option<&'static str>,
-        personal: Option<Box<crate::personal::Create>>,
     ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !CREDENTIAL_TTL_SECONDS.contains(&ttl) {
@@ -465,7 +446,6 @@ impl Database {
             ttl,
             root: std::sync::Mutex::new(Some(root)),
             bookmark,
-            personal,
         })
     }
     fn join_install(
@@ -583,9 +563,9 @@ impl Database {
         open: Open<'_>,
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
-        (bookmark, personal): (&'static str, Option<Box<crate::personal::Create>>),
+        bookmark: &'static str,
     ) -> Result<Opened, Failure> {
-        let install = Self::create_install(credential_ttl, root, Some(bookmark), personal)?;
+        let install = Self::create_install(credential_ttl, root, Some(bookmark))?;
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_join(
@@ -641,12 +621,6 @@ impl Database {
                 confirmed: Some(pending),
             },
         )
-    }
-    pub(crate) async fn launch_sign_in(
-        open: Open<'_>,
-        sign_in: crate::personal::SignIn,
-    ) -> Result<Opened, Failure> {
-        Self::launch(open, Install::SignIn(Box::new(sign_in)), None).await
     }
     pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::launch(open, Install::Installed, None).await
@@ -1420,7 +1394,6 @@ type Link = (crate::transport::Connected, bool);
 async fn identity(
     path: &Path,
     setup: &Setup,
-    bootstrap_intent: &BootstrapIntentFile,
     network: Option<Network>,
 ) -> Result<(Settings, Option<Link>), Failure> {
     let Setup {
@@ -1453,55 +1426,13 @@ async fn identity(
         }
     }
     match install {
-        Install::Create {
-            ttl,
-            root,
-            personal,
-            ..
-        } => {
+        Install::Create { ttl, root, .. } => {
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
                 .take()
                 .ok_or(crate::enrollment::PublisherRequired("creating a domain"))?;
-            let settings = match personal {
-                Some(personal) => {
-                    if setup.identity.is_some() {
-                        return Err(crate::enrollment::personal_refusal(
-                            rocky_credentials::PersonalError::WrongOwner,
-                        ));
-                    }
-                    let discovery = personal
-                        .discovery
-                        .lock()
-                        .map_err(|_| "discovery poisoned")?
-                        .take()
-                        .ok_or("the personal create was already attempted")?;
-                    let installing = crate::personal::Installing::resume(
-                        directory,
-                        secrets,
-                        &*root,
-                        (&personal.namespace, discovery),
-                    )?;
-                    if installing.resumed() {
-                        remove_installation(directory)?;
-                    }
-                    let settings = Settings::create_personal(
-                        schema,
-                        secrets,
-                        *ttl,
-                        (personal.namespace.clone(), installing),
-                        &*root,
-                    )?;
-                    *personal.coverage.lock().map_err(|_| "coverage poisoned")? =
-                        Some(crate::personal::RestoreCoverage::held(
-                            &settings,
-                            &settings.vault(secrets),
-                        )?);
-                    settings
-                }
-                None => Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?,
-            };
+            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
             if let Some(CoordinatorSlot::Client(client)) = &setup.coordination {
                 *setup
                     .created_settings
@@ -1631,23 +1562,6 @@ async fn identity(
                     Err(error)
                 }
             }
-        }
-        Install::SignIn(sign_in) => {
-            if setup.identity.is_some() {
-                return Err(crate::enrollment::personal_refusal(
-                    rocky_credentials::PersonalError::WrongOwner,
-                ));
-            }
-            crate::personal::sign_in::install(
-                path,
-                directory,
-                bootstrap_intent,
-                secrets,
-                schema,
-                sign_in,
-                network,
-            )
-            .await
         }
         Install::Supplied(supplied) => {
             let settings =
@@ -2138,7 +2052,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         confirm_removals(&setup, &directory, &path).await?;
     }
     let fresh = setup.install.unwinds_on_failure() && !Settings::exists(&path)?;
-    let (mut settings, link) = match identity(&path, &setup, &bootstrap_intent, network).await {
+    let (mut settings, link) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
         Err(error) => return Err(error),
@@ -2351,9 +2265,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         drain_migration_work(&replica, node.domain().scope).await?;
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Started)?;
-        if matches!(setup.install, Install::SignIn(_)) {
-            crate::personal::fault::check(&directory, crate::personal::fault::Stage::Saved)?;
-        }
         if matches!(setup.install, Install::Supplied(_)) {
             rocky_platform::fs::remove_file(crate::enrollment::Intent::path(&path, true))?;
         }
@@ -2380,7 +2291,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         _ => Vec::new(),
     };
-    let personal = setup.install.ends_personal_intent();
     if hello.send(Ok((scope, network, revoked))).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
         let created_root_undelivered =
@@ -2390,9 +2300,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         } else {
             abandoned
         });
-    }
-    if personal && let Err(error) = crate::personal::finish(&directory) {
-        tracing::warn!(%error, "the finished personal install intent could not be removed");
     }
     let bootstrapping = (node.bootstrap_intent.exists().await && network.is_some())
     .then(|| {
@@ -2756,10 +2663,6 @@ fn unwind(
     created: Option<(&crate::secrets::Vault, Vec<String>)>,
     error: Failure,
 ) -> Failure {
-    let next_attempt_finds_what_it_wrote = crate::personal::fault::crashed(&error);
-    if next_attempt_finds_what_it_wrote {
-        return error;
-    }
     if let Some((vault, roles)) = created {
         let _ = vault.forget(roles);
     }
@@ -2816,7 +2719,6 @@ mod tests {
         let ttl_of = |credential_ttl| match Database::create_install(
             credential_ttl,
             Arc::new(crate::RootKey::generate()),
-            None,
             None,
         )? {
             Install::Create { ttl, .. } => Ok::<_, Failure>(ttl),
@@ -2953,12 +2855,8 @@ mod tests {
         };
         tokio::task::LocalSet::new()
             .run_until(async {
-                let create = Database::create_install(
-                    None,
-                    Arc::new(crate::RootKey::generate()),
-                    None,
-                    None,
-                )?;
+                let create =
+                    Database::create_install(None, Arc::new(crate::RootKey::generate()), None)?;
                 Database::launch_local(open(), create)
                     .await?
                     .database

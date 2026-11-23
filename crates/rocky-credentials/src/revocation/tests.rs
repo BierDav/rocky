@@ -686,7 +686,7 @@ fn a_membership_certificate_for_another_identitys_node_without_its_signature_is_
         .unwrap()
         .possession;
     let impostor =
-        crate::NodePossession::sign(&PrivateKey::new(), b.public_key(), database, None).unwrap();
+        crate::NodePossession::sign(&PrivateKey::new(), b.public_key(), database).unwrap();
     for possession in [None, replayed, Some(impostor)] {
         let capability = claim(&b_grant, node.public_key(), possession);
         assert!(

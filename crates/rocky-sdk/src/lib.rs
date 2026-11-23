@@ -32,7 +32,6 @@ mod node;
 mod partitions;
 mod pause;
 mod peer;
-mod personal;
 mod reactor;
 mod recovery;
 mod registry;
@@ -73,9 +72,6 @@ pub use enrollment::{
 pub use error::{Error, ErrorKind};
 pub use inspection::*;
 pub use partitions::*;
-pub use personal::{
-    PersonalOpened, PersonalSignInError, RestoreCoverage, SignInSource, VerifiedBackup,
-};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use registry::{
@@ -112,9 +108,8 @@ pub use rocky_core::{
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 pub use rocky_credentials::{
-    DatabaseKind, DiscoveryCapability, FileIdentityProvider, IdentityKey, IdentityProvider, PeerId,
-    PersonalAccount, PersonalError, PersonalLocator, PersonalNamespace, PrfInput, PublicKey,
-    Purpose, RevocationMode, RootKey, VerifiedPasskeyPrf,
+    FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose,
+    RevocationMode, RootKey,
 };
 pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,
@@ -126,8 +121,8 @@ pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table}
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::{
-    ContactInfo, Discovered, DroppedStage, LinkRequest, Provisioning, RevocationResult, SeenDevice,
-    SessionInfo,
+    ContactInfo, DeviceRevocationReceipt, Discovered, DroppedStage, LinkRequest, Provisioning,
+    RevocationResult, SeenDevice, SessionInfo,
 };
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
@@ -140,5 +135,3 @@ extern crate self as rocky_sdk;
 #[cfg(test)]
 #[path = "../tests/integration/support/snapshot.rs"]
 mod test_snapshot;
-
-pub use personal::devices::{DeviceRevocationReceipt, PersonalDeviceNotice};

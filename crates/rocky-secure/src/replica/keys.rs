@@ -581,38 +581,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    #[cfg(test)]
     pub(crate) async fn keep_carried_escrow(
         &self,
         peer: PublicKey,
         records: Vec<VouchedEscrow>,
     ) -> Result<(), Error> {
-        self.keep_carried_dependencies(peer, records, None).await
-    }
-    pub(crate) async fn keep_carried_dependencies(
-        &self,
-        peer: PublicKey,
-        records: Vec<VouchedEscrow>,
-        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
-    ) -> Result<(), Error> {
-        Box::pin(self.keep_carried_dependencies_inner(peer, records, metadata)).await
-    }
-    async fn keep_carried_dependencies_inner(
-        &self,
-        peer: PublicKey,
-        records: Vec<VouchedEscrow>,
-        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
-    ) -> Result<(), Error> {
-        if records.is_empty() && metadata.is_none() {
+        if records.is_empty() {
             return Ok(());
         }
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(@keeping_frontier_cache inner, |inner| {
             inner.keep_carried_escrow_rows(peer, &records, time).await?;
-            if let Some(record) = &metadata {
-                inner.store_custody_metadata(record).await?;
-            }
             inner.check_archive_quota(0).await?;
             inner.fault(checkpoint::Stage::Custody)?;
             Ok(())

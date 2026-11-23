@@ -1,11 +1,10 @@
 use super::*;
 use p2panda_core::Signature;
-use rocky_credentials::{MetadataEscrow, PeerId};
+use rocky_credentials::PeerId;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_partition_custody(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_custody_receipts(scope BLOB NOT NULL,peer BLOB NOT NULL,receipt BLOB NOT NULL,PRIMARY KEY(scope,peer)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_custody_metadata(id INTEGER PRIMARY KEY CHECK(id=1),record BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_custody_challenges(scope BLOB NOT NULL,peer BLOB NOT NULL,binding BLOB NOT NULL,challenge BLOB NOT NULL,PRIMARY KEY(scope,peer)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_custody_bootstrap(id INTEGER PRIMARY KEY CHECK(id=1),manifest BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_eviction_custody(scope BLOB PRIMARY KEY,unconfirmed INTEGER NOT NULL)",
@@ -36,7 +35,6 @@ struct Coverage {
     chain: CredentialChain,
     logs: Vec<(PublicKey, u64, Hash)>,
     epochs: BTreeMap<rocky_core::KeyEpoch, Commitment>,
-    naming: Option<Commitment>,
     checkpoint: Option<SignedCheckpoint>,
 }
 
@@ -71,100 +69,6 @@ impl<A: RowApplication> Inner<A> {
                 .set_custody(decode(scope)?, decode::<PartitionCustody>(policy)?.peers);
         }
         Ok(())
-    }
-    pub(super) fn judge_custody_metadata(&self, record: &MetadataEscrow) -> Result<(), Error> {
-        let (_, kind) = self
-            .config
-            .manifest
-            .verify_kind(self.config.publisher)
-            .map_err(credential)?;
-        let DatabaseKind::Personal { owner, .. } = kind else {
-            return Err(denied("metadata escrow requires personal genesis"));
-        };
-        let descriptor = self.config.manifest.descriptor().map_err(credential)?;
-        record
-            .verify(
-                self.config
-                    .credentials
-                    .database_context(self.config.publisher)
-                    .map_err(credential)?,
-                descriptor,
-            )
-            .map_err(credential)?;
-        record
-            .chain()
-            .historic_provenance_with_families(
-                self.config.publisher,
-                record.signer(),
-                self.grant_families(),
-            )
-            .map_err(credential)?;
-        let link = record
-            .chain()
-            .certificate()
-            .map(rocky_credentials::PersonalLink::of)
-            .transpose()
-            .map_err(credential)?
-            .flatten()
-            .ok_or_else(|| denied("metadata escrow needs an owner device"))?;
-        if link.owner != *owner
-            || link.descriptor != descriptor
-            || self.config.revocations.tombstones(*owner, record.signer())
-            || self
-                .config
-                .revocations
-                .unfenced()
-                .ends_node_of(*owner, record.signer(), false)
-            || record.signed_at() > now()?.saturating_add(MAX_CLOCK_AHEAD.as_secs())
-        {
-            return Err(denied("metadata escrow owner is not authorized"));
-        }
-        Ok(())
-    }
-    pub(super) async fn custody_metadata(&self) -> Result<Option<MetadataEscrow>, Error> {
-        let mut result = self
-            .conn
-            .query("SELECT record FROM secure_custody_metadata WHERE id=1", ())
-            .await?;
-        result
-            .next()
-            .await?
-            .map(|row| decode(&row.get::<Vec<u8>>(0)?))
-            .transpose()
-    }
-    pub(super) async fn store_custody_metadata(
-        &self,
-        record: &MetadataEscrow,
-    ) -> Result<(), Error> {
-        self.judge_custody_metadata(record)?;
-        if let Some(held) = self.custody_metadata().await? {
-            if held.record().tag() != record.record().tag() {
-                return Err(denied("conflicting naming escrow"));
-            }
-            if self.judge_custody_metadata(&held).is_ok() {
-                return Ok(());
-            }
-        }
-        self.conn.execute("INSERT INTO secure_custody_metadata VALUES(1,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record", [encode(record)?]).await?;
-        Ok(())
-    }
-    async fn naming_tag(&self) -> Result<Option<Commitment>, Error> {
-        if !self
-            .config
-            .manifest
-            .verify_kind(self.config.publisher)
-            .map_err(credential)?
-            .1
-            .is_personal()
-        {
-            return Ok(None);
-        }
-        let record = self
-            .custody_metadata()
-            .await?
-            .ok_or_else(|| denied("custody requires naming escrow"))?;
-        self.judge_custody_metadata(&record)?;
-        Ok(Some(record.record().tag()))
     }
     pub(super) async fn durable_custodians(
         &self,
@@ -203,7 +107,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         let body = &receipt.body;
         if body.version != 1
-            || body.descriptor != self.config.manifest.descriptor().map_err(credential)?
+            || body.descriptor != self.config.manifest.descriptor()
             || body.audience != self.config.node.public_key()
             || body.signer == body.audience
             || body.logs.len() > MAX_CHECKPOINT_LOGS
@@ -213,7 +117,7 @@ impl<A: RowApplication> Inner<A> {
                 .any(|(_, held, _)| *held == 0 || *held > i64::MAX as u64)
             || body.logs.windows(2).any(|pair| pair[0].0 >= pair[1].0)
             || !body.signer.verify(
-                &signing_bytes("rocky.custody-receipt.v1", body)?,
+                &signing_bytes("rocky.custody-receipt.v2", body)?,
                 &receipt.signature,
             )
         {
@@ -222,17 +126,6 @@ impl<A: RowApplication> Inner<A> {
         let grants = self.verify_chain_scopes(&body.chain, body.signer, time, &[body.scope])?;
         if !roles::holds_whole(&grants, body.scope) {
             return Err(denied("custody receipt grant expired or revoked"));
-        }
-        if self
-            .config
-            .manifest
-            .verify_kind(self.config.publisher)
-            .map_err(credential)?
-            .1
-            .is_personal()
-            && body.naming.is_none()
-        {
-            return Err(denied("custody receipt lacks naming escrow"));
         }
         if let Some(signed) = &body.checkpoint {
             if signed.statement.scope != body.scope
@@ -352,13 +245,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    pub async fn custody_naming_escrow(&self) -> Result<Option<MetadataEscrow>, Error> {
-        let inner = self.inner.lock(Class::Background).await;
-        Ok(inner
-            .custody_metadata()
-            .await?
-            .filter(|record| inner.judge_custody_metadata(record).is_ok()))
-    }
     pub(crate) async fn forget_custody_receipt(
         &self,
         peer: PublicKey,
@@ -431,15 +317,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .partition_custody(scope)
             .await
     }
-    pub async fn keep_custody_metadata(&self, record: MetadataEscrow) -> Result<(), Error> {
-        let mut inner = self.inner.lock(Class::Background).await;
-        inner.judge_custody_metadata(&record)?;
-        transaction!(inner, |inner| {
-            inner.store_custody_metadata(&record).await
-        })?;
-        drop(flush_guard(inner, &self.inner).await?);
-        Ok(())
-    }
     pub(crate) async fn custody_receipt(
         &self,
         peer: PublicKey,
@@ -476,19 +353,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         manifest
             .verify_historic(inner.config.publisher)
             .map_err(credential)?;
-        if manifest.descriptor().map_err(credential)?
-            != inner.config.manifest.descriptor().map_err(credential)?
-        {
+        if manifest.descriptor() != inner.config.manifest.descriptor() {
             return Ok(None);
         }
         drop(bootstrap);
         if inner.check_archive_quota(0).await.is_err() {
             return Ok(None);
         }
-        let naming = match inner.naming_tag().await {
-            Ok(tag) => tag,
-            Err(_) => return Ok(None),
-        };
         let mut epochs = BTreeMap::new();
         let mut logs: BTreeMap<PublicKey, (u64, Hash)> = BTreeMap::new();
         let checkpoint = inner.archived_checkpoint(scope, true).await?;
@@ -565,7 +436,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect();
         let body = Coverage {
             version: 1,
-            descriptor: inner.config.manifest.descriptor().map_err(credential)?,
+            descriptor: inner.config.manifest.descriptor(),
             scope,
             tip: inner.workspace.tip,
             signer: inner.config.node.public_key(),
@@ -575,7 +446,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chain: inner.config.credentials.clone(),
             logs,
             epochs,
-            naming,
             checkpoint,
         };
         if encode(&body)?.len() > SECURE_MESSAGE_BYTES / 2 {
@@ -584,7 +454,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signature = inner
             .config
             .node
-            .sign(&signing_bytes("rocky.custody-receipt.v1", &body)?);
+            .sign(&signing_bytes("rocky.custody-receipt.v2", &body)?);
         Ok(Some(CustodyReceipt { body, signature }))
     }
     pub(crate) async fn record_custody_receipt(
@@ -606,9 +476,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("custody receipt outside challenge"));
         }
         inner.check_receipt(&receipt)?;
-        if body.naming != inner.naming_tag().await? {
-            return Err(denied("custody receipt naming escrow mismatch"));
-        }
         let mut required = inner
             .conn
             .query(

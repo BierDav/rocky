@@ -26,7 +26,7 @@ rand = "=0.8.8"
 sha2 = "0.10"
 # The root key's 24-word backup phrase (BIP 39, English).
 bip39 = { version = "=2.2.2", default-features = false }
-# Erases passkey PRF output and derived secrets held for one attempt.
+# Erases root and identity secrets held for one use.
 zeroize = "1.9"
 
 # Browsers supply randomness through `crypto.getRandomValues`.

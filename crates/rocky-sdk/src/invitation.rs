@@ -403,8 +403,6 @@ impl Settings {
         if !self.issuer() {
             return Err("only an issuer invites identities".into());
         }
-        self.admits(Some(&profile))?;
-        self.admits_identity(identity)?;
         self.check_profile(&profile)?;
         if self.revoked_identity(&identity, registry) {
             return Err("the identity was revoked".into());

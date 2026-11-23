@@ -57,6 +57,15 @@ pub struct RevocationResult {
     pub cut_dropped_stages: Vec<DroppedStage>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceRevocationReceipt {
+    pub node: crate::PeerId,
+    pub statement: rocky_core::Commitment,
+    pub local: bool,
+    pub delivered: std::collections::BTreeSet<crate::PeerId>,
+    pub pending: std::collections::BTreeSet<crate::PeerId>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DroppedStage {
     pub node: PublicKey,
     pub sequence: u64,
@@ -169,6 +178,13 @@ impl Session {
         identity: std::sync::Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), Failure> {
         self.send_signed(Some(identity), |reply| Request::Unlink(node, reply))
+            .await
+    }
+    pub async fn device_revocation_receipt(
+        &self,
+        node: crate::PeerId,
+    ) -> Result<Option<DeviceRevocationReceipt>, Failure> {
+        self.send(|reply| Request::DeviceRevocationReceipt(node, reply))
             .await
     }
     pub async fn provision(

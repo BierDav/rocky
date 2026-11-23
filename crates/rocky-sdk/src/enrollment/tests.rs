@@ -723,7 +723,6 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                         profile: None,
                         issuers: Vec::new(),
                         claims: None,
-                        naming: None,
                     },
                 )?
                 .0;

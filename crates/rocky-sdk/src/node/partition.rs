@@ -211,7 +211,6 @@ impl Node {
             lifetime: std::time::Duration::from_secs(settings.ttl),
             clock_skew: std::time::Duration::from_secs(300),
         };
-        settings.admits_identity(device.identity)?;
         let grants = self.domain().families.compact_partitions(&grants);
         if settings.revoked_node(&device, &registry) {
             return Err(refused("the device was revoked"));

@@ -52,12 +52,7 @@ impl Fixture {
         };
         let revocations = RevocationSet::new();
         Self {
-            manifest: SignedManifest::sign(
-                &manifest,
-                rocky_credentials::DatabaseKind::Shared,
-                &publisher,
-            )
-            .unwrap(),
+            manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
             publisher,
             schema,
             domain,

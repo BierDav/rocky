@@ -55,9 +55,7 @@ mod partitions;
 #[cfg(not(target_family = "wasm"))]
 mod peers;
 #[cfg(not(target_family = "wasm"))]
-mod personal;
 #[cfg(not(target_family = "wasm"))]
-mod personal_sign_in;
 #[cfg(not(target_family = "wasm"))]
 mod readiness;
 #[cfg(not(target_family = "wasm"))]

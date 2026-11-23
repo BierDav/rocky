@@ -31,7 +31,6 @@ pub struct ResetKeep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
     LocallyAnchored,
-    Unwitnessed,
     FencedByOwner { reset: Commitment },
 }
 
@@ -78,7 +77,6 @@ pub(crate) enum ResetRefused {
     DeviceSignedOut { statement: Commitment },
     CustodianSignedOut { custodian: PeerId },
     EndsSigner,
-    NotCustodian { node: PeerId },
 }
 impl ResetRefused {
     pub(crate) fn code(&self) -> &'static str {
@@ -86,7 +84,6 @@ impl ResetRefused {
             Self::DeviceSignedOut { .. } => "device_signed_out",
             Self::CustodianSignedOut { .. } => "custodian_signed_out",
             Self::EndsSigner => "reset_ends_signer",
-            Self::NotCustodian { .. } => "not_custodian",
         }
     }
 }
@@ -102,9 +99,6 @@ impl std::fmt::Display for ResetRefused {
                 write!(f, "custodian {} was already signed out", custodian.to_hex())
             }
             Self::EndsSigner => f.write_str("the reset would sign out this device itself"),
-            Self::NotCustodian { node } => {
-                write!(f, "{} is not a verified custody-only node", node.to_hex())
-            }
         }
     }
 }

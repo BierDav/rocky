@@ -444,7 +444,6 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         sequence: Some(0),
         previous: None,
         database: certified.database,
-        personal: None,
         possession: certified.possession,
     })
     .unwrap();

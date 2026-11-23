@@ -539,7 +539,7 @@ pub(crate) fn self_certificate_in(
             database: Some(database),
             sequence: Some(0),
             possession: Some(
-                rocky_credentials::NodePossession::sign(key, key.public_key(), database, None)
+                rocky_credentials::NodePossession::sign(key, key.public_key(), database)
                     .expect("possession"),
             ),
             ..Extended::default()

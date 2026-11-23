@@ -1002,10 +1002,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("compiled application differs from the domain root"));
         }
-        config
-            .revocations
-            .pin(&config.manifest, config.publisher)
-            .map_err(credential)?;
         if let Some(certificate) = config.credentials.certificate() {
             config
                 .revocations
@@ -2139,7 +2135,7 @@ impl<A: RowApplication> Inner<A> {
         self.header_authority(
             header,
             frame.chain()?.credentials(),
-            &self.config.revocations.pinned_only(),
+            &RevocationSet::default(),
             header.timestamp / 1_000_000,
         )
     }
@@ -2393,10 +2389,7 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("secure file identity mismatch"));
         }
-        let mut stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
-        stored
-            .pin(&self.config.manifest, self.config.publisher)
-            .map_err(credential)?;
+        let stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
         stored
             .verify_in(
                 self.config

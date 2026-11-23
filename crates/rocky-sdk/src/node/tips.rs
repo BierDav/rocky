@@ -287,7 +287,6 @@ impl Node {
         identity: PublicKey,
         root: &super::Root,
     ) -> Result<crate::TrustGrant, Failure> {
-        self.settings.lock().await.admits_identity(identity)?;
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let (link, changes) = self
             .settings

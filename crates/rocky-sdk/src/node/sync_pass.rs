@@ -531,7 +531,7 @@ impl Node {
             result = self.reconcile(transport, peer, &target.contact).await;
         }
         let settings = self.settings.lock().await.clone();
-        let sources = settings.epoch_sources()?;
+        let sources = settings.epoch_sources();
         let owes_epochs = settings.issuer()
             && sources.contains(&peer)
             && !result

@@ -6,7 +6,7 @@ use crate::{
     secrets::Vault,
 };
 use rocky_core::{Commitment, KeyEpoch, PartitionName, PartitionValue, ResourceScope};
-use rocky_credentials::{DatabaseKind, MetadataEscrow, RootEscrow, RootKey, escrow_tag};
+use rocky_credentials::{RootEscrow, RootKey, escrow_tag};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,129 +105,11 @@ pub(crate) async fn keep(
     vault: &Vault,
     domain: &Domain,
 ) -> Result<(), Failure> {
-    let naming = match replica.custody_naming_escrow().await? {
-        Some(record) => Some(record),
-        None => match settings
-            .naming_escrow
-            .clone()
-            .filter(|record| judge_naming(record, settings, domain).is_ok())
-        {
-            Some(record) => Some(record),
-            None => seal_naming(settings, vault)?,
-        },
-    };
-    if let Some(record) = naming {
-        replica.keep_custody_metadata(record).await?;
-    }
     let held = replica.escrowed().await?;
     replica
         .keep_escrow(seal(settings, vault, domain, &held)?)
         .await?;
     Ok(())
-}
-
-pub(crate) fn seal_naming(
-    settings: &Settings,
-    vault: &Vault,
-) -> Result<Option<MetadataEscrow>, Failure> {
-    if !settings.kind()?.is_personal() {
-        return Ok(None);
-    }
-    let Some(root) = vault.find(NAMING_ROLE)? else {
-        return Ok(None);
-    };
-    let item = Escrowed::Naming { root };
-    let tag = escrow_tag(settings.publisher, item.secret());
-    let record = RootEscrow::seal(settings.publisher, tag, &serde_json::to_vec(&item)?)?;
-    Ok(Some(MetadataEscrow::sign(
-        &Settings::node_key(vault)?,
-        settings.credentials.clone(),
-        (
-            settings.database_context()?,
-            settings.manifest()?.descriptor()?,
-        ),
-        record,
-        crate::enrollment::now()?,
-    )?))
-}
-
-fn judge_naming(
-    record: &MetadataEscrow,
-    settings: &Settings,
-    domain: &Domain,
-) -> Result<(), Failure> {
-    let DatabaseKind::Personal { owner, .. } = settings.kind()? else {
-        return Err("only a personal database escrows its naming root".into());
-    };
-    let descriptor = settings.manifest()?.descriptor()?;
-    record.verify(settings.database_context()?, descriptor)?;
-    let ahead = rocky_core::MAX_CLOCK_AHEAD.as_secs();
-    if record.signed_at() > crate::enrollment::now()?.saturating_add(ahead) {
-        return Err("the naming root escrow is vouched for in the future".into());
-    }
-    let signer = record.signer();
-    record.chain().historic_provenance_with_families(
-        settings.publisher,
-        signer,
-        &domain.families,
-    )?;
-    let link = record
-        .chain()
-        .certificate()
-        .map(rocky_credentials::PersonalLink::of)
-        .transpose()?
-        .flatten()
-        .ok_or("the naming root escrow's signer is no owner device")?;
-    let known = &settings.revocations;
-    if link.owner != owner
-        || link.descriptor != descriptor
-        || known.tombstones(owner, signer)
-        || known.unfenced().ends_node_of(owner, signer, false)
-    {
-        return Err("the naming root escrow's signer is no live owner device".into());
-    }
-    Ok(())
-}
-
-pub(crate) fn keep_naming(
-    settings: &mut Settings,
-    record: Option<MetadataEscrow>,
-) -> Result<(), Failure> {
-    let Some(record) = record else {
-        return Ok(());
-    };
-    if !matches!(settings.profile, rocky_credentials::Profile::Custody { .. }) {
-        return Err("only a personal custodian keeps the naming root escrow".into());
-    }
-    if settings.naming_escrow.is_none() {
-        judge_naming(&record, settings, &settings.domain()?)?;
-        settings.naming_escrow = Some(record);
-    }
-    Ok(())
-}
-
-pub(crate) fn open_naming(
-    record: &MetadataEscrow,
-    settings: &Settings,
-    domain: &Domain,
-    root: &RootKey,
-) -> Result<Option<[u8; 32]>, Failure> {
-    if judge_naming(record, settings, domain).is_err() {
-        return Ok(None);
-    }
-    let sealed = record.record();
-    Ok(sealed
-        .open(root)
-        .ok()
-        .and_then(|payload| serde_json::from_slice::<Escrowed>(&payload).ok())
-        .and_then(|item| match item {
-            Escrowed::Naming { root: naming }
-                if sealed.tag() == escrow_tag(settings.publisher, &naming) =>
-            {
-                Some(naming)
-            }
-            _ => None,
-        }))
 }
 
 #[derive(Default)]

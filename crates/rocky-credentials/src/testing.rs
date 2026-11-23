@@ -105,7 +105,7 @@ fn certificate(
                 sequence: Some(0),
                 database: Some(database),
                 possession: Some(
-                    crate::NodePossession::sign(node, identity_key, database, None)
+                    crate::NodePossession::sign(node, identity_key, database)
                         .expect("a possession proof"),
                 ),
                 ..Extended::default()

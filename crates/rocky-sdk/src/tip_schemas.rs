@@ -157,7 +157,6 @@ impl Bootstrap {
 impl Settings {
     pub(crate) fn verify_schema(&self) -> Result<(), Failure> {
         let root = self.manifest()?.verify_historic(self.publisher)?;
-        let _personal_genesis_still_locates_this_database = self.kind()?;
         let domain = self.domain()?;
         if root.app != domain.manifest().app || self.generation == 0 {
             return Err("invalid installed schema context".into());

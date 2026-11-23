@@ -230,18 +230,6 @@ pub(crate) enum Request {
         rocky_credentials::PeerId,
         Reply<Option<crate::DeviceRevocationReceipt>>,
     ),
-    PersonalDeviceNotices(Reply<Vec<crate::PersonalDeviceNotice>>),
-    PersonalDeviceNotice(rocky_credentials::PeerId, bool, Reply<()>),
-    RevokePersonalDevice(
-        rocky_credentials::PeerId,
-        crate::VerifiedPasskeyPrf,
-        Reply<crate::DeviceRevocationReceipt>,
-    ),
-    PersonalReset(
-        crate::VerifiedPasskeyPrf,
-        crate::ResetKeep,
-        Reply<crate::ResetReceipt>,
-    ),
     Unlink(rocky_credentials::PeerId, Reply<()>),
     Backup(std::path::PathBuf, Reply<crate::BackupInventory>),
     RevokeIdentity(
@@ -355,10 +343,7 @@ impl Request {
             Self::AddPeer(..) => Kind::PeerAdd,
             Self::RemovePeer(..) => Kind::PeerRemove,
             Self::EnrollmentUpstream(..) => Kind::EnrollmentUpstream,
-            Self::DeviceRevocationReceipt(..)
-            | Self::PersonalDeviceNotices(..)
-            | Self::PersonalDeviceNotice(..) => Kind::Status,
-            Self::RevokePersonalDevice(..) | Self::PersonalReset(..) => Kind::Revoke,
+            Self::DeviceRevocationReceipt(..) => Kind::Status,
             Self::Unlink(..) => Kind::Unlink,
             Self::Backup(..) => Kind::Backup,
             Self::RevokeIdentity(..) | Self::SignOutEverywhereElse(..) => Kind::Revoke,
@@ -552,18 +537,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::DeviceRevocationReceipt(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::PersonalDeviceNotices(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::PersonalDeviceNotice(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::RevokePersonalDevice(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::PersonalReset(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Unlink(_, reply) => {

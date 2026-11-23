@@ -137,7 +137,7 @@ async fn enrolled_schema(
     if let Some((issuer, profile)) = issuer {
         let provisioned = issuer.provision(profile, None).await?;
         let (settings, vault, _) =
-            Settings::install_provisioned(&store, schema, &provisioned.uri, true).await?;
+            Settings::install_provisioned(&store, Some(schema), &provisioned.uri, true).await?;
         settings.save(&path).await?;
         let transport = hub
             .connector(name)

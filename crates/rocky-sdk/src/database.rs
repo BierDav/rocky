@@ -30,6 +30,26 @@ pub struct Open<'a> {
     pub network: Option<Network>,
     pub coordination: Option<CoordinatorSlot>,
 }
+pub(crate) struct Opening<'a> {
+    pub(crate) directory: &'a Path,
+    pub(crate) schema: Option<&'a Schema>,
+    pub(crate) secrets: Option<Arc<dyn SecretStore>>,
+    pub(crate) identity: Option<Arc<dyn crate::IdentityProvider>>,
+    pub(crate) network: Option<Network>,
+    pub(crate) coordination: Option<CoordinatorSlot>,
+}
+impl<'a> From<Open<'a>> for Opening<'a> {
+    fn from(open: Open<'a>) -> Self {
+        Self {
+            directory: open.directory,
+            schema: Some(open.schema),
+            secrets: open.secrets,
+            identity: open.identity,
+            network: open.network,
+            coordination: open.coordination,
+        }
+    }
+}
 #[derive(Clone)]
 pub enum CoordinatorSlot {
     Client(Arc<dyn rocky_credentials::Coordinator>),
@@ -86,7 +106,7 @@ impl Install {
 }
 struct Setup {
     directory: PathBuf,
-    schema: Schema,
+    schema: Option<Schema>,
     secrets: Arc<dyn SecretStore>,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
@@ -318,7 +338,7 @@ impl Database {
         let root = crate::RootKey::generate();
         let created = crate::RootKey::from_secret(root.secret());
         let mut opened = Self::start(
-            open,
+            open.into(),
             Self::create_install(credential_ttl, Arc::new(root), None)?,
         )?;
         opened.root = Some(created);
@@ -329,12 +349,15 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::start(open, Self::create_install(credential_ttl, root, None)?)
+        Self::start(
+            open.into(),
+            Self::create_install(credential_ttl, root, None)?,
+        )
     }
     pub fn join(open: Open<'_>, provisioning: &str) -> Result<Opened, Failure> {
         let single_use = open.identity.is_none();
         let (install, phrase) = Self::join_install(provisioning, single_use);
-        let mut opened = Self::start(open, install)?;
+        let mut opened = Self::start(open.into(), install)?;
         if let Ok(mut guard) = phrase.lock() {
             opened.identity = guard.take();
         }
@@ -348,7 +371,7 @@ impl Database {
             return Err("another node of an identity needs that identity's provider".into());
         }
         Self::start(
-            open,
+            open.into(),
             Install::Identity {
                 contact: contact.into(),
                 confirmed: None,
@@ -356,22 +379,22 @@ impl Database {
         )
     }
     pub fn accept_invitation(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        Self::start(open, Self::invited_install(invitation))
+        Self::start(open.into(), Self::invited_install(invitation))
     }
     pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
-        Self::start(open, Install::Supplied(Box::new(supplied)))
+        Self::start(open.into(), Install::Supplied(Box::new(supplied)))
     }
     pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
-        Self::start(open, Install::Installed)
+        Self::start(open.into(), Install::Installed)
     }
     pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
-        Self::start_confirmed(open, Install::Installed, Some(digest.into()))
+        Self::start_confirmed(open.into(), Install::Installed, Some(digest.into()))
     }
-    fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
+    fn start(open: Opening<'_>, install: Install) -> Result<Opened, Failure> {
         Self::start_confirmed(open, install, None)
     }
     fn start_confirmed(
-        open: Open<'_>,
+        open: Opening<'_>,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<Opened, Failure> {
@@ -443,7 +466,7 @@ impl Database {
         Settings::prepare_install(&path, &secrets, identity)
     }
     async fn launch(
-        open: Open<'_>,
+        open: Opening<'_>,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<Opened, Failure> {
@@ -454,7 +477,7 @@ impl Database {
         Self::launch_in(open, install, confirmation, place).await
     }
     async fn launch_in(
-        open: Open<'_>,
+        open: Opening<'_>,
         install: Install,
         confirmation: Option<String>,
         place: fn(Serving, residence::Claim, Hello) -> std::io::Result<Worker>,
@@ -480,7 +503,7 @@ impl Database {
         }
     }
     pub(crate) async fn launch_create(
-        open: Open<'_>,
+        open: Opening<'_>,
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
         bookmark: &'static str,
@@ -489,7 +512,7 @@ impl Database {
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_join(
-        open: Open<'_>,
+        open: Opening<'_>,
         provisioning: &str,
         single_use: bool,
     ) -> Result<Opened, Failure> {
@@ -504,13 +527,13 @@ impl Database {
         }
     }
     pub(crate) async fn launch_invited(
-        open: Open<'_>,
+        open: Opening<'_>,
         invitation: &str,
     ) -> Result<Opened, Failure> {
         Self::launch(open, Self::invited_install(invitation), None).await
     }
     pub(crate) async fn launch_link(
-        open: Open<'_>,
+        open: Opening<'_>,
         contact: &str,
         confirmed: Option<Arc<crate::AwaitingLink>>,
     ) -> Result<Opened, Failure> {
@@ -535,18 +558,18 @@ impl Database {
             return Err("link code does not match".into());
         }
         Self::start(
-            open,
+            open.into(),
             Install::Identity {
                 contact: contact.into(),
                 confirmed: Some(pending),
             },
         )
     }
-    pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
+    pub(crate) async fn launch_open(open: Opening<'_>) -> Result<Opened, Failure> {
         Self::launch(open, Install::Installed, None).await
     }
     fn setup(
-        open: Open<'_>,
+        open: Opening<'_>,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
@@ -563,8 +586,12 @@ impl Database {
                 return Err("accepting an invitation needs the invited identity's provider".into());
             }
         }
+        if open.schema.is_none() && matches!(install, Install::Create { .. } | Install::Supplied(_))
+        {
+            return Err(crate::StoreOnlyRefusal::NeedsSchema.into());
+        }
         let setup = Setup {
-            schema: open.schema.validated()?,
+            schema: open.schema.map(Schema::validated).transpose()?,
             secrets: open
                 .secrets
                 .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
@@ -580,7 +607,7 @@ impl Database {
         Ok((setup, open.network))
     }
     fn serving(
-        open: Open<'_>,
+        open: Opening<'_>,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<(Serving, residence::Claim, Senders), Failure> {
@@ -749,7 +776,7 @@ impl Database {
         install: Install,
         ahead: Arc<AtomicU64>,
     ) -> Result<Hosted, Failure> {
-        let (mut serving, claim, senders) = Self::serving(open, install, None)?;
+        let (mut serving, claim, senders) = Self::serving(open.into(), install, None)?;
         let (expose, exposed) = std::sync::mpsc::channel();
         serving.setup.expose = Some(expose);
         let (hello, greeting) = oneshot::channel();
@@ -783,7 +810,7 @@ impl Database {
         Ok(Hosted { opened, node })
     }
     async fn launch_local(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
-        Self::launch_in(open, install, None, Worker::local).await
+        Self::launch_in(open.into(), install, None, Worker::local).await
     }
     pub(crate) async fn crash(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
@@ -1322,6 +1349,9 @@ async fn identity(
                 .map_err(|_| "root poisoned")?
                 .take()
                 .ok_or(crate::enrollment::PublisherRequired("creating a domain"))?;
+            let schema = schema
+                .as_ref()
+                .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
             let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
             if let Some(CoordinatorSlot::Client(client)) = &setup.coordination {
                 *setup
@@ -1366,7 +1396,8 @@ async fn identity(
             phrase,
         } => {
             let (settings, vault, identity_phrase) =
-                Settings::install_provisioned(secrets, schema, provisioning, *single_use).await?;
+                Settings::install_provisioned(secrets, schema.as_ref(), provisioning, *single_use)
+                    .await?;
             let started = async {
                 let link = match network {
                     Some(network) => {
@@ -1436,7 +1467,7 @@ async fn identity(
             let key = Settings::route_secret(&prepared.1)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_invited(
-                (path, schema),
+                (path, schema.as_ref()),
                 prepared,
                 provider,
                 invitation,
@@ -1454,6 +1485,9 @@ async fn identity(
             }
         }
         Install::Supplied(supplied) => {
+            let schema = schema
+                .as_ref()
+                .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
             let settings =
                 Settings::install(path, schema, secrets, supplied, setup.identity.clone()).await?;
             let Some(network) = network else {
@@ -1475,7 +1509,8 @@ async fn identity(
                 }
                 None => None,
             };
-            if settings.application(schema)? == crate::DeclaredSchema::Current
+            if let Some(schema) = schema
+                && settings.application(schema)? == crate::DeclaredSchema::Current
                 && settings.schema != *schema
             {
                 settings.schema = schema.clone();
@@ -1645,6 +1680,9 @@ pub(crate) async fn insert_rows(
     Ok(())
 }
 async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Result<(), Failure> {
+    let Some(schema) = &setup.schema else {
+        return Ok(());
+    };
     let settings = Settings::load(path)?;
     let has_tip_schema = rocky_secure::installed_tip_schema(
         &directory.join("rocky.sqlite"),
@@ -1655,13 +1693,7 @@ async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Resul
     .await?
     .is_some();
     if has_tip_schema {
-        crate::rollout::confirm(
-            &settings,
-            path,
-            &setup.schema,
-            setup.confirmation.as_deref(),
-        )
-        .await?;
+        crate::rollout::confirm(&settings, path, schema, setup.confirmation.as_deref()).await?;
     }
     Ok(())
 }
@@ -1789,6 +1821,9 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
+        if setup.schema.is_none() && !settings.stores_only() {
+            return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
+        }
         if let (Install::Join { .. } | Install::Invited { .. }, Some(inviter)) =
             (&setup.install, settings.issuers.first())
         {
@@ -1904,17 +1939,18 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
     };
     let scope = domain.scope;
-    let node = Arc::new(
-        Node::new(
-            replica.clone(),
-            domain,
-            vault,
-            settings,
-            path.clone(),
-            bootstrap_intent,
-        )
-        .with_declared(setup.schema.clone()),
+    let node = Node::new(
+        replica.clone(),
+        domain,
+        vault,
+        settings,
+        path.clone(),
+        bootstrap_intent,
     );
+    let node = Arc::new(match &setup.schema {
+        Some(schema) => node.with_declared(schema.clone()),
+        None => node,
+    });
     #[cfg(test)]
     if let Some(expose) = &setup.expose {
         let _ = expose.send(Arc::downgrade(&node));

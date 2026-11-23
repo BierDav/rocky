@@ -1,10 +1,12 @@
-use crate::{Database, Failure, IdentityProvider, Network, Open, Opened, Schema, SecretStore};
+use crate::{
+    Database, Failure, IdentityProvider, Network, Opened, Schema, SecretStore, database::Opening,
+};
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone)]
 pub struct Configuration {
     directory: PathBuf,
-    schema: Schema,
+    schema: Option<Schema>,
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
@@ -15,13 +17,19 @@ impl Configuration {
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
         let schema = schema.validated()?;
         Ok(Self {
+            schema: Some(schema),
+            ..Self::store_only(directory)
+        })
+    }
+    pub fn store_only(directory: impl Into<PathBuf>) -> Self {
+        Self {
             directory: directory.into(),
-            schema,
+            schema: None,
             secrets: None,
             identity: None,
             network: None,
             coordination: None,
-        })
+        }
     }
     #[must_use]
     pub fn secrets(mut self, store: Arc<dyn SecretStore>) -> Self {
@@ -51,10 +59,10 @@ impl Configuration {
         self.coordination = Some(crate::CoordinatorSlot::Connector(connector));
         self
     }
-    fn options(&self) -> Open<'_> {
-        Open {
+    fn options(&self) -> Opening<'_> {
+        Opening {
             directory: &self.directory,
-            schema: &self.schema,
+            schema: self.schema.as_ref(),
             secrets: self.secrets.clone(),
             identity: self.identity.clone(),
             network: self.network.clone(),

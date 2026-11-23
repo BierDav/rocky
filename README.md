@@ -44,6 +44,12 @@ for an enrollment that node signs. Such an invitation is single use and expires 
 minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
 unused one with `Session::withdraw_invitation`. Supply the identity for
 later linking; opening and renewal use the node key alone.
+A relay is an ordinary identity invited with store-only access
+(`GrantProfile::Custody`): it holds and forwards encrypted frames and
+partition-key mailboxes for devices that are never online together, but never
+receives a data key. `Configuration::store_only` opens such a database without
+the application's schema, so one process can relay for many tenants
+(`cargo run -p rocky-sdk --example relay`).
 The root grants and revokes trust per identity; those calls fail with
 `publisher_required` without it. Every linked node of a trusted identity
 can invite, renew, revoke ordinary identities and seal. Linking another node

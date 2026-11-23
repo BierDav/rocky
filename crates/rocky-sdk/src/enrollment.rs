@@ -853,6 +853,9 @@ impl Settings {
     pub fn issuer(&self) -> bool {
         self.authority.is_some()
     }
+    pub(crate) fn stores_only(&self) -> bool {
+        matches!(self.profile, Profile::Custody { .. }) && !self.issuer() && self.keys.is_empty()
+    }
     pub(crate) fn renews_from_issuer(&self) -> bool {
         !self.issuer() || !self.issuers.is_empty()
     }
@@ -2385,7 +2388,7 @@ fn refuse_oversized_revocation(
 impl Settings {
     pub(crate) async fn install_provisioned(
         store: &Arc<dyn crate::SecretStore>,
-        schema: &Schema,
+        schema: Option<&Schema>,
         provisioning: &str,
         single_use: bool,
     ) -> Result<(Self, Vault, Option<String>), Failure> {
@@ -2410,7 +2413,7 @@ impl Settings {
         Ok((settings, vault, phrase))
     }
     pub(crate) fn install_enrollment(
-        schema: &Schema,
+        schema: Option<&Schema>,
         (installation, vault): (String, &Vault),
         issuing: EnrollingIssuer,
         enrollment: Enrollment,
@@ -2422,9 +2425,17 @@ impl Settings {
         {
             return Err("enrollment belongs to another database".into());
         }
-        if context(schema, issuing.database) != context(&enrollment.record.schema, issuing.database)
-        {
-            return Err("application mismatch".into());
+        match schema {
+            Some(schema)
+                if context(schema, issuing.database)
+                    != context(&enrollment.record.schema, issuing.database) =>
+            {
+                return Err("application mismatch".into());
+            }
+            None if !matches!(enrollment.profile, Profile::Custody { .. }) => {
+                return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
+            }
+            _ => {}
         }
         enrollment.revocations.verify_in(issuing.database)?;
         let identity = provider.public_key()?;

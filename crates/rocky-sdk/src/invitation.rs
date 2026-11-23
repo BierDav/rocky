@@ -482,7 +482,7 @@ impl Settings {
     }
 
     pub(crate) async fn enroll_invited(
-        (path, schema): (&Path, &Schema),
+        (path, schema): (&Path, Option<&Schema>),
         (intent, vault): (Intent, Vault),
         provider: Arc<dyn IdentityProvider>,
         invitation: &str,

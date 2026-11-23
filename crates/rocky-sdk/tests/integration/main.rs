@@ -59,6 +59,8 @@ mod registry;
 #[cfg(not(target_family = "wasm"))]
 mod registry_revocation;
 #[cfg(not(target_family = "wasm"))]
+mod relay;
+#[cfg(not(target_family = "wasm"))]
 mod removal;
 #[cfg(not(target_family = "wasm"))]
 mod replayed;

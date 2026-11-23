@@ -42,6 +42,7 @@ mod session;
 mod simulation;
 mod sql;
 mod status;
+mod store_only;
 mod sync;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_directory;
@@ -113,6 +114,7 @@ pub use session::{
 };
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
+pub use store_only::StoreOnlyRefusal;
 pub use tips::*;
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub use self_enrollment::AwaitingLink;

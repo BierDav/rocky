@@ -40,9 +40,6 @@ env:
   ROCKY_CRANELIFT: '0'
   # Smaller test binaries and build cache; backtraces keep line numbers.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  # The SDK persists `identity.json` from its runtime thread; a fault-injection
-  # test can race the temporary path a persist briefly holds. Retry once.
-  NEXTEST_RETRIES: 1
 
 jobs:
   lint:

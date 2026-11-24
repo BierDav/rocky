@@ -468,6 +468,8 @@ impl Node {
             (epochs, recipients)
         };
         let subscriptions = self.replica.subscriptions().await?;
+        let full = crate::database::replica_role(&*self.settings.lock().await, &self.domain())
+            == rocky_secure::ReplicaRole::Full;
         let mut tables = Vec::new();
         for member in &partition.members {
             let epochs = self.replica.key_epochs(member.scope).await;
@@ -477,6 +479,7 @@ impl Node {
                 current: epochs.iter().copied().max(),
                 epochs,
                 subscribed: subscriptions.contains(&member.scope),
+                held: full || subscriptions.contains(&member.scope),
             });
         }
         Ok(crate::PartitionStatus {
@@ -556,6 +559,7 @@ impl Node {
                         epochs: Vec::new(),
                         current: None,
                         subscribed: false,
+                        held: false,
                     })
                     .collect(),
                 recipients: Vec::new(),

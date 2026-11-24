@@ -1037,7 +1037,7 @@ impl Simulation {
                 ))
                 .await?;
             let tables = status.tables;
-            if !tables.is_empty() && tables.iter().all(|table| table.subscribed) {
+            if !tables.is_empty() && tables.iter().all(|table| table.held) {
                 held.insert(list.clone());
             }
         }

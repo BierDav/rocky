@@ -177,6 +177,8 @@ pub struct PartitionTableStatus {
     pub current: Option<rocky_core::KeyEpoch>,
     /// Whether this device syncs it.
     pub subscribed: bool,
+    /// Whether this device holds its rows, by a subscription or as a full replica.
+    pub held: bool,
 }
 /// A partition key's delivery to one device.
 #[cfg(any(test, feature = "test-support"))]

@@ -911,17 +911,24 @@ pub(crate) async fn attach(
     Ok(recovered)
 }
 
+pub(crate) fn replica_role(
+    settings: &Settings,
+    domain: &crate::domain::Domain,
+) -> rocky_secure::ReplicaRole {
+    let partial = !settings.issuer() && domain.holds_partitions_only_when_granted(&settings.access);
+    if partial {
+        rocky_secure::ReplicaRole::Partial
+    } else {
+        rocky_secure::ReplicaRole::Full
+    }
+}
 pub(crate) async fn align_role(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
     domain: &crate::domain::Domain,
 ) -> Result<Option<bool>, Failure> {
-    let partial = !settings.issuer() && domain.holds_partitions_only_when_granted(&settings.access);
-    let role = if partial {
-        rocky_secure::ReplicaRole::Partial
-    } else {
-        rocky_secure::ReplicaRole::Full
-    };
+    let role = replica_role(settings, domain);
+    let partial = role == rocky_secure::ReplicaRole::Partial;
     let changed = replica.role().await?.role != role;
     if changed {
         replica.set_role(rocky_secure::RoleConfig { role }).await?;

@@ -629,6 +629,24 @@ mod regressions {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_oracle_audits_the_full_replica_of_the_creator() -> Result<(), Failure> {
+        let board = Change::Board {
+            list: "l0".into(),
+            code: 1,
+            cap: 5,
+        };
+        let report = simulate(2, INTEGRATION, vec![Change(0, board)]).await?;
+        assert!(failure(&report).is_none(), "{}", report.dump());
+        assert_eq!(
+            report.coverage.get("lists held"),
+            Some(&4),
+            "a and b each hold both lists: {}",
+            report.dump()
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_joiner_writing_while_it_imports_two_lists_does_not_stall() -> Result<(), Failure> {
         let board = |node, list: &str, code, cap| {
             Change(

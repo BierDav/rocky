@@ -3200,13 +3200,6 @@ impl Settings {
         }
         Ok(())
     }
-    pub(crate) fn known_issuer(&self, node: &PublicKey) -> bool {
-        self.issuers.contains(node)
-            || self
-                .contact_refs
-                .get(&rocky_credentials::PeerId::of(*node))
-                .is_some_and(|entry| entry.issuer)
-    }
     pub(crate) fn bind_saved_contact(&mut self, node: PublicKey) {
         let id = rocky_credentials::PeerId::of(node);
         if self.resolved_refs.insert(id)

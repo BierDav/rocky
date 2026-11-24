@@ -1,7 +1,5 @@
 use crate::{Configuration, DEVICES, LIST_GROUP, TodoError, Todos};
-use rocky_sdk::{
-    Access, Failure, PartitionTarget, ReplicaRole, ReplicaRoleConfig, RoleName, RowIdentity, params,
-};
+use rocky_sdk::{Access, Failure, RoleName, RowIdentity, params};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,9 +22,6 @@ impl Role {
     }
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|role| role.as_str() == text)
-    }
-    pub fn holds_all(self) -> bool {
-        self != Self::Partial
     }
     fn access(self) -> Result<Access, TodoError> {
         match self {
@@ -68,14 +63,6 @@ pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, 
 pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Result<Todos, Failure> {
     let (role, uri) = parse_invitation(code)?;
     let todos = Todos::new(configuration.join(&uri.parse()?).await?.database);
-    if role == Role::Partial {
-        todos
-            .database
-            .set_replica_role(ReplicaRoleConfig {
-                role: ReplicaRole::Partial,
-            })
-            .await?;
-    }
     todos.register(role, name).await?;
     Ok(todos)
 }
@@ -178,67 +165,23 @@ impl Todos {
             .ok_or_else(|| "the node is not linked to a recorded person".into())
     }
     pub async fn shared_with(&self, list: RowIdentity) -> Result<BTreeSet<String>, Failure> {
+        let partition = list_partition(list);
         Ok(self
             .database
-            .partition_status(list_target(list))
+            .people()
             .await?
-            .recipients
             .into_iter()
-            .filter_map(|delivery| delivery.node)
-            .map(|node| node.to_hex())
+            .filter(|person| person.partitions.contains(&partition))
+            .flat_map(|person| person.devices)
+            .map(|device| device.id.key().to_hex())
             .collect())
     }
     pub async fn share(&self, list: RowIdentity, nodes: &[String]) -> Result<(), Failure> {
-        if nodes.is_empty() {
-            return Ok(());
-        }
-        let partial: BTreeSet<String> = self
-            .members()
-            .await?
-            .into_iter()
-            .filter(|member| member.role == Role::Partial)
-            .map(|member| member.node)
-            .collect();
-        let mut full = BTreeSet::new();
         for node in nodes {
-            let key = node.parse()?;
-            if partial.contains(node) {
-                let person = self.person_of(key).await?;
-                self.database
-                    .grant_partition(person, &list_partition(list))
-                    .await?;
-            } else {
-                full.insert(key);
-            }
-        }
-        if !full.is_empty() {
+            let person = self.person_of(node.parse()?).await?;
             self.database
-                .share_partition(list_target(list), full, None)
+                .grant_partition(person, &list_partition(list))
                 .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn share_with_members(&self, list: RowIdentity) -> Result<(), Failure> {
-        let own = self.node().await?;
-        let shared = self.shared_with(list).await?;
-        let missing: Vec<String> = self
-            .members()
-            .await?
-            .into_iter()
-            .filter(|member| {
-                member.role.holds_all() && member.node != own && !shared.contains(&member.node)
-            })
-            .map(|member| member.node)
-            .collect();
-        self.share(list, &missing).await
-    }
-    pub async fn share_lists_with_members(&self) -> Result<(), Failure> {
-        if self.role().await? != Role::Trusted {
-            return Ok(());
-        }
-        for list in self.lists().await? {
-            self.share_with_members(list.id).await?;
         }
         Ok(())
     }
@@ -246,10 +189,4 @@ impl Todos {
 
 fn list_partition(list: RowIdentity) -> rocky_sdk::Partition {
     rocky_sdk::Partition::new(LIST_GROUP, vec![list.sql()])
-}
-fn list_target(list: RowIdentity) -> PartitionTarget {
-    PartitionTarget::Group {
-        group: LIST_GROUP.into(),
-        values: vec![list.sql()],
-    }
 }

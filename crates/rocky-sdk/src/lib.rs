@@ -59,6 +59,7 @@ pub use connection::{
     ChangeCause, SqlFailure, SqlReason, TableChange, TableEvents, Unavailability,
 };
 pub use database::{Created, Database};
+#[cfg(any(test, feature = "test-support"))]
 pub use delivery::State as DeliveryState;
 pub use error::{Error, ErrorKind};
 pub use extension::DeviceCredential;
@@ -80,19 +81,16 @@ pub use rocky_core::{
     IndexDefinition, LogicalAssertion, LogicalRestriction, LogicalView, TableClass,
     TableDefinition,
 };
-pub use rocky_core::{
-    KeyEpoch, PartitionName, PartitionTuple, ResourceScope, RowIdentity, Scope, SqlValue,
-    TransactionToken, WriterId,
-};
 pub use rocky_core::{RoleError, SchemaError};
+pub use rocky_core::{RowIdentity, Scope, SqlValue, TransactionToken};
 pub use rocky_credentials::{
     FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
 };
+pub use rocky_secure::PageCache;
 pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, Holding,
     RetentionLimits, RetentionPolicy,
 };
-pub use rocky_secure::{PageCache, PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};
 pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{
     Column, InvalidName, Migration, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,

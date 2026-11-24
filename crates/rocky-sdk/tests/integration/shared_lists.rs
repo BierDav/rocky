@@ -141,7 +141,7 @@ async fn checkpoint_writer(
             .database,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
-    let base = issuer
+    issuer
         .insert(
             "lists",
             None,
@@ -161,21 +161,6 @@ async fn checkpoint_writer(
             .await?
             .database,
     )?;
-    let writer_node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&base)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([writer_node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     assert_eq!(
         writer.column("SELECT title FROM lists").await?,
@@ -202,7 +187,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .database,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
-    let base = issuer
+    issuer
         .insert(
             "lists",
             None,
@@ -219,21 +204,6 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .await?
             .database,
     )?;
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&base)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     let prepared = snap::value(writer.database.next_partition("lists")).await?;
     snap::value(issuer.database.seal()).await?;
@@ -346,21 +316,6 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         list.as_str(),
         "a prepared partition survives a restart before its first row commits"
     );
-    let issuer_node = snap::value(issuer.database.info()).await?["node"].clone();
-    snap::value(
-        writer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([issuer_node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     snap::value(issuer.sync_now()).await?;
     assert_eq!(
@@ -439,21 +394,6 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         )
         .await?;
 
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await.map_err(|error| {
         format!("one sync delivers the envelope and the list's checkpoint: {error}")
     })?;
@@ -547,23 +487,8 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(issuer.database.seal()).await?;
     snap::value(issuer.database.compact(0)).await?;
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     writer
         .insert(
@@ -679,21 +604,6 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     for title in ["Milk", "Eggs", "Flour"] {
         issuer
             .insert(
@@ -805,21 +715,6 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     writer
         .insert(
@@ -867,13 +762,12 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             .database,
     )?;
     snap::value(a.database.next_partition("lists")).await?;
-    let list = a
-        .insert(
-            "lists",
-            None,
-            "INSERT INTO lists(id,title) VALUES(?,'Own list')",
-        )
-        .await?;
+    a.insert(
+        "lists",
+        None,
+        "INSERT INTO lists(id,title) VALUES(?,'Own list')",
+    )
+    .await?;
     let invitation = a
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
@@ -890,21 +784,6 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         b.column("SELECT title FROM lists").await?,
         [json!("Own list")]
     );
-    let node = snap::value(a.database.info()).await?["node"].clone();
-    snap::value(
-        b.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(a.sync_now()).await?;
     let activity = snap::value(a.database.activity(0)).await?;
     assert!(
@@ -960,22 +839,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         lists.push(peer.insert("lists", None, &sql).await?);
     }
     sync_each_learning_the_others_tuple(&[&a, &b]).await?;
-    for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
-        let node = snap::value(to.database.info()).await?["node"].clone();
-        snap::value(
-            from.database.share_partition(
-                rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                },
-                serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                    json!([node]),
-                )
-                .expect("typed fixture"),
-                None,
-            ),
-        )
-        .await?;
+    for (from, to) in [(&a, &b), (&b, &a)] {
         snap::value(from.sync_now()).await?;
         snap::value(to.sync_now()).await?;
     }
@@ -1009,13 +873,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .code;
     let writer =
         Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?.with_identity(&b);
-    snap::value(
-        writer.database.set_replica_role(
-            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
-                .expect("typed fixture"),
-        ),
-    )
-    .await?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -1043,21 +900,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             )
             .await?;
     }
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
@@ -1164,21 +1006,6 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             )
             .await?;
     }
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
@@ -1305,21 +1132,6 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             )
             .await?;
     }
-    let node = snap::value(writer.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(writer.sync_now()).await?;
     writer
         .insert(
@@ -1432,21 +1244,6 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         }
         transaction.commit().await?;
     }
-    let node = snap::value(member.database.info()).await?["node"].clone();
-    snap::value(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(&list)).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     snap::value(member.sync_now()).await?;
     for peer in [member, issuer] {
         peer.database.close().await?;

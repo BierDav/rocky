@@ -227,6 +227,7 @@ pub struct DataStatus {
     pub bootstrap: Option<BootstrapProgress>,
     pub imports: Vec<ScopeImportStatus>,
     pub key_epochs: Vec<KeyEpochStatus>,
+    pub partitions: Vec<crate::PartitionProgress>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPath {

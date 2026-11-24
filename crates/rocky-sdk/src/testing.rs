@@ -92,7 +92,7 @@ pub struct TipFrontierLog {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipAuthorMark {
-    pub author: crate::WriterId,
+    pub author: rocky_core::WriterId,
     pub sequence: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

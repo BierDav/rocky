@@ -54,8 +54,6 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
 
     let tablet = world.join("tablet", Role::Full).await?;
     world.sync().await?;
-    laptop.share_lists_with_members().await?;
-    world.sync().await?;
     assert_eq!(
         tablet.lists().await?.len(),
         2,

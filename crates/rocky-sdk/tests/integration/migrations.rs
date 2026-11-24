@@ -277,7 +277,7 @@ async fn list(device: &Device, title: &str) -> Result<String, Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() -> Result<(), Failure>
+async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -> Result<(), Failure>
 {
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -292,44 +292,13 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     a.admit(&b).await;
     introduce(&a, &b).await;
     list(&a, "From a").await?;
-    let theirs = list(&b, "From b").await?;
-    snap::ok(
-        a.database.register_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: vec![snap::row_id(&(theirs))],
-            },
-            rocky_sdk::PartitionSelection {
-                name: None,
-                omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
-                    .expect("typed fixture"),
-            },
-        ),
-    )
-    .await;
+    list(&b, "From b").await?;
+    for _ in 0..2 {
+        sync(&b).await;
+        sync(&a).await;
+    }
     a.close().await;
-
     let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
-    let status = generation(&a).await;
-    assert_eq!(
-        status["current"]["schema"], 1,
-        "an issuer holding no key of a list does not sign: {status}"
-    );
-    assert_eq!(status["application"], "ahead");
-    assert_eq!(
-        status["migration"],
-        json!({"state": "full_access_required"})
-    );
-    let query = snap::observe(snap::read(
-        &a.database,
-        "SELECT position FROM lists",
-        Vec::new(),
-    ))
-    .await
-    .err()
-    .ok_or("a query on the new field answered")?;
-    assert!(query.to_string().contains("no such column"), "{query}");
-
     for _ in 0..2 {
         sync(&b).await;
         sync(&a).await;
@@ -339,7 +308,7 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     assert_eq!(
         generation(&a).await["current"]["schema"],
         2,
-        "once issuers passed each other the group key, the issuer signs and migrates"
+        "the member's creation hands its key to the issuer, which migrates every list"
     );
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists ORDER BY title").await,
@@ -684,21 +653,6 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     )?;
     introduce(&a, &b).await;
     let id = list(&a, "Weekly").await?;
-    let node = b.node().await;
-    snap::ok(
-        a.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: vec![snap::row_id(&(id))],
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await;
     sync(&b).await;
     a.close().await;
     let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;

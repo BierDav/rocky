@@ -29,10 +29,10 @@ async fn run(nodes: usize, steps: Vec<Action>, kinds: &[&str]) -> Result<Vec<Str
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Result<(), Failure> {
+async fn a_trusted_node_sees_a_devices_alert_and_blocker_clear() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
     let relink = [Sever(1, 2), Heal(1, 2)];
-    let mut steps = vec![Invite(0, 2), Partial(1), Sync(0), Sync(1), Sync(2), Mesh(0)];
+    let mut steps = vec![Invite(0, 2), Sync(0), Sync(1), Sync(2), Mesh(0)];
     steps.extend([Sever(0, 2), Clock(2, hour)]);
     steps.extend(relink.clone());
     steps.extend([

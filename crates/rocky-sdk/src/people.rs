@@ -363,7 +363,6 @@ pub struct DeviceInfo {
     pub transport: String,
     pub readable: usize,
     pub writable: usize,
-    pub writer: crate::WriterId,
 }
 
 impl Database {

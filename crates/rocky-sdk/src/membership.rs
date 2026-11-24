@@ -126,6 +126,7 @@ impl Membership {
             .filter(move |member| member.identity == *identity)
             .map(|member| &member.node)
     }
+    #[cfg(test)]
     pub fn identity_of(&self, node: &PublicKey) -> Option<PublicKey> {
         self.0.get(node).map(|member| member.identity)
     }

@@ -40,9 +40,6 @@ impl Peer {
             .code)
     }
 
-    async fn node(&self) -> Result<Value, Failure> {
-        Ok(snap::value(self.database.info()).await?["node"].clone())
-    }
     async fn online(&self, online: bool) -> Result<(), Failure> {
         snap::value(self.database.set_sync(if online {
             rocky_sdk::SyncMode::Manual
@@ -139,23 +136,6 @@ impl Peer {
     async fn items(&self) -> Result<Vec<Vec<Value>>, Failure> {
         self.rows("SELECT list,title,completed,category FROM items ORDER BY list,title")
             .await
-    }
-    async fn share(&self, list: &str, reader: &Peer) -> Result<(), Failure> {
-        snap::value(
-            self.database.share_partition(
-                rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                },
-                serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                    json!([reader.node().await?]),
-                )
-                .expect("typed fixture"),
-                None,
-            ),
-        )
-        .await
-        .map(drop)
     }
 }
 fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
@@ -255,9 +235,6 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     let milk = a.add(&weekly, "Milk", Some(&dairy)).await?;
     a.add(&weekly, "Butter", Some(&dairy)).await?;
     a.add(&party, "Cake", None).await?;
-    for list in [&weekly, &weekend, &party] {
-        a.share(list, b).await?;
-    }
     relay(a, b).await?;
     assert_eq!(
         b.items().await?,
@@ -351,9 +328,6 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
             .database,
     )?;
     c.sync().await?;
-    for list in [&weekly, &weekend] {
-        a.share(list, &c).await?;
-    }
     c.sync().await?;
     assert_eq!(c.items().await?, a.items().await?);
     assert_eq!(
@@ -377,7 +351,6 @@ async fn custody_keeps_offered_partitions_across_restart() -> Result<(), Failure
         custody,
     } = topology().await?;
     let list = a.create_list("Weekly").await?;
-    a.share(&list, &b).await?;
     a.add(&list, "Milk", None).await?;
     b.online(false).await?;
     a.sync().await?;

@@ -392,7 +392,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let mut writers = std::collections::BTreeSet::new();
     for device in [&a, &b, &x, &y] {
         writers.insert(
-            snap::ok(device.database.info()).await["writer"]
+            snap::ok(device.database.info()).await["node"]
                 .clone()
                 .to_string(),
         );

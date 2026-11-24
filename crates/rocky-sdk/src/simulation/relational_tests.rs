@@ -277,120 +277,6 @@ mod regressions {
         .await
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn an_eviction_after_a_seal_audits() -> Result<(), Failure> {
-        holds(
-            20004,
-            vec![
-                Change(
-                    0,
-                    Change::Board {
-                        list: "l0".into(),
-                        code: 1,
-                        cap: 3,
-                    },
-                ),
-                Seal(0),
-                Evict(1, "l0".into()),
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_eviction_before_the_list_arrives_finalizes() -> Result<(), Failure> {
-        holds(
-            20004,
-            vec![
-                Change(
-                    0,
-                    Change::Board {
-                        list: "l0".into(),
-                        code: 1,
-                        cap: 3,
-                    },
-                ),
-                Evict(1, "l0".into()),
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn evicting_a_list_whose_share_never_arrived_succeeds() -> Result<(), Failure> {
-        let report = simulate(
-            20033,
-            INTEGRATION,
-            vec![
-                Offline(1),
-                Partition("l8".into()),
-                Share("l8".into(), 1),
-                Evict(1, "l8".into()),
-                Seal(0),
-            ],
-        )
-        .await?;
-        assert!(failure(&report).is_none(), "{}", report.dump());
-        assert_eq!(
-            report.coverage.get("evicted"),
-            Some(&1),
-            "{}",
-            report.dump()
-        );
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn evicting_a_list_with_a_board_and_its_card_audits() -> Result<(), Failure> {
-        let report = simulate(
-            20042,
-            INTEGRATION,
-            vec![
-                Change(
-                    0,
-                    Change::Pair {
-                        list: "l1".into(),
-                        code: 0,
-                        name: 3,
-                        points: 1,
-                    },
-                ),
-                Evict(1, "l1".into()),
-            ],
-        )
-        .await?;
-        assert!(failure(&report).is_none(), "{}", report.dump());
-        assert_eq!(
-            report.coverage.get("evicted"),
-            Some(&1),
-            "{}",
-            report.dump()
-        );
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_list_held_again_after_eviction_keeps_sealed_eras() -> Result<(), Failure> {
-        holds(
-            20064,
-            vec![
-                Change(
-                    0,
-                    Change::Pair {
-                        list: "l1".into(),
-                        code: 2,
-                        name: 4,
-                        points: 5,
-                    },
-                ),
-                Seal(0),
-                Evict(1, "l1".into()),
-                Hold(1, "l1".into()),
-            ],
-        )
-        .await
-    }
-
     async fn keeps_outcomes(
         seed: u64,
         scenario: Scenario,
@@ -406,7 +292,6 @@ mod regressions {
         );
         Ok(report)
     }
-
     #[tokio::test(start_paused = true)]
     async fn a_listed_checkpoint_waits_for_placements() -> Result<(), Failure> {
         keeps_outcomes(
@@ -443,7 +328,6 @@ mod regressions {
                     },
                 ),
                 Partition("l8".into()),
-                Share("l8".into(), 1),
                 Invite(0, 2),
                 Seal(0),
             ],
@@ -482,97 +366,6 @@ mod regressions {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_list_held_again_after_two_seals_keeps_the_first_seals_era() -> Result<(), Failure> {
-        keeps_outcomes(
-            20027,
-            soak_size(20027),
-            vec![
-                Change(
-                    1,
-                    Change::Board {
-                        list: "l1".into(),
-                        code: 0,
-                        cap: 8,
-                    },
-                ),
-                Evict(1, "l1".into()),
-                Seal(0),
-                Crash(1, Some(rocky_secure::CrashPoint::Redo)),
-                Seal(0),
-                Hold(1, "l1".into()),
-            ],
-        )
-        .await
-        .map(drop)
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_evicted_own_outcome_turns_final_with_a_covering_base() -> Result<(), Failure> {
-        holds_at(
-            20207,
-            soak_size(20207),
-            vec![
-                Invite(0, 2),
-                Change(
-                    1,
-                    Change::Board {
-                        list: "l0".into(),
-                        code: 2,
-                        cap: 6,
-                    },
-                ),
-                Evict(1, "l0".into()),
-                Revoke(2),
-                Hold(1, "l0".into()),
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_base_at_an_earlier_seal_verifies_the_next_seal() -> Result<(), Failure> {
-        holds_at(20135, soak_size(20135), steps_20135()).await
-    }
-    fn steps_20135() -> Vec<Action> {
-        vec![
-            Change(
-                1,
-                Change::Board {
-                    list: "l1".into(),
-                    code: 3,
-                    cap: 12,
-                },
-            ),
-            Crash(1, Some(rocky_secure::CrashPoint::Apply)),
-            Change(
-                0,
-                Change::Card {
-                    list: "l1".into(),
-                    board: 7,
-                    pinned: Some(7),
-                    name: 2,
-                    points: 3,
-                },
-            ),
-            Seal(0),
-            Evict(1, "l1".into()),
-            Compact(0),
-            Seal(0),
-            Share("l1".into(), 1),
-        ]
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_card_on_a_remote_board_replays_after_it_under_a_frozen_clock() -> Result<(), Failure>
-    {
-        let frozen = Scenario {
-            wall: Wall::Frozen,
-            ..soak_size(20135)
-        };
-        holds_at(20135, frozen, steps_20135()).await
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_member_holding_one_list_finalizes_seals_over_another() -> Result<(), Failure> {
         keeps_outcomes(
             20000,
@@ -587,33 +380,10 @@ mod regressions {
                     },
                 ),
                 Invite(0, 2),
-                Share("l1".into(), 2),
             ],
         )
         .await
         .map(drop)
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_revocation_imports_no_checkpoint_into_an_evicted_list() -> Result<(), Failure> {
-        holds_at(
-            20080,
-            soak_size(20080),
-            vec![
-                Evict(1, "l0".into()),
-                Change(
-                    0,
-                    Change::Board {
-                        list: "l0".into(),
-                        code: 1,
-                        cap: 6,
-                    },
-                ),
-                Invite(0, 2),
-                Revoke(2),
-            ],
-        )
-        .await
     }
 
     #[tokio::test(start_paused = true)]
@@ -650,7 +420,6 @@ mod regressions {
                 ),
                 Seal(0),
                 Invite(0, 2),
-                Share("l0".into(), 2),
             ],
         )
         .await
@@ -663,7 +432,6 @@ mod regressions {
             soak_size(20290),
             vec![
                 Invite(0, 2),
-                Share("l1".into(), 2),
                 Sync(0),
                 Seal(0),
                 Change(
@@ -681,36 +449,6 @@ mod regressions {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn leaving_a_list_waits_for_custody_of_own_frames() -> Result<(), Failure> {
-        holds_at(
-            20074,
-            soak_size(20074),
-            vec![
-                Change(
-                    0,
-                    Change::Pair {
-                        list: "l1".into(),
-                        code: 1,
-                        name: 2,
-                        points: 6,
-                    },
-                ),
-                Offline(0),
-                Change(
-                    1,
-                    Change::Board {
-                        list: "l0".into(),
-                        code: 0,
-                        cap: 10,
-                    },
-                ),
-                Evict(1, "l0".into()),
-            ],
-        )
-        .await
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_head_whose_author_is_revoked_resolves_at_a_peer_that_never_saw_it()
     -> Result<(), Failure> {
         holds_at(
@@ -718,7 +456,6 @@ mod regressions {
             soak_size(20276),
             vec![
                 Invite(0, 2),
-                Share("l0".into(), 2),
                 Sync(0),
                 Restart(2),
                 Change(

@@ -43,13 +43,7 @@ async fn a_member_recovers_earlier_epoch_writes_from_a_newer_base() -> Result<()
 async fn a_late_empty_partition_gets_a_verified_replay_base() -> Result<(), Failure> {
     healed(
         10532,
-        vec![
-            Write(0),
-            Seal(0),
-            Compact(0),
-            Partition("late".into()),
-            Share("late".into(), 1),
-        ],
+        vec![Write(0), Seal(0), Compact(0), Partition("late".into())],
     )
     .await
 }
@@ -101,7 +95,6 @@ async fn an_empty_partition_base_advances_to_cover_a_new_author() -> Result<(), 
             Sync(0),
             Seal(0),
             Compact(0),
-            Share("empty".into(), 1),
         ],
     )
     .await

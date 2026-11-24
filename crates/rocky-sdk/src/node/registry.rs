@@ -66,6 +66,21 @@ impl Node {
         if let Some(identity) = renewed.chain.principal() {
             self.see(identity, renewed.node).await?;
         }
+        crate::delivery::fault::pause(
+            Settings::node_key(&self.vault)?.public_key(),
+            crate::delivery::fault::Stage::Renewing,
+        )
+        .await;
+        let settings = self.settings_snapshot().await;
+        let registry = self.registry(&settings).await?;
+        if settings.tombstoned(&renewed.node)
+            || renewed
+                .chain
+                .principal()
+                .is_some_and(|identity| settings.revoked_identity(&identity, &registry))
+        {
+            return Err("device was revoked".into());
+        }
         Ok(reply)
     }
 

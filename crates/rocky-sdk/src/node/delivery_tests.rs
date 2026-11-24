@@ -101,27 +101,24 @@ impl Device {
             .code)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
-        Ok(snap::value(
-            self.database
-                .partition_status(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values()).clone(),
-                }),
+        Ok(
+            snap::value(self.database.partition_status(&rocky_sdk::Partition::new(
+                "list".to_owned(),
+                (values()).clone(),
+            )))
+            .await?["epochs"]
+                .as_array()
+                .ok_or("epochs")?
+                .iter()
+                .map(|epoch| epoch["generation"].clone())
+                .collect(),
         )
-        .await?["epochs"]
-            .as_array()
-            .ok_or("epochs")?
-            .iter()
-            .map(|epoch| epoch["generation"].clone())
-            .collect())
     }
     async fn state(&self, node: &str) -> Result<Value, Failure> {
-        let status = snap::value(self.database.partition_status(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values()).clone(),
-            },
-        ))
+        let status = snap::value(self.database.partition_status(&rocky_sdk::Partition::new(
+            "list".to_owned(),
+            (values()).clone(),
+        )))
         .await?;
         Ok(status["recipients"]
             .as_array()
@@ -188,9 +185,27 @@ impl Mesh {
         Self::with_root(tempfile::tempdir()?.into()).await
     }
     async fn with_root(root: crate::test_directory::Directory) -> Result<Self, Failure> {
-        let mesh = Self::unpartitioned(root).await?;
-        create_list(&mesh.a).await?;
-        Ok(mesh)
+        let Self {
+            root,
+            hub,
+            a,
+            custody,
+            b,
+        } = Self::unpartitioned(root).await?;
+        explicit_syncs_only(&[&a, &custody]).await?;
+        let away = b.stop().await?;
+        create_list(&a).await?;
+        a.online(false).await?;
+        let b = away.start().await?;
+        b.online(false).await?;
+        a.online(true).await?;
+        Ok(Self {
+            root,
+            hub,
+            a,
+            custody,
+            b,
+        })
     }
     async fn unpartitioned(root: crate::test_directory::Directory) -> Result<Self, Failure> {
         let hub = Arc::new(Hub::default());
@@ -267,21 +282,6 @@ async fn relay(from: &Device, to: &Device) -> Result<Value, String> {
         .await
         .map_err(|error| error.to_string())
 }
-async fn share(device: &Device, recipients: &[&str]) -> Result<Value, Failure> {
-    let recipients = recipients
-        .iter()
-        .map(|key| key.parse())
-        .collect::<Result<_, _>>()?;
-    snap::value(device.database.share_partition(
-        crate::PartitionTarget::Group {
-            group: "list".into(),
-            values: values(),
-        },
-        recipients,
-        None,
-    ))
-    .await
-}
 async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
     Ok(device
         .events("envelopes_delivered")
@@ -301,7 +301,7 @@ fn contains(bytes: &[u8], pattern: &[u8]) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone()
+async fn a_creation_and_a_rotation_reach_an_offline_recipient_through_custody_alone()
 -> Result<(), Failure> {
     let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let third = mesh.member("third").await?;
@@ -310,8 +310,6 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     mesh.hub.record("third");
     let node = b.node().await?;
     b.online(false).await?;
-    let removed_node = removed.node().await?;
-    share(a, &[&node, &third.node().await?, &removed_node]).await?;
     snap::value(a.database.remove(
         crate::PersonId::new(removed.identity().await?.parse()?),
         crate::Removal::Departed,
@@ -322,17 +320,14 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     assert_eq!(a.state(&node).await?, "deposited");
     assert_eq!(
         custody.mailbox()?.len(),
-        4,
-        "a share and a rotation each for B and the third member"
+        3,
+        "the creation for B and a rotation each for B and the third member"
     );
     let held = std::fs::read(custody.directory.join("mailbox.json"))?;
-    let address = snap::value(
-        a.database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values()).clone(),
-            }),
-    )
+    let address = snap::value(a.database.partition_status(&rocky_sdk::Partition::new(
+        "list".to_owned(),
+        (values()).clone(),
+    )))
     .await?["address"]
         .as_str()
         .ok_or("address")?
@@ -381,8 +376,6 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
     introduce(a, &second).await?;
     introduce(b, &second).await?;
     let node = b.node().await?;
-    b.online(false).await?;
-    share(a, &[&node]).await?;
     relay(a, b).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     assert_eq!(second.mailbox()?.len(), 1);
@@ -425,8 +418,6 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     let removed = mesh_member("removed").await?;
     explicit_syncs_only(&[&a]).await?;
     let node = b.node().await?;
-    b.online(false).await?;
-    share(&a, &[&node]).await?;
     relay(&a, &b).await?;
     snap::value(other.database.sync_now()).await?;
     assert_eq!(
@@ -462,13 +453,10 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     for round in &rounds {
         assert_eq!(round["refused"], 1, "no room for B's rotation: {round}");
     }
-    let status = snap::value(
-        a.database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values()).clone(),
-            }),
-    )
+    let status = snap::value(a.database.partition_status(&rocky_sdk::Partition::new(
+        "list".to_owned(),
+        (values()).clone(),
+    )))
     .await?;
     let rotated: Vec<&Value> = status["recipients"]
         .as_array()
@@ -536,7 +524,6 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
     let identity = b.identity().await?;
     let b = b.stop().await?;
     create_list(&a).await?;
-    share(&a, &[&node]).await?;
     snap::value(a.database.sync_now()).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     let custody = custody.restart_with(|_| Ok(())).await?;
@@ -609,20 +596,6 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
         At::Recipient => node.parse()?,
     };
     b.online(direct).await?;
-    snap::value(
-        a.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values()).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
-    .await?;
     let pending = || -> Result<bool, Failure> {
         Ok(fault::STOPS
             .lock()
@@ -750,8 +723,6 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     explicit_syncs_only(&[&mesh.a, &mesh.b, &mailbox]).await?;
     mesh.custody.online(false).await?;
     let recipient = mesh.b.node().await?;
-    mesh.b.online(false).await?;
-    share(&mesh.a, &[&recipient]).await?;
     let _row_exchange_may_be_refused_without_a_list_grant =
         snap::observe(mesh.a.database.sync_now()).await;
     assert_eq!(
@@ -766,4 +737,104 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     assert_eq!(mesh.b.epochs().await?, [json!(1)]);
     mailbox.close().await?;
     mesh.close().await
+}
+
+struct Paused {
+    reached: tokio::sync::oneshot::Receiver<()>,
+    release: tokio::sync::oneshot::Sender<()>,
+}
+fn pause_at(node: rocky_secure::PublicKey, stage: fault::Stage) -> Result<Paused, Failure> {
+    let (reached_by_sender, reached) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    fault::PAUSES
+        .lock()
+        .map_err(|_| "poisoned")?
+        .push(fault::Pause {
+            node,
+            stage,
+            reached: reached_by_sender,
+            release: released,
+        });
+    Ok(Paused { reached, release })
+}
+async fn revoke_while_paused(
+    a: &Device,
+    b: &Device,
+    paused: Paused,
+    answering: impl std::future::Future<Output = Result<Value, Value>>,
+) -> Result<Result<Value, Value>, Failure> {
+    let identity = crate::PersonId::new(b.identity().await?.parse()?);
+    let revoking = async {
+        paused
+            .reached
+            .await
+            .map_err(|_| "the sender never reached the hand-off")?;
+        snap::value(a.database.remove(identity, crate::Removal::Departed)).await?;
+        paused
+            .release
+            .send(())
+            .map_err(|_| "the sender stopped waiting")?;
+        Ok::<_, Failure>(())
+    };
+    let (answered, revoked) = tokio::join!(answering, revoking);
+    revoked?;
+    Ok(answered)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recipient_revoked_while_its_envelope_is_handed_gets_nothing() -> Result<(), Failure> {
+    let Mesh {
+        root,
+        hub,
+        a,
+        custody,
+        b,
+    } = Mesh::new().await?;
+    introduce(&a, &b).await?;
+    custody.online(false).await?;
+    b.online(true).await?;
+    let node = b.node().await?;
+    assert_eq!(a.state(&node).await?, "pending");
+    let paused = pause_at(a.node().await?.parse()?, fault::Stage::Handing)?;
+    let _sync_after_the_revocation_may_report_the_revoked_peer =
+        revoke_while_paused(&a, &b, paused, snap::observe(a.database.sync_now())).await?;
+    assert_eq!(
+        delivered(&b, "received").await?,
+        0,
+        "the envelope computed before the revocation was never handed"
+    );
+    assert!(b.events("partition_key_installed").await?.is_empty());
+    assert_eq!(b.epochs().await?, Vec::<Value>::new());
+    for device in [a, custody, b] {
+        device.close().await?;
+    }
+    drop((root, hub));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recipient_revoked_while_its_renewal_is_answered_gets_nothing() -> Result<(), Failure> {
+    let Mesh {
+        root,
+        hub,
+        a,
+        custody,
+        b,
+    } = Mesh::new().await?;
+    introduce(&a, &b).await?;
+    custody.online(false).await?;
+    b.online(true).await?;
+    let paused = pause_at(a.node().await?.parse()?, fault::Stage::Renewing)?;
+    let renewed = revoke_while_paused(&a, &b, paused, snap::observe(b.database.renew())).await?;
+    assert!(
+        renewed.is_err(),
+        "the answer computed before the revocation is withheld: {renewed:?}"
+    );
+    assert!(b.events("partition_key_installed").await?.is_empty());
+    assert_eq!(b.epochs().await?, Vec::<Value>::new());
+    for device in [a, custody, b] {
+        device.close().await?;
+    }
+    drop((root, hub));
+    Ok(())
 }

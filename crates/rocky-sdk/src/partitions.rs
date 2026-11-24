@@ -1,9 +1,10 @@
 use crate::{Database, SqlValue, request::Request};
-use rocky_credentials::{CredentialChain, PublicKey};
+#[cfg(any(test, feature = "test-support"))]
+use rocky_credentials::PublicKey;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "StoredPartition", from = "StoredPartition")]
 pub struct Partition {
     pub group: String,
     pub values: Vec<SqlValue>,
@@ -61,6 +62,16 @@ pub(crate) struct StoredPartition {
     group: String,
     values: Vec<StoredValue>,
 }
+impl From<Partition> for StoredPartition {
+    fn from(partition: Partition) -> Self {
+        Self::of(&partition)
+    }
+}
+impl From<StoredPartition> for Partition {
+    fn from(stored: StoredPartition) -> Self {
+        stored.partition()
+    }
+}
 impl StoredPartition {
     pub(crate) fn of(partition: &Partition) -> Self {
         Self {
@@ -77,7 +88,7 @@ impl StoredPartition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum PartitionTarget {
+pub(crate) enum PartitionTarget {
     Group {
         group: String,
         values: Vec<SqlValue>,
@@ -95,69 +106,34 @@ impl PartitionTarget {
         }
     }
 }
-#[derive(Clone, Debug, Serialize)]
-pub struct PreparedPartition {
-    pub address: String,
-    pub epoch: rocky_core::KeyEpoch,
-    pub name: String,
-}
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedPartition {
-    pub id: rocky_core::RowIdentity,
-    pub scope: rocky_core::ResourceScope,
-    #[serde(flatten)]
-    pub partition: PreparedPartition,
+    pub id: crate::RowIdentity,
+    pub partition: Partition,
 }
-#[derive(Clone, Debug, Serialize)]
-pub struct PartitionEnvelope {
-    pub recipient: PublicKey,
-    pub envelope: Vec<u8>,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct PartitionShare {
-    pub epoch: rocky_core::KeyEpoch,
-    pub recipients: BTreeSet<PublicKey>,
-    pub envelopes: Vec<PartitionEnvelope>,
-    pub sender: Option<CredentialChain>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionProgress {
+    pub partition: Partition,
+    pub held: bool,
+    pub complete: bool,
 }
 impl Database {
-    pub async fn set_partition_custody(
-        &self,
-        scope: rocky_core::ResourceScope,
-        policy: crate::PartitionCustody,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::PartitionCustody(scope, policy, reply))
-            .await
-    }
-    pub async fn set_replica_role(
-        &self,
-        role: crate::ReplicaRoleConfig,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::ReplicaRole(role, reply)).await
-    }
     pub async fn next_partition(&self, table: &str) -> Result<CreatedPartition, crate::Error> {
         self.send(|reply| Request::NextPartition(table.into(), reply))
             .await
     }
-    pub async fn share_partition(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn partition_status(
         &self,
-        target: PartitionTarget,
-        recipients: BTreeSet<PublicKey>,
-        epoch: Option<rocky_core::KeyEpoch>,
-    ) -> Result<PartitionShare, crate::Error> {
-        self.send(|reply| Request::SharePartition(target, recipients, epoch, reply))
+        partition: &Partition,
+    ) -> Result<PartitionStatus, crate::Error> {
+        let target = partition.target();
+        self.send(|reply| Request::PartitionStatus(target, reply))
             .await
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PartitionAddress {
-    pub scope: rocky_core::ResourceScope,
-    pub tuple: rocky_core::PartitionTuple,
-    pub group: String,
-    pub address: String,
-    pub name: rocky_core::PartitionName,
-}
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct PartitionStatus {
     pub group: String,
@@ -167,6 +143,7 @@ pub struct PartitionStatus {
     pub tables: Vec<PartitionTableStatus>,
     pub recipients: Vec<PartitionDelivery>,
 }
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct PartitionTableStatus {
     pub table: String,
@@ -175,92 +152,11 @@ pub struct PartitionTableStatus {
     pub current: Option<rocky_core::KeyEpoch>,
     pub holding: Option<rocky_secure::Holding>,
 }
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct PartitionDelivery {
     pub node: Option<PublicKey>,
     pub reference: rocky_credentials::PeerId,
     pub epoch: rocky_core::KeyEpoch,
     pub state: crate::DeliveryState,
-}
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PartitionEviction {
-    pub rows: u64,
-    pub operations: u64,
-    pub checkpoints: u64,
-    pub recovery_unconfirmed: bool,
-}
-#[derive(Clone, Debug, Default)]
-pub struct PartitionSelection {
-    pub name: Option<rocky_core::PartitionName>,
-    pub omit: BTreeSet<String>,
-}
-impl Database {
-    pub async fn partition_address(
-        &self,
-        table: &str,
-        values: Vec<SqlValue>,
-    ) -> Result<PartitionAddress, crate::Error> {
-        self.send(|reply| Request::PartitionAddress(table.into(), values, reply))
-            .await
-    }
-    pub async fn partition_complete(&self, table: &str) -> Result<bool, crate::Error> {
-        self.send(|reply| Request::PartitionComplete(table.into(), reply))
-            .await
-    }
-    pub async fn install_partition(
-        &self,
-        target: PartitionTarget,
-        envelope: rocky_credentials::GroupSecretEnvelope,
-        sender: CredentialChain,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::InstallPartition(target, Box::new(envelope), sender, reply))
-            .await
-    }
-    pub async fn partition_status(
-        &self,
-        target: PartitionTarget,
-    ) -> Result<PartitionStatus, crate::Error> {
-        self.send(|reply| Request::PartitionStatus(target, reply))
-            .await
-    }
-    pub async fn register_partition(
-        &self,
-        target: PartitionTarget,
-        selection: PartitionSelection,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::RegisterPartition(target, selection, reply))
-            .await
-    }
-    pub async fn subscribe_partition(
-        &self,
-        target: PartitionTarget,
-        selection: PartitionSelection,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::HoldPartition(target, selection, false, reply))
-            .await
-    }
-    pub async fn bootstrap_partition(
-        &self,
-        target: PartitionTarget,
-        selection: PartitionSelection,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::HoldPartition(target, selection, true, reply))
-            .await
-    }
-    pub async fn unsubscribe_partition(
-        &self,
-        target: PartitionTarget,
-        omit: BTreeSet<String>,
-    ) -> Result<(), crate::Error> {
-        self.send(|reply| Request::ReleasePartition(target, omit, reply))
-            .await
-    }
-    pub async fn evict_partition(
-        &self,
-        target: PartitionTarget,
-        omit: BTreeSet<String>,
-    ) -> Result<PartitionEviction, crate::Error> {
-        self.send(|reply| Request::EvictPartition(target, omit, reply))
-            .await
-    }
 }

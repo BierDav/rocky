@@ -447,18 +447,12 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                 Ok(events) => events,
                 Err(failure) => return error.set(Some(failure.to_string())),
             };
-            let _ = todos.share_lists_with_members().await;
             loop {
                 revision += 1;
                 let change = match events.next().await {
                     Ok(change) => change,
                     Err(failure) => return error.set(Some(failure.to_string())),
                 };
-                if change.tables.iter().any(|table| table == todo_app::DEVICES)
-                    && let Err(failure) = todos.share_lists_with_members().await
-                {
-                    error.set(Some(format!("Sharing lists: {failure}")));
-                }
                 if change.reconcile {
                     notices
                         .write()
@@ -516,7 +510,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
         .filter(|node| partials.iter().any(|member| member.node == *node))
         .or(partials.first().map(|member| member.node.clone()));
     let shared_names: Vec<String> = view.shared.iter().map(|node| member_name(node)).collect();
-    let can_share = view.role.is_some_and(Role::holds_all);
+    let can_share = view.role == Some(Role::Trusted);
     let list = view.list;
     let rows = view.todos.clone();
     let creating = todos.clone();
@@ -556,7 +550,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
             button { r#type: "submit", disabled, "Create" }
         }
         if view.role == Some(Role::Partial) && view.lists.is_empty() {
-            p { class: "muted", "A partial device holds only the lists a trusted or full device shares with it." }
+            p { class: "muted", "A partial device holds only the lists the trusted device shares with it." }
         }
         if let Some(list) = list {
             div { class: "row small",

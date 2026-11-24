@@ -11,7 +11,7 @@ use rocky_credentials::{DeliveryReceipt, GroupSecretEnvelope, SealedDelivery, wr
 use rocky_secure::{PrivateKey, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -90,6 +90,7 @@ pub struct Pending {
     pub targets: Vec<rocky_credentials::PeerId>,
     pub mailboxes: Vec<rocky_credentials::PeerId>,
 }
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Delivered,
@@ -97,6 +98,7 @@ pub enum State {
     Pending,
 }
 impl Pending {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn state(&self) -> State {
         match (&self.delivery, self.mailboxes.is_empty()) {
             (None, _) => State::Delivered,
@@ -176,11 +178,91 @@ impl Settings {
         self.deliveries
             .retain(|_, pending| !revocations.revokes_reference(&pending.recipient));
     }
+    fn queued(&self, recipient: PublicKey, record: &GroupRecord, epoch: KeyEpoch) -> bool {
+        let recipient = rocky_credentials::PeerId::of(recipient);
+        let address = record_key(&record.address);
+        self.deliveries.values().any(|pending| {
+            pending.recipient == recipient && pending.address == address && pending.epoch == epoch
+        })
+    }
+    pub(crate) fn queue_group(
+        &mut self,
+        signer: &PrivateKey,
+        (record, epoch, secret): (&GroupRecord, KeyEpoch, [u8; 32]),
+        recipients: &BTreeSet<PublicKey>,
+        reason: Reason,
+        again: bool,
+    ) -> Result<usize, Failure> {
+        let statements = self
+            .epoch_statements
+            .get(&secret_role(&record.address, epoch))
+            .cloned()
+            .unwrap_or_default();
+        let sender = Some(self.credentials.clone());
+        let mut queued = 0;
+        for recipient in recipients {
+            if !again && self.queued(*recipient, record, epoch) {
+                continue;
+            }
+            let envelope = GroupSecretEnvelope::seal_recorded(
+                signer,
+                rocky_credentials::GroupSecrets {
+                    group: record.address,
+                    epoch: epoch.generation,
+                    secret,
+                    name: record.name,
+                },
+                *recipient,
+                statements.clone(),
+            )?;
+            let delivery = Contents::seal(
+                *recipient,
+                reason,
+                record,
+                envelope.to_bytes()?,
+                sender.clone(),
+            )?;
+            self.queue(*recipient, record, epoch, &delivery, again)?;
+            queued += 1;
+        }
+        Ok(queued)
+    }
+    pub(crate) fn audience(
+        &self,
+        own: PublicKey,
+        domain: &crate::domain::Domain,
+        partition: &GroupPartition,
+        (registry, membership): (&crate::registry::Registry, &crate::membership::Membership),
+        excluded: &[PublicKey],
+    ) -> BTreeSet<PublicKey> {
+        registry
+            .records
+            .iter()
+            .filter(|(identity, record)| {
+                !excluded.contains(identity)
+                    && !self.revoked_identity(identity, registry)
+                    && reads_group(domain, record, partition)
+            })
+            .flat_map(|(identity, _)| {
+                let seen = self
+                    .authority
+                    .iter()
+                    .flat_map(|issuing| &issuing.seen)
+                    .filter(move |(_, seen)| seen.identity == *identity)
+                    .map(|(node, _)| *node);
+                membership
+                    .nodes(identity)
+                    .map(|linked| linked.node)
+                    .chain(seen)
+            })
+            .filter(|node| *node != own && !self.tombstoned(node))
+            .collect()
+    }
     pub(crate) fn queue_rotation(
         &mut self,
         vault: &crate::secrets::Vault,
         domain: &crate::domain::Domain,
-        (registry, membership): (&crate::registry::Registry, &crate::membership::Membership),
+        known: (&crate::registry::Registry, &crate::membership::Membership),
     ) -> Result<(), Failure> {
         let Some(rotation) = self
             .authority
@@ -189,25 +271,8 @@ impl Settings {
         else {
             return Ok(());
         };
-        let own = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let candidates: Vec<(&PublicKey, &IdentityRecord)> = registry
-            .records
-            .iter()
-            .filter(|(identity, _)| {
-                !rotation.identities.contains(identity)
-                    && !self.revoked_identity(identity, registry)
-            })
-            .flat_map(|(identity, record)| {
-                membership
-                    .nodes(identity)
-                    .map(move |linked| (&linked.node, record))
-            })
-            .filter(|(node, _)| **node != own && !self.tombstoned(node))
-            .collect();
-        if rotation.groups.is_empty() || candidates.is_empty() {
-            return Ok(());
-        }
-        let signer_under_issuer_chain = PrivateKey::from_bytes(&vault.get("node")?);
+        let signer = PrivateKey::from_bytes(&vault.get("node")?);
+        let own = signer.public_key();
         let mut pending = Vec::new();
         for (address, target) in &rotation.groups {
             let Some(record) = self.groups.get(address).cloned() else {
@@ -216,38 +281,17 @@ impl Settings {
             let secret = vault.get(&format!("rotation.partition.{address}.{target}"))?;
             let epoch = KeyEpoch::new(target.generation(), &secret);
             let partition = GroupPartition::of(domain, &record)?;
-            let statements = self
-                .epoch_statements
-                .get(&secret_role(&record.address, epoch))
-                .cloned()
-                .unwrap_or_default();
-            for (node, entry) in &candidates {
-                if !reads_group(domain, entry, &partition) {
-                    continue;
-                }
-                let envelope = GroupSecretEnvelope::seal_recorded(
-                    &signer_under_issuer_chain,
-                    rocky_credentials::GroupSecrets {
-                        group: record.address,
-                        epoch: epoch.generation,
-                        secret,
-                        name: record.name,
-                    },
-                    **node,
-                    statements.clone(),
-                )?;
-                let delivery = Contents::seal(
-                    **node,
-                    Reason::Rotation,
-                    &record,
-                    envelope.to_bytes()?,
-                    Some(self.credentials.clone()),
-                )?;
-                pending.push((**node, record.clone(), epoch, delivery));
-            }
+            let recipients = self.audience(own, domain, &partition, known, &rotation.identities);
+            pending.push((record, epoch, secret, recipients));
         }
-        for (node, record, epoch, delivery) in pending {
-            self.queue(node, &record, epoch, &delivery, false)?;
+        for (record, epoch, secret, recipients) in pending {
+            self.queue_group(
+                &signer,
+                (&record, epoch, secret),
+                &recipients,
+                Reason::Rotation,
+                false,
+            )?;
         }
         Ok(())
     }
@@ -459,6 +503,8 @@ pub(crate) mod fault {
     use crate::Failure;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Stage {
+        Handing,
+        Renewing,
         Prepared,
         Installed,
         Receipts,
@@ -485,4 +531,31 @@ pub(crate) mod fault {
     pub fn check(_: rocky_secure::PublicKey, _: Stage) -> Result<(), Failure> {
         Ok(())
     }
+    #[cfg(test)]
+    pub struct Pause {
+        pub node: rocky_secure::PublicKey,
+        pub stage: Stage,
+        pub reached: tokio::sync::oneshot::Sender<()>,
+        pub release: tokio::sync::oneshot::Receiver<()>,
+    }
+    #[cfg(test)]
+    pub static PAUSES: std::sync::Mutex<Vec<Pause>> = std::sync::Mutex::new(Vec::new());
+    #[cfg(test)]
+    pub async fn pause(node: rocky_secure::PublicKey, stage: Stage) {
+        let taken = {
+            let mut pauses = PAUSES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pauses
+                .iter()
+                .position(|pause| pause.node == node && pause.stage == stage)
+                .map(|index| pauses.remove(index))
+        };
+        if let Some(pause) = taken {
+            let _ = pause.reached.send(());
+            let _ = pause.release.await;
+        }
+    }
+    #[cfg(not(test))]
+    pub async fn pause(_: rocky_secure::PublicKey, _: Stage) {}
 }

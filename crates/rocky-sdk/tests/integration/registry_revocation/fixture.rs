@@ -83,14 +83,10 @@ pub(crate) fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
 }
 pub(crate) async fn epoch(device: &Device, list: &str) -> Value {
-    let status = snap::ok(
-        device
-            .database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values(list)).clone(),
-            }),
-    )
+    let status = snap::ok(device.database.partition_status(&rocky_sdk::Partition::new(
+        "list".to_owned(),
+        (values(list)).clone(),
+    )))
     .await;
     for table in status["tables"].as_array().into_iter().flatten() {
         assert_eq!(table["epochs"], status["epochs"], "{status}");
@@ -127,20 +123,6 @@ impl Domain {
             snap::ok(
                 a.database
                     .create_partition(&rocky_sdk::Partition::new("list", (values(list)).clone())),
-            )
-            .await;
-            snap::ok(
-                a.database.share_partition(
-                    rocky_sdk::PartitionTarget::Group {
-                        group: "list".to_owned(),
-                        values: (values(list)).clone(),
-                    },
-                    serde_json::from_value::<
-                        std::collections::BTreeSet<rocky_credentials::PublicKey>,
-                    >(json!([b.node().await]))
-                    .expect("typed fixture"),
-                    None,
-                ),
             )
             .await;
         }

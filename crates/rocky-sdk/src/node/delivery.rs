@@ -9,7 +9,6 @@ use crate::{
 use rocky_core::Right;
 use rocky_credentials::{DeliveryReceipt, GroupSecretEnvelope, SealedDelivery};
 use rocky_secure::network::{Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
-use std::collections::BTreeSet;
 
 pub(crate) struct Port<'a> {
     pub node: &'a Node,
@@ -88,11 +87,20 @@ impl Deliveries for Port<'_> {
     ) -> DeliveryFuture<'_, ()> {
         Box::pin(async move { self.node.forget(peer, digests).await.map_err(secure) })
     }
+    fn admits(&self, peer: PublicKey) -> DeliveryFuture<'_, bool> {
+        Box::pin(async move { self.node.admits(peer).await.map_err(secure) })
+    }
 }
 
 impl Node {
     fn own_node(&self) -> Result<PublicKey, Failure> {
         Ok(PrivateKey::from_bytes(&self.vault.get("node")?).public_key())
+    }
+    async fn admits(&self, peer: PublicKey) -> Result<bool, Failure> {
+        fault::pause(self.own_node()?, Stage::Handing).await;
+        let learned = self.replica.revocations().await;
+        let settings = self.settings.lock().await;
+        Ok(!settings.tombstoned(&peer) && !learned.revokes(&peer))
     }
     fn mailbox_chain(&self, settings: &Settings, node: PublicKey, chain: &CredentialChain) -> bool {
         let Ok(time) = now() else {
@@ -303,20 +311,17 @@ impl Node {
                 bootstrap,
             )
             .await?;
-        let target = crate::PartitionTarget::Group {
-            group: contents.group,
-            values,
-        };
+        let named = crate::Partition::new(contents.group, values);
         if installed {
             self.activity
                 .record(crate::ActivityKind::PartitionKeyInstalled {
-                    target: target.clone(),
+                    partition: named.clone(),
                 });
         }
         if bootstrap {
-            self.hold(&partition, &BTreeSet::new(), true).await?;
+            self.hold(&partition, true).await?;
             self.activity
-                .record(crate::ActivityKind::PartitionBootstrap { target });
+                .record(crate::ActivityKind::PartitionBootstrap { partition: named });
         }
         self.wake_sync();
         Ok(())

@@ -64,8 +64,6 @@ struct Simulation {
     authored: Vec<Authored>,
     may_vanish: BTreeSet<TransactionToken>,
     positions: BTreeMap<TransactionToken, (Position, bool)>,
-    partial: Vec<bool>,
-    shared: BTreeSet<(usize, String)>,
     coverage: BTreeMap<String, usize>,
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
     mesh_watches: BTreeMap<usize, tokio::task::JoinHandle<Result<MeshView, Failure>>>,
@@ -114,8 +112,6 @@ pub(super) async fn run_steps(
         authored: Vec::new(),
         may_vanish: BTreeSet::new(),
         positions: BTreeMap::new(),
-        partial: vec![false; scenario.nodes],
-        shared: BTreeSet::new(),
         coverage: BTreeMap::new(),
         members: (0..scenario.nodes)
             .map(|node| Member::new(root.path(), &node_name(node), fixture.schema()))
@@ -188,7 +184,6 @@ impl Simulation {
         if self.fixture == Fixture::Relational {
             for list in LISTS {
                 self.step(0, &Action::Partition(list.into())).await?;
-                self.step(0, &Action::Share(list.into(), 1)).await?;
             }
             self.sync(1).await?;
         }
@@ -341,16 +336,6 @@ impl Simulation {
                     .map_err(|_| "not woken")???;
                 Ok(self.mesh(&mesh))
             }
-            Action::Partial(node) => {
-                self.running(*node)?
-                    .database()?
-                    .set_replica_role(crate::ReplicaRoleConfig {
-                        role: crate::ReplicaRole::Partial,
-                    })
-                    .await?;
-                self.partial[*node] = true;
-                Ok("partial".into())
-            }
             Action::Received(node) => {
                 let running = self.members[*node]
                     .running
@@ -455,25 +440,6 @@ impl Simulation {
                 self.lists.push(list.clone());
                 Ok("created".into())
             }
-            Action::Share(list, node) => {
-                let key = self.members[*node]
-                    .node_key
-                    .clone()
-                    .ok_or("skipped: never joined")?;
-                self.running(0)?
-                    .database()?
-                    .share_partition(
-                        crate::PartitionTarget::Group {
-                            group: "list".into(),
-                            values: vec![crate::SqlValue::Text(list.clone())],
-                        },
-                        [key.parse()?].into(),
-                        None,
-                    )
-                    .await?;
-                self.shared.insert((*node, list.clone()));
-                Ok("shared".into())
-            }
             Action::WritePart(node, list) => {
                 let elsewhere = self.waits_elsewhere(*node).await;
                 self.running(*node)?
@@ -495,74 +461,6 @@ impl Simulation {
                 Ok("revoked".into())
             }
             Action::Change(node, change) => self.change(*node, index, change).await,
-            Action::Evict(node, list) => {
-                if !self.shared.contains(&(*node, list.clone())) {
-                    return Err("skipped: never shared".into());
-                }
-                let owner = rocky_credentials::PeerId::of(
-                    self.members[0]
-                        .node_key
-                        .as_ref()
-                        .ok_or("no owner")?
-                        .parse()?,
-                );
-                let member = self.running(*node)?;
-                if !self.partial[*node] {
-                    member
-                        .database()?
-                        .set_replica_role(crate::ReplicaRoleConfig {
-                            role: crate::ReplicaRole::Partial,
-                        })
-                        .await?;
-                }
-                let target = crate::PartitionTarget::Group {
-                    group: "list".into(),
-                    values: vec![crate::SqlValue::Text(list.clone())],
-                };
-                let database = member.database()?;
-                for table in database.partition_status(target.clone()).await?.tables {
-                    if let Some(scope) = table.scope {
-                        database
-                            .set_partition_custody(
-                                scope,
-                                crate::PartitionCustody {
-                                    peers: [owner].into(),
-                                    copies: 1,
-                                },
-                            )
-                            .await?;
-                    }
-                }
-                self.sync(*node).await?;
-                self.running(*node)?
-                    .database()?
-                    .unsubscribe_partition(target.clone(), Default::default())
-                    .await?;
-                self.partial[*node] = true;
-                let evicted = self
-                    .running(*node)?
-                    .database()?
-                    .evict_partition(target, Default::default())
-                    .await?;
-                self.count("evicted");
-                Ok(format!("evicted {} rows", evicted.rows))
-            }
-            Action::Hold(node, list) => {
-                if !self.shared.contains(&(*node, list.clone())) {
-                    return Err("skipped: never shared".into());
-                }
-                self.running(*node)?
-                    .database()?
-                    .subscribe_partition(
-                        crate::PartitionTarget::Group {
-                            group: "list".into(),
-                            values: vec![crate::SqlValue::Text(list.clone())],
-                        },
-                        Default::default(),
-                    )
-                    .await?;
-                Ok("holding".into())
-            }
             Action::Offline(node) | Action::Online(node) => {
                 let online = matches!(action, Action::Online(_));
                 self.database(*node)?
@@ -1104,10 +1002,10 @@ impl Simulation {
         for list in &self.lists {
             let status = member
                 .database()?
-                .partition_status(crate::PartitionTarget::Group {
-                    group: "list".into(),
-                    values: vec![crate::SqlValue::Text(list.clone())],
-                })
+                .partition_status(&crate::Partition::new(
+                    "list",
+                    vec![crate::SqlValue::Text(list.clone())],
+                ))
                 .await?;
             let tables = status.tables;
             if !tables.is_empty()
@@ -1135,10 +1033,10 @@ impl Simulation {
         for (table, list) in &authored.scopes {
             let status = member
                 .database()?
-                .partition_status(crate::PartitionTarget::Group {
-                    group: "list".into(),
-                    values: vec![crate::SqlValue::Text(list.clone())],
-                })
+                .partition_status(&crate::Partition::new(
+                    "list",
+                    vec![crate::SqlValue::Text(list.clone())],
+                ))
                 .await?;
             let Some(scope) = status
                 .tables

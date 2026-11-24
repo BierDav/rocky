@@ -41,32 +41,12 @@ impl Node {
                 let result = tokio::select! { result = self.next_activity(a) => result, () = reply.closed() => return, };
                 let _ = reply.send(result);
             }
-            Request::PartitionAddress(a, b, reply) => {
-                let _ = reply.send(self.partition_address(&a, b).await);
-            }
-            Request::PartitionComplete(a, reply) => {
-                let _ = reply.send(self.partition_complete(&a).await);
-            }
             Request::CreatePartition(partition, reply) => {
                 let _ = reply.send(self.create_named_partition(&partition).await);
             }
-            Request::InstallPartition(a, b, c, reply) => {
-                let _ = reply.send(self.install_partition(&a, &b, &c).await);
-            }
+            #[cfg(any(test, feature = "test-support"))]
             Request::PartitionStatus(a, reply) => {
                 let _ = reply.send(self.partition_status(&a).await);
-            }
-            Request::RegisterPartition(a, b, reply) => {
-                let _ = reply.send(self.register_partition(&a, &b).await);
-            }
-            Request::HoldPartition(a, b, c, reply) => {
-                let _ = reply.send(self.hold_partition(&a, &b, c).await);
-            }
-            Request::ReleasePartition(a, b, reply) => {
-                let _ = reply.send(self.release_partition(&a, &b).await);
-            }
-            Request::EvictPartition(a, b, reply) => {
-                let _ = reply.send(self.evict_partition(&a, &b).await);
             }
             Request::Status(reply) => {
                 let _ = reply.send(self.observed_status().await);
@@ -153,23 +133,8 @@ impl Node {
             Request::Info(reply) => {
                 let _ = reply.send(self.device_info().await);
             }
-            Request::PartitionCustody(scope, policy, reply) => {
-                let result = self
-                    .replica
-                    .set_partition_custody(scope, policy)
-                    .await
-                    .map_err(Into::into);
-                self.wake_sync();
-                let _ = reply.send(result);
-            }
-            Request::ReplicaRole(role, reply) => {
-                let _ = reply.send(self.set_replica_role(role).await);
-            }
             Request::NextPartition(table, reply) => {
                 let _ = reply.send(self.next_partition(&table).await);
-            }
-            Request::SharePartition(target, recipients, epoch, reply) => {
-                let _ = reply.send(self.share_partition(&target, recipients, epoch).await);
             }
             Request::DeviceCredential(reply) => {
                 let _ = reply.send(self.device_credential().await);

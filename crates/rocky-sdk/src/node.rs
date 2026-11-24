@@ -40,7 +40,9 @@ use crate::{
 };
 use data_encoding::HEXLOWER;
 use futures_util::{StreamExt, stream};
-use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
+#[cfg(test)]
+use rocky_core::SqlValue;
+use rocky_core::{ResourceScope, TypedRows, commitment};
 use rocky_credentials::{IdentityEnrollment, IdentityReply};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
@@ -850,7 +852,6 @@ impl Node {
             transport: self.kind(),
             readable: status.readable.len(),
             writable: status.writable.len(),
-            writer: crate::WriterId::from_bytes(*status.node.as_bytes()),
         })
     }
     async fn bootstrap_progress(&self) -> Result<Option<crate::BootstrapProgress>, Failure> {
@@ -1163,6 +1164,12 @@ impl Node {
             self.apply(&mut settings, keys).await?;
             self.hold_keys(&settings, &settings.partitions(&self.domain())?)
                 .await?;
+            if let Some(partial) =
+                crate::database::align_role(&self.replica, &settings, &self.domain()).await?
+            {
+                self.activity
+                    .record(crate::ActivityKind::RoleChanged { partial });
+            }
             let grants_widened = settings.granted(&self.domain()).len() > readable;
             if grants_widened {
                 let domain = self.domain();

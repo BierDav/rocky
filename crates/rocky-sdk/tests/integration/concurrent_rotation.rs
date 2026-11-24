@@ -66,10 +66,7 @@ async fn partition(device: &Device) -> Value {
     snap::ok(
         device
             .database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".into(),
-                values: values(),
-            }),
+            .partition_status(&rocky_sdk::Partition::new("list", values())),
     )
     .await
 }
@@ -83,10 +80,7 @@ async fn create_partition(device: &Device) -> Value {
     let status = snap::ok(
         device
             .database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".into(),
-                values: values(),
-            }),
+            .partition_status(&rocky_sdk::Partition::new("list", values())),
     )
     .await;
     json!({ "epoch": status["current"] })

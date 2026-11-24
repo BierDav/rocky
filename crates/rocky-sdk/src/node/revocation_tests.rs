@@ -9,11 +9,8 @@ const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
-fn list_partition(list: impl Into<String>) -> crate::PartitionTarget {
-    crate::PartitionTarget::Group {
-        group: "list".into(),
-        values: vec![rocky_core::SqlValue::Text(list.into())],
-    }
+fn list_partition(list: impl Into<String>) -> crate::Partition {
+    crate::Partition::new("list", vec![rocky_core::SqlValue::Text(list.into())])
 }
 
 #[derive(Clone, Default)]
@@ -365,7 +362,8 @@ fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<()
     runtime()?.block_on(async {
         let node = issuer(template.path(), Arc::new(keys.clone())).await?;
         for list in ["L", "M"] {
-            node.create_partition(&list_partition(list)).await?;
+            node.create_partition(&list_partition(list).target())
+                .await?;
         }
         Ok::<_, Failure>(())
     })?;
@@ -442,7 +440,7 @@ async fn stop_at(
     let reopened = configuration.open().await?;
     let completed = Settings::load(&root.path().join("rocky.sqlite"))?;
     for list in ["L", "M"] {
-        let status = reopened.partition_status(list_partition(list)).await?;
+        let status = reopened.partition_status(&list_partition(list)).await?;
         for table in status.tables {
             assert_eq!(table.epochs, status.epochs, "{stop:?}");
             assert_eq!(table.current, status.current, "{stop:?}");
@@ -522,7 +520,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let template = tempfile::tempdir()?;
     let keys = Keys::default();
     let node = issuer(template.path(), Arc::new(keys.clone())).await?;
-    node.create_partition(&list_partition("L")).await?;
+    node.create_partition(&list_partition("L").target()).await?;
     let settings = node.settings.lock().await.clone();
     let record = settings.groups.values().next().ok_or("group")?;
     let secret = [245; 32];
@@ -561,7 +559,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         let epochs = &settings.groups.values().next().ok_or("group")?.epochs;
         assert_eq!(epochs.len(), 2);
         assert!(epochs.contains(&rocky_core::KeyEpoch::new(1, &secret)));
-        let status = database.partition_status(list_partition("L")).await?;
+        let status = database.partition_status(&list_partition("L")).await?;
         for table in status.tables {
             assert_eq!(table.epochs, status.epochs);
             assert_eq!(table.current, status.current);

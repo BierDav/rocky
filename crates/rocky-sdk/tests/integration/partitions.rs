@@ -106,41 +106,21 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .await;
     snap::ok(reader.sync_now()).await;
     assert_eq!(
-        snap::ok(reader.partition_status(rocky_sdk::PartitionTarget::Table {
-            table: "items".to_owned(),
-            values: (values("A")).clone()
-        }))
+        snap::ok(reader.partition_status(&rocky_sdk::Partition::new("items", values("A"))))
         .await["epochs"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
-    assert_ne!(
-        snap::reply(
-            reader.register_partition(
-                rocky_sdk::PartitionTarget::Table {
-                    table: "items".to_owned(),
-                    values: (values("B")).clone()
-                },
-                rocky_sdk::PartitionSelection {
-                    name: None,
-                    omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
-                        .expect("typed fixture")
-                }
-            )
-        )
-        .await["status"],
-        "ok"
-    );
-    assert!(
-        !snap::ok(async {
-            let value = reader.partition_complete("items").await?;
-            Ok::<_, rocky_sdk::Error>(json!({"complete":value}))
-        })
-        .await["complete"]
-            .as_bool()
-            .unwrap()
+    let progress = reader.status().await.unwrap().data.partitions;
+    assert_eq!(
+        progress
+            .iter()
+            .map(|progress| (progress.partition.clone(), progress.held))
+            .collect::<Vec<_>>(),
+        [(rocky_sdk::Partition::new("items", values("A")), true)],
+        "a per-partition reader holds only the partition granted to it"
     );
     snap::ok(async {
         reader.renew().await?;

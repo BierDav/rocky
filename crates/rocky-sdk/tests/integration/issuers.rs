@@ -137,9 +137,9 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "paired issuers share no identity key"
     );
     assert_ne!(
-        device_info(&a).await.writer,
-        device_info(&b).await.writer,
-        "paired issuers share no writer key"
+        device_info(&a).await.node,
+        device_info(&b).await.node,
+        "paired issuers share no node key"
     );
     synced(&b).await?;
     assert_eq!(b.titles().await, ["Milk"]);

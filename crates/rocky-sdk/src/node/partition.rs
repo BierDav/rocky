@@ -1,13 +1,11 @@
 use super::*;
-use crate::groups::{GroupPartition, record_key, secret_role};
-use rocky_core::TableClass;
+use crate::groups::{GroupPartition, GroupRecord, record_key, secret_role};
 use rocky_credentials::GroupSecretEnvelope;
 use std::collections::BTreeSet;
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Naming {
     Known,
     Create,
-    Sealed(rocky_core::PartitionName),
 }
 impl Node {
     async fn offered_group_name(
@@ -53,7 +51,6 @@ impl Node {
         GroupPartition::resolve(&self.domain(), group, table, values.to_vec(), |address| {
             match known.get(&record_key(address)) {
                 Some(record) => Ok(record.name),
-                None if let Naming::Sealed(name) = naming => Ok(name),
                 None if naming == Naming::Create || issuer => {
                     Ok(rocky_secure::created_name(&naming_key, address))
                 }
@@ -61,6 +58,7 @@ impl Node {
             }
         })
     }
+    #[cfg(any(test, feature = "test-support"))]
     async fn unknown_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -100,34 +98,6 @@ impl Node {
                 envelope.epoch(),
             )?
             .1)
-    }
-    pub(super) async fn partition_address(
-        &self,
-        table: &str,
-        values: Vec<SqlValue>,
-    ) -> Result<crate::PartitionAddress, Failure> {
-        self.domain()
-            .logical()
-            .table(table)
-            .filter(|table| table.class == TableClass::Replayed && !table.partition_by.is_empty())
-            .ok_or("table is not partitioned")?;
-        let partition = self
-            .group_partition(
-                &crate::PartitionTarget::Table {
-                    table: table.into(),
-                    values,
-                },
-                Naming::Known,
-            )
-            .await?;
-        let member = partition.member(table).ok_or("table is not partitioned")?;
-        Ok(crate::PartitionAddress {
-            scope: member.scope,
-            tuple: member.tuple.clone(),
-            group: partition.record.group.clone(),
-            address: record_key(&partition.record.address),
-            name: partition.record.name,
-        })
     }
     pub(super) fn reads_group(
         &self,
@@ -189,22 +159,39 @@ impl Node {
         }
         Ok(())
     }
-    async fn know(&self, partition: &GroupPartition) -> Result<(), Failure> {
-        let key = record_key(&partition.record.address);
-        if self.settings.lock().await.groups.contains_key(&key) {
-            return Ok(());
+    async fn audience_of(
+        &self,
+        partition: &GroupPartition,
+        excluded: &[PublicKey],
+    ) -> Result<BTreeSet<PublicKey>, Failure> {
+        let settings = self.settings_snapshot().await;
+        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let mut audience: BTreeSet<PublicKey> = settings
+            .issuers
+            .iter()
+            .copied()
+            .filter(|node| !settings.tombstoned(node))
+            .collect();
+        if settings.issuer() {
+            let registry = self.registry(&settings).await?;
+            let membership = self.membership().await?;
+            audience.extend(settings.audience(
+                own,
+                &self.domain(),
+                partition,
+                (&registry, &membership),
+                &[],
+            ));
         }
-        let record = partition.record.clone();
-        self.configure(|settings| {
-            settings.groups.entry(key).or_insert(record);
-            Ok(())
-        })
-        .await
+        audience.retain(|node| *node != own && !excluded.contains(node));
+        Ok(audience)
     }
     async fn create_group(
         &self,
         partition: GroupPartition,
-    ) -> Result<crate::PreparedPartition, Failure> {
+        id: Option<rocky_core::RowIdentity>,
+    ) -> Result<GroupRecord, Failure> {
+        let audience = self.audience_of(&partition, &[]).await?;
         let mut settings = self.settings.lock().await;
         self.reads_group(&settings, &partition)?;
         let key = record_key(&partition.record.address);
@@ -213,6 +200,8 @@ impl Node {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| partition.record.clone());
+        let created = record.current().is_none();
+        let mut recipients = 0;
         let epoch = match record.current() {
             Some(epoch) => epoch,
             None => {
@@ -240,17 +229,36 @@ impl Node {
             .epoch_statements
             .entry(secret_role(&record.address, epoch))
             .or_insert(ids);
+        if created {
+            let secret = self.vault.get(&secret_role(&record.address, epoch))?;
+            recipients = draft.queue_group(
+                &PrivateKey::from_bytes(&self.vault.get("node")?),
+                (&record, epoch, secret),
+                &audience,
+                crate::delivery::Reason::Share,
+                false,
+            )?;
+        }
         settings.commit(draft, &self.replica).await?;
         let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
-        Ok(crate::PreparedPartition {
-            address: record_key(&record.address),
-            epoch,
-            name: data_encoding::HEXLOWER.encode(&record.name),
-        })
+        drop(settings);
+        let named = record.partition()?;
+        self.activity.record(crate::ActivityKind::PartitionCreated {
+            partition: named.clone(),
+            id,
+        });
+        if recipients > 0 {
+            self.activity.record(crate::ActivityKind::PartitionShared {
+                partition: named,
+                recipients,
+            });
+        }
+        self.wake_sync();
+        Ok(record)
     }
     pub(super) async fn install_envelope(
         &self,
@@ -260,6 +268,17 @@ impl Node {
         bootstrap: bool,
     ) -> Result<bool, Failure> {
         let epoch = envelope.epoch();
+        let created_by_member = sender.is_some_and(|chain| {
+            !chain
+                .held()
+                .and_then(|held| held.extended().ok())
+                .is_some_and(|extended| extended.issues)
+        });
+        let forward = if created_by_member && self.settings_snapshot().await.issuer() {
+            self.audience_of(&partition, &[envelope.issuer()]).await?
+        } else {
+            BTreeSet::new()
+        };
         let mut settings = self.settings.lock().await;
         let signer = match sender {
             None => settings.publisher,
@@ -352,114 +371,54 @@ impl Node {
         draft
             .epoch_statements
             .insert(role, envelope.statements().to_vec());
+        let forwarded = draft.queue_group(
+            &PrivateKey::from_bytes(&self.vault.get("node")?),
+            (&record, epoch, secret),
+            &forward,
+            crate::delivery::Reason::Share,
+            false,
+        )?;
         settings.commit(draft, &self.replica).await?;
         let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
+        if forwarded > 0 {
+            self.activity.record(crate::ActivityKind::PartitionShared {
+                partition: record.partition()?,
+                recipients: forwarded,
+            });
+        }
         Ok(true)
     }
-    pub(super) async fn share(
+    pub(super) async fn share_with(
         &self,
-        partition: GroupPartition,
-        recipients: BTreeSet<PublicKey>,
-        epoch: Option<rocky_core::KeyEpoch>,
-    ) -> Result<crate::PartitionShare, Failure> {
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let membership = self.membership().await?;
+        partition: &GroupPartition,
+        recipients: &BTreeSet<PublicKey>,
+    ) -> Result<usize, Failure> {
         let mut settings = self.settings.lock().await;
-        if !settings.issuer()
-            && !recipients
-                .iter()
-                .all(|recipient| settings.known_issuer(recipient))
-        {
-            return Err(refused(
-                "only an admin shares a group secret with a member; a member shares only with admins",
-            ));
-        }
-        self.reads_group(&settings, &partition)?;
-        if settings
-            .authority
-            .as_ref()
-            .is_some_and(|authority| authority.rotation.is_some())
-        {
-            return Err(refused("a revocation is unfinished; reopen to complete it"));
-        }
+        self.reads_group(&settings, partition)?;
         let record = settings
             .groups
             .get(&record_key(&partition.record.address))
             .filter(|record| record.current().is_some())
             .cloned()
-            .ok_or_else(|| refused("no group secret is held here; create or install it first"))?;
-        let current = record.current().ok_or("no group secret epoch")?;
-        let epoch = epoch.unwrap_or(current);
-        if epoch != current {
-            return Err(refused(format!(
-                "only the current epoch {current:?} of a group secret is shared"
-            )));
-        }
-        if recipients.len() > 256 {
-            return Err(refused("share with at most 256 recipients at once"));
-        }
-        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        if let Some(revoked) = recipients.iter().find(|recipient| {
-            settings.tombstoned(recipient)
-                || membership
-                    .identity_of(recipient)
-                    .is_some_and(|identity| settings.revoked_identity(&identity, &registry))
-        }) {
-            return Err(refused(format!(
-                "recipient {} was revoked",
-                revoked.to_hex()
-            )));
-        }
-        if recipients.contains(&own) {
-            return Err(refused("this device holds the group secret already"));
-        }
-        let statements = settings
-            .epoch_statements
-            .get(&secret_role(&record.address, epoch))
-            .cloned()
-            .unwrap_or_default();
-        let sender = Some(settings.credentials.clone());
-        let signer = PrivateKey::from_bytes(&self.vault.get("node")?);
+            .ok_or_else(|| refused("no group secret is held here; create it first"))?;
+        let epoch = record.current().ok_or("no group secret epoch")?;
         let secret = self.vault.get(&secret_role(&record.address, epoch))?;
         let mut draft = settings.clone();
-        let mut envelopes = Vec::new();
-        for recipient in &recipients {
-            let envelope = GroupSecretEnvelope::seal_recorded(
-                &signer,
-                rocky_credentials::GroupSecrets {
-                    group: record.address,
-                    epoch: epoch.generation,
-                    secret,
-                    name: record.name,
-                },
-                *recipient,
-                statements.clone(),
-            )?;
-            envelopes.push(crate::PartitionEnvelope {
-                recipient: envelope.recipient(),
-                envelope: envelope.to_bytes()?,
-            });
-            let delivery = crate::delivery::Contents::seal(
-                *recipient,
-                crate::delivery::Reason::Share,
-                &record,
-                envelope.to_bytes()?,
-                sender.clone(),
-            )?;
-            draft.queue(*recipient, &record, epoch, &delivery, true)?;
-        }
-        settings.commit(draft, &self.replica).await?;
-        Ok(crate::PartitionShare {
-            epoch,
+        let queued = draft.queue_group(
+            &PrivateKey::from_bytes(&self.vault.get("node")?),
+            (&record, epoch, secret),
             recipients,
-            envelopes,
-            sender,
-        })
+            crate::delivery::Reason::Share,
+            true,
+        )?;
+        settings.commit(draft, &self.replica).await?;
+        Ok(queued)
     }
+    #[cfg(any(test, feature = "test-support"))]
     async fn group_status(
         &self,
         partition: GroupPartition,
@@ -520,27 +479,6 @@ impl Node {
             recipients,
         })
     }
-    pub(super) async fn set_replica_role(
-        &self,
-        role: rocky_secure::RoleConfig,
-    ) -> Result<(), Failure> {
-        let partial = role.role == rocky_secure::ReplicaRole::Partial;
-        self.replica.set_role(role).await?;
-        if partial {
-            let settings = self.settings.lock().await.clone();
-            for (_, scope) in self.domain().scopes() {
-                if !self.domain().partitioned_table(&scope)
-                    && settings.reads_whole(&self.domain(), &scope)
-                {
-                    self.replica.subscribe(scope).await?;
-                }
-            }
-        }
-        self.activity
-            .record(crate::ActivityKind::RoleChanged { partial });
-        self.wake_sync();
-        Ok(())
-    }
     pub(super) async fn next_partition(
         &self,
         table: &str,
@@ -554,36 +492,9 @@ impl Node {
             values: vec![id.sql()],
         };
         let partition = self.group_partition(&target, Naming::Create).await?;
-        let scope = partition
-            .member(table)
-            .ok_or("table is not partitioned")?
-            .scope;
-        let partition = self.create_group(partition).await?;
-        self.activity.record(crate::ActivityKind::PartitionCreated {
-            target: target.clone(),
-            id: Some(id),
-        });
-        self.wake_sync();
-        Ok(crate::CreatedPartition {
-            id,
-            scope,
-            partition,
-        })
-    }
-    pub(super) async fn share_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        recipients: BTreeSet<PublicKey>,
-        epoch: Option<rocky_core::KeyEpoch>,
-    ) -> Result<crate::PartitionShare, Failure> {
-        let partition = self.group_partition(target, Naming::Known).await?;
-        let shared = self.share(partition, recipients, epoch).await?;
-        self.activity.record(crate::ActivityKind::PartitionShared {
-            target: target.clone(),
-            recipients: shared.recipients.len(),
-        });
-        self.wake_sync();
-        Ok(shared)
+        partition.member(table).ok_or("table is not partitioned")?;
+        let partition = self.create_group(partition, Some(id)).await?.partition()?;
+        Ok(crate::CreatedPartition { id, partition })
     }
     pub(super) async fn identity_nodes(
         &self,
@@ -606,50 +517,17 @@ impl Node {
         }
         Ok(nodes)
     }
-    pub(super) async fn partition_complete(&self, name: &str) -> Result<bool, Failure> {
-        let logical = self.domain().logical().clone();
-        let table = logical
-            .table(name)
-            .filter(|table| !table.partition_by.is_empty())
-            .ok_or("table is not partitioned")?;
-        Ok(self.replica.table_complete(logical.table_id(table)).await?)
-    }
-    async fn partition_changed(&self) {
-        self.wake_sync();
-    }
     pub(super) async fn create_partition(
         &self,
         target: &crate::PartitionTarget,
-    ) -> Result<crate::PreparedPartition, Failure> {
+    ) -> Result<GroupRecord, Failure> {
         if !self.settings.lock().await.issuer() {
             return Err(refused("explicit partition creation requires an issuer"));
         }
         let partition = self.group_partition(target, Naming::Create).await?;
-        let prepared = self.create_group(partition).await?;
-        self.activity.record(crate::ActivityKind::PartitionCreated {
-            target: target.clone(),
-            id: None,
-        });
-        self.partition_changed().await;
-        Ok(prepared)
+        self.create_group(partition, None).await
     }
-    pub(super) async fn install_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        envelope: &GroupSecretEnvelope,
-        sender: &CredentialChain,
-    ) -> Result<(), Failure> {
-        let name = self.envelope_name(envelope, Some(sender)).await?;
-        let partition = self.group_partition(target, Naming::Sealed(name)).await?;
-        self.install_envelope(partition, envelope, Some(sender), false)
-            .await?;
-        self.activity
-            .record(crate::ActivityKind::PartitionKeyInstalled {
-                target: target.clone(),
-            });
-        self.partition_changed().await;
-        Ok(())
-    }
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) async fn partition_status(
         &self,
         target: &crate::PartitionTarget,
@@ -677,115 +555,26 @@ impl Node {
         self.group_status(self.group_partition(target, Naming::Known).await?)
             .await
     }
-    pub(super) async fn register_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        selection: &crate::PartitionSelection,
-    ) -> Result<(), Failure> {
-        let partition = self
-            .group_partition(target, selection.name.map_or(Naming::Known, Naming::Sealed))
-            .await?;
-        for member in partition.covered(&selection.omit).map_err(refused)? {
-            self.replica
-                .register_partition(member.scope, member.tuple.clone(), partition.record.name)
-                .await?;
-        }
-        self.know(&partition).await?;
-        self.partition_changed().await;
-        Ok(())
-    }
-    pub(super) async fn hold_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        selection: &crate::PartitionSelection,
-        bootstrap: bool,
-    ) -> Result<(), Failure> {
-        let partition = self
-            .group_partition(target, selection.name.map_or(Naming::Known, Naming::Sealed))
-            .await?;
-        self.hold(&partition, &selection.omit, bootstrap).await?;
-        self.activity.record(if bootstrap {
-            crate::ActivityKind::PartitionBootstrap {
-                target: target.clone(),
-            }
-        } else {
-            crate::ActivityKind::PartitionSubscribed {
-                target: target.clone(),
-            }
-        });
-        self.partition_changed().await;
-        Ok(())
-    }
-    pub(super) async fn release_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        omit: &BTreeSet<String>,
-    ) -> Result<(), Failure> {
-        if self.unknown_partition(target).await?.is_none() {
-            let partition = self.group_partition(target, Naming::Known).await?;
-            for member in partition.released(omit).map_err(refused)? {
-                self.replica.unsubscribe(member.scope).await?;
-            }
-            self.activity
-                .record(crate::ActivityKind::PartitionUnsubscribed {
-                    target: target.clone(),
-                });
-            self.partition_changed().await;
-        }
-        Ok(())
-    }
-    pub(super) async fn evict_partition(
-        &self,
-        target: &crate::PartitionTarget,
-        omit: &BTreeSet<String>,
-    ) -> Result<crate::PartitionEviction, Failure> {
-        let mut evicted = crate::PartitionEviction::default();
-        if self.unknown_partition(target).await?.is_none() {
-            let partition = self.group_partition(target, Naming::Known).await?;
-            for member in partition.released(omit).map_err(refused)? {
-                let report = self.replica.evict(member.scope).await?;
-                evicted.rows += report.rows as u64;
-                evicted.operations += report.operations as u64;
-                evicted.checkpoints += report.checkpoints;
-                evicted.recovery_unconfirmed |= report.recovery_unconfirmed;
-            }
-            self.activity.record(crate::ActivityKind::PartitionEvicted {
-                target: target.clone(),
-            });
-            self.partition_changed().await;
-        }
-        Ok(evicted)
-    }
     pub(super) async fn hold(
         &self,
         partition: &GroupPartition,
-        omit: &BTreeSet<String>,
         bootstrap: bool,
     ) -> Result<(), Failure> {
-        let covered = partition.covered(omit).map_err(refused)?;
-        for member in &covered {
+        for member in &partition.members {
             self.replica
                 .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                 .await?;
         }
-        self.know(partition).await?;
-        for member in &covered {
+        for member in &partition.members {
             self.replica.subscribe(member.scope).await?;
         }
-        for member in partition
-            .members
-            .iter()
-            .filter(|member| omit.contains(&member.table))
-        {
-            self.replica.unsubscribe(member.scope).await?;
-        }
         if bootstrap {
-            self.bootstrap_partition(&covered).await
+            self.bootstrap_partition(&partition.members).await
         } else {
             Ok(())
         }
     }
-    async fn bootstrap_partition(&self, covered: &[&crate::groups::Member]) -> Result<(), Failure> {
+    async fn bootstrap_partition(&self, covered: &[crate::groups::Member]) -> Result<(), Failure> {
         let domain = self.domain();
         let added: Vec<ResourceScope> = {
             let settings = self.settings.lock().await;
@@ -796,5 +585,39 @@ impl Node {
                 .collect()
         };
         self.bootstrap_intent.add_scopes(&added).await
+    }
+    pub(super) async fn partition_progress(
+        &self,
+        settings: &Settings,
+        blockers: &[rocky_core::Blocker],
+    ) -> Result<Vec<crate::PartitionProgress>, Failure> {
+        let domain = self.domain();
+        let full = self.replica.role().await?.role == rocky_secure::ReplicaRole::Full;
+        let mut progress = Vec::new();
+        for partition in settings.partitions(&domain)? {
+            let held = partition.record.current().is_some()
+                && partition
+                    .members
+                    .iter()
+                    .all(|member| settings.reads_partition(&domain, member));
+            let mut complete = held;
+            for member in &partition.members {
+                if !complete {
+                    break;
+                }
+                let holds = match self.replica.subscription(member.scope).await? {
+                    Some(holding) => holding == rocky_secure::Holding::Held,
+                    None => full,
+                };
+                let label = rocky_core::scope_label(&member.scope);
+                complete = holds && !blockers.iter().any(|blocker| blocker.scope == label);
+            }
+            progress.push(crate::PartitionProgress {
+                partition: partition.record.partition()?,
+                held,
+                complete,
+            });
+        }
+        Ok(progress)
     }
 }

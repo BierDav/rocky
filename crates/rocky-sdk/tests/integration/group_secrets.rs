@@ -1,7 +1,7 @@
 use crate::common;
 use crate::support::snapshot as snap;
 use rocky_credentials::{ProviderError, PublicKey};
-use rocky_sdk::{Access, Database, Network, RoleName, SecretStore, transport::memory::Hub};
+use rocky_sdk::{Access, Database, Invite, Network, RoleName, SecretStore, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -127,13 +127,10 @@ impl Peer {
     }
 
     async fn status(&self, list: &str) -> Value {
-        snap::ok(
-            self.database
-                .partition_status(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                }),
-        )
+        snap::ok(self.database.partition_status(&rocky_sdk::Partition::new(
+            "list".to_owned(),
+            (values(list)).clone(),
+        )))
         .await
     }
     async fn epochs(&self, list: &str) -> (Value, BTreeMap<String, Value>) {
@@ -200,23 +197,6 @@ impl Peer {
             },
         )
     }
-    async fn share(&self, list: &str, recipients: &[&NodeKeys]) -> Result<Value, String> {
-        let recipients: Vec<_> = recipients.iter().map(|device| device.node).collect();
-        snap::string(
-            self.database.share_partition(
-                rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                },
-                serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                    json!(recipients),
-                )
-                .expect("typed fixture"),
-                None,
-            ),
-        )
-        .await
-    }
     async fn fetch(&self, from: &Peer) -> Result<Value, String> {
         let contact = snap::ok(from.database.contact()).await;
         snap::string(async {
@@ -245,15 +225,6 @@ impl Peer {
             })
             .collect()
     }
-    async fn events(&self, kind: &str) -> Vec<Value> {
-        snap::ok(self.database.activity(0)).await["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|event| event["kind"] == kind)
-            .cloned()
-            .collect()
-    }
 }
 fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
@@ -273,7 +244,7 @@ async fn granted(
 }
 
 #[tokio::test]
-async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table() {
+async fn one_envelope_grants_a_group_and_only_a_role_reading_every_table_is_granted() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer")).await;
     snap::ok(
@@ -294,8 +265,6 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
     assert!(uniform(&tables, json!([1])));
 
     let (reader, device) = granted(&issuer, &root.path().join("reader"), "A", "reader").await;
-    let shared = issuer.share("A", &[&device]).await.unwrap();
-    assert_eq!(shared["recipients"], json!([device.node.to_hex()]));
     assert_eq!(
         issuer.recipients("A").await[&device.node.to_hex()],
         "pending"
@@ -308,42 +277,19 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         .await
         .unwrap_err();
     assert!(refused_grant.contains("every table"), "{refused_grant}");
-    issuer.share("A", &[&partial_device]).await.unwrap();
     reader_lacking_one_table.fetch(&issuer).await.unwrap();
-    let refused = reader_lacking_one_table.events("envelope_refused").await;
-    assert!(
-        !refused.is_empty()
-            && refused
-                .iter()
-                .all(|event| event["peer"] == refused[0]["peer"]
-                    && event["error"] == refused[0]["error"]),
-        "only its own envelope reached it: {refused:?}"
-    );
-    assert!(
-        refused[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("attachments lacks it"),
-        "{refused:?}"
-    );
     assert_eq!(
         reader_lacking_one_table.store.group_secrets(),
         0,
-        "a refused envelope leaves no secret"
+        "a role lacking one table of the group receives no secret"
     );
-    let (secrets, tables) = reader_lacking_one_table.epochs("A").await;
-    assert_eq!(secrets, json!([]), "a refused envelope leaves no epoch");
-    assert!(uniform(&tables, json!([])));
     assert_eq!(
-        reader_lacking_one_table.status("A").await["tables"][0]["holding"],
-        Value::Null,
-        "a refused envelope leaves no registration"
-    );
-    let states = issuer.recipients("A").await;
-    assert_eq!(
-        states[&partial_device.node.to_hex()],
-        "pending",
-        "the sender keeps a refused envelope"
+        issuer
+            .recipients("A")
+            .await
+            .get(&partial_device.node.to_hex()),
+        None,
+        "no envelope is sealed to it"
     );
 
     reader.fetch(&issuer).await.unwrap();
@@ -397,10 +343,6 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         granted(&issuer, &root.path().join("removed"), "A", "reader").await;
     let (remaining, remaining_device) =
         granted(&issuer, &root.path().join("remaining"), "A", "reader").await;
-    issuer
-        .share("A", &[&removed_device, &remaining_device])
-        .await
-        .unwrap();
     for peer in [&removed, &remaining] {
         peer.fetch(&issuer).await.unwrap();
     }
@@ -430,10 +372,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let created = snap::ok(
         issuer
             .database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: values("C"),
-            }),
+            .partition_status(&rocky_sdk::Partition::new("list".to_owned(), values("C"))),
     )
     .await;
     assert_eq!(
@@ -441,33 +380,6 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         "key epochs follow each scope, not the revocations"
     );
 
-    let refused = issuer.share("A", &[&removed_device]).await.unwrap_err();
-    assert!(
-        refused.contains("revoked"),
-        "sharing refuses the revoked device: {refused}"
-    );
-    let refused = snap::string(
-        issuer.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([remaining_device.node]),
-            )
-            .expect("typed fixture"),
-            Some(
-                serde_json::from_value::<rocky_core::KeyEpoch>(json!(created["current"]))
-                    .expect("typed fixture"),
-            ),
-        ),
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        refused.contains("current epoch"),
-        "sharing refuses any epoch but the current: {refused}"
-    );
     let refused = issuer
         .grant(removed_device.identity, "A")
         .await
@@ -483,11 +395,6 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         states[&remaining_device.node.to_hex()],
         "pending",
         "the rotation seals the new epoch to the recorded remaining reader without a share"
-    );
-    let shared = issuer.share("A", &[&remaining_device]).await.unwrap();
-    assert_eq!(
-        shared["epoch"]["generation"], 2,
-        "sharing again adds no epoch"
     );
     assert!(removed.fetch(&issuer).await.is_err(), "revoked");
     remaining.fetch(&issuer).await.unwrap();
@@ -659,63 +566,25 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
 }
 
 #[tokio::test]
-async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
+async fn a_granted_phone_holds_every_table_of_its_list_and_nothing_else() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer")).await;
+    for list in ["A", "B"] {
+        snap::ok(
+            issuer
+                .database
+                .create_partition(&rocky_sdk::Partition::new("list", values(list))),
+        )
+        .await;
+    }
+    let (phone, _) = granted(&issuer, &root.path().join("phone"), "A", "reader").await;
     snap::ok(
         issuer
             .database
-            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
-    )
-    .await;
-    let (phone, device) = granted(&issuer, &root.path().join("phone"), "A", "reader").await;
-    issuer.share("A", &[&device]).await.unwrap();
-    snap::ok(
-        phone.database.set_replica_role(
-            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
-                .expect("typed fixture"),
-        ),
+            .create_partition(&rocky_sdk::Partition::new("list", values("C"))),
     )
     .await;
     phone.fetch(&issuer).await.unwrap();
-    for omit in [json!(["photos"]), json!(TABLES)] {
-        assert!(
-            snap::string(
-                phone.database.subscribe_partition(
-                    rocky_sdk::PartitionTarget::Group {
-                        group: "list".to_owned(),
-                        values: (values("A")).clone()
-                    },
-                    rocky_sdk::PartitionSelection {
-                        name: None,
-                        omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!(
-                            omit
-                        ))
-                        .expect("typed fixture")
-                    }
-                )
-            )
-            .await
-            .is_err(),
-            "{omit}"
-        );
-    }
-    snap::ok(
-        phone.database.subscribe_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            },
-            rocky_sdk::PartitionSelection {
-                name: None,
-                omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([
-                    "attachments"
-                ]))
-                .expect("typed fixture"),
-            },
-        ),
-    )
-    .await;
     let holding: BTreeMap<String, Value> = phone.status("A").await["tables"]
         .as_array()
         .unwrap()
@@ -727,28 +596,17 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
             )
         })
         .collect();
-    assert_eq!(holding["lists"], "held");
-    assert_eq!(holding["items"], "held");
-    assert_eq!(holding["attachments"], "left");
-    snap::ok(
-        phone.database.unsubscribe_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            },
-            serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
-                .expect("typed fixture"),
-        ),
-    )
-    .await;
-    let status = phone.status("A").await;
-    assert!(
-        status["tables"]
-            .as_array()
-            .unwrap()
+    for table in TABLES {
+        assert_eq!(holding[table], "held", "{table}");
+    }
+    let progress = phone.database.status().await.unwrap().data.partitions;
+    assert_eq!(
+        progress
             .iter()
-            .all(|table| table["holding"] == "left"),
-        "the whole group partition is released together: {status}"
+            .map(|progress| (progress.partition.clone(), progress.held))
+            .collect::<Vec<_>>(),
+        [(rocky_sdk::Partition::new("list", values("A")), true)],
+        "the phone holds the granted list and no other"
     );
     phone.database.close().await.unwrap();
     issuer.database.close().await.unwrap();
@@ -832,9 +690,6 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
         introduce(&issuer, &reader).await;
         readers.push((reader, device));
     }
-    let devices: Vec<&NodeKeys> = readers.iter().map(|(_, device)| device).collect();
-    let shared = issuer.share("A", &devices).await.unwrap();
-    assert_eq!(shared["recipients"].as_array().unwrap().len(), 2);
     for (reader, _) in &readers {
         snap::ok(reader.database.sync_now()).await;
         assert_eq!(
@@ -885,7 +740,7 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer")).await;
     let directory = root.path().join("reader");
-    let (reader, device) = issuer.enroll_as(&directory, Access::Read).await;
+    let (reader, _) = issuer.enroll_as(&directory, Access::Read).await;
     introduce(&issuer, &reader).await;
     let older = common::authority_bytes(&directory, "identity")
         .unwrap()
@@ -899,7 +754,6 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
-    issuer.share("A", &[&device]).await.unwrap();
     snap::ok(reader.database.sync_now()).await;
     let expected = vec![vec!["before".to_owned()]; 3];
     assert_eq!(rows(&reader).await, expected);
@@ -928,9 +782,8 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
         write(&issuer, table, "before").await;
     }
     let directory = root.path().join("writer");
-    let (writer, device) = granted(&issuer, &directory, "A", "writer").await;
+    let (writer, _) = granted(&issuer, &directory, "A", "writer").await;
     introduce(&issuer, &writer).await;
-    issuer.share("A", &[&device]).await.unwrap();
     snap::ok(writer.database.sync_now()).await;
     snap::ok(writer.database.sync_now()).await;
     let mut tx = writer.database.transaction().await.unwrap();
@@ -953,7 +806,7 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
 }
 
 #[tokio::test]
-async fn only_an_admin_shares_or_grants_a_partition() {
+async fn only_an_admin_grants_a_partition() {
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer")).await;
     snap::ok(
@@ -966,8 +819,6 @@ async fn only_an_admin_shares_or_grants_a_partition() {
     member.fetch(&issuer).await.unwrap();
     assert_eq!(member.epochs("A").await.0, json!([1]));
     let (other, other_device) = issuer.enroll(&root.path().join("other"), "reader").await;
-    let refused = member.share("A", &[&other_device]).await.unwrap_err();
-    assert!(refused.contains("only an admin"), "{refused}");
     let refused = member.grant(other_device.identity, "A").await.unwrap_err();
     assert!(refused.contains("only an admin"), "{refused}");
     for peer in [other, member, issuer] {
@@ -1097,4 +948,180 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
 #[test]
 fn the_budgeted_store_meets_the_key_provider_contract() {
     rocky_credentials::testing::key_provider_contract(&Store::default());
+}
+
+async fn full_person(issuer: &Peer, root: &Path, name: &str) -> (Peer, Peer, PublicKey) {
+    let person: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(rocky_sdk::FileIdentityProvider::open(root.join(name)).unwrap());
+    let identity = person.public_key().unwrap();
+    let invitation = issuer
+        .database
+        .invite(Invite::new(Access::Full).for_identity(rocky_sdk::PersonId::new(identity)))
+        .await
+        .unwrap();
+    let laptop_store = Arc::new(Store::default());
+    let laptop = Peer::new(
+        open_with_identity(
+            &root.join(format!("{name}-laptop")),
+            &laptop_store,
+            &issuer.hub,
+            &person,
+        )
+        .join(&invitation.code)
+        .await
+        .unwrap()
+        .database,
+        laptop_store,
+        issuer.hub.clone(),
+    );
+    let contact = snap::ok(laptop.database.contact()).await["uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let phone_store = Arc::new(Store::default());
+    let phone = Peer::new(
+        common::link(
+            open_with_identity(
+                &root.join(format!("{name}-phone")),
+                &phone_store,
+                &issuer.hub,
+                &person,
+            ),
+            person.clone(),
+            &contact,
+            &laptop.database,
+        )
+        .await
+        .unwrap(),
+        phone_store,
+        issuer.hub.clone(),
+    );
+    for device in [&laptop, &phone] {
+        introduce(issuer, device).await;
+        snap::ok(device.database.sync_now()).await;
+    }
+    (laptop, phone, identity)
+}
+async fn holds(peer: &Peer) -> Vec<(rocky_sdk::Partition, bool)> {
+    peer.database
+        .status()
+        .await
+        .unwrap()
+        .data
+        .partitions
+        .into_iter()
+        .map(|progress| (progress.partition, progress.held))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_members_phone_and_laptop_open_a_list_created_after_they_joined() {
+    let root = support::small_directory().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer")).await;
+    let (laptop, phone, _) = full_person(&issuer, root.path(), "member").await;
+    snap::ok(
+        issuer
+            .database
+            .create_partition(&rocky_sdk::Partition::new("list", values("A"))),
+    )
+    .await;
+    for table in TABLES {
+        write(&issuer, table, "before").await;
+    }
+    for device in [&laptop, &phone] {
+        snap::ok(device.database.sync_now()).await;
+        assert_eq!(
+            rows(device).await,
+            vec![vec!["before".to_owned()]; 3],
+            "every device of a full member opens the new list without an application call"
+        );
+        assert_eq!(
+            holds(device).await,
+            [(rocky_sdk::Partition::new("list", values("A")), true)]
+        );
+    }
+    for peer in [laptop, phone, issuer] {
+        peer.database.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_relay_holds_a_new_lists_frames_but_never_its_secret() {
+    let root = support::small_directory().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer")).await;
+    let (relay, _) = issuer
+        .enroll_as(&root.path().join("relay"), Access::Store)
+        .await;
+    let (member, _) = issuer
+        .enroll_as(&root.path().join("member"), Access::Full)
+        .await;
+    introduce(&issuer, &relay).await;
+    introduce(&member, &relay).await;
+    snap::ok(member.database.set_sync(rocky_sdk::SyncMode::Off)).await;
+    snap::ok(
+        issuer
+            .database
+            .create_partition(&rocky_sdk::Partition::new("list", values("A"))),
+    )
+    .await;
+    for table in TABLES {
+        write(&issuer, table, "before").await;
+    }
+    snap::ok(issuer.database.sync_now()).await;
+    issuer.database.close().await.unwrap();
+    snap::ok(member.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
+    for _ in 0..2 {
+        let _issuer_is_gone = snap::observe(member.database.sync_now()).await;
+    }
+    assert_eq!(
+        rows(&member).await,
+        vec![vec!["before".to_owned()]; 3],
+        "the member opens the list with the relay as its only reachable peer"
+    );
+    assert_eq!(relay.store.group_secrets(), 0, "the relay holds no secret");
+    assert!(holds(&relay).await.is_empty());
+    for peer in [member, relay] {
+        peer.database.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_persons_devices_get_nothing_created_after_the_removal() {
+    let root = support::small_directory().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer")).await;
+    let (laptop, phone, identity) = full_person(&issuer, root.path(), "member").await;
+    let nodes = [
+        laptop.database.info().await.unwrap().node.to_hex(),
+        phone.database.info().await.unwrap().node.to_hex(),
+    ];
+    snap::ok(issuer.database.remove(
+        rocky_sdk::PersonId::new(identity),
+        rocky_sdk::Removal::Departed,
+    ))
+    .await;
+    snap::ok(
+        issuer
+            .database
+            .create_partition(&rocky_sdk::Partition::new("list", values("A"))),
+    )
+    .await;
+    for table in TABLES {
+        write(&issuer, table, "after").await;
+    }
+    let recipients = issuer.recipients("A").await;
+    for node in &nodes {
+        assert_eq!(
+            recipients.get(node),
+            None,
+            "no envelope is sealed to {node}"
+        );
+    }
+    for device in [&laptop, &phone] {
+        let _removed = snap::observe(device.database.sync_now()).await;
+        assert_eq!(device.store.group_secrets(), 0);
+        assert!(holds(device).await.is_empty());
+    }
+    for peer in [laptop, phone, issuer] {
+        peer.database.close().await.unwrap();
+    }
 }

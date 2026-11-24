@@ -193,6 +193,14 @@ impl Domain {
         }
         Ok(granted)
     }
+    pub(crate) fn holds_partitions_only_when_granted(&self, access: &Access) -> bool {
+        let Access::Role(name) = access else {
+            return false;
+        };
+        self.logical()
+            .role(name.as_str())
+            .is_some_and(|role| !role.per_partition.is_empty())
+    }
     pub(crate) fn reads_table(&self, access: &Access, table: &str) -> bool {
         if table == crate::domain::REGISTRY {
             return false;

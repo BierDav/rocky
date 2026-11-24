@@ -54,6 +54,9 @@ pub trait Deliveries: Send + Sync {
         receipts: Vec<DeliveryReceipt>,
     ) -> DeliveryFuture<'_, ()>;
     fn forget(&self, peer: PublicKey, digests: Vec<Commitment>) -> DeliveryFuture<'_, ()>;
+    fn admits(&self, _peer: PublicKey) -> DeliveryFuture<'_, bool> {
+        Box::pin(async { Ok(true) })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -156,6 +159,9 @@ impl NativeSession {
         let mut report = Delivered::default();
         let outgoing = port.outgoing(self.peer, &self.credentials).await?;
         for page in pages(outgoing.direct)? {
+            if !port.admits(self.peer).await? {
+                break;
+            }
             let digests: Vec<Commitment> = page
                 .iter()
                 .map(SealedDelivery::digest)
@@ -256,6 +262,11 @@ impl NativeSession {
             }
             DeliveryMessage::Collect => {
                 let held = port.held(self.peer, DELIVERY_PAGE).await?;
+                let held = if port.admits(self.peer).await? {
+                    held
+                } else {
+                    Held::default()
+                };
                 self.send(DeliveryMessage::Collected {
                     deliveries: blobs(&held.deliveries, SealedDelivery::to_bytes)?,
                     receipts: blobs(&held.receipts, DeliveryReceipt::to_bytes)?,

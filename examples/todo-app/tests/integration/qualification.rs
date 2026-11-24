@@ -148,8 +148,6 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     world.sync().await?;
     let watch = world.join("watch", Role::Full).await?;
     world.sync().await?;
-    laptop.share_lists_with_members().await?;
-    world.sync().await?;
     let rows = laptop.all_todos().await?;
     for device in [&phone, &tablet, &watch] {
         assert_eq!(

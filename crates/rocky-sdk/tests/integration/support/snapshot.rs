@@ -23,9 +23,6 @@ serialized!(
     sdk::DatabaseStatus,
     sdk::SyncReport,
     sdk::NetworkStatus,
-    sdk::PartitionShare,
-    sdk::PreparedPartition,
-    sdk::CreatedPartition,
     sdk::RetentionLimits
 );
 pub async fn observe<T: Snapshot, E: Into<sdk::Failure>>(
@@ -88,7 +85,7 @@ impl Snapshot for rocky_core::RowIdentity {
 }
 impl Snapshot for sdk::DeviceInfo {
     fn snapshot(self) -> Value {
-        json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
+        json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable})
     }
 }
 impl Snapshot for sdk::Invitation {
@@ -135,14 +132,9 @@ impl Snapshot for sdk::RetentionStatus {
         json!({"policy":self.policy,"covered":self.checkpoint.covered,"uncovered":self.checkpoint.uncovered,"pruned_prefix":self.checkpoint.pruned_prefix,"maintenance_error":self.checkpoint.maintenance_error})
     }
 }
-impl Snapshot for sdk::PartitionAddress {
+impl Snapshot for sdk::CreatedPartition {
     fn snapshot(self) -> Value {
-        json!({"scope":self.scope,"tuple":self.tuple,"group":self.group,"address":self.address,"name":data_encoding::HEXLOWER.encode(&self.name)})
-    }
-}
-impl Snapshot for sdk::PartitionEviction {
-    fn snapshot(self) -> Value {
-        json!({"rows":self.rows,"operations":self.operations})
+        json!({"id":self.id,"partition":partition(self.partition)})
     }
 }
 impl Snapshot for sdk::PartitionStatus {
@@ -435,15 +427,12 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::RoutineSealFailed { error } => json!({"kind":"routine_seal_failed","error":error}),
                 sdk::ActivityKind::LocalRecoveryFailed { error } => json!({"kind":"local_recovery_failed","error":error}),
                 sdk::ActivityKind::RoleChanged { partial } => json!({"kind":"role_changed","partial":partial}),
-                sdk::ActivityKind::PartitionCreated { target, id } => json!({"kind":"partition_created","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) },"id":id}),
-                sdk::ActivityKind::PartitionShared { target, recipients } => json!({"kind":"partition_shared","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) },"recipients":recipients}),
+                sdk::ActivityKind::PartitionCreated { partition: created, id } => json!({"kind":"partition_created","partition":partition(created),"id":id}),
+                sdk::ActivityKind::PartitionShared { partition: shared, recipients } => json!({"kind":"partition_shared","partition":partition(shared),"recipients":recipients}),
                 sdk::ActivityKind::EnvelopesDelivered { peer, handed, deposited, refused, received, receipts } => json!({"kind":"envelopes_delivered","peer":peer,"handed":handed,"deposited":deposited,"refused":refused,"received":received,"receipts":receipts}),
                 sdk::ActivityKind::EnvelopeRefused { peer, error } => json!({"kind":"envelope_refused","peer":peer,"error":error}),
-                sdk::ActivityKind::PartitionKeyInstalled { target } => json!({"kind":"partition_key_installed","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) }}),
-                sdk::ActivityKind::PartitionBootstrap { target } => json!({"kind":"partition_bootstrap","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) }}),
-                sdk::ActivityKind::PartitionSubscribed { target } => json!({"kind":"partition_subscribed","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) }}),
-                sdk::ActivityKind::PartitionUnsubscribed { target } => json!({"kind":"partition_unsubscribed","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) }}),
-                sdk::ActivityKind::PartitionEvicted { target } => json!({"kind":"partition_evicted","target":match target { sdk::PartitionTarget::Group { group,values }=>json!({"group":group,"values":values.into_iter().map(cell).collect::<Vec<_>>()}), sdk::PartitionTarget::Table { table,values }=>json!({"table":table,"values":values.into_iter().map(cell).collect::<Vec<_>>()}) }}),
+                sdk::ActivityKind::PartitionKeyInstalled { partition: installed } => json!({"kind":"partition_key_installed","partition":partition(installed)}),
+                sdk::ActivityKind::PartitionBootstrap { partition: held } => json!({"kind":"partition_bootstrap","partition":partition(held)}),
                 sdk::ActivityKind::UnlinkUnpushed { error } => json!({"kind":"unlink_unpushed","error":error}),
                 sdk::ActivityKind::MembershipLinkRecorded { identity, node, sequence } => json!({"kind":"membership_link_recorded","identity":identity,"node":node,"sequence":sequence}),
                 sdk::ActivityKind::NetworkingEnabled => json!({"kind":"networking_enabled"}),

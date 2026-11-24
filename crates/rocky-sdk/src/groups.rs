@@ -6,7 +6,6 @@ use rocky_core::{
 use rocky_credentials::derive_table_key;
 use rocky_secure::KeyMaterial;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 pub(crate) const MAX_GROUP_EPOCHS: usize = 256;
 
@@ -31,6 +30,15 @@ impl GroupRecord {
             return Err("group secret epoch capacity reached".into());
         }
         Ok(())
+    }
+    pub fn partition(&self) -> Result<crate::Partition, Failure> {
+        Ok(crate::Partition::new(
+            self.group.clone(),
+            self.values
+                .iter()
+                .map(PartitionValue::value)
+                .collect::<Result<Vec<SqlValue>, _>>()?,
+        ))
     }
     pub fn hold(&mut self, epoch: rocky_core::KeyEpoch) -> Result<(), Failure> {
         self.admit(epoch)?;
@@ -65,7 +73,6 @@ pub(crate) struct Member {
     pub table: String,
     pub scope: ResourceScope,
     pub tuple: PartitionTuple,
-    pub parents: Vec<String>,
 }
 #[derive(Clone)]
 pub(crate) struct GroupPartition {
@@ -119,11 +126,6 @@ impl GroupPartition {
         group: &PartitionGroup<'_>,
     ) -> Result<Self, Failure> {
         let logical = domain.logical();
-        let names: BTreeSet<&str> = group
-            .tables
-            .iter()
-            .map(|table| table.sql_name.as_str())
-            .collect();
         let members = group
             .tables
             .iter()
@@ -143,12 +145,6 @@ impl GroupPartition {
                     table: table.sql_name.clone(),
                     scope: tuple.scope(domain.scope, logical.table_id(table), &record.name)?,
                     tuple,
-                    parents: table
-                        .foreign_keys
-                        .iter()
-                        .filter(|key| names.contains(key.table.as_str()))
-                        .map(|key| key.table.clone())
-                        .collect(),
                 })
             })
             .collect::<Result<Vec<_>, Failure>>()?;
@@ -156,52 +152,6 @@ impl GroupPartition {
     }
     pub fn member(&self, table: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.table == table)
-    }
-    pub fn covered(&self, omit: &BTreeSet<String>) -> Result<Vec<&Member>, Failure> {
-        if let Some(unknown) = omit.iter().find(|name| self.member(name).is_none()) {
-            return Err(format!("{unknown} is no table of group {}", self.record.group).into());
-        }
-        let covered: Vec<&Member> = self
-            .members
-            .iter()
-            .filter(|member| !omit.contains(&member.table))
-            .collect();
-        for member in &covered {
-            if let Some(parent) = member.parents.iter().find(|parent| omit.contains(*parent)) {
-                return Err(format!(
-                    "{} references {parent}; leaving {parent} out of group {} is refused",
-                    member.table, self.record.group
-                )
-                .into());
-            }
-        }
-        if covered.is_empty() {
-            return Err("every table of the group is left out".into());
-        }
-        Ok(covered)
-    }
-    pub fn released(&self, keep: &BTreeSet<String>) -> Result<Vec<&Member>, Failure> {
-        if let Some(unknown) = keep.iter().find(|name| self.member(name).is_none()) {
-            return Err(format!("{unknown} is no table of group {}", self.record.group).into());
-        }
-        for member in self
-            .members
-            .iter()
-            .filter(|member| keep.contains(&member.table))
-        {
-            if let Some(parent) = member.parents.iter().find(|parent| !keep.contains(*parent)) {
-                return Err(format!(
-                    "{} references {parent}; keeping it without {parent} is refused",
-                    member.table
-                )
-                .into());
-            }
-        }
-        Ok(self
-            .members
-            .iter()
-            .filter(|member| !keep.contains(&member.table))
-            .collect())
     }
     pub fn key(
         &self,

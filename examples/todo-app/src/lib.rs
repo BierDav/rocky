@@ -181,7 +181,6 @@ impl Todos {
             .execute("INSERT INTO lists(id,title) VALUES(?,?)", params![id, name])
             .await?;
         let token = transaction.commit().await?;
-        self.share_with_members(id).await?;
         Ok(Created { id, token })
     }
     pub async fn rename_list(

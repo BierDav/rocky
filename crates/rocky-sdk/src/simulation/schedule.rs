@@ -98,13 +98,10 @@ pub(super) enum Action {
     Seal(usize),
     Compact(usize),
     Partition(String),
-    Share(String, usize),
     WritePart(usize, String),
     Invite(usize, usize),
     Revoke(usize),
     Change(usize, Change),
-    Evict(usize, String),
-    Hold(usize, String),
     Offline(usize),
     Online(usize),
     WriteAhead(usize, Duration),
@@ -118,7 +115,6 @@ pub(super) enum Action {
     WatchMesh(usize, usize),
     WokenMesh(usize),
     Received(usize),
-    Partial(usize),
     StaleAfter(usize, Duration),
 }
 impl fmt::Display for Action {
@@ -139,13 +135,10 @@ impl fmt::Display for Action {
             Self::Seal(node) => write!(f, "seal {}", name(node)),
             Self::Compact(node) => write!(f, "compact {}", name(node)),
             Self::Partition(list) => write!(f, "partition {list}"),
-            Self::Share(list, node) => write!(f, "share {list} with {}", name(node)),
             Self::WritePart(node, list) => write!(f, "write {} in {list}", name(node)),
             Self::Invite(by, node) => write!(f, "invite {} by {}", name(node), name(by)),
             Self::Revoke(node) => write!(f, "revoke {}", name(node)),
             Self::Change(node, change) => write!(f, "change {} {change:?}", name(node)),
-            Self::Evict(node, list) => write!(f, "evict {} {list}", name(node)),
-            Self::Hold(node, list) => write!(f, "hold {} {list}", name(node)),
             Self::Offline(node) => write!(f, "offline {}", name(node)),
             Self::Online(node) => write!(f, "online {}", name(node)),
             Self::WriteAhead(node, by) => write!(f, "write {} {by:?} ahead", name(node)),
@@ -161,7 +154,6 @@ impl fmt::Display for Action {
             }
             Self::WokenMesh(node) => write!(f, "woken mesh {}", name(node)),
             Self::Received(node) => write!(f, "received {}", name(node)),
-            Self::Partial(node) => write!(f, "partial {}", name(node)),
             Self::StaleAfter(node, after) => write!(f, "stale after {} {after:?}", name(node)),
         }
     }
@@ -170,7 +162,7 @@ pub(super) fn node_name(node: usize) -> String {
     char::from(b'a' + node as u8).to_string()
 }
 
-const WEIGHTS: [(Kind, u64); 18] = [
+const WEIGHTS: [(Kind, u64); 17] = [
     (Kind::Write, 20),
     (Kind::Probe, 6),
     (Kind::Sync, 14),
@@ -185,7 +177,6 @@ const WEIGHTS: [(Kind, u64); 18] = [
     (Kind::Seal, 6),
     (Kind::Compact, 4),
     (Kind::Partition, 3),
-    (Kind::Share, 3),
     (Kind::WritePart, 4),
     (Kind::Invite, 4),
     (Kind::Revoke, 1),
@@ -206,7 +197,6 @@ enum Kind {
     Seal,
     Compact,
     Partition,
-    Share,
     WritePart,
     Invite,
     Revoke,
@@ -289,11 +279,7 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
                 lists.push(list.clone());
                 Action::Partition(list)
             }
-            Kind::Share | Kind::WritePart if lists.is_empty() => continue,
-            Kind::Share => {
-                let list = lists[draws.below(lists.len() as u64) as usize].clone();
-                Action::Share(list, 1 + draws.below(members as u64 - 1) as usize)
-            }
+            Kind::WritePart if lists.is_empty() => continue,
             Kind::WritePart => {
                 let list = lists[draws.below(lists.len() as u64) as usize].clone();
                 Action::WritePart(node(&mut draws), list)
@@ -342,7 +328,7 @@ fn faults(draws: &mut Draws) -> LinkFaults {
 
 pub(super) const LISTS: [&str; 2] = ["l0", "l1"];
 
-const RELATIONAL: [(Lifecycle, u64); 18] = [
+const RELATIONAL: [(Lifecycle, u64); 15] = [
     (Lifecycle::Change, 44),
     (Lifecycle::Sync, 14),
     (Lifecycle::SyncPair, 8),
@@ -354,11 +340,8 @@ const RELATIONAL: [(Lifecycle, u64); 18] = [
     (Lifecycle::Seal, 7),
     (Lifecycle::Compact, 5),
     (Lifecycle::Partition, 2),
-    (Lifecycle::Share, 4),
     (Lifecycle::Invite, 4),
     (Lifecycle::Revoke, 1),
-    (Lifecycle::Evict, 3),
-    (Lifecycle::Hold, 3),
     (Lifecycle::Offline, 3),
     (Lifecycle::Online, 3),
 ];
@@ -375,11 +358,8 @@ enum Lifecycle {
     Seal,
     Compact,
     Partition,
-    Share,
     Invite,
     Revoke,
-    Evict,
-    Hold,
     Offline,
     Online,
 }
@@ -414,7 +394,6 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
                 found
             })
             .map_or(Lifecycle::Change, |(kind, _)| *kind);
-        let list = |draws: &mut Draws| lists[draws.below(lists.len() as u64) as usize].clone();
         let action = match kind {
             Lifecycle::Change => {
                 let author = node(&mut draws);
@@ -448,10 +427,6 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
                 lists.push(list.clone());
                 Action::Partition(list)
             }
-            Lifecycle::Share => {
-                let list = list(&mut draws);
-                Action::Share(list, other(&mut draws))
-            }
             Lifecycle::Invite if members < scenario.nodes => {
                 members += 1;
                 Action::Invite(draws.below(members as u64 - 1) as usize, members - 1)
@@ -461,14 +436,6 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
                 Action::Revoke(other(&mut draws))
             }
             Lifecycle::Invite | Lifecycle::Revoke => continue,
-            Lifecycle::Evict => {
-                let list = list(&mut draws);
-                Action::Evict(other(&mut draws), list)
-            }
-            Lifecycle::Hold => {
-                let list = list(&mut draws);
-                Action::Hold(other(&mut draws), list)
-            }
             Lifecycle::Offline => Action::Offline(node(&mut draws)),
             Lifecycle::Online => Action::Online(node(&mut draws)),
         };
@@ -478,11 +445,8 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
                 members += 1;
                 Some(Action::Invite(0, members - 1))
             }
-            Action::Invite(_, joined) if draws.chance(600) => {
-                Some(Action::Share(lists[0].clone(), *joined))
-            }
-            Action::Share(_, node) if draws.chance(300) => Some(Action::Crash(
-                *node,
+            Action::Invite(_, joined) if draws.chance(300) => Some(Action::Crash(
+                *joined,
                 [None, Some(CrashPoint::Import), Some(CrashPoint::Switch)][draws.below(3) as usize],
             )),
             _ => None,

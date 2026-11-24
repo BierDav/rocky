@@ -93,10 +93,11 @@ fn middle(low: &[u8], high: Option<&[u8]>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocky_sdk::WriterId;
 
     fn tag(sequence: u64) -> RowIdentity {
-        RowIdentity::new(WriterId::from_bytes([7; 32]), sequence).unwrap()
+        format!("{}{sequence:016x}", "07".repeat(32))
+            .parse()
+            .unwrap()
     }
 
     #[test]

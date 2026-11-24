@@ -142,25 +142,10 @@ impl Listed {
                 .await?,
         )?;
         introduce(&a, &b).await;
-        let node = b.node().await;
         for index in 0..lists {
             snap::ok(
                 a.database
                     .create_partition(&rocky_sdk::Partition::new("items", (list(index)).clone())),
-            )
-            .await;
-            snap::ok(
-                a.database.share_partition(
-                    rocky_sdk::PartitionTarget::Table {
-                        table: "items".to_owned(),
-                        values: (list(index)).clone(),
-                    },
-                    serde_json::from_value::<
-                        std::collections::BTreeSet<rocky_credentials::PublicKey>,
-                    >(json!([node]))
-                    .expect("typed fixture"),
-                    None,
-                ),
             )
             .await;
         }

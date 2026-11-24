@@ -872,15 +872,48 @@ pub(crate) async fn attach(
     let recovered =
         settings.recover_groups(vault, domain, &replica.retained_partitions().await?)?;
     install_group_keys(replica, settings, vault, domain).await?;
-    if replica.role().await?.role == rocky_secure::ReplicaRole::Partial {
-        hold_late_group_members(replica, settings, domain).await?;
-    }
+    align_role(replica, settings, domain).await?;
     replica
         .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
             &vault.get("node")?,
         ))
         .await?;
     Ok(recovered)
+}
+
+pub(crate) async fn align_role(
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
+    settings: &Settings,
+    domain: &crate::domain::Domain,
+) -> Result<Option<bool>, Failure> {
+    let partial = !settings.issuer() && domain.holds_partitions_only_when_granted(&settings.access);
+    let role = if partial {
+        rocky_secure::ReplicaRole::Partial
+    } else {
+        rocky_secure::ReplicaRole::Full
+    };
+    let changed = replica.role().await?.role != role;
+    if changed {
+        replica.set_role(rocky_secure::RoleConfig { role }).await?;
+    }
+    if partial {
+        let whole = domain.scopes().map(|(_, scope)| scope).filter(|scope| {
+            !domain.partitioned_table(scope) && settings.reads_whole(domain, scope)
+        });
+        let granted: Vec<_> = settings
+            .partitions(domain)?
+            .into_iter()
+            .flat_map(|partition| partition.members)
+            .filter(|member| settings.reads_partition(domain, member))
+            .map(|member| member.scope)
+            .collect();
+        for scope in whole.chain(granted) {
+            if replica.subscription(scope).await? != Some(rocky_secure::Holding::Held) {
+                replica.subscribe(scope).await?;
+            }
+        }
+    }
+    Ok(changed.then_some(partial))
 }
 
 async fn install_group_keys(
@@ -905,28 +938,6 @@ async fn install_group_keys(
                         .await?;
                 }
             }
-        }
-    }
-    Ok(())
-}
-
-async fn hold_late_group_members(
-    replica: &EncryptedReplica<rocky_core::TypedRows>,
-    settings: &Settings,
-    domain: &crate::domain::Domain,
-) -> Result<(), Failure> {
-    for partition in settings.partitions(domain)? {
-        let mut held = false;
-        let mut unrecorded = Vec::new();
-        for member in &partition.members {
-            match replica.subscription(member.scope).await? {
-                Some(rocky_secure::Holding::Held) => held = true,
-                None if settings.reads_partition(domain, member) => unrecorded.push(member.scope),
-                _ => {}
-            }
-        }
-        for scope in unrecorded.into_iter().filter(|_| held) {
-            replica.subscribe(scope).await?;
         }
     }
     Ok(())

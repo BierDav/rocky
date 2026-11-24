@@ -270,10 +270,10 @@ impl Node {
         changes.grant(&identity, &stored, Some(record))?;
         self.commit(changes).await?;
         let nodes = self.identity_nodes(identity).await?;
-        let shared = self.share(group, nodes, None).await?;
+        let recipients = self.share_with(&group, &nodes).await?;
         self.activity.record(crate::ActivityKind::PartitionShared {
-            target,
-            recipients: shared.recipients.len(),
+            partition: partition.clone(),
+            recipients,
         });
         self.wake_sync();
         Ok(())
@@ -419,7 +419,8 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(Box::new(AccessError::AdminRequired));
         }
-        self.create_partition(&partition.target()).await?;
-        Ok(partition.clone())
+        self.create_partition(&partition.target())
+            .await?
+            .partition()
     }
 }

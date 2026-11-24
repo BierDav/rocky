@@ -2205,51 +2205,11 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             )
             .await
             .map_err(|error| format!("multi-batch receiver enrollment: {error}"))?;
-            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             for n in 0..3 {
                 let values = vec![crate::SqlValue::Text(format!("partition_{n}"))];
-                snap::value(a.create_partition(&rocky_sdk::PartitionTarget::Group {
-                    group: "held".to_owned(),
-                    values: (values).clone(),
-                }))
-                .await
-                .map_err(|error| format!("create partition {n}: {error}"))?;
-                let shared = snap::value(
-                    a.share_partition(
-                        &rocky_sdk::PartitionTarget::Group {
-                            group: "held".to_owned(),
-                            values: (values).clone(),
-                        },
-                        serde_json::from_value::<
-                            std::collections::BTreeSet<rocky_credentials::PublicKey>,
-                        >(json!([peer.to_hex()]))
-                        .expect("typed fixture"),
-                        None,
-                    ),
-                )
-                .await
-                .map_err(|error| format!("share partition {n}: {error}"))?;
-                snap::value(
-                    b.install_partition(
-                        &rocky_sdk::PartitionTarget::Group {
-                            group: "held".to_owned(),
-                            values: (values).clone(),
-                        },
-                        &rocky_credentials::GroupSecretEnvelope::from_bytes(
-                            &serde_json::from_value::<Vec<u8>>(json!(
-                                shared["envelopes"][0]["envelope"]
-                            ))
-                            .expect("typed fixture"),
-                        )
-                        .expect("envelope"),
-                        &serde_json::from_value::<rocky_credentials::CredentialChain>(json!(
-                            shared["sender"]
-                        ))
-                        .expect("typed fixture"),
-                    ),
-                )
-                .await
-                .map_err(|error| format!("install partition {n}: {error}"))?;
+                a.create_partition(&crate::Partition::new("held", values).target())
+                    .await
+                    .map_err(|error| format!("create partition {n}: {error}"))?;
             }
             targets(&a, std::slice::from_ref(&b)).await?;
             targets(&b, std::slice::from_ref(&a)).await?;
@@ -2260,9 +2220,9 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                     && b.current().is_some_and(|s| s.live.len() == 1)
             })
             .await;
+            until(|| b.scopes().len() == 66).await;
             settled(&a).await;
             settled(&b).await;
-            assert_eq!(b.scopes().len(), 66);
             assert_eq!(
                 b.scopes()
                     .iter()

@@ -129,11 +129,11 @@ pub enum ActivityKind {
         partial: bool,
     },
     PartitionCreated {
-        target: crate::PartitionTarget,
+        partition: crate::Partition,
         id: Option<rocky_core::RowIdentity>,
     },
     PartitionShared {
-        target: crate::PartitionTarget,
+        partition: crate::Partition,
         recipients: usize,
     },
     EnvelopesDelivered {
@@ -149,19 +149,10 @@ pub enum ActivityKind {
         error: String,
     },
     PartitionKeyInstalled {
-        target: crate::PartitionTarget,
+        partition: crate::Partition,
     },
     PartitionBootstrap {
-        target: crate::PartitionTarget,
-    },
-    PartitionSubscribed {
-        target: crate::PartitionTarget,
-    },
-    PartitionUnsubscribed {
-        target: crate::PartitionTarget,
-    },
-    PartitionEvicted {
-        target: crate::PartitionTarget,
+        partition: crate::Partition,
     },
     UnlinkUnpushed {
         error: String,

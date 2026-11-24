@@ -24,32 +24,8 @@ use tokio::sync::oneshot;
 type Reply<T> = oneshot::Sender<Result<T, crate::Failure>>;
 
 pub(crate) enum Request {
-    PartitionAddress(String, Vec<crate::SqlValue>, Reply<crate::PartitionAddress>),
-    PartitionComplete(String, Reply<bool>),
-    InstallPartition(
-        crate::PartitionTarget,
-        Box<rocky_credentials::GroupSecretEnvelope>,
-        rocky_credentials::CredentialChain,
-        Reply<()>,
-    ),
+    #[cfg(any(test, feature = "test-support"))]
     PartitionStatus(crate::PartitionTarget, Reply<crate::PartitionStatus>),
-    RegisterPartition(crate::PartitionTarget, crate::PartitionSelection, Reply<()>),
-    HoldPartition(
-        crate::PartitionTarget,
-        crate::PartitionSelection,
-        bool,
-        Reply<()>,
-    ),
-    ReleasePartition(
-        crate::PartitionTarget,
-        std::collections::BTreeSet<String>,
-        Reply<()>,
-    ),
-    EvictPartition(
-        crate::PartitionTarget,
-        std::collections::BTreeSet<String>,
-        Reply<crate::PartitionEviction>,
-    ),
 
     HeldChanges(Reply<Vec<crate::HeldChange>>),
     DropHeld(rocky_core::Commitment, Reply<()>),
@@ -110,19 +86,7 @@ pub(crate) enum Request {
     ),
     Unlink(rocky_credentials::PeerId, Reply<()>),
     Info(Reply<crate::DeviceInfo>),
-    ReplicaRole(crate::ReplicaRoleConfig, Reply<()>),
-    PartitionCustody(
-        rocky_core::ResourceScope,
-        crate::PartitionCustody,
-        Reply<()>,
-    ),
     NextPartition(String, Reply<crate::CreatedPartition>),
-    SharePartition(
-        crate::PartitionTarget,
-        std::collections::BTreeSet<rocky_credentials::PublicKey>,
-        Option<rocky_core::KeyEpoch>,
-        Reply<crate::PartitionShare>,
-    ),
     DeviceCredential(Reply<crate::DeviceCredential>),
     SignExtension(Vec<u8>, Reply<rocky_credentials::Signature>),
 }
@@ -162,28 +126,8 @@ impl Request {
             Self::ActivityNext(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::PartitionAddress(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::PartitionComplete(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::InstallPartition(_, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
+            #[cfg(any(test, feature = "test-support"))]
             Self::PartitionStatus(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::RegisterPartition(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::HoldPartition(_, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::ReleasePartition(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::EvictPartition(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Status(reply) => {
@@ -257,13 +201,7 @@ impl Request {
             Self::Info(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::ReplicaRole(_, reply) | Self::PartitionCustody(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::NextPartition(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::SharePartition(_, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::DeviceCredential(reply) => {

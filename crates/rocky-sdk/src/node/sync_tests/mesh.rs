@@ -458,28 +458,32 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
 async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
-        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#)?;
+        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"roles":[{"name":"outsider","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#)?;
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
-        let reader = crate::Access::Read;
-        let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, reader.clone())), &schema).await?;
-        let c = enrolled_schema(&root.path().join("c"), &hub, "c", Some((&a, reader)), &schema).await?;
+        let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, crate::Access::Read)), &schema).await?;
+        let outsider = crate::Access::Role(crate::RoleName::from_static("outsider"));
+        let c = enrolled_schema(&root.path().join("c"), &hub, "c", Some((&a, outsider)), &schema).await?;
         let d = enrolled_schema(&root.path().join("d"), &hub, "d", Some((&a, crate::Access::Store)), &schema).await?;
         let target = crate::PartitionTarget::Table { table: "items".into(), values: vec![SqlValue::Text("only-custody".into())] };
-        let created = a.create_partition(&target).await?;
-        let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-        let shared = a.share_partition(&target, [b_key].into(), None).await?;
-        b.install_partition(&target, &rocky_credentials::GroupSecretEnvelope::from_bytes(&shared.envelopes[0].envelope)?, shared.sender.as_ref().ok_or("sender")?).await?;
-        assert!(d.register_partition(&target, &crate::PartitionSelection::default()).await.is_err());
-        let name = data_encoding::HEXLOWER.decode(created.name.as_bytes())?.try_into().map_err(|_| "partition name")?;
-        d.register_partition(&target, &crate::PartitionSelection { name: Some(name), omit: Default::default() }).await?;
+        a.create_partition(&target).await?;
+        pass(&b).await?;
         let sql = a.sql_session(SqlOptions::default()).await?;
         sql.run("BEGIN", Vec::new()).await?;
         let id = sql.next_id_partition("items", &[SqlValue::Text("only-custody".into())]).await?;
         sql.run("INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![id.sql()]).await?;
         sql.run("COMMIT", Vec::new()).await?;
-        pass(&d).await?;
+        let custody = contact(&a, &d).await?;
+        a.configure(|settings| {
+            for peer in settings.peers.keys().copied().collect::<Vec<_>>() {
+                if peer != custody {
+                    settings.remove_peer(peer)?;
+                }
+            }
+            Ok(())
+        }).await?;
+        pass(&a).await?;
         a.detach().await;
         let d_key = contact(&b, &d).await?;
         let c_key = contact(&b, &c).await?;

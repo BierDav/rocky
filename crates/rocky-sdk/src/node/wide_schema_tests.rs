@@ -84,14 +84,10 @@ fn metric(label: &str, chain: &CredentialChain) -> usize {
     bytes
 }
 async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
-    let status = snap::ok(
-        device
-            .database
-            .partition_status(rocky_sdk::PartitionTarget::Group {
-                group: "book".into(),
-                values: vec![rocky_sdk::SqlValue::Text("A".into())],
-            }),
-    )
+    let status = snap::ok(device.database.partition_status(&rocky_sdk::Partition::new(
+        "book",
+        vec![rocky_sdk::SqlValue::Text("A".into())],
+    )))
     .await;
     let tables = status["tables"].as_array().unwrap();
     assert_eq!(tables.len(), count);
@@ -152,20 +148,6 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         "book",
         vec![rocky_sdk::SqlValue::Text("A".to_owned())],
     )))
-    .await;
-    snap::ok(
-        owner.database.share_partition(
-            rocky_sdk::PartitionTarget::Group {
-                group: "book".to_owned(),
-                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
-            },
-            serde_json::from_value::<std::collections::BTreeSet<rocky_credentials::PublicKey>>(
-                json!([members[0].1.node, members[1].1.node]),
-            )
-            .expect("typed fixture"),
-            None,
-        ),
-    )
     .await;
     let saved = settings(&owner_dir);
     let delivery = saved

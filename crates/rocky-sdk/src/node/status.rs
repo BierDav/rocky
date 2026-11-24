@@ -186,6 +186,7 @@ impl Node {
             || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let revision = *self.replica.observe_revision().borrow();
+        let blockers = self.blockers().await?;
         let mut status = DatabaseStatus {
             token: String::new(),
             observed_at_epoch_millis: epoch_millis(),
@@ -246,7 +247,8 @@ impl Node {
                         tables: plan.tables as u64,
                     }),
                 },
-                blockers: self.blockers().await?,
+                partitions: self.partition_progress(&settings, &blockers).await?,
+                blockers,
                 bootstrap_pending,
                 bootstrap: self.bootstrap_progress().await?,
                 imports,

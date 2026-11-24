@@ -74,7 +74,12 @@ lists; column lists restrict writes only. A role declared `per_partition`
 holds no partition of that group until an admin calls
 `Database::grant_partition(person, &partition)`, which delivers the group
 secret to every device of that person; `revoke_partition` takes it back.
-`Full` and `Read` reach every partition. `Database::me` says who the device
+`Full` and `Read` reach every partition. A new partition's secret reaches
+every device of every person whose access covers it through the delivery
+mailboxes, with no application call; store-only devices hold its frames but
+never its secret, and a device's replica follows its access.
+`DataStatus::partitions` reports whether each partition is held and complete.
+`Database::me` says who the device
 belongs to, its access and what it may do per table. Admins list people with
 `Database::people` (a `Person` per member with access, partitions and
 devices), change access with `set_access` and end a person with

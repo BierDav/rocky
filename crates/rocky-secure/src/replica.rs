@@ -1782,9 +1782,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     pub async fn evict_key(&self, scope: ResourceScope) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner.config.keys.retain(|key| key.scope != scope);
-        inner.history.retain(|key| key.scope != scope);
-        inner.bump_authority();
+        inner.lose_keys(|key| key.scope == scope);
     }
     pub async fn handle_committed(&self, handle: Commitment) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;

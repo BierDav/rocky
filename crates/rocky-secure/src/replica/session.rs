@@ -138,18 +138,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.node_author = previous_author;
             return Err(error);
         }
-        let readable =
-            |key: &KeyMaterial| grants.iter().any(|grant| readable_grant(grant, key.scope));
-        inner.config.keys.retain(readable);
-        inner.history.retain(readable);
-        inner.bump_authority();
+        inner.lose_keys(|key| !grants.iter().any(|grant| readable_grant(grant, key.scope)));
         Ok(())
     }
     pub async fn logout(&self) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner.config.keys.clear();
-        inner.history.clear();
-        inner.bump_authority();
+        inner.lose_keys(|_| true);
     }
 }
 

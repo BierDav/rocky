@@ -946,3 +946,47 @@ async fn time_frozen<F: std::future::Future>(future: F) -> F::Output {
         }
     }
 }
+
+#[tokio::test]
+async fn an_observer_hears_only_of_changed_rows_not_of_renewals_or_idle_syncs()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = create(open(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?)
+    .await?;
+    let invitation = a.invite(crate::Invite::new(crate::Access::Full)).await?;
+    let b = open(
+        &root.path().join("b"),
+        Some(Network::Owned(hub.connector("b"))),
+    )?
+    .join(&invitation.code)
+    .await?
+    .database;
+    snap::value(b.sync_now()).await?;
+    let events = b.observe(&[]).await?;
+    b.renew().await?;
+    snap::value(b.sync_now()).await?;
+    snap::value(b.sync_now()).await?;
+    let writer = a.connect(WRITER).await?;
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    run(
+        &writer,
+        "INSERT INTO lists(key,title) VALUES('l1','Groceries')",
+    )
+    .await?;
+    run(&writer, "END TRANSACTION").await?;
+    snap::value(b.sync_now()).await?;
+    let change = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
+    assert_eq!(
+        (change.tables, change.causes),
+        (vec!["lists".to_string()], vec![crate::ChangeCause::Sync]),
+        "the renewal and the idle syncs before the change queued no event"
+    );
+    writer.close().await;
+    b.close().await?;
+    a.close().await?;
+    Ok(())
+}

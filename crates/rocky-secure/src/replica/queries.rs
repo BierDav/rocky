@@ -201,8 +201,30 @@ impl<A: RowApplication> Inner<A> {
             .queries
             .authority
             .store(self.authority, Ordering::SeqCst);
-        if let Some(events) = &self.workspace.queries.events {
-            events.publish(None, self.revision, &[Cause::Authority]);
+    }
+    pub(super) fn lose_keys(&mut self, lost: impl Fn(&KeyMaterial) -> bool) {
+        let mut scopes = BTreeSet::new();
+        for keys in [&mut self.config.keys, &mut self.history] {
+            keys.retain(|key| {
+                let keep = !lost(key);
+                if !keep {
+                    scopes.insert(key.scope);
+                }
+                keep
+            });
+        }
+        self.bump_authority();
+        let (Some(events), Some(typed)) = (&self.workspace.queries.events, &self.workspace.typed)
+        else {
+            return;
+        };
+        let tables: BTreeSet<String> = scopes
+            .into_iter()
+            .filter_map(|scope| typed.by_scope(scope))
+            .map(|projected| projected.table.sql_name.to_ascii_lowercase())
+            .collect();
+        if !tables.is_empty() {
+            events.publish(Some(&tables), self.revision, &[Cause::Authority]);
         }
     }
     pub(super) fn touch(&self, table: &str) {

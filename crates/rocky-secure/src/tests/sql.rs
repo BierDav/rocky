@@ -1960,11 +1960,12 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
     assert_eq!(
         salaries.next().await.unwrap().causes,
         [Cause::Authority].into(),
-        "an authority change wakes every observer"
+        "losing a table's key wakes its observers"
     );
     assert_eq!(
-        items.next().await.unwrap().causes,
-        [Cause::Authority].into()
+        items.try_next().unwrap(),
+        None,
+        "an authority change that leaves a table's rows readable wakes no observer"
     );
     drop(session);
     drop(alice);

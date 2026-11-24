@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Rust source policy: no allow attributes, no comments and no doc text.
+"""Rust source policy: no allow attributes and no comments, except short `///`
+docs on public items of the published app-facing crates.
 
   scripts/lint-rust              check every workspace package and every Cargo
                                  workspace of OUTSIDE_THE_WORKSPACE
@@ -22,6 +23,13 @@ ALLOW_GUIDANCE = '#[allow(...)] is forbidden; use #[expect(lint, reason = "...")
 COMMENT_GUIDANCE = ('comments, doc comments and #[doc = ...] text are forbidden; carry the meaning '
                     'in a type or guard, a test name or assertion message, or a clearer name, '
                     'or delete it')
+DOCUMENTED_CRATES = ('rocky-sdk', 'rocky-tcp', 'rocky-iroh', 'rocky-coordinator')
+DOC_GUIDANCE = ('only one- or two-sentence /// docs on pub items, enum variants and fields, and '
+                'trait members, and a leading //! in lib.rs, of the published app-facing crates '
+                'are allowed, without code blocks')
+MAX_DOC_SENTENCES = 2
+SENTENCE_END = re.compile(r'[.!?](?=\s|$)')
+INLINE_CODE = re.compile(r'`[^`]*`')
 TOKEN = re.compile(
     r'//[^\n]*|/\*|(?P<raw>(?:br|cr|r)(?P<hashes>\#*)")'
     r'|(?:b|c)?"(?:\\.|[^"\\])*"'
@@ -131,8 +139,10 @@ def violations(source):
             yield line(source, position)
 
 
-def comments(source):
-    """Every line a comment spans, doc comments included, and each `doc = ...` attribute."""
+def comments(source, documented_crate=False, crate_root=False):
+    """Every line a comment spans and each `doc = ...` attribute, except, in a
+    documented crate, short `///` docs on public items and a short leading `//!`
+    in the crate root."""
     lines = set()
     for kind, value, position in lexemes(source):
         if kind == 'comment':
@@ -140,7 +150,117 @@ def comments(source):
             lines.update(range(first, first + value.count('\n') + 1))
     for attribute in attributes(source):
         lines.update(line(source, position) for position in documented(attribute))
+    if documented_crate:
+        lines.difference_update(public_docs(source))
+    if documented_crate and crate_root:
+        lines.difference_update(crate_doc(source))
     return sorted(lines)
+
+
+def crate_doc(source):
+    """Lines of the `//!` block before the first token, when it is short."""
+    block = []
+    for kind, value, position in lexemes(source):
+        if kind != 'comment' or not value.startswith('//!'):
+            break
+        block.append((value, position))
+    return {line(source, position) for _, position in block} if block and short(block) else set()
+
+
+def outer_doc(value):
+    return value.startswith('///') and not value.startswith('////')
+
+
+def doc_blocks(source):
+    """Runs of `///` lines with only whitespace between them, each with the index
+    of the first token after it."""
+    block, count = [], 0
+    for kind, value, position in lexemes(source):
+        if kind == 'comment' and outer_doc(value):
+            block.append((value, position))
+            continue
+        if block and kind == 'token':
+            yield block, count
+        block = []
+        count += kind == 'token'
+
+
+def skip_attributes(parts, index):
+    """The index of the item after the attributes at `index`, and whether one of
+    them exports a macro."""
+    exported = False
+    while index + 1 < len(parts) and parts[index][0] == '#' and parts[index + 1][0] == '[':
+        exported |= index + 2 < len(parts) and parts[index + 2][0] == 'macro_export'
+        depth = 0
+        for index in range(index + 1, len(parts)):
+            depth += {'[': 1, ']': -1}.get(parts[index][0], 0)
+            if depth == 0:
+                break
+        index += 1
+    return index, exported
+
+
+def public(parts, index):
+    return (index < len(parts) and parts[index][0] == 'pub'
+            and (index + 1 >= len(parts) or parts[index + 1][0] != '('))
+
+
+def member_bodies(parts):
+    """Token indices inside the body of a `pub enum` (at any depth) or directly
+    inside a `pub trait`, where members carry no `pub` of their own."""
+    inside = set()
+    stack, pending, opened_by_pub = [], None, False
+    for index, (value, _) in enumerate(parts):
+        if value == 'pub':
+            opened_by_pub = public(parts, index)
+        elif value in ('enum', 'trait') and opened_by_pub:
+            pending = value
+        elif value == ';':
+            pending, opened_by_pub = None, False
+        elif value == '{':
+            enclosing = stack[-1] if stack else None
+            stack.append(pending or ('enum' if enclosing == 'enum' else None))
+            pending, opened_by_pub = None, False
+            continue
+        elif value == '}':
+            if stack:
+                stack.pop()
+            pending, opened_by_pub = None, False
+            continue
+        if stack and stack[-1] in ('enum', 'trait'):
+            inside.add(index)
+    return inside
+
+
+def short(block):
+    text = ' '.join(value[3:].strip() for value, _ in block)
+    return '```' not in text and len(SENTENCE_END.findall(INLINE_CODE.sub('', text))) <= MAX_DOC_SENTENCES
+
+
+def public_docs(source):
+    """Lines of `///` blocks that document a public item, exported macro, enum
+    variant or field, or trait member in at most two sentences without a code block."""
+    parts = list(tokens(source))
+    members = member_bodies(parts)
+    lines = set()
+    for block, following in doc_blocks(source):
+        if not short(block):
+            continue
+        item, exported = skip_attributes(parts, following)
+        if public(parts, item) or item in members or exported:
+            lines.update(line(source, position) for _, position in block)
+    return lines
+
+
+def documented_source(path):
+    """`(documented crate, crate root)` for a source file."""
+    try:
+        parts = path.resolve().relative_to(ROOT).parts
+    except ValueError:
+        return False, False
+    documented = (len(parts) > 3 and parts[0] == 'crates' and parts[1] in DOCUMENTED_CRATES
+                  and parts[2] == 'src')
+    return documented, documented and parts[3:] == ('lib.rs',)
 
 
 def rust_sources(directory, nested_packages):
@@ -184,12 +304,18 @@ def report(path, lines, guidance):
     return bool(lines)
 
 
+def check(path):
+    source = path.read_text()
+    documented_crate, crate_root = documented_source(path)
+    failed = report(path, list(violations(source)), ALLOW_GUIDANCE)
+    return failed | report(path, list(comments(source, documented_crate, crate_root)),
+                           DOC_GUIDANCE if documented_crate else COMMENT_GUIDANCE)
+
+
 def check_paths(paths):
     failed = False
     for path in sorted(paths):
-        source = path.read_text()
-        failed |= report(path, list(violations(source)), ALLOW_GUIDANCE)
-        failed |= report(path, list(comments(source)), COMMENT_GUIDANCE)
+        failed |= check(path)
     return failed
 
 
@@ -197,9 +323,7 @@ def check_workspace():
     failed = False
     for sources in scanned():
         for path in sources:
-            source = path.read_text()
-            failed |= report(path, list(violations(source)), ALLOW_GUIDANCE)
-            failed |= report(path, list(comments(source)), COMMENT_GUIDANCE)
+            failed |= check(path)
     return failed
 
 

@@ -35,13 +35,20 @@
 
 ## Comments
 
-- Rust code holds no comments of any kind: no `//` or `/* */` comments, no doc
-  comments and no `#[doc = ...]` text (`scripts/lint-rust`). Code explains
-  itself through names, types, guards and tests.
+- Rust code holds no comments: no `//` or `/* */` comments, no `#[doc = ...]`
+  text and no doc comments, with one exception (`scripts/lint-rust`). Code
+  explains itself through names, types, guards and tests.
+- The exception: `pub` items, enum variants and fields, and trait members in
+  the `src/` of the published app-facing crates (rocky-sdk, rocky-tcp,
+  rocky-iroh and rocky-coordinator) carry a one- or two-sentence `///` doc,
+  each `lib.rs` opens with such a `//!` doc, and those crates deny
+  `missing_docs`. A doc says what the item is for and
+  the one fact its type does not show: a limit, a default, what `None` means
+  or what clears a blocker. No restated names, no code blocks, no doctests.
 - Encode a reason or warning as, in order of preference: a type or guard that
   makes the mistake impossible; a test named after the rule or an assertion
   message; a clearer name for the item, parameter or constant; otherwise delete
-  it. Examples are ordinary tests, not doctests.
+  it. Examples are ordinary tests or example programs, not doctests.
 
 ## Version control
 

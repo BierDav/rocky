@@ -63,7 +63,11 @@ ten minutes by default) or the one person it is for (`for_identity`). The
 label names the device the invitation admits (`Device::label`) and, on the
 person's first invitation, the person. The
 returned `Invitation` holds an `InvitationCode`; `Configuration::join` redeems
-it over the network with the issuing device and returns `Opened`. A default
+it over the network with the issuing device and returns `Opened` after its
+first pull from that device, so the first read sees the issuer's rows. Joining
+needs the issuing device online; if the first pull fails after redemption, the
+database still opens, its reads report the missing data as `Incomplete`, and
+the next sync completes it. A default
 code carries a single-use secret, so whoever holds it joins once, as an
 identity Rocky mints and returns once in `Opened::identity`; a `for_identity`
 code carries no secret and admits only that person's configured identity. A

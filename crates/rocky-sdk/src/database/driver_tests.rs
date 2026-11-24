@@ -990,3 +990,57 @@ async fn an_observer_hears_only_of_changed_rows_not_of_renewals_or_idle_syncs()
     a.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn join_returns_once_its_first_pull_brought_the_issuers_rows() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = create(open(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?)
+    .await?;
+    let writer = a.connect(WRITER).await?;
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    run(
+        &writer,
+        "INSERT INTO lists(key,title) VALUES('l1','Groceries')",
+    )
+    .await?;
+    run(
+        &writer,
+        "INSERT INTO items(key,list,title,completed) VALUES('i1','l1','Milk',0)",
+    )
+    .await?;
+    run(&writer, "END TRANSACTION").await?;
+    let invitation = a.invite(crate::Invite::new(crate::Access::Full)).await?;
+    let b_path = root.path().join("b");
+    let (bootstrapping, finish_bootstrap) =
+        crate::pause::arm(&b_path, crate::pause::Point::Bootstrap);
+    let configuration = open(&b_path, Some(Network::Owned(hub.connector("b"))))?;
+    let mut joining = std::pin::pin!(configuration.join(&invitation.code));
+    tokio::select! {
+        biased;
+        _ = &mut joining => return Err("join returned before its first pull began".into()),
+        reached = bootstrapping => reached.map_err(|_| -> Failure { "the first pull never began".into() })?,
+    }
+    tokio::select! {
+        biased;
+        _ = &mut joining => return Err("join returned while its first pull was held".into()),
+        () = tokio::task::yield_now() => {}
+    }
+    let _ = finish_bootstrap.send(());
+    let b = joining.await?.database;
+    let reader = b.connect(READER).await?;
+    assert_eq!(
+        count(&reader, "items").await?,
+        1,
+        "the first read after join sees the issuer's rows without a sync_now"
+    );
+    for connection in [writer, reader] {
+        connection.close().await;
+    }
+    b.close().await?;
+    a.close().await?;
+    Ok(())
+}

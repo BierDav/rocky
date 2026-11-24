@@ -47,6 +47,7 @@ pub(crate) enum Request {
     Status(Reply<crate::DatabaseStatus>),
     StatusAfter(String, Reply<crate::DatabaseStatus>),
     Sync(Reply<crate::SyncReport>),
+    FirstPull(Reply<()>),
     SetSync(crate::SyncMode, Reply<()>),
     Logout(crate::Logout, Reply<()>),
     #[cfg(any(test, feature = "test-support"))]
@@ -131,6 +132,9 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::Sync(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::FirstPull(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::SetSync(_, reply) => {

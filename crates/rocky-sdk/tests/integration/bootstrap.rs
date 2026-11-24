@@ -889,6 +889,7 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
 #[tokio::test(flavor = "multi_thread")]
 async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
     const STEP: usize = 8 * 1024;
+    const INTO_THE_IMPORT: usize = 160 * 1024;
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
@@ -911,13 +912,25 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
         hub.cut_after(Some(STEP));
         spent
     };
+    let step_unless_cut = |written: &mut tokio::sync::watch::Receiver<usize>| {
+        if hub.hold_cut.load(std::sync::atomic::Ordering::SeqCst) {
+            step(written)
+        } else {
+            usize::MAX
+        }
+    };
     let joining = tokio::spawn({
         let (directory, network) = (root.path().join("b"), hub.connector("b"));
         async move { Device::join(&directory, &invitation, Network::Owned(network)).await }
     });
     tokio::pin!(joining);
     let b = loop {
-        let spent = step(&mut written);
+        if *written.borrow() >= INTO_THE_IMPORT {
+            hub.hold_cut
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            hub.cut_after(Some(0));
+        }
+        let spent = step_unless_cut(&mut written);
         tokio::select! {
             joined = &mut joining => break joined??,
             held = written.wait_for(|total| *total >= spent) => {
@@ -925,6 +938,9 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
             }
         }
     };
+    hub.hold_cut
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    hub.cut_after(Some(0));
     let stepped = async {
         let mut seen = Vec::new();
         let mut changes = b.database.status_changes();
@@ -985,24 +1001,29 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
             .await;
     }
     a.seal_and_compact().await;
-    let b = Arc::new(
-        Device::join(
-            &root.path().join("b"),
-            &a.invite().await,
-            Network::Owned(hub.connector("b")),
-        )
-        .await?,
-    );
-    let mut changes = b.database.status_changes();
-    let mut status = snap::ok(changes.next()).await;
-    while status["data"]["bootstrap"]["rows_done"]
-        .as_u64()
-        .unwrap_or(0)
-        == 0
-    {
-        status = snap::ok(changes.next()).await;
-    }
+    const STEP: usize = 8 * 1024;
+    const INTO_THE_IMPORT: usize = 480 * 1024;
+    let invitation = a.invite().await;
+    hub.hold_cut
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     hub.cut_after(Some(0));
+    let mut written = hub.written();
+    let directory = root.path().join("b");
+    let joining = Device::join(&directory, &invitation, Network::Owned(hub.connector("b")));
+    tokio::pin!(joining);
+    let b = Arc::new(loop {
+        if *written.borrow_and_update() >= INTO_THE_IMPORT {
+            hub.hold_cut
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            hub.cut_after(Some(0));
+        } else {
+            hub.cut_after(Some(STEP));
+        }
+        tokio::select! {
+            joined = &mut joining => break joined?,
+            changed = written.changed() => changed.expect("the hub outlives the join"),
+        }
+    });
     a.add(200, "edited on a while cut").await;
     b.add(201, "edited on b while cut").await;
     let paused = snap::ok(b.database.status()).await;

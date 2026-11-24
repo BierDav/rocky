@@ -1356,8 +1356,12 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             if let Err(error) = joining.initial_sync().await {
                 tracing::debug!(%error, "initial sync failed; its bootstrap intent stays for the next sync or open");
             }
+            joining.first_pull.send_replace(true);
         })
     });
+    if bootstrapping.is_none() {
+        node.first_pull.send_replace(true);
+    }
     let budget = Arc::new(Semaphore::new(ACTIVE_CALL_QUOTA));
     let connections = Arc::new(connection::Registry::default());
     let mut tasks = rocky_platform::task::JoinSet::new();

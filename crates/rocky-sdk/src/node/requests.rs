@@ -58,6 +58,14 @@ impl Node {
             Request::Sync(reply) => {
                 let _ = reply.send(self.sync_once().await);
             }
+            Request::FirstPull(mut reply) => {
+                let mut pulled = self.first_pull.subscribe();
+                let result = tokio::select! {
+                    pulled = pulled.wait_for(|pulled| *pulled) => pulled.map(drop).map_err(Failure::from),
+                    () = reply.closed() => return,
+                };
+                let _ = reply.send(result);
+            }
             Request::SetSync(mode, reply) => {
                 let _ = reply.send(self.set_sync(mode).await);
             }

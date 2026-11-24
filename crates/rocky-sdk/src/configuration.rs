@@ -109,6 +109,7 @@ impl Configuration {
         let (install, minted) = Install::invited(code);
         let database = Database::launch(self, install, None).await?;
         let identity = minted.lock().ok().and_then(|mut minted| minted.take());
+        database.send(crate::request::Request::FirstPull).await?;
         Ok(Opened { database, identity })
     }
 }

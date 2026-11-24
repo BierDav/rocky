@@ -389,11 +389,12 @@ async fn a_detach_cancels_work_that_outlasts_its_drain() -> Result<(), Failure> 
     add(&member, 1, "Milk").await;
 
     hub.stalled.store(true, Ordering::SeqCst);
+    let dialed_before_the_stall = dials(&hub);
     let stuck = {
         let member = member.clone();
         tokio::spawn(async move { sync(&member).await })
     };
-    while dials(&hub) < 2 {
+    while dials(&hub) == dialed_before_the_stall {
         tokio::task::yield_now().await;
     }
     let started = std::time::Instant::now();

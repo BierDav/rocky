@@ -278,11 +278,16 @@ mod tests {
         );
         assert!(
             !context
-                .visible::<employees_app::Employees>(scope, tip, WriterId::from_bytes([1; 32]), 6)
+                .visible::<crate::tests::employees_app::Employees>(
+                    scope,
+                    tip,
+                    WriterId::from_bytes([1; 32]),
+                    6
+                )
                 .unwrap()
         );
         assert!(
-            matches!(context.visible::<employees_app::Employees>(scope, tip, WriterId::from_bytes([1; 32]), 5), Err(Error::Rejected(message)) if message == "cyclic tip graph")
+            matches!(context.visible::<crate::tests::employees_app::Employees>(scope, tip, WriterId::from_bytes([1; 32]), 5), Err(Error::Rejected(message)) if message == "cyclic tip graph")
         );
         assert_eq!(context.hits, 2);
         assert_eq!(context.misses, 0);

@@ -1,3 +1,4 @@
+pub(crate) mod employees_app;
 pub(crate) mod live_publication;
 use super::*;
 pub(crate) const PARTITION_NAME: rocky_core::PartitionName = [0x5a; 32];

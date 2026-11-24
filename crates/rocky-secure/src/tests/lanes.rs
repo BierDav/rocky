@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::{collect_rows, rows};
-use employees_app::Employees;
+use crate::tests::employees_app::Employees;
 use rocky_core::SqlValue;
 use std::path::{Path, PathBuf};
 

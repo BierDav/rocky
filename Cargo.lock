@@ -2058,13 +2058,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
-name = "employees-app"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
-]
-
-[[package]]
 name = "enum-assoc"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6134,7 +6127,6 @@ name = "rocky-secure"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
- "employees-app",
  "p2panda-core",
  "p2panda-store",
  "rand 0.8.8",

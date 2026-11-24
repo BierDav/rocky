@@ -35,7 +35,6 @@ rand = "=0.8.8"
 
 [dev-dependencies]
 rocky-credentials = { workspace = true, features = ["test-support"] }
-employees-app = { path = "../../examples/employees-app" }
 rocky-storage = { path = "../rocky-storage", features = ["test-support"] }
 rusqlite.workspace = true
 rocky-platform = { workspace = true, features = ["test-support"] }

@@ -48,8 +48,8 @@ fn publication_scans_embedded_row_metadata_before_expansion() {
     assert!(crate::wire::RowPayload::charge_publication(&envelope, &mut 0).is_err());
 }
 
+use crate::tests::employees_app::Employees;
 use crate::tests::{Fixture, live_publication::pair, revocations};
-use employees_app::Employees;
 use rocky_core::RowWrite;
 use rocky_platform::fs::Scratch;
 type Replica = EncryptedReplica<Employees>;

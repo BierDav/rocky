@@ -428,6 +428,13 @@ impl Node {
         }
         settings.application(&self.declared)
     }
+    pub(crate) async fn upgrade_required(&self) -> Result<Option<(u32, u32)>, Failure> {
+        if self.replica.followed_bookmark().await.is_none() {
+            return Ok(None);
+        }
+        let settings = self.settings.lock().await.clone();
+        settings.upgrade_required(&self.declared)
+    }
     pub(crate) async fn migration(
         &self,
         settings: &Settings,

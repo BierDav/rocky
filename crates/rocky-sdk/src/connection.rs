@@ -61,6 +61,15 @@ async fn explained(
     error: Failure,
 ) -> Failure {
     let typed = crate::Error::from_failure(&error);
+    if let crate::ErrorKind::Sql {
+        code: code::ERROR,
+        unsupported: None,
+        ..
+    } = typed.kind()
+        && let Ok(Some((current, declared))) = node.upgrade_required().await
+    {
+        return Box::new(crate::Error::upgrade_required(current, declared));
+    }
     let mut explained = match next_id {
         Some(table) => node.allocation_refusal(table, &typed).await,
         None => node.statement_refusal(sql).await,

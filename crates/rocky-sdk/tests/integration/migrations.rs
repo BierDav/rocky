@@ -149,6 +149,10 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
         .err()
         .ok_or("a failing migration opened")?;
     assert!(failed_at(&failed, 2, 2), "{failed}");
+    assert!(
+        !failed.retryable(),
+        "rerunning the same migration fails alike"
+    );
     let a = reopen(root.path(), &common::schema(), None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
@@ -1199,110 +1203,188 @@ async fn dropped_alerts(device: &Device) -> Result<Vec<rocky_sdk::TransactionTok
         .collect())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_late_write_a_removal_no_longer_applies_is_dropped_loudly() -> Result<(), Failure> {
-    let root = crate::support::small_directory()?;
-    let hub = Arc::new(Hub::default());
-    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let dirs = |name: &str| root.path().join(name);
-    let owner = Device::create(&dirs("owner"), network("owner")).await?;
-    let bob = Device::join(
-        &dirs("bob"),
-        &owner.invite().await,
-        Network::Owned(hub.connector("bob")),
-    )
-    .await?;
-    let carol = Device::join(
-        &dirs("carol"),
-        &owner.invite().await,
-        Network::Owned(hub.connector("carol")),
-    )
-    .await?;
-    introduce(&owner, &bob).await;
-    introduce(&owner, &carol).await;
-    owner.add(1, "Coffee").await;
-    sync(&bob).await;
-    sync(&carol).await;
-    bob.close().await;
-    owner.close().await;
-
-    let owner = reopen(&dirs("owner"), &memoed(), network("owner")).await?;
-    sync(&carol).await;
-    owner.close().await;
-    let owner =
-        Device::new(common::confirmed(open(&dirs("owner"), &untitled(), network("owner"))).await?)?;
-    sync(&carol).await;
-
-    let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
-    let events = bob.database.observe(&[]).await?;
-    let mut tx = bob.database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?;
-    tx.execute(
-        "INSERT INTO items(id,key,completed,title) VALUES(?,'tea',0,'Tea')",
-        vec![id.sql()],
-    )
-    .await?;
-    let rocky_sdk::Commit::Recorded(tea) = tx.commit().await? else {
-        return Err("a write has a token".into());
-    };
-    introduce(&owner, &bob).await;
-    for _ in 0..3 {
+struct LateWriter {
+    root: crate::support::Directory,
+    hub: Arc<Hub>,
+    owner: Device,
+    bob: Device,
+    carol: Device,
+    events: rocky_sdk::TableEvents,
+    tea: rocky_sdk::TransactionToken,
+}
+impl LateWriter {
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self.root.path().join(name)
+    }
+    fn network(&self, name: &str) -> Option<Network> {
+        Some(Network::Owned(self.hub.connector(name)))
+    }
+    async fn create() -> Result<Self, Failure> {
+        let root = crate::support::small_directory()?;
+        let hub = Arc::new(Hub::default());
+        let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+        let dirs = |name: &str| root.path().join(name);
+        let owner = Device::create(&dirs("owner"), network("owner")).await?;
+        let bob = Device::join(
+            &dirs("bob"),
+            &owner.invite().await,
+            Network::Owned(hub.connector("bob")),
+        )
+        .await?;
+        let carol = Device::join(
+            &dirs("carol"),
+            &owner.invite().await,
+            Network::Owned(hub.connector("carol")),
+        )
+        .await?;
+        introduce(&owner, &bob).await;
+        introduce(&owner, &carol).await;
+        owner.add(1, "Coffee").await;
         sync(&bob).await;
         sync(&carol).await;
-        sync(&owner).await;
+        bob.close().await;
+        owner.close().await;
+
+        let owner = reopen(&dirs("owner"), &memoed(), network("owner")).await?;
+        sync(&carol).await;
+        owner.close().await;
+        let owner = Device::new(
+            common::confirmed(open(&dirs("owner"), &untitled(), network("owner"))).await?,
+        )?;
+        sync(&carol).await;
+
+        let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
+        let events = bob.database.observe(&[]).await?;
+        let mut tx = bob.database.transaction().await?;
+        let id = tx.next_id("items", Vec::new()).await?;
+        tx.execute(
+            "INSERT INTO items(id,key,completed,title) VALUES(?,'tea',0,'Tea')",
+            vec![id.sql()],
+        )
+        .await?;
+        let rocky_sdk::Commit::Recorded(tea) = tx.commit().await? else {
+            return Err("a write has a token".into());
+        };
+        introduce(&owner, &bob).await;
+        for _ in 0..3 {
+            sync(&bob).await;
+            sync(&carol).await;
+            sync(&owner).await;
+        }
+        assert_eq!(generation(&bob).await["current"]["schema"], 3);
+        Ok(Self {
+            root,
+            hub,
+            owner,
+            bob,
+            carol,
+            events,
+            tea,
+        })
     }
-    assert_eq!(generation(&bob).await["current"]["schema"], 3);
+    async fn close(self) {
+        self.bob.close().await;
+        self.carol.close().await;
+        self.owner.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_write_a_removal_no_longer_applies_is_dropped_loudly() -> Result<(), Failure> {
+    let mut late = LateWriter::create().await?;
+    let tea = late.tea;
     let dropped = rocky_sdk::DroppedTransaction {
         token: tea,
         reason: rocky_sdk::DropReason::Schema,
     };
-    while !events.next().await?.dropped.contains(&dropped) {}
+    while !late.events.next().await?.dropped.contains(&dropped) {}
     assert_eq!(
-        bob.database.transaction_outcome(tea).await?,
+        late.bob.database.transaction_outcome(tea).await?,
         Some(rocky_sdk::TransactionOutcome::Dropped {
             reason: rocky_sdk::DropReason::Schema,
             sealed: false,
         })
     );
     assert_eq!(
-        dropped_alerts(&bob).await?,
+        dropped_alerts(&late.bob).await?,
         [tea],
         "the writer is told its write was dropped"
     );
     assert_eq!(
-        dropped_alerts(&owner).await?,
+        dropped_alerts(&late.owner).await?,
         [tea],
         "an admin is told a member's write was dropped"
     );
     assert_eq!(
-        dropped_alerts(&carol).await?,
+        dropped_alerts(&late.carol).await?,
         [],
         "a member that neither wrote it nor administers stays quiet"
     );
 
-    bob.close().await;
-    let bob = reopen(&dirs("bob"), &untitled(), network("bob")).await?;
+    late.bob.close().await;
+    late.bob = reopen(&late.path("bob"), &untitled(), late.network("bob")).await?;
     assert_eq!(
-        dropped_alerts(&bob).await?,
+        dropped_alerts(&late.bob).await?,
         [tea],
         "the alert survives a restart until it is acknowledged"
     );
-    bob.database.acknowledge_drop(tea).await?;
-    assert_eq!(dropped_alerts(&bob).await?, []);
-    bob.close().await;
-    let bob = reopen(&dirs("bob"), &untitled(), network("bob")).await?;
+    late.bob.database.acknowledge_drop(tea).await?;
+    assert_eq!(dropped_alerts(&late.bob).await?, []);
+    late.bob.close().await;
+    late.bob = reopen(&late.path("bob"), &untitled(), late.network("bob")).await?;
     assert_eq!(
-        dropped_alerts(&bob).await?,
+        dropped_alerts(&late.bob).await?,
         [],
         "an acknowledged drop stays acknowledged"
     );
     assert_eq!(
-        dropped_alerts(&owner).await?,
+        dropped_alerts(&late.owner).await?,
         [tea],
         "each device acknowledges for itself"
     );
-    bob.close().await;
-    carol.close().await;
-    owner.close().await;
+    late.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Failure> {
+    let mut late = LateWriter::create().await?;
+    let upgrade = rocky_sdk::ErrorKind::UpgradeRequired {
+        current: 3,
+        declared: 1,
+    };
+    let mut tx = late.bob.database.transaction().await?;
+    let id = tx.next_id("items", Vec::new()).await?;
+    let refused = tx
+        .execute(
+            "INSERT INTO items(id,key,completed,title) VALUES(?,'milk',0,'Milk')",
+            vec![id.sql()],
+        )
+        .await
+        .err()
+        .ok_or("a write into the removed field succeeded")?;
+    assert_eq!(
+        *refused.kind(),
+        upgrade,
+        "SQL naming the removed field says the application must upgrade: {refused}"
+    );
+    assert!(!refused.retryable());
+    drop(tx);
+    late.bob.close().await;
+
+    let refused = open(&late.path("bob"), &common::schema(), late.network("bob"))
+        .open()
+        .await
+        .err()
+        .ok_or("an application behind a removal it uses opened")?;
+    assert_eq!(*refused.kind(), upgrade, "{refused}");
+    assert!(!refused.retryable());
+    late.bob = reopen(&late.path("bob"), &unmemoed(), late.network("bob")).await?;
+    assert_eq!(
+        generation(&late.bob).await["application"],
+        "behind",
+        "an application behind that uses only what is kept opens"
+    );
+    late.close().await;
     Ok(())
 }

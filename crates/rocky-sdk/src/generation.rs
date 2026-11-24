@@ -40,6 +40,27 @@ impl Settings {
             Ok(crate::DeclaredSchema::Behind)
         }
     }
+    pub(crate) fn upgrade_required(
+        &self,
+        declared: &Schema,
+    ) -> Result<Option<(u32, u32)>, Failure> {
+        if self.application(declared)? != crate::DeclaredSchema::Behind {
+            return Ok(None);
+        }
+        let uses_removed = declared.tables.iter().any(|table| {
+            self.schema
+                .tables
+                .iter()
+                .find(|current| current.name == table.name)
+                .is_none_or(|current| {
+                    table
+                        .columns
+                        .iter()
+                        .any(|column| !current.columns.iter().any(|kept| kept.name == column.name))
+                })
+        });
+        Ok(uses_removed.then_some((self.generation, declared.version)))
+    }
     pub(crate) fn may_migrate(&self, domain: &Domain) -> Result<bool, Failure> {
         Ok(self.issuer()
             && self.partitions(domain)?.iter().all(|partition| {

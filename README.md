@@ -168,6 +168,12 @@ dropped with `DropReason::Schema` on every device, and loudly: `observe`
 delivers it in `TableChange::dropped` as a `DroppedTransaction { token, reason
 }`, and the writer's device and every admin device raise a `WriteDropped`
 alert in `status` that survives restarts until `acknowledge_drop(token)`.
+An application whose declared version is behind one that removed a table or
+field it declares gets `ErrorKind::UpgradeRequired { current, declared }` on
+open, and a statement failing on such a removal mid-session returns the
+same kind. A failing migration step withdraws its version
+and returns `ErrorKind::MigrationFailed { version, step }`, which a retry
+does not clear.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that

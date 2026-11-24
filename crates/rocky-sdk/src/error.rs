@@ -40,6 +40,10 @@ pub enum ErrorKind {
         version: u32,
         step: usize,
     },
+    UpgradeRequired {
+        current: u32,
+        declared: u32,
+    },
     StoreSuperseded,
     StoreOnly(crate::StoreOnlyRefusal),
     UnsupportedGeneration,
@@ -112,6 +116,7 @@ impl ErrorKind {
             Self::Schema(_) => "invalid_schema",
             Self::MigrationPending => "migration_pending",
             Self::MigrationFailed { .. } => "migration_failed",
+            Self::UpgradeRequired { .. } => "upgrade_required",
             Self::StoreSuperseded => "store_superseded",
             Self::StoreOnly(_) => "store_only",
             Self::UnsupportedGeneration => "unsupported_generation",
@@ -235,6 +240,15 @@ impl Error {
                 unsupported: None,
             },
             message,
+        )
+    }
+
+    pub(crate) fn upgrade_required(current: u32, declared: u32) -> Self {
+        Self::new(
+            ErrorKind::UpgradeRequired { current, declared },
+            format!(
+                "the application declares schema version {declared}, but this database is at version {current}, which removed a table or field it uses; upgrade the application"
+            ),
         )
     }
 

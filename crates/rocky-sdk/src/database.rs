@@ -1316,6 +1316,9 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             node.refresh_importing().await?;
             node.try_ensure_tip_node().await;
             if matches!(setup.install, Install::Installed) {
+                if let Some((current, declared)) = node.upgrade_required().await? {
+                    return Err(crate::Error::upgrade_required(current, declared).into());
+                }
                 node.publish_schema_at_open(setup.confirmation.as_deref())
                     .await?;
             }

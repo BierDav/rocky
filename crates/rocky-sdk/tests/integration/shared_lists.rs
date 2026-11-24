@@ -44,15 +44,17 @@ const ORDERED: &str = r#"{"format":7,"application":"lists","version":2,"tables":
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-fn identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
-    Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+fn key(directory: &Path) -> rocky_sdk::IdentityKey {
+    rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
         "fixture.lists.identity",
         directory.to_string_lossy().as_bytes(),
-    )))
+    ))
+}
+fn identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
+    Arc::new(key(directory))
 }
 
 struct Peer {
-    identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
     database: Database,
 }
 async fn only_explicit_syncs(peers: &[&Peer]) -> Result<(), Failure> {
@@ -63,21 +65,11 @@ async fn only_explicit_syncs(peers: &[&Peer]) -> Result<(), Failure> {
 }
 impl Peer {
     fn new(database: Database) -> Result<Self, Failure> {
-        Ok(Self {
-            identity: None,
-            database,
-        })
-    }
-    fn with_identity(mut self, directory: &Path) -> Self {
-        self.identity = Some(identity(directory));
-        self
+        Ok(Self { database })
     }
 
     async fn sync_now(&self) -> Result<Option<rocky_sdk::SyncReport>, rocky_sdk::Error> {
-        crate::support::peerless_ok(match &self.identity {
-            Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
-            None => self.database.sync_now().await,
-        })
+        crate::support::peerless_ok(self.database.sync_now().await)
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         let mut tx = self.database.transaction().await?;
@@ -135,8 +127,7 @@ async fn checkpoint_writer(
 ) -> Result<(Peer, Peer), Failure> {
     let issuer_path = root.join("issuer");
     let issuer = Peer::new(
-        at(&issuer_path, hub, "issuer", schema)
-            .create()
+        crate::common::create_as(at(&issuer_path, hub, "issuer", schema), key(&issuer_path))
             .await?
             .database,
     )?;
@@ -181,10 +172,12 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        at(&root.path().join("issuer"), &hub, "issuer", ORDERED)
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            at(&root.path().join("issuer"), &hub, "issuer", ORDERED),
+            key(&root.path().join("issuer")),
+        )
+        .await?
+        .database,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     issuer
@@ -350,10 +343,12 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        open(&root.path().join("a"), &hub, "a")
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            open(&root.path().join("a"), &hub, "a"),
+            key(&root.path().join("a")),
+        )
+        .await?
+        .database,
     )?;
     let invitation = issuer
         .database
@@ -462,10 +457,12 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        open(&root.path().join("a"), &hub, "a")
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            open(&root.path().join("a"), &hub, "a"),
+            key(&root.path().join("a")),
+        )
+        .await?
+        .database,
     )?;
     let invitation = issuer
         .database
@@ -573,10 +570,12 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        open(&root.path().join("a"), &hub, "a")
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            open(&root.path().join("a"), &hub, "a"),
+            key(&root.path().join("a")),
+        )
+        .await?
+        .database,
     )?;
     let invitation = issuer
         .database
@@ -644,7 +643,11 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = root.path().join("a");
-    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    let issuer = Peer::new(
+        crate::common::create_as(open(&a, &hub, "a"), key(&a))
+            .await?
+            .database,
+    )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -666,7 +669,7 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
     snap::value(issuer.database.compact(0)).await?;
     issuer.database.close().await?;
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -684,10 +687,12 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
-        open(&root.path().join("a"), &hub, "a")
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            open(&root.path().join("a"), &hub, "a"),
+            key(&root.path().join("a")),
+        )
+        .await?
+        .database,
     )?;
     let invitation = issuer
         .database
@@ -756,10 +761,12 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(
-        open(&root.path().join("a"), &hub, "a")
-            .create()
-            .await?
-            .database,
+        crate::common::create_as(
+            open(&root.path().join("a"), &hub, "a"),
+            key(&root.path().join("a")),
+        )
+        .await?
+        .database,
     )?;
     snap::value(a.database.next_partition("lists")).await?;
     a.insert(
@@ -811,7 +818,11 @@ async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Fail
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
-    let created = open(&root.path().join("a"), &hub, "a").create().await?;
+    let created = crate::common::create_as(
+        open(&root.path().join("a"), &hub, "a"),
+        key(&root.path().join("a")),
+    )
+    .await?;
     let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.root);
     let a = Peer::new(created.database)?;
     let invitation = a
@@ -865,14 +876,17 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    let issuer = Peer::new(
+        crate::common::create_as(open(&a, &hub, "a"), key(&a))
+            .await?
+            .database,
+    )?;
     let invitation = issuer
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?
         .code;
-    let writer =
-        Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?.with_identity(&b);
+    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -905,7 +919,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -918,7 +932,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
+    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?;
     older_application.sync_now().await?;
     older_application
         .insert(
@@ -938,7 +952,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
+    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?;
     writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
@@ -971,14 +985,17 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    let issuer = Peer::new(
+        crate::common::create_as(open(&a, &hub, "a"), key(&a))
+            .await?
+            .database,
+    )?;
     let invitation = issuer
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?
         .code;
-    let writer =
-        Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?.with_identity(&b);
+    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -1011,7 +1028,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1024,7 +1041,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
+    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?;
     older_application.sync_now().await?;
     older_application
         .insert(
@@ -1044,7 +1061,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
+    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?;
     writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
@@ -1093,7 +1110,11 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    let issuer = Peer::new(
+        crate::common::create_as(open(&a, &hub, "a"), key(&a))
+            .await?
+            .database,
+    )?;
     let invitation = issuer
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
@@ -1145,7 +1166,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", POSITIONED).open().await?)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", POSITIONED).open().await?)?;
 
     let older_application = Peer::new(at_without_identity(&b, &hub, "b", SCHEMA).open().await?)?;
     older_application.sync_now().await?;
@@ -1211,7 +1232,11 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
-    let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
+    let issuer = Peer::new(
+        crate::common::create_as(open(&a, &hub, "a"), key(&a))
+            .await?
+            .database,
+    )?;
     let invitation = issuer
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
@@ -1249,7 +1274,7 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?.with_identity(&a);
+    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
     let check_sql = format!(
         "SELECT COUNT(*) || ':' || COUNT(DISTINCT position) FROM items WHERE list = X'{list}' AND position > ''"
     );

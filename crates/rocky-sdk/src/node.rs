@@ -301,6 +301,7 @@ pub(crate) struct Node {
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    signer: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
 }
 
 impl Node {
@@ -397,6 +398,7 @@ impl Node {
             discovery_skew: AtomicU64::new(0),
             mailbox: Mutex::new(None),
             declared: settings_schema,
+            signer: None,
             schema_fetch: Mutex::new(()),
             schema_acquisition: Default::default(),
             widened: Default::default(),
@@ -405,6 +407,19 @@ impl Node {
     pub fn with_declared(mut self, schema: crate::schema::Schema) -> Self {
         self.declared = schema;
         self
+    }
+    pub(crate) fn with_signer(
+        mut self,
+        signer: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
+    ) -> Self {
+        self.signer = signer;
+        self
+    }
+    pub(crate) fn signed<F: std::future::Future>(
+        &self,
+        call: F,
+    ) -> impl std::future::Future<Output = F::Output> + use<F> {
+        crate::identities::supplying(self.signer.clone(), call)
     }
     pub async fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
         if self.replica.followed_bookmark().await.is_none() {
@@ -511,24 +526,29 @@ impl Node {
             refused: AtomicU64::new(0),
         });
         link.transport.listen(Some(self.domain().scope), true)?;
-        let publisher =
-            crate::reactor::spawn_local("publish_links", self.clone().publish_links(link.clone()));
+        let publisher = crate::reactor::spawn_local(
+            "publish_links",
+            self.signed(self.clone().publish_links(link.clone())),
+        );
         *link
             .publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
-        let synchronizer =
-            crate::reactor::spawn_local("synchronize", self.clone().synchronize(link.clone()));
+        let synchronizer = crate::reactor::spawn_local(
+            "synchronize",
+            self.signed(self.clone().synchronize(link.clone())),
+        );
         *link
             .synchronizer
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(synchronizer);
-        let server = crate::reactor::spawn_local("accept", self.clone().accept(link.clone()));
+        let server =
+            crate::reactor::spawn_local("accept", self.signed(self.clone().accept(link.clone())));
         *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
         if let Some(discovery) = link.discovery.clone() {
             let discoverer = crate::reactor::spawn_local(
                 "discover",
-                self.clone().discover(link.clone(), discovery),
+                self.signed(self.clone().discover(link.clone(), discovery)),
             );
             *link
                 .discoverer

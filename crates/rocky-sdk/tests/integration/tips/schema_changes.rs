@@ -32,8 +32,7 @@ async fn additive_publication_moves_main_and_an_old_app_opens_behind() -> Result
     let before = snap::ok(a.database.tip_status()).await["tip"].clone();
     a.close().await;
     let declared = schema(2, false);
-    let a = Device::new(open(root.path(), &declared).open().await?)?
-        .with_identity(common::external_identity(root.path()));
+    let a = Device::new(open(root.path(), &declared).open().await?)?;
     let status = snap::ok(async {
         a.database
             .status()
@@ -67,8 +66,7 @@ async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Res
     a.close().await;
     let declared = schema(2, true);
     for _ in 0..2 {
-        let a = Device::new(open(root.path(), &declared).open().await?)?
-            .with_identity(common::external_identity(root.path()));
+        let a = Device::new(open(root.path(), &declared).open().await?)?;
         let status = snap::ok(async {
             a.database
                 .status()
@@ -109,8 +107,7 @@ async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> R
         parent_read_the_author_evaluates_once_for_replicas
     ]);
     let declared = declared.to_string();
-    let a = Device::new(open(root.path(), &declared).open().await?)?
-        .with_identity(common::external_identity(root.path()));
+    let a = Device::new(open(root.path(), &declared).open().await?)?;
     let rows = snap::ok(snap::read(
         &a.database,
         "SELECT title,note FROM items",

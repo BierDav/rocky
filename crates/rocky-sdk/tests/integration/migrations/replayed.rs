@@ -28,7 +28,13 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, ITEMS, network("a")).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(&a_dir, ITEMS, network("a")),
+            common::external_key(&a_dir),
+        )
+        .await?,
+    )?;
     let b = Device::new(
         open(&b_dir, ITEMS, network("b"))
             .join(&a.invite().await)
@@ -132,9 +138,11 @@ impl Listed {
         };
         let network = |name: &str| Some(Network::Owned(listed.hub.connector(name)));
         let a = Device::new(
-            open(&listed.path("a"), LISTED, network("a"))
-                .create()
-                .await?,
+            common::create_as(
+                open(&listed.path("a"), LISTED, network("a")),
+                common::external_key(&listed.path("a")),
+            )
+            .await?,
         )?;
         let b = Device::new(
             open(&listed.path("b"), LISTED, network("b"))

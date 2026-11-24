@@ -82,7 +82,7 @@ impl Settings {
             .try_with(|loan| loan.provider.clone())
             .ok()
             .flatten()
-            .ok_or("supply the identity for this call")?;
+            .ok_or(crate::LinkError::IdentityRequired)?;
         if provider.public_key()? != self.identity {
             return Err("the identity provider supplies another identity".into());
         }
@@ -212,7 +212,7 @@ mod tests {
             &schema,
             &store,
             crate::enrollment::DEFAULT_TTL,
-            Some(provider.clone()),
+            provider.clone(),
             &crate::RootKey::generate(),
         )?;
         let vault = settings.vault(&store);

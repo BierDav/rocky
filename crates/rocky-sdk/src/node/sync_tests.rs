@@ -152,13 +152,7 @@ async fn enrolled_schema(
         .await?;
         node(root, settings, vault, transport).await
     } else {
-        let settings = Settings::create(
-            schema,
-            &store,
-            crate::enrollment::DEFAULT_TTL,
-            None,
-            &rocky_credentials::RootKey::generate(),
-        )?;
+        let settings = Settings::create_owned(schema, &store, crate::enrollment::DEFAULT_TTL)?;
         settings.save(&path).await?;
         let vault = settings.vault(&store);
         let transport = hub
@@ -466,7 +460,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));
-    let settings = Settings::create(&schema, &store, crate::enrollment::DEFAULT_TTL, None, &rocky_credentials::RootKey::generate())?;
+    let settings = Settings::create_owned(&schema, &store, crate::enrollment::DEFAULT_TTL)?;
     let vault = settings.vault(&store);
     let hub = Arc::new(Hub::default());
     let transport = hub
@@ -547,12 +541,10 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
         .run_until(async {
             let root = tempfile::tempdir()?;
             let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
-            let settings = Settings::create(
+            let settings = Settings::create_owned(
                 &Schema::parse(SCHEMA)?,
                 &store,
                 crate::enrollment::DEFAULT_TTL,
-                None,
-                &rocky_credentials::RootKey::generate(),
             )?;
             let vault = settings.vault(&store);
             let transport = Arc::new(Hub::default())

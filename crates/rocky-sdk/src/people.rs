@@ -151,7 +151,7 @@ impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::IdentityRequired => {
-                "linking a device needs the person's identity; configure it with Configuration::identity"
+                "this call needs the person's identity key; configure it with Configuration::identity"
             }
             Self::NetworkRequired => "linking a device needs an attached network",
             Self::Unreachable => "the other device is not reachable",
@@ -430,16 +430,8 @@ impl Database {
             .await
     }
     pub async fn unlink(&self, device: DeviceId) -> Result<(), crate::Error> {
-        self.send_signed(self.identity(), |reply| {
-            Request::Unlink(crate::PeerId::of(device.0), reply)
-        })
-        .await
-    }
-    pub async fn sync_now_with_identity(
-        &self,
-        identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::SyncReport, crate::Error> {
-        self.send_signed(Some(identity), Request::Sync).await
+        self.send(|reply| Request::Unlink(crate::PeerId::of(device.0), reply))
+            .await
     }
     pub async fn logout(&self, logout: Logout) -> Result<(), crate::Error> {
         self.send(|reply| Request::Logout(logout, reply)).await

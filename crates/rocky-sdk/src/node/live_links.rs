@@ -819,7 +819,7 @@ impl Node {
         let node = self.clone();
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
-        self.background.spawn("live_link", async move {
+        let running = self.signed(async move {
             let started = rocky_platform::time::Instant::now();
             let _permit = permit;
             let result = node
@@ -880,6 +880,7 @@ impl Node {
                 }
             }
         });
+        self.background.spawn("live_link", running);
         Ok(())
     }
     async fn signal_link(&self, service: &Link, peer: PublicKey, id: u64) -> Result<(), Failure> {

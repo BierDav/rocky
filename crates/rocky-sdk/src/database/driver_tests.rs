@@ -873,9 +873,13 @@ async fn a_live_commit_reaches_a_connected_peer_without_sync_now_or_a_tick() -> 
     };
     tokio::task::LocalSet::new()
         .run_until(time_frozen(async {
-            let root_key = Arc::new(crate::RootKey::generate());
-            let a = super::Database::launch_local(&live("a")?, super::Install::create(root_key))
-                .await?;
+            let root_key = crate::RootKey::generate();
+            let owner = Arc::new(root_key.identity());
+            let a = super::Database::launch_local(
+                &live("a")?,
+                super::Install::create(Arc::new(root_key), owner),
+            )
+            .await?;
             let invitation = a.invite(crate::Invite::new(crate::Access::Full)).await?;
             let (joining, _) = super::Install::invited(&invitation.code);
             let b = super::Database::launch_local(&live("b")?, joining).await?;

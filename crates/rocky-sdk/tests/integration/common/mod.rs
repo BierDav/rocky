@@ -23,11 +23,31 @@ pub async fn write_authority(directory: &Path, key: &str, bytes: &[u8]) -> Resul
 
 pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
-    Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+pub fn external_key(directory: &Path) -> rocky_sdk::IdentityKey {
+    rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
         "fixture.external-identity",
         directory.to_string_lossy().as_bytes(),
-    )))
+    ))
+}
+pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
+    Arc::new(external_key(directory))
+}
+pub async fn create_as(
+    configuration: Configuration,
+    owner: rocky_sdk::IdentityKey,
+) -> Result<Created, rocky_sdk::Error> {
+    let root = rocky_sdk::RootKey::generate();
+    let database = configuration
+        .create_with_root(
+            Arc::new(rocky_sdk::RootKey::from_secret(root.secret())),
+            Arc::new(rocky_sdk::IdentityKey::from_secret(owner.secret())),
+        )
+        .await?;
+    Ok(Created {
+        database,
+        root,
+        owner,
+    })
 }
 pub fn prepared_identity(directory: &Path) -> Option<Arc<dyn rocky_sdk::IdentityProvider>> {
     directory
@@ -64,7 +84,6 @@ pub struct Device {
     pub database: Database,
     scope: rocky_sdk::Scope,
     root: Option<String>,
-    signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
 }
 pub fn parsed_schema() -> &'static rocky_sdk::Schema {
     static PARSED: std::sync::LazyLock<rocky_sdk::Schema> =
@@ -111,38 +130,33 @@ impl Device {
         Ok(Self {
             scope: opened.database.scope(),
             root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
-            signer: opened
-                .root
-                .as_ref()
-                .map(|root| Arc::new(root.identity()) as Arc<dyn rocky_sdk::IdentityProvider>),
             database: opened.database,
         })
     }
     pub async fn create(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
-        let signer = external_identity(directory);
-        let created = open(directory, Some(signer.clone()), network)
-            .create()
-            .await?;
-        Self::new(created).map(|device| device.with_identity(signer))
+        let created = create_as(
+            open(directory, Some(external_identity(directory)), network),
+            external_key(directory),
+        )
+        .await?;
+        Self::new(created)
     }
     pub async fn join(
         directory: &Path,
         invitation: &rocky_sdk::InvitationCode,
         network: Network,
     ) -> Result<Self, Failure> {
-        let signer = external_identity(directory);
-        let joined = open(directory, Some(signer.clone()), Some(network))
+        let joined = open(directory, Some(external_identity(directory)), Some(network))
             .join(invitation)
             .await?;
-        Self::new(joined.database).map(|device| device.with_identity(signer))
+        Self::new(joined.database)
     }
     pub async fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
-        Self::new(open(directory, None, network).open().await?)
-            .map(|device| device.with_identity(external_identity(directory)))
-    }
-    pub fn with_identity(mut self, signer: Arc<dyn rocky_sdk::IdentityProvider>) -> Self {
-        self.signer = Some(signer);
-        self
+        Self::new(
+            open(directory, Some(external_identity(directory)), network)
+                .open()
+                .await?,
+        )
     }
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         self.root_signer().expect("fixture root")
@@ -258,10 +272,7 @@ impl Device {
             .collect()
     }
     pub async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, rocky_sdk::Error> {
-        match self.signer.clone() {
-            Some(identity) => self.database.sync_now_with_identity(identity).await,
-            None => self.database.sync_now().await,
-        }
+        self.database.sync_now().await
     }
     pub async fn sync(&self) -> Result<Value, Value> {
         snap::observe(self.sync_now()).await

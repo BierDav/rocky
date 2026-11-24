@@ -32,7 +32,7 @@ async fn invited_relay(
     let relay = relay_configuration(directory, hub, &person)
         .join(&invitation.code)
         .await?;
-    Ok((Device::new(relay)?.with_identity(person.clone()), person))
+    Ok((Device::new(relay)?, person))
 }
 fn assert_keyless(directory: &Path) -> Result<(), Failure> {
     let identity = common::authority_json(directory, "identity")?;

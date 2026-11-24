@@ -88,8 +88,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     let minted = opened
         .identity
         .ok_or("a joiner without an identity gets one")?;
-    let member = Device::new(opened.database)?
-        .with_identity(Arc::new(IdentityKey::from_secret(minted.secret())));
+    let member = Device::new(opened.database)?;
     let me = member.database.me().await?;
     assert_eq!(me.person.key(), minted.public_key());
     assert_eq!(me.access, writer());
@@ -373,7 +372,7 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
     let opened = join(&root.path().join("phone"), &hub, None, &invitation.code).await?;
     let phrase = opened.identity.ok_or("minted identity")?.phrase();
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&phrase)?);
-    let phone = Device::new(opened.database)?.with_identity(person.clone());
+    let phone = Device::new(opened.database)?;
     common::introduce(&owner, &phone).await;
     phone.sync().await.map_err(|error| error.to_string())?;
 
@@ -386,8 +385,7 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
             &phone.database,
         )
         .await?,
-    )?
-    .with_identity(person.clone());
+    )?;
     assert_eq!(
         laptop.database.me().await?.person.key(),
         person.public_key()?,
@@ -460,7 +458,7 @@ async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> R
     let opened = join(&root.path().join("phone"), &hub, None, &invitation.code).await?;
     let phrase = opened.identity.ok_or("minted identity")?.phrase();
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&phrase)?);
-    let phone = Device::new(opened.database)?.with_identity(person.clone());
+    let phone = Device::new(opened.database)?;
     common::introduce(&owner, &phone).await;
     phone.sync().await.map_err(|error| error.to_string())?;
     let laptop = Device::new(
@@ -471,8 +469,7 @@ async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> R
             &phone.database,
         )
         .await?,
-    )?
-    .with_identity(person.clone());
+    )?;
     common::introduce(&owner, &laptop).await;
     common::introduce(&phone, &laptop).await;
     for device in [&laptop, &phone, &owner, &laptop] {

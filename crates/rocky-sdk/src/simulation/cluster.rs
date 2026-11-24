@@ -29,6 +29,7 @@ pub(super) struct Member {
     schema: &'static str,
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
     pub(super) root: Option<Arc<crate::RootKey>>,
+    identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 
 impl Member {
@@ -43,15 +44,19 @@ impl Member {
             revoked: false,
             ahead: Arc::default(),
             root: None,
+            identity: None,
         }
     }
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
         let secrets: Arc<dyn SecretStore> = self.keys.clone();
         let schema = crate::Schema::parse(self.schema)?;
-        let configuration = Configuration::new(&self.directory, &schema)?
+        let mut configuration = Configuration::new(&self.directory, &schema)?
             .secrets(secrets)
             .network(Network::Owned(hub.connector(&self.name)))
             .sync(crate::SyncMode::Manual);
+        if let Some(identity) = &self.identity {
+            configuration = configuration.identity(identity.clone());
+        }
         let hosted = Database::host(&configuration, install, self.ahead.clone()).await?;
         self.running = Some(Running {
             database: hosted.database,
@@ -64,8 +69,10 @@ impl Member {
     }
     pub(super) async fn create(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
         let root = Arc::new(crate::RootKey::generate());
+        let owner: Arc<dyn crate::IdentityProvider> = Arc::new(root.identity());
         self.root = Some(root.clone());
-        self.start(hub, Install::create(root)).await
+        self.identity = Some(owner.clone());
+        self.start(hub, Install::create(root, owner)).await
     }
     pub(super) async fn join(
         &mut self,
@@ -96,14 +103,7 @@ impl Member {
             .database)
     }
     pub(super) async fn sync(&self) -> Result<Reconciled, crate::Error> {
-        let report = match &self.root {
-            Some(root) => {
-                self.database()?
-                    .sync_now_with_identity(Arc::new(root.identity()))
-                    .await
-            }
-            None => self.database()?.sync_now().await,
-        };
+        let report = self.database()?.sync_now().await;
         match report {
             Ok(report) => Ok(Reconciled {
                 peers: report.reconciled(),

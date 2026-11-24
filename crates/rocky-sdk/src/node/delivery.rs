@@ -41,9 +41,12 @@ impl Deliveries for Port<'_> {
                 .ok_or_else(|| secure("delivery owner ended".into()))?;
             let (received, receipts) = tokio::sync::oneshot::channel();
             let receiving = node.clone();
-            node.background.spawn("receive_deliveries", async move {
-                let _ = received.send(receiving.receive(peer, deliveries).await);
-            });
+            node.background.spawn(
+                "receive_deliveries",
+                node.signed(async move {
+                    let _ = received.send(receiving.receive(peer, deliveries).await);
+                }),
+            );
             receipts
                 .await
                 .map_err(|_| secure("the delivery receipt ended".into()))?

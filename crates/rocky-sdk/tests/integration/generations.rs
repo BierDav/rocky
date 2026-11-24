@@ -19,9 +19,7 @@ async fn reopen(
     schema: &str,
     network: Option<Network>,
 ) -> Result<Device, Failure> {
-    let signer = common::external_identity(directory);
     Device::new(open(directory, schema, network).open().await?)
-        .map(|device| device.with_identity(signer))
 }
 
 fn open<'a>(
@@ -375,7 +373,13 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let dirs = |name: &str| root.path().join(name);
-    let a = Device::new(open(&dirs("a"), NULLABLE, network("a")).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(&dirs("a"), NULLABLE, network("a")),
+            common::external_key(&dirs("a")),
+        )
+        .await?,
+    )?;
     let b = Device::new(
         open(&dirs("b"), NULLABLE, network("b"))
             .join(&a.invite().await)
@@ -437,7 +441,13 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
 #[tokio::test(flavor = "multi_thread")]
 async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let a = Device::new(open(root.path(), UNIQUE, None).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(root.path(), UNIQUE, None),
+            common::external_key(root.path()),
+        )
+        .await?,
+    )?;
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     a.close().await;
@@ -1159,7 +1169,13 @@ const LINKED: &str = r#"{"application":"shopping","version":2,"format":7,"tables
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let a = Device::new(open(root.path(), LINKABLE, None).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(root.path(), LINKABLE, None),
+            common::external_key(root.path()),
+        )
+        .await?,
+    )?;
     a.close().await;
     let error = open(root.path(), LINKED, None)
         .open()

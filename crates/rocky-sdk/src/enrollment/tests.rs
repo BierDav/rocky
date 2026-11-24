@@ -50,13 +50,7 @@ fn revoking_an_enrolled_identity_ends_it_under_any_node_key() -> Result<(), Fail
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut issuer = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let vault = issuer.vault(&store);
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let device = NodeKeys {
@@ -102,13 +96,7 @@ async fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopen
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut issuer = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let vault = issuer.vault(&store);
     let node = PrivateKey::new().public_key();
     let record = ContactRecord {
@@ -190,13 +178,7 @@ fn read_access_reads_every_partition_and_never_the_registry() -> Result<(), Fail
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut issuer = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let vault = issuer.vault(&store);
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let device = NodeKeys {
@@ -236,13 +218,7 @@ fn only_admins_and_store_access_hold_the_registry() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let issuer = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let domain = issuer.domain()?;
     let registry = domain.registry();
     let none = BTreeSet::new();
@@ -271,13 +247,7 @@ async fn issuer_at(
 ) -> Result<(Settings, Vault, std::path::PathBuf), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> =
         std::sync::Arc::new(crate::FileSecretStore::new(directory.join("secrets")));
-    let issuer = Settings::create(
-        &Schema::parse(schema)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let issuer = Settings::create_owned(&Schema::parse(schema)?, &store, DEFAULT_TTL)?;
     let vault = issuer.vault(&store);
     let path = directory.join("rocky.sqlite");
     issuer.save(&path).await?;
@@ -498,7 +468,13 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
     let root = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let owner = rocky_credentials::RootKey::generate();
-    let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None, &owner)?;
+    let mut a = Settings::create(
+        &Schema::parse(SCHEMA)?,
+        &store,
+        DEFAULT_TTL,
+        std::sync::Arc::new(owner.identity()),
+        &owner,
+    )?;
     let av = a.vault(&store);
     let domain = a.domain()?;
     let mut partition = GroupPartition::resolve(
@@ -686,13 +662,7 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut settings = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut settings = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let vault = settings.vault(&store);
     let node = PrivateKey::new().public_key();
     let record = ContactRecord {
@@ -739,13 +709,7 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
 #[test]
 fn a_per_partition_role_renews_without_group_keys_of_unheld_partitions() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
-    let mut issuer = Settings::create(
-        &Schema::parse(PER_LIST_SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut issuer = Settings::create_owned(&Schema::parse(PER_LIST_SCHEMA)?, &store, DEFAULT_TTL)?;
     let vault = issuer.vault(&store);
     let domain = issuer.domain()?;
     let mut partition = GroupPartition::resolve(
@@ -795,13 +759,7 @@ fn a_per_partition_role_renews_without_group_keys_of_unheld_partitions() -> Resu
 #[test]
 fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
-    let mut installed = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut installed = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let schema = installed.schema.clone();
     assert_eq!(
         installed.application(&schema)?,
@@ -839,13 +797,7 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
 {
     use crate::tip_schemas::Record;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
-    let installed = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let installed = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let mut schema = installed.schema.clone();
     schema.version = 2;
     let record = Record::new(&schema, 2, rocky_core::EngineIdentity::current());
@@ -912,13 +864,7 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
 #[test]
 fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
-    let mut issuer = Settings::create(
-        &Schema::parse(SCHEMA)?,
-        &store,
-        DEFAULT_TTL,
-        None,
-        &rocky_credentials::RootKey::generate(),
-    )?;
+    let mut issuer = Settings::create_owned(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
     let domain = issuer.domain()?;
     assert!(issuer.may_migrate(&domain)?);
     let mut partition = GroupPartition::resolve(

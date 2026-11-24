@@ -359,20 +359,8 @@ mod tests {
         let root = RootKey::generate();
         let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(directory.path()));
-        let a = Settings::create(
-            &Schema::parse(SCHEMA)?,
-            &store,
-            3600,
-            Some(person.clone()),
-            &root,
-        )?;
-        let b = Settings::create(
-            &Schema::parse(SCHEMA)?,
-            &store,
-            3600,
-            Some(person.clone()),
-            &root,
-        )?;
+        let a = Settings::create(&Schema::parse(SCHEMA)?, &store, 3600, person.clone(), &root)?;
+        let b = Settings::create(&Schema::parse(SCHEMA)?, &store, 3600, person.clone(), &root)?;
         let vault = a.vault(&store);
         let node = PrivateKey::new();
         let audience = Settings::node_key(&vault)?.public_key();

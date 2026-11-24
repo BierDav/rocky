@@ -3,14 +3,14 @@ use crate::request::Request;
 
 impl Node {
     pub(crate) async fn request(&self, request: Request) {
+        self.signed(self.serve_request(request)).await;
+    }
+    async fn serve_request(&self, request: Request) {
         if let Err(error) = self.admit_request(&request).await {
             request.fail(error);
             return;
         }
         match request {
-            Request::WithIdentity(loan, request) => {
-                Box::pin(loan.supply(self.request(*request))).await;
-            }
             Request::HeldChanges(reply) => {
                 let _ = reply.send(self.replica.held_changes().await.map_err(Into::into));
             }

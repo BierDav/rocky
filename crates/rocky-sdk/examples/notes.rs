@@ -21,6 +21,10 @@ async fn main() -> Result<(), Error> {
     let database = if std::env::args().any(|arg| arg == "--create") {
         let created = configuration.create().await?;
         println!("Root phrase, keep it offline: {}", created.root.phrase());
+        println!(
+            "Person key, keep it in the app's secure storage: {}",
+            created.owner.phrase()
+        );
         created.database
     } else {
         configuration.open().await?

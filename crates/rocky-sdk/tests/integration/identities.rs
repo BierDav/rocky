@@ -1,7 +1,7 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
-    Database, FileIdentityProvider, IdentityKey, IdentityProvider, Network, transport::memory::Hub,
+    FileIdentityProvider, IdentityKey, IdentityProvider, Network, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -221,158 +221,26 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one()
--> Result<(), Failure> {
+async fn the_configured_identity_signs_every_call_and_is_released_at_close() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let path = root.path().join("a");
-    let key = Arc::new(IdentityKey::generate());
-    let weak = Arc::downgrade(&key);
-    let created = open(&path, &hub, "a", Some(key.clone())).create().await?;
+    let created = open(&path, &hub, "a", None).create().await?;
     created.database.close().await?;
-    let database = open(&path, &hub, "a", None).open().await?;
+    let key = Arc::new(IdentityKey::from_phrase(&created.owner.phrase())?);
+    let weak = Arc::downgrade(&key);
+    let database = open(&path, &hub, "a", Some(key)).open().await?;
     database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?;
-    crate::support::peerless_ok(database.sync_now_with_identity(key).await)?;
+    crate::support::peerless_ok(database.sync_now().await)?;
+    database.close().await?;
     assert!(
         weak.upgrade().is_none(),
-        "the call retained its identity provider"
+        "the closed database retained its identity provider"
     );
     assert!(!holds(root.path(), "a", "identity")?);
-    database.close().await?;
-    Ok(())
-}
-
-const RELEASE_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
-
-struct GatedRelease {
-    signer: Arc<dyn IdentityProvider>,
-    dropping: Option<tokio::sync::oneshot::Sender<()>>,
-    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    released: Arc<std::sync::atomic::AtomicBool>,
-}
-impl IdentityProvider for GatedRelease {
-    fn public_key(&self) -> Result<rocky_credentials::PublicKey, rocky_credentials::Error> {
-        self.signer.public_key()
-    }
-    fn sign(
-        &self,
-        purpose: rocky_credentials::Purpose,
-        message: &[u8],
-    ) -> Result<rocky_credentials::Signature, rocky_credentials::Error> {
-        self.signer.sign(purpose, message)
-    }
-}
-impl Drop for GatedRelease {
-    fn drop(&mut self) {
-        if let Some(dropping) = self.dropping.take() {
-            let _ = dropping.send(());
-        }
-        if let Ok(gate) = self.gate.get_mut() {
-            let _ = gate.recv_timeout(RELEASE_HANG_BOUND);
-        }
-        self.released
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-async fn returns_only_after_release<F: std::future::Future>(
-    signer: Arc<dyn IdentityProvider>,
-    call: impl FnOnce(Arc<dyn IdentityProvider>) -> F,
-) -> Result<F::Output, Failure> {
-    let (dropping, dropping_started) = tokio::sync::oneshot::channel();
-    let (open_gate, gate) = std::sync::mpsc::channel();
-    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let provider = Arc::new(GatedRelease {
-        signer,
-        dropping: Some(dropping),
-        gate: std::sync::Mutex::new(gate),
-        released: released.clone(),
-    });
-    let weak = Arc::downgrade(&provider);
-    let mut call = std::pin::pin!(call(provider));
-    tokio::select! {
-        biased;
-        started = dropping_started => started?,
-        _ = call.as_mut() => {
-            return Err("the call returned before the database began releasing its identity".into());
-        }
-    }
-    let still_pending = std::future::poll_fn(|context| {
-        std::task::Poll::Ready(call.as_mut().poll(context).is_pending())
-    })
-    .await;
-    assert!(
-        still_pending,
-        "the call returned while the database still held its identity"
-    );
-    open_gate.send(())?;
-    let output = call.await;
-    assert!(released.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(weak.upgrade().is_none());
-    Ok(output)
-}
-
-async fn reopened_without_identity(
-    root: &Path,
-    hub: &Arc<Hub>,
-) -> Result<(Database, IdentityKey), Failure> {
-    let path = root.join("a");
-    let key = IdentityKey::generate();
-    let created = open(
-        &path,
-        hub,
-        "a",
-        Some(Arc::new(IdentityKey::from_secret(key.secret()))),
-    )
-    .create()
-    .await?;
-    created.database.close().await?;
-    Ok((open(&path, hub, "a", None).open().await?, key))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_signed_call_returns_only_after_the_database_released_its_identity() -> Result<(), Failure>
-{
-    let root = tempfile::tempdir()?;
-    let hub = Arc::new(Hub::default());
-    let (database, key) = reopened_without_identity(root.path(), &hub).await?;
-    let synced = returns_only_after_release(Arc::new(key), |provider| {
-        database.sync_now_with_identity(provider)
-    })
-    .await?;
-    crate::support::peerless_ok(synced)?;
-    database.close().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_refused_signed_call_returns_only_after_its_identity_was_dropped() -> Result<(), Failure>
-{
-    let root = tempfile::tempdir()?;
-    let hub = Arc::new(Hub::default());
-    let issuer = Device::create(
-        &root.path().join("issuer"),
-        Some(Network::Owned(hub.connector("issuer"))),
-    )
-    .await?;
-    let member = Device::join(
-        &root.path().join("member"),
-        &issuer.invite().await,
-        Network::Owned(hub.connector("member")),
-    )
-    .await?;
-    let member_database = member.database.clone();
-    member_database.logout(rocky_sdk::Logout::KeepData).await?;
-    let refused = returns_only_after_release(Arc::new(IdentityKey::generate()), |provider| {
-        member_database.sync_now_with_identity(provider)
-    })
-    .await?;
-    let refusal = refused.err().ok_or("a logged-out device synced")?;
-    assert!(refusal.to_string().contains("logged out"), "{refusal}");
-    member.close().await;
-    issuer.close().await;
     Ok(())
 }
 
@@ -407,6 +275,15 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
     assert_eq!(
         identity(root.path(), "owner")?["identity"],
         json!(restored.identity().public_key())
+    );
+    assert_eq!(
+        opened.owner.public_key(),
+        restored.identity().public_key(),
+        "create returns the owner's person key derived from the root"
+    );
+    assert_eq!(
+        IdentityKey::from_phrase(&opened.owner.phrase())?.public_key(),
+        opened.owner.public_key()
     );
     no_identity_secret(&path, &[key.secret(), key.identity().secret()])?;
     opened.database.close().await?;
@@ -530,22 +407,32 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_application_root_signer_requires_an_explicit_owner_identity() -> Result<(), Failure> {
+async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let path = root.path().join("custom");
     let config = rocky_sdk::Configuration::new(&path, snap::schema(common::SCHEMA))?;
     let signer = Arc::new(rocky_credentials::PrivateKey::new());
-    let error = config
-        .create_with_root(signer.clone())
+    let identity = IdentityKey::generate();
+    let refused = config
+        .clone()
+        .identity(Arc::new(IdentityKey::generate()))
+        .create_with_root(
+            signer.clone(),
+            Arc::new(IdentityKey::from_secret(identity.secret())),
+        )
         .await
         .err()
-        .ok_or("created without an owner identity")?;
-    assert!(error.to_string().contains("explicit owner identity"));
-    let identity = IdentityKey::generate();
+        .ok_or("created under a configured identity that is not the owner")?;
+    assert_eq!(
+        refused.kind,
+        rocky_sdk::ErrorKind::Access(rocky_sdk::AccessError::OwnerRequired)
+    );
     let opened = config
-        .clone()
-        .identity(Arc::new(IdentityKey::from_secret(identity.secret())))
-        .create_with_root(signer)
+        .create_with_root(
+            signer,
+            Arc::new(IdentityKey::from_secret(identity.secret())),
+        )
         .await?;
     assert_eq!(
         self::identity(root.path(), "custom")?["identity"],
@@ -674,7 +561,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             let owner_name = format!("owner{index}");
             let owner = Device::new(
                 open(&path.join(&owner_name), &hub, &owner_name, None)
-                    .create_with_root(root)
+                    .create_with_root(root.clone(), Arc::new(root.identity()))
                     .await?,
             )?;
             let profile = if index == 0 {
@@ -898,17 +785,12 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
 async fn linking_requires_both_codes_before_credentials_are_released() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let key: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
-    let owner = Device::new(
-        open(
-            &directory.path().join("owner"),
-            &hub,
-            "owner",
-            Some(key.clone()),
-        )
+    let created = open(&directory.path().join("owner"), &hub, "owner", None)
         .create()
-        .await?,
-    )?;
+        .await?;
+    let key: Arc<dyn IdentityProvider> =
+        Arc::new(IdentityKey::from_phrase(&created.owner.phrase())?);
+    let owner = Device::new(created)?;
     let path = directory.path().join("new");
     let schema = snap::schema(common::SCHEMA).clone();
     let config = rocky_sdk::Configuration::new(&path, &schema)?
@@ -994,7 +876,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     let personal: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let owner = Device::new(
         open(&path.join("owner"), &hub, "owner", None)
-            .create_with_root(root.clone())
+            .create_with_root(root.clone(), Arc::new(root.identity()))
             .await?,
     )?;
     let first_opened = open(&path.join("first"), &hub, "first", Some(personal.clone()))

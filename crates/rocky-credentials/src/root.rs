@@ -30,9 +30,6 @@ impl RootKey {
     }
 }
 impl IdentityProvider for RootKey {
-    fn owner_identity(&self) -> Option<std::sync::Arc<dyn IdentityProvider>> {
-        Some(std::sync::Arc::new(self.identity()))
-    }
     fn public_key(&self) -> Result<PublicKey, Error> {
         Ok(self.0.public_key())
     }

@@ -1197,17 +1197,11 @@ impl Settings {
         schema: &Schema,
         store: &std::sync::Arc<dyn crate::SecretStore>,
         ttl: u64,
-        provider: Option<Arc<dyn IdentityProvider>>,
+        identity: Arc<dyn IdentityProvider>,
         root: &dyn IdentityProvider,
     ) -> Result<Self, Failure> {
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
-        let identity: Arc<dyn IdentityProvider> = match provider {
-            Some(provider) => provider,
-            None => root
-                .owner_identity()
-                .ok_or("an application root signer needs an explicit owner identity")?,
-        };
         let publisher = root.public_key()?;
         if identity.public_key()? == publisher {
             return Err("a device's identity is never the root key".into());
@@ -1251,6 +1245,15 @@ impl Settings {
             bound.scope,
         )?;
         Ok(settings)
+    }
+    #[cfg(test)]
+    pub(crate) fn create_owned(
+        schema: &Schema,
+        store: &std::sync::Arc<dyn crate::SecretStore>,
+        ttl: u64,
+    ) -> Result<Self, Failure> {
+        let root = rocky_credentials::RootKey::generate();
+        Self::create(schema, store, ttl, Arc::new(root.identity()), &root)
     }
     pub(crate) fn installed(
         installation: String,

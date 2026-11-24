@@ -26,11 +26,13 @@ mod residence;
 pub struct Created {
     pub database: Database,
     pub root: crate::RootKey,
+    pub owner: crate::IdentityKey,
 }
 type Minted = Arc<std::sync::Mutex<Option<crate::IdentityKey>>>;
 pub(crate) enum Install {
     Create {
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
+        owner: Arc<dyn crate::IdentityProvider>,
     },
     Identity {
         contact: String,
@@ -43,9 +45,13 @@ pub(crate) enum Install {
     Installed,
 }
 impl Install {
-    pub(crate) fn create(root: Arc<dyn crate::IdentityProvider>) -> Self {
+    pub(crate) fn create(
+        root: Arc<dyn crate::IdentityProvider>,
+        owner: Arc<dyn crate::IdentityProvider>,
+    ) -> Self {
         Self::Create {
             root: std::sync::Mutex::new(Some(root)),
+            owner,
         }
     }
     pub(crate) fn invited(code: &crate::InvitationCode) -> (Self, Minted) {
@@ -91,7 +97,6 @@ struct Senders {
     input: mpsc::Sender<Command>,
     cleanup: mpsc::UnboundedSender<Command>,
     handles: residence::Handles,
-    identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 enum Command {
     Request(Box<crate::request::Request>),
@@ -170,7 +175,6 @@ struct Shared {
     budget: Semaphore,
     closed: AtomicBool,
     worker: Mutex<Option<Worker>>,
-    identity: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
     _handles: residence::Handles,
 }
 impl Shared {
@@ -347,6 +351,15 @@ impl Database {
         if configuration.schema.is_none() && matches!(install, Install::Create { .. }) {
             return Err(crate::StoreOnlyRefusal::NeedsSchema.into());
         }
+        if let (Install::Create { owner, .. }, Some(configured)) =
+            (&install, &configuration.identity)
+            && configured.public_key()? != owner.public_key()?
+        {
+            return Err(Box::new(crate::Error::new(
+                crate::ErrorKind::Access(crate::AccessError::OwnerRequired),
+                "the configured identity is not the owner's person key; create without it or pass it as the owner",
+            )));
+        }
         let setup = Setup {
             schema: configuration
                 .schema
@@ -390,7 +403,6 @@ impl Database {
                 input,
                 cleanup,
                 handles: claimed.handles,
-                identity: configuration.identity.clone(),
             },
         ))
     }
@@ -402,7 +414,6 @@ impl Database {
                 budget: Semaphore::new(ACTIVE_CALL_QUOTA),
                 closed: AtomicBool::new(false),
                 worker: Mutex::new(Some(worker)),
-                identity: std::sync::Mutex::new(senders.identity),
                 _handles: senders.handles,
             }),
             scope,
@@ -411,29 +422,11 @@ impl Database {
     pub fn scope(&self) -> rocky_core::Scope {
         self.scope
     }
-    pub(crate) fn identity(&self) -> Option<Arc<dyn crate::IdentityProvider>> {
-        self.shared
-            .identity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
     pub(crate) async fn send<T>(
         &self,
         request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
     ) -> Result<T, crate::Error> {
         self.send_lending(None, |_, reply| request(reply)).await
-    }
-    pub(crate) async fn send_signed<T>(
-        &self,
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
-    ) -> Result<T, crate::Error> {
-        self.send_lending(identity, |loan, reply| match loan {
-            Some(loan) => crate::request::Request::WithIdentity(loan, Box::new(request(reply))),
-            None => request(reply),
-        })
-        .await
     }
     pub(crate) async fn send_rooted<T>(
         &self,
@@ -528,13 +521,6 @@ impl Database {
     }
     pub async fn close(&self) -> Result<(), crate::Error> {
         let mut worker = self.shared.worker.lock().await;
-        drop(
-            self.shared
-                .identity
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
         if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
             let result = self.shared.request(Command::Close).await;
@@ -728,12 +714,13 @@ impl Drop for Connection {
 }
 
 type Link = (crate::transport::Connected, bool);
+type Signer = Option<Arc<dyn crate::IdentityProvider>>;
 
 async fn identity(
     path: &Path,
     setup: &Setup,
     network: Option<Network>,
-) -> Result<(Settings, Option<Link>), Failure> {
+) -> Result<(Settings, Option<Link>, Signer), Failure> {
     let Setup {
         schema,
         secrets,
@@ -748,7 +735,7 @@ async fn identity(
         return Err("no domain in this directory: create or join one".into());
     }
     match install {
-        Install::Create { root } => {
+        Install::Create { root, owner } => {
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
@@ -757,8 +744,7 @@ async fn identity(
             let schema = schema
                 .as_ref()
                 .ok_or(crate::StoreOnlyRefusal::NeedsSchema)?;
-            let settings =
-                Settings::create(schema, secrets, DEFAULT_TTL, setup.identity.clone(), &*root)?;
+            let settings = Settings::create(schema, secrets, DEFAULT_TTL, owner.clone(), &*root)?;
             drop(root);
             let vault = settings.vault(secrets);
             let started = async {
@@ -770,7 +756,7 @@ async fn identity(
             }
             .await;
             match started {
-                Ok(link) => Ok((settings, link)),
+                Ok(link) => Ok((settings, link, Some(owner.clone()))),
                 Err(error) => {
                     if install.discards_secrets() {
                         let _ = vault.forget(settings.roles());
@@ -785,21 +771,21 @@ async fn identity(
             let provider = setup
                 .identity
                 .clone()
-                .ok_or("another node of an identity needs that identity's provider")?;
+                .ok_or(crate::LinkError::IdentityRequired)?;
             let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
             let key = Settings::route_secret(&prepared.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_identity(
                 path,
                 (prepared.intent, prepared.vault),
-                provider,
+                provider.clone(),
                 contact,
                 &*transport,
                 confirmed.clone(),
             )
             .await
             {
-                Ok(settings) => Ok((settings, Some((transport, owned)))),
+                Ok(settings) => Ok((settings, Some((transport, owned)), Some(provider))),
                 Err(error) => {
                     if owned {
                         transport.close().await;
@@ -817,7 +803,7 @@ async fn identity(
             match Settings::enroll_invited(
                 (path, schema.as_ref()),
                 (prepared.intent, prepared.vault),
-                prepared.provider,
+                prepared.provider.clone(),
                 code,
                 &*transport,
             )
@@ -827,7 +813,7 @@ async fn identity(
                     if let Ok(mut slot) = minted.lock() {
                         *slot = prepared.minted;
                     }
-                    Ok((settings, Some((transport, owned))))
+                    Ok((settings, Some((transport, owned)), Some(prepared.provider)))
                 }
                 Err(error) => {
                     if owned {
@@ -857,7 +843,7 @@ async fn identity(
                 settings.schema = schema.clone();
                 settings.save(path).await?;
             }
-            Ok((settings, link))
+            Ok((settings, link, setup.identity.clone()))
         }
     }
 }
@@ -1125,7 +1111,7 @@ async fn run(serving: Serving, hello: &Hello) -> Result<(), Failure> {
 
 async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let Serving {
-        mut setup,
+        setup,
         network,
         mut input,
         mut cleanups,
@@ -1166,7 +1152,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         confirm_removals(&setup, &directory, &path).await?;
     }
     let fresh = setup.install.unwinds_on_failure() && !Settings::exists(&path)?;
-    let (mut settings, link) = match identity(&path, &setup, network).await {
+    let (mut settings, link, signer) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => {
             drop(wal_index);
@@ -1174,7 +1160,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         Err(error) => return Err(error),
     };
-    let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
         if setup.schema.is_none() && !settings.stores_only() {
@@ -1291,6 +1276,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         path.clone(),
         bootstrap_intent,
     );
+    let node = node.with_signer(signer);
     let node = Arc::new(match &setup.schema {
         Some(schema) => node.with_declared(schema.clone()),
         None => node,
@@ -1301,7 +1287,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         let _ = expose.send(Arc::downgrade(&node));
     }
     let started = async {
-        crate::identities::supplying(startup_identity, async {
+        node.signed(async {
             node.restore_line_signers().await?;
             node.complete_revocation().await?;
             node.refresh_importing().await?;
@@ -1351,13 +1337,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     .then(|| {
         let joining = node.clone();
         let held = directory.clone();
-        crate::reactor::spawn_local("bootstrap", async move {
+        crate::reactor::spawn_local("bootstrap", node.signed(async move {
             pause::at(&held, pause::Point::Bootstrap).await;
             if let Err(error) = joining.initial_sync().await {
                 tracing::debug!(%error, "initial sync failed; its bootstrap intent stays for the next sync or open");
             }
             joining.first_pull.send_replace(true);
-        })
+        }))
     });
     if bootstrapping.is_none() {
         node.first_pull.send_replace(true);
@@ -1367,7 +1353,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let mut tasks = rocky_platform::task::JoinSet::new();
     let mut shutdown = None;
     let settling = crate::reactor::spawn_local("settle_commits", settle_commits(replica.clone()));
-    let recovering = crate::reactor::spawn_local("recovery", node.clone().drive_recovery());
+    let recovering =
+        crate::reactor::spawn_local("recovery", node.signed(node.clone().drive_recovery()));
     loop {
         let command = tokio::select! {
             command = input.recv() => match command { Some(command) => command, None => break },
@@ -1771,7 +1758,9 @@ mod tests {
             .network(Network::Owned(hub.connector("held")));
         tokio::task::LocalSet::new()
             .run_until(async {
-                let create = Install::create(Arc::new(crate::RootKey::generate()));
+                let root = crate::RootKey::generate();
+                let owner = Arc::new(root.identity());
+                let create = Install::create(Arc::new(root), owner);
                 Database::launch_local(&configuration, create)
                     .await?
                     .close()
@@ -1945,7 +1934,6 @@ mod tests {
             budget: Semaphore::new(1),
             closed: AtomicBool::new(false),
             worker: Mutex::new(None),
-            identity: std::sync::Mutex::new(None),
             _handles: residence::claim(Path::new("unread-connection-reply"))?.handles,
         });
         let connection = Connection {

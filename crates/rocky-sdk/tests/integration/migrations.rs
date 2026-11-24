@@ -43,7 +43,7 @@ async fn reopen_as(
     signer: Arc<dyn rocky_sdk::IdentityProvider>,
 ) -> Result<Device, Failure> {
     let configuration = open(directory, schema, network).identity(signer.clone());
-    Device::new(configuration.open().await?).map(|device| device.with_identity(signer))
+    Device::new(configuration.open().await?)
 }
 
 fn open<'a>(
@@ -286,7 +286,13 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, LISTS, network("a")).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(&a_dir, LISTS, network("a")),
+            common::external_key(&a_dir),
+        )
+        .await?,
+    )?;
     let b_opened = open(&b_dir, LISTS, network("b"))
         .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
@@ -648,7 +654,13 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, LISTS, network("a")).create().await?)?;
+    let a = Device::new(
+        common::create_as(
+            open(&a_dir, LISTS, network("a")),
+            common::external_key(&a_dir),
+        )
+        .await?,
+    )?;
     let b = Device::new(
         open(&b_dir, LISTS, network("b"))
             .join(&a.invite().await)
@@ -725,7 +737,14 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
             None,
         )
     };
-    let a = Device::new(options(common::SCHEMA).create().await?)?;
+    let a = Device::new(
+        options(common::SCHEMA)
+            .create_with_root(
+                Arc::new(rocky_sdk::RootKey::generate()),
+                identity.clone() as Arc<dyn rocky_sdk::IdentityProvider>,
+            )
+            .await?,
+    )?;
     a.add(1, "once").await;
     a.close().await;
     let a = Device::new(options(POSITIONED).open().await?)?;
@@ -856,8 +875,13 @@ const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format"
 async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holding_it()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
-    let a = Device::new(open(root.path(), LISTED, None).create().await?)?
-        .with_identity(common::external_identity(root.path()));
+    let a = Device::new(
+        common::create_as(
+            open(root.path(), LISTED, None),
+            common::external_key(root.path()),
+        )
+        .await?,
+    )?;
     a.add(1, "apples").await;
     a.close().await;
 
@@ -953,8 +977,7 @@ async fn skipping_versions_converges(late_write: bool) -> Result<(), Failure> {
     assert_eq!(generation(&carol).await["current"]["schema"], 2);
     owner.close().await;
     let owner =
-        Device::new(common::confirmed(open(&dirs("owner"), UNTITLED, network("owner"))).await?)?
-            .with_identity(common::external_identity(&dirs("owner")));
+        Device::new(common::confirmed(open(&dirs("owner"), UNTITLED, network("owner"))).await?)?;
     assert_eq!(generation(&owner).await["current"]["schema"], 3);
     sync(&carol).await;
     let migrated = json!([[snap::cell(text(&coffee)), snap::cell(text("Coffee"))]]);

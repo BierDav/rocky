@@ -72,7 +72,7 @@ async fn issuer_with_root(
         &Schema::parse(SCHEMA)?,
         &store,
         crate::enrollment::DEFAULT_TTL,
-        identity,
+        identity.unwrap_or_else(|| Arc::new(root.identity())),
         root,
     )?;
     let vault = settings.vault(&store);

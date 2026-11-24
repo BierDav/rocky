@@ -43,7 +43,6 @@ pub(crate) enum Request {
     Activity(u64, Reply<crate::ActivityPage>),
     ActivityNext(u64, Reply<crate::ActivityPage>),
 
-    WithIdentity(crate::identities::Loan, Box<Request>),
     Status(Reply<crate::DatabaseStatus>),
     StatusAfter(String, Reply<crate::DatabaseStatus>),
     Sync(Reply<crate::SyncReport>),
@@ -88,18 +87,13 @@ pub(crate) enum Request {
 }
 impl Request {
     pub(crate) fn allowed_after_logout(&self) -> bool {
-        match self {
-            Self::WithIdentity(_, request) => request.allowed_after_logout(),
-            Self::Status(..)
-            | Self::StatusAfter(..)
-            | Self::Activity(..)
-            | Self::ActivityNext(..) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::Status(..) | Self::StatusAfter(..) | Self::Activity(..) | Self::ActivityNext(..)
+        )
     }
     pub(crate) fn fail(self, error: crate::Failure) {
         match self {
-            Self::WithIdentity(_, request) => request.fail(error),
             Self::HeldChanges(reply) => {
                 let _ = reply.send(Err(error));
             }

@@ -18,9 +18,6 @@ pub enum Purpose {
 }
 
 pub trait IdentityProvider: Send + Sync {
-    fn owner_identity(&self) -> Option<std::sync::Arc<dyn IdentityProvider>> {
-        None
-    }
     fn public_key(&self) -> Result<PublicKey, Error>;
     fn sign(&self, purpose: Purpose, message: &[u8]) -> Result<Signature, Error>;
 }

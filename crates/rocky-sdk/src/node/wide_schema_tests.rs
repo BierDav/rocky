@@ -9,14 +9,10 @@ type Failure = crate::Failure;
 
 struct Device {
     database: Database,
-    identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 impl Device {
     fn new(database: Database) -> Self {
-        Self {
-            database,
-            identity: None,
-        }
+        Self { database }
     }
 
     async fn contact(&self) -> String {
@@ -26,13 +22,7 @@ impl Device {
             .into()
     }
     async fn sync(&self) -> Result<Value, Value> {
-        snap::observe(async {
-            match &self.identity {
-                Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
-                None => self.database.sync_now().await,
-            }
-        })
-        .await
+        snap::observe(self.database.sync_now()).await
     }
     async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {

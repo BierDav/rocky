@@ -493,12 +493,10 @@ mod tests {
     -> Result<(), Failure> {
         let dir = rocky_platform::fs::Scratch::new().await;
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
-        let mut a = Settings::create(
+        let mut a = Settings::create_owned(
             &Schema::parse(SCHEMA)?,
             &store,
             crate::enrollment::DEFAULT_TTL,
-            None,
-            &rocky_credentials::RootKey::generate(),
         )?;
         let av = a.vault(&store);
         let publisher = a.identity;
@@ -580,7 +578,7 @@ mod tests {
                 &Schema::parse(SCHEMA)?,
                 &store,
                 crate::enrollment::DEFAULT_TTL,
-                None,
+                std::sync::Arc::new(root.identity()),
                 &root,
             )?;
             let member = PrivateKey::from_bytes(&settings.vault(&store).get("node")?);
@@ -913,12 +911,10 @@ mod tests {
     -> Result<(), Failure> {
         let dir = rocky_platform::fs::Scratch::new().await;
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
-        let mut settings = Settings::create(
+        let mut settings = Settings::create_owned(
             &Schema::parse(SCHEMA)?,
             &store,
             crate::enrollment::DEFAULT_TTL,
-            None,
-            &rocky_credentials::RootKey::generate(),
         )?;
         let vault = settings.vault(&store);
         let configured = PrivateKey::new().public_key();

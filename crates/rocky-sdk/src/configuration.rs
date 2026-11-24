@@ -60,18 +60,25 @@ impl Configuration {
     }
     pub async fn create(&self) -> Result<Created, crate::Error> {
         let root = crate::RootKey::generate();
-        let created = crate::RootKey::from_secret(root.secret());
-        let database = self.create_with_root(Arc::new(root)).await?;
+        let owner = root.identity();
+        let database = self
+            .create_with_root(
+                Arc::new(crate::RootKey::from_secret(root.secret())),
+                Arc::new(crate::IdentityKey::from_secret(owner.secret())),
+            )
+            .await?;
         Ok(Created {
             database,
-            root: created,
+            root,
+            owner,
         })
     }
     pub async fn create_with_root(
         &self,
         root: Arc<dyn crate::IdentityProvider>,
+        owner: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Database, crate::Error> {
-        Database::launch(self, Install::create(root), None).await
+        Database::launch(self, Install::create(root, owner), None).await
     }
     pub async fn open(&self) -> Result<Database, crate::Error> {
         Database::launch(self, Install::Installed, None).await

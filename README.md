@@ -54,10 +54,20 @@ a table could not be read: `Unavailable { table, reason }`, where `Incomplete
 lists the same blockers until the missing data arrives.
 
 A database's authority is an offline root key: `Configuration::create`
-returns it once as a 24-word phrase (`Created::root`), or
-`create_with_root` takes a passkey-backed signer. Rocky never stores it.
-The owner's identity is derived from that root. Identity signers are also
-never stored. An admin invites with `Database::invite(Invite::new(access))`,
+returns it once as a 24-word phrase (`Created::root`) together with the
+owner's person key derived from it (`Created::owner`, an `IdentityKey`), or
+`create_with_root(root, owner)` takes a passkey-backed root signer and the
+owner's person signer. Rocky never stores either. The application keeps the
+person key in its own secure storage (`IdentityKey::phrase` and
+`IdentityKey::from_phrase` move it as 24 words; `FileIdentityProvider` keeps
+it in a native file) and supplies it with `Configuration::identity`; the open
+database signs with it for that session and drops it at close. With the person
+key alone, an owner or admin device publishes a new schema version, approves
+links of its person's devices, unlinks devices and invites; only `make_admin`
+and `revoke_admin` need the root. A call that needs the person key without one
+configured fails with `LinkError::IdentityRequired`, and `create` refuses a
+configured identity that is not the owner's (`AccessError::OwnerRequired`).
+An admin invites with `Database::invite(Invite::new(access))`,
 optionally naming `partition`s, a `label`, a validity (`Invite::valid_for`,
 ten minutes by default) or the one person it is for (`for_identity`). The
 label names the device the invitation admits (`Device::label`) and, on the
@@ -69,11 +79,13 @@ needs the issuing device online; if the first pull fails after redemption, the
 database still opens, its reads report the missing data as `Incomplete`, and
 the next sync completes it. A default
 code carries a single-use secret, so whoever holds it joins once, as an
-identity Rocky mints and returns once in `Opened::identity`; a `for_identity`
+identity Rocky mints and returns once in `Opened::identity` (an
+`IdentityKey` the application stores like the owner's); a `for_identity`
 code carries no secret and admits only that person's configured identity. A
 refused join says why with a `JoinError` (`Expired`, `Used`, `Cancelled`,
 `OtherIdentity`, `AlreadyMember`, `Removed`, `IssuerUnreachable`, ...).
-`Database::invitations` lists open and redeemed invitations and
+`Database::invitations` lists open and redeemed invitations, naming the
+`PersonId` that redeemed each (`redeemed_by`), and
 `cancel_invitation` ends an unused one. A person links another device with
 `Configuration::link`, which returns a `PendingLink` whose `code` the person
 compares with `Database::link_requests` on a device they already hold,
@@ -141,7 +153,8 @@ the application's schema, so one process can relay for many tenants
 Every linked node of an admin can invite, renew and remove ordinary
 members, and seals: Rocky seals
 routinely and when the schema changes, never through an application call.
-Linking another node needs the identity signer and matching codes on both
+Linking another node needs the person key configured on the new device and
+matching codes on both
 devices, with no root ceremony. Every node certificate carries the node's
 own signature naming its identity and database, so no identity can list
 another's node; a node key that two identities hold live certificates for

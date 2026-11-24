@@ -46,9 +46,7 @@ impl Node {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
-        let identity = settings
-            .identity()
-            .map_err(|_| crate::LinkError::IdentityRequired)?;
+        let identity = settings.identity()?;
         let mut known = settings.revocations.clone();
         known.merge_in(
             &self.replica.revocations().await,

@@ -857,3 +857,92 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     a.close().await?;
     Ok(())
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(start_paused = true)]
+async fn a_live_commit_reaches_a_connected_peer_without_sync_now_or_a_tick() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let live = |name: &str| -> Result<Configuration, Failure> {
+        Ok(open(
+            &root.path().join(name),
+            Some(Network::Owned(hub.connector(name))),
+        )?
+        .sync(crate::SyncMode::Live))
+    };
+    tokio::task::LocalSet::new()
+        .run_until(time_frozen(async {
+            let root_key = Arc::new(crate::RootKey::generate());
+            let a = super::Database::launch_local(&live("a")?, super::Install::create(root_key))
+                .await?;
+            let invitation = a.invite(crate::Invite::new(crate::Access::Full)).await?;
+            let (joining, _) = super::Install::invited(&invitation.code);
+            let b = super::Database::launch_local(&live("b")?, joining).await?;
+            for database in [&a, &b] {
+                loop {
+                    let status = database.status().await?;
+                    let settled = status.network.connected_peer_count == 1
+                        && !status.network.reconciling
+                        && !status.network.worker_running
+                        && !status.data.bootstrap_pending;
+                    if settled {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+            let reader = b.connect(READER).await?;
+            assert_eq!(count(&reader, "items").await?, 0);
+            let events = b.observe(&["items"]).await?;
+            let frozen_at = tokio::time::Instant::now();
+            let writer = a.connect(WRITER).await?;
+            run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+            run(
+                &writer,
+                "INSERT INTO lists(key,title) VALUES('l1','Groceries')",
+            )
+            .await?;
+            run(
+                &writer,
+                "INSERT INTO items(key,list,title,completed) VALUES('i1','l1','Milk',0)",
+            )
+            .await?;
+            run(&writer, "END TRANSACTION").await?;
+            let change = loop {
+                let change = events.next().await?;
+                if change.causes.contains(&crate::ChangeCause::Sync) {
+                    break change;
+                }
+            };
+            assert_eq!(change.tables, ["items"]);
+            assert_eq!(
+                tokio::time::Instant::now(),
+                frozen_at,
+                "no tick or retry deadline could fire: the commit was pushed"
+            );
+            assert_eq!(count(&reader, "items").await?, 1);
+            for connection in [writer, reader] {
+                connection.close().await;
+            }
+            b.close().await?;
+            a.close().await?;
+            Ok(())
+        }))
+        .await
+}
+
+async fn time_frozen<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let watchdog = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut future => return output,
+            () = tokio::task::yield_now() => {
+                std::thread::park_timeout(Duration::from_micros(50));
+                assert!(watchdog.elapsed() < Duration::from_secs(120), "test made no progress");
+            }
+        }
+    }
+}

@@ -1,6 +1,6 @@
 use super::{
     driver,
-    schedule::{Action, Action::*, Fixture, Scenario, Wall},
+    schedule::{Action, Action::*, Fixture, Invites, Scenario, Wall},
 };
 use crate::Failure;
 use std::time::Duration;
@@ -12,6 +12,7 @@ async fn run(nodes: usize, steps: Vec<Action>, kinds: &[&str]) -> Result<Vec<Str
         rounds: 4,
         fixture: Fixture::Items,
         wall: Wall::Moving,
+        invites: Invites::Full,
     };
     let report = tokio::task::LocalSet::new()
         .run_until(driver::run_steps(1, scenario, steps))

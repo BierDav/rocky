@@ -1,6 +1,6 @@
 use super::{
     driver,
-    schedule::{Action::*, Fixture, Scenario, Wall},
+    schedule::{Action::*, Fixture, Invites, Scenario, Wall},
 };
 use crate::Failure;
 
@@ -10,6 +10,7 @@ const SIZE: Scenario = Scenario {
     rounds: 4,
     fixture: Fixture::Items,
     wall: Wall::Moving,
+    invites: Invites::Full,
 };
 
 async fn healed(seed: u64, steps: Vec<super::schedule::Action>) -> Result<(), Failure> {

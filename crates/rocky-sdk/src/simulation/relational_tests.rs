@@ -1,6 +1,6 @@
 use super::{
     driver::{self, Report},
-    schedule::{Action, Fixture, Scenario, Wall, plan},
+    schedule::{Action, Fixture, Invites, Scenario, Wall, plan},
 };
 use crate::Failure;
 use std::collections::BTreeMap;
@@ -11,6 +11,7 @@ const INTEGRATION: Scenario = Scenario {
     rounds: 4,
     fixture: Fixture::Relational,
     wall: Wall::Moving,
+    invites: Invites::Full,
 };
 fn requested(seed: u64) -> Scenario {
     match std::env::var_os("ROCKY_SIM_INTEGRATION") {
@@ -23,7 +24,14 @@ fn soak_size(seed: u64) -> Scenario {
         Ok("frozen") => Wall::Frozen,
         _ => Wall::Moving,
     };
-    soak_at(seed, wall)
+    let invites = match std::env::var_os("ROCKY_SIM_PARTIAL") {
+        Some(_) => Invites::Partial,
+        None => Invites::Full,
+    };
+    Scenario {
+        invites,
+        ..soak_at(seed, wall)
+    }
 }
 fn soak_at(seed: u64, wall: Wall) -> Scenario {
     Scenario {
@@ -32,6 +40,7 @@ fn soak_at(seed: u64, wall: Wall) -> Scenario {
         rounds: 5,
         fixture: Fixture::Relational,
         wall,
+        invites: Invites::Full,
     }
 }
 
@@ -142,7 +151,7 @@ async fn shrink() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "the relational soak of ROCKY_SIM_SEEDS seeds (200) from ROCKY_SIM_FIRST, ROCKY_SIM_WALL=frozen stopping the wall clock: ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture"]
+#[ignore = "the relational soak of ROCKY_SIM_SEEDS seeds (200) from ROCKY_SIM_FIRST, ROCKY_SIM_WALL=frozen stopping the wall clock and ROCKY_SIM_PARTIAL=1 drawing per-list invites and grants: ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture"]
 async fn relational_soak() -> Result<(), Failure> {
     let read = |name: &str, default: u64| {
         std::env::var(name)

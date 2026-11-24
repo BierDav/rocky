@@ -9,12 +9,19 @@ pub(super) struct Scenario {
     pub(super) rounds: usize,
     pub(super) fixture: Fixture,
     pub(super) wall: Wall,
+    pub(super) invites: Invites,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Wall {
     Moving,
     Frozen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Invites {
+    Full,
+    Partial,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,18 +372,25 @@ enum Lifecycle {
     Compact,
     Partition,
     Invite,
+    Grant,
     Revoke,
     Offline,
     Online,
 }
+const PARTIAL_GRANTS: [(Lifecycle, u64); 1] = [(Lifecycle::Grant, 2)];
 const RELATIONAL_POINTS: [CrashPoint; CrashPoint::ALL.len()] = CrashPoint::ALL;
 
 fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
     let mut draws = Draws::new(seed);
-    let total: u64 = RELATIONAL.iter().map(|(_, weight)| weight).sum();
+    let lifecycles: Vec<(Lifecycle, u64)> = match scenario.invites {
+        Invites::Full => RELATIONAL.to_vec(),
+        Invites::Partial => RELATIONAL.iter().chain(&PARTIAL_GRANTS).copied().collect(),
+    };
+    let total: u64 = lifecycles.iter().map(|(_, weight)| weight).sum();
     let mut steps = Vec::with_capacity(scenario.steps);
     let mut members = 2;
     let mut revoked = false;
+    let mut listed: Vec<usize> = Vec::new();
     let mut lists: Vec<String> = LISTS.iter().map(|list| list.to_string()).collect();
     while steps.len() < scenario.steps {
         let index = steps.len();
@@ -392,7 +406,7 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
             (a, b)
         };
         let mut pick = draws.below(total);
-        let kind = RELATIONAL
+        let kind = lifecycles
             .iter()
             .find(|(_, weight)| {
                 let found = pick < *weight;
@@ -435,13 +449,27 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
             }
             Lifecycle::Invite if members < scenario.nodes => {
                 members += 1;
-                Action::Invite(draws.below(members as u64 - 1) as usize, members - 1)
+                let listing =
+                    scenario.invites == Invites::Partial && draws.chance(LISTED_INVITES_PER_MILLE);
+                match listing {
+                    true => {
+                        listed.push(members - 1);
+                        let list = lists[draws.below(lists.len() as u64) as usize].clone();
+                        Action::InviteTo(0, members - 1, list)
+                    }
+                    false => Action::Invite(draws.below(members as u64 - 1) as usize, members - 1),
+                }
+            }
+            Lifecycle::Grant if !listed.is_empty() => {
+                let member = listed[draws.below(listed.len() as u64) as usize];
+                let list = lists[draws.below(lists.len() as u64) as usize].clone();
+                Action::Grant(list, member)
             }
             Lifecycle::Revoke if !revoked && members > 2 => {
                 revoked = true;
                 Action::Revoke(other(&mut draws))
             }
-            Lifecycle::Invite | Lifecycle::Revoke => continue,
+            Lifecycle::Invite | Lifecycle::Grant | Lifecycle::Revoke => continue,
             Lifecycle::Offline => Action::Offline(node(&mut draws)),
             Lifecycle::Online => Action::Online(node(&mut draws)),
         };
@@ -451,10 +479,13 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
                 members += 1;
                 Some(Action::Invite(0, members - 1))
             }
-            Action::Invite(_, joined) if draws.chance(300) => Some(Action::Crash(
-                *joined,
-                [None, Some(CrashPoint::Import), Some(CrashPoint::Switch)][draws.below(3) as usize],
-            )),
+            Action::Invite(_, joined) | Action::InviteTo(_, joined, _) if draws.chance(300) => {
+                Some(Action::Crash(
+                    *joined,
+                    [None, Some(CrashPoint::Import), Some(CrashPoint::Switch)]
+                        [draws.below(3) as usize],
+                ))
+            }
             _ => None,
         };
         steps.push(action);
@@ -465,6 +496,7 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
 }
 
 const OWNER_SIGNS_PER_MILLE: u16 = 700;
+const LISTED_INVITES_PER_MILLE: u16 = 400;
 const MIN_BOARD_CAP: u8 = 3;
 const BOARD_CAP_SPREAD: u64 = 11;
 fn change(draws: &mut Draws, lists: &[String]) -> Change {

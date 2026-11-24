@@ -1,6 +1,6 @@
 use super::{
     driver::{self, Report},
-    schedule::{Fixture, Scenario, Wall},
+    schedule::{Fixture, Invites, Scenario, Wall},
 };
 use crate::Failure;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ const INTEGRATION: Scenario = Scenario {
     rounds: 4,
     fixture: Fixture::Items,
     wall: Wall::Moving,
+    invites: Invites::Full,
 };
 fn sweep(seed: u64) -> Scenario {
     Scenario {
@@ -19,6 +20,7 @@ fn sweep(seed: u64) -> Scenario {
         rounds: 4,
         fixture: Fixture::Items,
         wall: Wall::Moving,
+        invites: Invites::Full,
     }
 }
 const KNOWN_LIVENESS: &[(u64, &[&str])] = &[];

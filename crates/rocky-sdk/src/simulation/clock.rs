@@ -1,6 +1,6 @@
 use super::{
     driver,
-    schedule::{Action::*, Fixture, Scenario, Wall},
+    schedule::{Action::*, Fixture, Invites, Scenario, Wall},
 };
 use crate::Failure;
 use rocky_core::MAX_CLOCK_AHEAD;
@@ -31,6 +31,7 @@ async fn frames_from_a_clock_ahead_apply_when_this_clock_is_near_them() -> Resul
         rounds: 4,
         fixture: Fixture::Items,
         wall: Wall::Moving,
+        invites: Invites::Full,
     };
     let report = tokio::task::LocalSet::new()
         .run_until(driver::run_steps(1, scenario, steps))
@@ -75,6 +76,7 @@ async fn a_link_tells_both_devices_when_one_clock_runs_ahead() -> Result<(), Fai
         rounds: 4,
         fixture: Fixture::Items,
         wall: Wall::Moving,
+        invites: Invites::Full,
     };
     let report = tokio::task::LocalSet::new()
         .run_until(driver::run_steps(1, scenario, steps))

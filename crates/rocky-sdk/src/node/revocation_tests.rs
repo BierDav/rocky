@@ -185,7 +185,6 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
                 origin: Some(target),
                 enrolled: now()?,
                 invitation: None,
-                single_use: true,
             }),
             ..IdentityRecord::default()
         },
@@ -645,7 +644,7 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     let own = Settings::node_key(&node.vault)?.public_key();
     crate::identities::supplying(
         Some(identity.clone()),
-        node.unlink(rocky_credentials::PeerId::of(own)),
+        node.unlink_own(rocky_credentials::PeerId::of(own)),
     )
     .await?;
     let settings = node.settings.lock().await;
@@ -806,7 +805,7 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
     }
     let request = &requests[32];
     let code = request.confirmation_code()?;
-    node.confirm_link(request.node, &code).await?;
+    node.approve_link(request.node, &crate::LinkCode(code.clone()))?;
     let wire = LinkRequest {
         request: request.clone(),
         code: None,
@@ -825,7 +824,10 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
         .get_mut(&request.node)
         .ok_or("missing request")?
         .received = time - 300;
-    assert!(node.confirm_link(request.node, &code).await.is_err());
+    assert!(
+        node.approve_link(request.node, &crate::LinkCode(code.clone()))
+            .is_err()
+    );
     assert!(node.answer_link(&settings, confirmed).is_err());
     assert_eq!(
         node.replica
@@ -865,12 +867,14 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     };
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
-    let terms = crate::InviteTerms::default();
+    let invite = |profile: crate::Access| {
+        crate::Invite::new(profile).for_identity(crate::PersonId::new(person.public_key()))
+    };
     let open = |book: &mut Book, profile: crate::Access| {
         settings.invite(
             (&node.vault, routes()),
             book,
-            (person.public_key(), profile, &terms),
+            &invite(profile),
             &registry,
             time,
         )
@@ -886,7 +890,12 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let database = settings.database_context()?;
     let ask_for = |key: &PrivateKey, invitation: crate::InvitationId| {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
-        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(request, invitation.0, key)?)
+        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(
+            request,
+            invitation.0,
+            None,
+            key,
+        )?)
     };
     let ask = |key: &PrivateKey| ask_for(key, issued.id);
     let joiner = PrivateKey::new();
@@ -911,8 +920,8 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .err()
         .ok_or("a second node redeemed the invitation")?;
     assert_eq!(
-        other.downcast_ref::<crate::InvitationRefusal>(),
-        Some(&crate::InvitationRefusal::Used)
+        other.downcast_ref::<crate::JoinError>(),
+        Some(&crate::JoinError::Used)
     );
     assert!(
         node.answer_invitation(ask_for(&PrivateKey::new(), conflicting.id)?)
@@ -926,7 +935,10 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
             .find(|open| open.id == id)
             .map(|open| open.redeemed_by)
     };
-    assert_eq!(redeemer(issued.id), Some(Some(joiner.public_key())));
+    assert_eq!(
+        redeemer(issued.id),
+        Some(Some(crate::PersonId::new(person.public_key())))
+    );
     assert_eq!(redeemer(spare.id), Some(None));
     assert_eq!(redeemer(conflicting.id), Some(None));
     let snapshot = node.settings_snapshot().await;
@@ -942,7 +954,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
             .invite(
                 (&node.vault, routes()),
                 &mut Book::read(&node.replica).await?,
-                (person.public_key(), wider, &terms),
+                &invite(wider),
                 &recorded,
                 now()?,
             )
@@ -967,7 +979,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     let wide = crate::Access::Full;
     let time = now()?;
     let mut book = Book::read(&node.replica).await?;
-    let mut open = |profile: crate::Access, label: &[u8]| {
+    let mut open = |profile: crate::Access, label: &str| {
         settings.invite(
             (
                 &node.vault,
@@ -977,21 +989,15 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
                 }],
             ),
             &mut book,
-            (
-                identity,
-                profile,
-                &crate::InviteTerms {
-                    valid_for: None,
-                    label: Some(label.to_vec()),
-                    partitions: Vec::new(),
-                },
-            ),
+            &crate::Invite::new(profile)
+                .for_identity(crate::PersonId::new(identity))
+                .label(label),
             &registry,
             time,
         )
     };
-    let invited = open(narrow.clone(), b"Alice")?;
-    let rival = open(wide, b"Mallory")?;
+    let invited = open(narrow.clone(), "Alice")?;
+    let rival = open(wide, "Mallory")?;
     node.replica
         .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
         .await?;
@@ -999,7 +1005,12 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     let database = settings.database_context()?;
     let ask = |key: &PrivateKey, invitation: crate::InvitationId| {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
-        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(request, invitation.0, key)?)
+        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(
+            request,
+            invitation.0,
+            None,
+            key,
+        )?)
     };
     let redeemers = || async {
         Ok::<_, Failure>(
@@ -1062,7 +1073,10 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     );
     assert_eq!(
         redeemers().await?,
-        BTreeMap::from([(invited.id, Some(joiner.public_key())), (rival.id, None)])
+        BTreeMap::from([
+            (invited.id, Some(crate::PersonId::new(identity))),
+            (rival.id, None)
+        ])
     );
     assert_eq!(redemptions(), 1);
 

@@ -135,14 +135,21 @@ async fn enrolled_schema(
     let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
     let path = root.join("rocky.sqlite");
     if let Some((issuer, profile)) = issuer {
-        let provisioned = issuer.provision(profile, None).await?;
-        let (settings, vault, _) =
-            Settings::install_provisioned(&store, Some(schema), &provisioned.uri, true).await?;
-        settings.save(&path).await?;
+        let invitation = issuer.invite(&crate::Invite::new(profile)).await?;
+        let prepared = Settings::prepare_invited(&path, &store, None, &invitation.code)?;
+        let vault = prepared.vault.clone();
         let transport = hub
             .connector(name)
-            .start(settings.issuer(), Settings::route_secret(&vault)?)
+            .start(false, Settings::route_secret(&vault)?)
             .await?;
+        let settings = Settings::enroll_invited(
+            (&path, Some(schema)),
+            (prepared.intent, prepared.vault),
+            prepared.provider,
+            &invitation.code,
+            &*transport,
+        )
+        .await?;
         node(root, settings, vault, transport).await
     } else {
         let settings = Settings::create(

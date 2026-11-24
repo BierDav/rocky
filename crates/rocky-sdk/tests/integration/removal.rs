@@ -179,7 +179,7 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let directory = |name: &str| root.path().join(name);
     let a = Device::new(open(&directory("a"), NOTED, network("a")).create().await?)?;
-    let join = |name: &str, invitation: String| {
+    let join = |name: &str, invitation: rocky_sdk::InvitationCode| {
         let configuration = open(&directory(name), NOTED, network(name));
         async move { Device::new(configuration.join(&invitation).await?) }
     };

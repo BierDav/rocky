@@ -23,7 +23,9 @@ fn free_port() -> u16 {
 
 enum OpenMode {
     Create,
-    Join { invitation: String },
+    Join {
+        invitation: rocky_sdk::InvitationCode,
+    },
     Resume,
 }
 
@@ -70,7 +72,7 @@ impl Db {
         );
         let engine = match mode {
             OpenMode::Create => configuration.create().await?.database,
-            OpenMode::Join { invitation } => configuration.join(&invitation).await?,
+            OpenMode::Join { invitation } => configuration.join(&invitation).await?.database,
             OpenMode::Resume => configuration.open().await?,
         };
         let scope = engine.scope();
@@ -81,13 +83,13 @@ impl Db {
     }
     async fn join(
         directory: &Path,
-        invitation: &str,
+        invitation: &rocky_sdk::InvitationCode,
         transport: rocky_iroh::Options,
     ) -> Result<Self, Failure> {
         Self::open(
             directory,
             OpenMode::Join {
-                invitation: snap::text(&(invitation)),
+                invitation: invitation.clone(),
             },
             transport,
         )
@@ -96,11 +98,12 @@ impl Db {
     async fn resume(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
         Self::open(directory, OpenMode::Resume, transport).await
     }
-    async fn invite(&self) -> String {
-        snap::ok(self.engine.provision(rocky_sdk::Access::Full, None)).await["uri"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+    async fn invite(&self) -> rocky_sdk::InvitationCode {
+        self.engine
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+            .await
+            .expect("invitation")
+            .code
     }
     async fn sync(&self) -> Value {
         snap::ok(self.engine.sync_now()).await
@@ -187,7 +190,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     let member = Db::with_secrets(
         &root.path().join("b"),
         OpenMode::Join {
-            invitation: snap::text(&(creator.invite().await)),
+            invitation: creator.invite().await,
         },
         at(0),
         Some(b_keys.clone()),
@@ -529,7 +532,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     let member = open(
         "b",
         OpenMode::Join {
-            invitation: snap::text(&(invitation)),
+            invitation: invitation.clone(),
         },
         "b",
     )

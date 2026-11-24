@@ -171,6 +171,7 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
     for name in ["bytes", "duration_ms", "outcome", "channel"] {
         assert!(field(rows, name).is_some(), "{name}: {:?}", spans[&rows]);
     }
+    let invitation = invitation.to_string();
     let mut forbidden = vec![title.to_owned(), invitation.clone()];
     forbidden.extend(
         invitation

@@ -49,8 +49,11 @@ mod native {
         )
         .await?;
         tx.commit().await?;
-        let invitation = db.provision(Access::Full, None).await?;
-        println!("{}", json!({ "relay": url, "invitation": invitation.uri }));
+        let invitation = db.invite(rocky_sdk::Invite::new(Access::Full)).await?;
+        println!(
+            "{}",
+            json!({ "relay": url, "invitation": invitation.code.to_string() })
+        );
 
         tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;
         let checked = check(&db).await;

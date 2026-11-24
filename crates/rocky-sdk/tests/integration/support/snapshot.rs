@@ -93,14 +93,9 @@ impl Snapshot for sdk::DeviceInfo {
         json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
     }
 }
-impl Snapshot for sdk::Provisioning {
+impl Snapshot for sdk::Invitation {
     fn snapshot(self) -> Value {
-        json!({"uri":self.uri,"node":self.node,"identity":self.identity,"access":self.access,"sequence":self.sequence.to_string()})
-    }
-}
-impl Snapshot for sdk::Discovered {
-    fn snapshot(self) -> Value {
-        json!({"seen":self.seen,"links":self.links})
+        json!({"id":self.id,"code":self.code.to_string(),"expires":self.expires.unix_micros().to_string()})
     }
 }
 impl Snapshot for sdk::ContactInfo {
@@ -118,7 +113,7 @@ impl Snapshot for sdk::GenerationStatus {
 }
 impl Snapshot for Vec<sdk::IdentityInfo> {
     fn snapshot(self) -> Value {
-        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"single_use":identity.single_use,"own":identity.own,"revoked":identity.revoked,"access":identity.access,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"own":identity.own,"revoked":identity.revoked,"access":identity.access,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 impl Snapshot for sdk::RetentionStatus {
@@ -397,8 +392,7 @@ impl Snapshot for sdk::ActivityPage {
         let events=self.events.into_iter().map(|event| {
             let mut detail=match event.detail {
                 sdk::ActivityKind::LinkAdmissionFailed { error } => json!({"kind":"link_admission_failed","error":error}),
-                sdk::ActivityKind::DeviceProvisioned { node, identity, access } => json!({"kind":"device_provisioned","node":node,"identity":identity,"access":access}),
-                sdk::ActivityKind::IdentityInvited { invitation, identity, access, expires } => json!({"kind":"identity_invited","invitation":invitation,"identity":identity,"access":access,"expires":expires.to_string()}),
+                sdk::ActivityKind::IdentityInvited { invitation, person, access, expires } => json!({"kind":"identity_invited","invitation":invitation,"person":person,"access":access,"expires":expires.to_string()}),
                 sdk::ActivityKind::InvitationRedeemed { invitation, identity, node } => json!({"kind":"invitation_redeemed","invitation":invitation,"identity":identity,"node":node}),
                 sdk::ActivityKind::PeerAdded { peer } => json!({"kind":"peer_added","peer":peer}),
                 sdk::ActivityKind::PeerRemoved { peer } => json!({"kind":"peer_removed","peer":peer}),

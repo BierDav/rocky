@@ -10,7 +10,6 @@ pub struct IdentityInfo {
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
     pub invitation: Option<crate::InvitationId>,
-    pub single_use: bool,
     pub own: bool,
     pub revoked: bool,
     pub access: Option<crate::Access>,

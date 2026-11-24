@@ -173,42 +173,6 @@ impl TrustedObservation {
     }
 }
 
-pub(crate) fn seen_devices(
-    known: &rocky_credentials::RevocationSet,
-    registry: &crate::registry::Registry,
-    last_seen: impl Fn(PublicKey) -> Option<u64>,
-) -> Vec<crate::SeenDevice> {
-    let mut seen = BTreeMap::<PublicKey, crate::SeenDevice>::new();
-    for certificate in known.certificates() {
-        let (identity, node) = (certificate.issuer, certificate.capability.subject);
-        if known.contests_node(node) {
-            continue;
-        }
-        let Some(last_seen) = last_seen(node) else {
-            continue;
-        };
-        let device = crate::SeenDevice {
-            node,
-            identity,
-            last_seen,
-            registry_known: registry.admitted(&identity),
-            unknown_identity: !registry.admitted(&identity),
-            revoked: known.revokes(&identity),
-            unlinked: known.identity_unlinks(identity, rocky_credentials::PeerId::of(node)),
-        };
-        match seen.entry(node) {
-            Entry::Vacant(vacant) => {
-                vacant.insert(device);
-            }
-            Entry::Occupied(mut held) if held.get().unlinked && !device.unlinked => {
-                held.insert(device);
-            }
-            Entry::Occupied(_) => {}
-        }
-    }
-    seen.into_values().collect()
-}
-
 pub(crate) fn observe_trusted(
     known: &rocky_credentials::RevocationSet,
     trusted: &[PublicKey],
@@ -357,30 +321,6 @@ mod tests {
             identities,
             nodes,
         }
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn seen_devices_omit_a_node_two_identities_share() {
-        let Shared {
-            known,
-            identities: [a, _, _, d],
-            nodes: [own, shared, handed],
-        } = shared_handed_and_own_nodes();
-        let seen = seen_devices(&known, &crate::registry::Registry::default(), |_| Some(7));
-        let shown: BTreeMap<PublicKey, (PublicKey, bool)> = seen
-            .into_iter()
-            .map(|device| (device.node, (device.identity, device.unlinked)))
-            .collect();
-        assert!(
-            !shown.contains_key(&shared.public_key()),
-            "a node two identities hold live certificates for is shown under neither"
-        );
-        assert_eq!(shown[&own.public_key()], (a.public_key(), false));
-        assert_eq!(
-            shown[&handed.public_key()],
-            (d.public_key(), false),
-            "a node its earlier identity unlinked is shown under the identity that holds it"
-        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

@@ -57,46 +57,6 @@ impl Node {
         self.commit(Changes::default()).await
     }
 
-    pub(super) async fn discovered(&self) -> Result<crate::Discovered, Failure> {
-        let settings = self.settings.lock().await.clone();
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let mut known = self.replica.revocations().await;
-        known.verify_in(settings.database_context()?)?;
-        known.merge(
-            &settings.revocations,
-            settings.publisher,
-            self.domain().manifest().app,
-            now()?,
-        )?;
-        let time = now()?;
-        let met = self
-            .met
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let seen = crate::membership::seen_devices(&known, &registry, |node| {
-            self.last_seen(node, time)
-                .into_iter()
-                .chain(met.get(&node).copied())
-                .chain(settings.contact_meta.get(&node).map(|meta| meta.learned))
-                .max()
-        });
-        let links = self
-            .link_requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter(|(_, held)| time.saturating_sub(held.received) < 300)
-            .map(|(node, held)| crate::LinkRequest {
-                node: *node,
-                code: held.code.clone(),
-                received: held.received,
-                confirmed: held.confirmed,
-            })
-            .collect();
-        Ok(crate::Discovered { seen, links })
-    }
-
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let settings = self.settings.lock().await.clone();
@@ -174,7 +134,6 @@ impl Node {
                     origin: admitted.origin,
                     enrolled: admitted.enrolled,
                     invitation: admitted.invitation,
-                    single_use: admitted.single_use,
                     own: *identity == settings.identity,
                     revoked: settings.revoked_identity(identity, &registry),
                     access: record.access().cloned(),

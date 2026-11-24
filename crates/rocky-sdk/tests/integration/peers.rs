@@ -371,20 +371,16 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer"))).await?;
-    let invite = decode(&a.invite().await, "rocky://provision/")?;
-    assert_eq!(invite["v"], 2);
-    for version in [0, 1, 3, u32::MAX] {
+    let invite = decode(&a.invite().await.to_string(), "rocky://invite/")?;
+    assert_eq!(invite["v"], 4);
+    for version in [0, 3, 5, u32::MAX] {
         let mut other = invite.clone();
         other["v"] = json!(version);
         let directory = root.path().join(format!("join-{version}"));
         assert!(
-            Device::join(
-                &directory,
-                &encode(&other, "rocky://provision/"),
-                memory(&hub, "join")
-            )
-            .await
-            .is_err()
+            encode(&other, "rocky://invite/")
+                .parse::<rocky_sdk::InvitationCode>()
+                .is_err()
         );
         assert!(!directory.exists());
     }
@@ -408,8 +404,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 42);
-    for version in (0..42).chain([43, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 43);
+    for version in (0..43).chain([44, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

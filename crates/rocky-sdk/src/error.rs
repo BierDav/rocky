@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Revoked,
@@ -18,10 +16,11 @@ pub enum ErrorKind {
     MigrationPending,
     Schema(Box<crate::SchemaError>),
     StoreSuperseded,
-    Invitation(crate::InvitationRefusal),
+    Invite(crate::InviteError),
+    Join(crate::JoinError),
+    Link(crate::LinkError),
     Service(crate::ServiceError),
     StoreOnly(crate::StoreOnlyRefusal),
-    AwaitingLink(Arc<crate::AwaitingLink>),
     RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
     Sql(Box<crate::SqlFailure>),
     Decode(crate::DecodeError),
@@ -47,10 +46,11 @@ impl ErrorKind {
             Self::MigrationPending => "migration_pending",
             Self::Schema(_) => "invalid_schema",
             Self::StoreSuperseded => "store_superseded",
-            Self::Invitation(refusal) => refusal.code(),
+            Self::Invite(error) => error.code(),
+            Self::Join(error) => error.code(),
+            Self::Link(error) => error.code(),
             Self::Service(service) => service.code(),
             Self::StoreOnly(_) => "store_only",
-            Self::AwaitingLink(_) => "awaiting_link",
             Self::RolloutConfirmation(_) => "rollout_confirmation_required",
             Self::Sql(failure) => match failure.reason {
                 crate::SqlReason::Unavailable {
@@ -110,14 +110,30 @@ impl Error {
 
 impl From<crate::Failure> for Error {
     fn from(error: crate::Failure) -> Self {
-        match error.downcast::<crate::AwaitingLink>() {
-            Ok(pending) => Self {
-                detail: pending.to_string(),
-                kind: ErrorKind::AwaitingLink(Arc::new(*pending)),
-                retryable: false,
-                blockers: Vec::new(),
-            },
-            Err(error) => crate::node::typed_error(&error),
+        crate::node::typed_error(&error)
+    }
+}
+
+impl From<crate::InviteError> for Error {
+    fn from(error: crate::InviteError) -> Self {
+        Self::new(ErrorKind::Invite(error), error.to_string())
+    }
+}
+
+impl From<crate::JoinError> for Error {
+    fn from(error: crate::JoinError) -> Self {
+        Self {
+            retryable: error.retryable(),
+            ..Self::new(ErrorKind::Join(error), error.to_string())
+        }
+    }
+}
+
+impl From<crate::LinkError> for Error {
+    fn from(error: crate::LinkError) -> Self {
+        Self {
+            retryable: error.retryable(),
+            ..Self::new(ErrorKind::Link(error), error.to_string())
         }
     }
 }
@@ -189,10 +205,11 @@ impl std::error::Error for Error {
         match &self.kind {
             ErrorKind::Service(service) => Some(service),
             ErrorKind::StoreOnly(refusal) => Some(refusal),
-            ErrorKind::AwaitingLink(pending) => Some(pending.as_ref()),
             ErrorKind::RolloutConfirmation(required) => Some(required.as_ref()),
             ErrorKind::Sql(failure) => Some(failure.as_ref()),
-            ErrorKind::Invitation(refusal) => Some(refusal),
+            ErrorKind::Invite(error) => Some(error),
+            ErrorKind::Join(error) => Some(error),
+            ErrorKind::Link(error) => Some(error),
             ErrorKind::Schema(error) => Some(error.as_ref()),
             ErrorKind::Decode(error) => Some(error),
             _ => None,

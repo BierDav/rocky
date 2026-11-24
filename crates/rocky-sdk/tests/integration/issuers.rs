@@ -21,7 +21,7 @@ async fn join(
     root: &Path,
     hub: &Arc<Hub>,
     name: &str,
-    invitation: &str,
+    invitation: &rocky_sdk::InvitationCode,
 ) -> Result<Device, Failure> {
     Device::new(open(&root.join(name), hub, name).join(invitation).await?)
 }
@@ -107,9 +107,9 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         &hub,
         "b",
         &a.database
-            .provision(rocky_sdk::Access::Full, None)
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
             .await?
-            .uri,
+            .code,
     )
     .await?;
     let principal = device_info(&b).await.principal.to_hex();
@@ -343,9 +343,9 @@ async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
         &hub,
         "b",
         &a.database
-            .provision(rocky_sdk::Access::Full, None)
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
             .await?
-            .uri,
+            .code,
     )
     .await?;
     a.admit(&b).await;
@@ -358,9 +358,9 @@ async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
         &hub,
         "g",
         &a.database
-            .provision(rocky_sdk::Access::Full, None)
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
             .await?
-            .uri,
+            .code,
     )
     .await?;
     let granted = device_info(&g).await.expires;
@@ -392,9 +392,9 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         &hub,
         "t",
         &a.database
-            .provision(rocky_sdk::Access::Full, None)
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
             .await?
-            .uri,
+            .code,
     )
     .await?;
     let t_identity = device_info(&t).await.principal.to_hex();

@@ -141,7 +141,8 @@ impl SignedRevocation {
                 && !(signer.signing_node().is_none() && Self::unlink_shape(&statement, chain)))
             || (!chain.0.is_empty()
                 && !statement.nodes.is_empty()
-                && (signer.signing_node().is_some() || !Self::unlink_shape(&statement, chain)))
+                && signer.signing_node().is_none()
+                && !Self::unlink_shape(&statement, chain))
             || statement.empty()
             || !statement.valid_cut(chain.0.is_empty() || Self::unlink_shape(&statement, chain))
             || (statement.mode == RevocationMode::Compromised && !chain.0.is_empty())
@@ -224,8 +225,7 @@ impl SignedRevocation {
                 "the issuer chain was not valid at the statement's time",
             ))
         };
-        if (!self.chain.0.is_empty() && !unlink && !statement.nodes.is_empty())
-            || statement.app != app
+        if statement.app != app
             || statement.empty()
             || !statement.valid_cut(self.chain.0.is_empty() || unlink)
             || (statement.mode == RevocationMode::Compromised && !self.root())

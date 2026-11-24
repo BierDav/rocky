@@ -1,5 +1,5 @@
 use crate::{
-    Access, Failure,
+    Access, Failure, Partition, PersonId, SqlValue, Timestamp,
     access::HeldPartition,
     enrollment::{
         Contact, EnrollingIssuer, Enrollment, Intent, NodeKeys, Route, Settings, exchange, now,
@@ -28,13 +28,13 @@ use std::{
 };
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
-const BOOK_VERSION: u32 = 2;
-const INVITE_VERSION: u32 = 3;
+const BOOK_VERSION: u32 = 3;
+const INVITE_VERSION: u32 = 4;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const SKEW: u64 = 300;
 const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
-pub const DEFAULT_INVITATION_VALIDITY: Duration = Duration::from_secs(10 * 60);
-pub const MAX_OPEN_INVITATIONS: usize = 64;
+const MAX_OPEN: usize = 64;
+const MAX_LABEL: usize = crate::registry::MAX_LABEL;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvitationId(pub(crate) Commitment);
@@ -42,13 +42,10 @@ impl InvitationId {
     fn fresh() -> Self {
         Self(rocky_platform::entropy::random())
     }
-    pub fn to_hex(&self) -> String {
-        HEXLOWER.encode(&self.0)
-    }
 }
 impl std::fmt::Display for InvitationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.to_hex())
+        f.write_str(&HEXLOWER.encode(&self.0))
     }
 }
 impl std::fmt::Debug for InvitationId {
@@ -57,14 +54,16 @@ impl std::fmt::Debug for InvitationId {
     }
 }
 impl std::str::FromStr for InvitationId {
-    type Err = Failure;
-    fn from_str(hex: &str) -> Result<Self, Failure> {
-        Ok(Self(crate::enrollment::hex32(hex)?))
+    type Err = JoinError;
+    fn from_str(hex: &str) -> Result<Self, JoinError> {
+        crate::enrollment::hex32(hex)
+            .map(Self)
+            .map_err(|_| JoinError::Invalid)
     }
 }
 impl Serialize for InvitationId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_hex())
+        serializer.serialize_str(&self.to_string())
     }
 }
 impl<'de> Deserialize<'de> for InvitationId {
@@ -75,110 +74,382 @@ impl<'de> Deserialize<'de> for InvitationId {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct InviteTerms {
-    pub valid_for: Option<Duration>,
-    pub label: Option<Vec<u8>>,
-    pub partitions: Vec<crate::PartitionTarget>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Invite {
+    access: Access,
+    partitions: Vec<Partition>,
+    label: Option<String>,
+    valid_for: Duration,
+    person: Option<PersonId>,
 }
-impl InviteTerms {
-    fn validity(&self) -> Result<u64, Failure> {
-        let seconds = self
-            .valid_for
-            .unwrap_or(DEFAULT_INVITATION_VALIDITY)
-            .as_secs();
+impl Invite {
+    pub const DEFAULT_VALIDITY: Duration = Duration::from_secs(10 * 60);
+    pub fn new(access: Access) -> Self {
+        Self {
+            access,
+            partitions: Vec::new(),
+            label: None,
+            valid_for: Self::DEFAULT_VALIDITY,
+            person: None,
+        }
+    }
+    #[must_use]
+    pub fn partition(mut self, partition: Partition) -> Self {
+        self.partitions.push(partition);
+        self
+    }
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+    #[must_use]
+    pub fn valid_for(mut self, validity: Duration) -> Self {
+        self.valid_for = validity;
+        self
+    }
+    #[must_use]
+    pub fn for_identity(mut self, person: PersonId) -> Self {
+        self.person = Some(person);
+        self
+    }
+    pub(crate) fn access(&self) -> &Access {
+        &self.access
+    }
+    fn validity(&self) -> Result<u64, InviteError> {
+        let seconds = self.valid_for.as_secs();
         if !VALIDITY_SECONDS.contains(&seconds) {
-            return Err("an invitation is valid for between a minute and 30 days".into());
+            return Err(InviteError::Validity {
+                min: Duration::from_secs(*VALIDITY_SECONDS.start()),
+                max: Duration::from_secs(*VALIDITY_SECONDS.end()),
+            });
         }
         Ok(seconds)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invitation {
-    pub uri: String,
     pub id: InvitationId,
-    pub identity: PublicKey,
-    pub access: Access,
-    pub expires: u64,
-    pub sequence: u64,
+    pub code: InvitationCode,
+    pub expires: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenInvitation {
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingInvitation {
     pub id: InvitationId,
-    pub identity: PublicKey,
     pub access: Access,
-    pub expires: u64,
-    pub redeemed_by: Option<PublicKey>,
+    pub partitions: Vec<Partition>,
+    pub label: Option<String>,
+    pub expires: Timestamp,
+    pub redeemed_by: Option<PersonId>,
+}
+
+fn timestamp(seconds: u64) -> Timestamp {
+    Timestamp::from_unix_micros(
+        i64::try_from(seconds)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InvitationRefusal {
+pub enum InviteError {
+    AdminRequired,
+    NetworkRequired,
+    TooManyOpen { limit: usize },
+    Validity { min: Duration, max: Duration },
+    LabelTooLong { limit: usize },
+    AlreadyMember,
+    Removed,
     Unknown,
+    Redeemed,
+}
+impl InviteError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AdminRequired => "admin_required",
+            Self::NetworkRequired => "network_required",
+            Self::TooManyOpen { .. } => "too_many_invitations",
+            Self::Validity { .. } => "invitation_validity",
+            Self::LabelTooLong { .. } => "label_too_long",
+            Self::AlreadyMember => "already_member",
+            Self::Removed => "removed",
+            Self::Unknown => "invitation_unknown",
+            Self::Redeemed => "invitation_redeemed",
+        }
+    }
+}
+impl std::fmt::Display for InviteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AdminRequired => f.write_str("only an admin invites people"),
+            Self::NetworkRequired => {
+                f.write_str("inviting needs an attached network the joiner can reach")
+            }
+            Self::TooManyOpen { limit } => write!(
+                f,
+                "at most {limit} invitations are open at once; cancel one or let it expire"
+            ),
+            Self::Validity { min, max } => write!(
+                f,
+                "an invitation is valid for between {}s and {}s",
+                min.as_secs(),
+                max.as_secs()
+            ),
+            Self::LabelTooLong { limit } => write!(f, "a label holds at most {limit} bytes"),
+            Self::AlreadyMember => f.write_str(
+                "the person is already a member with other access or an admin; link a device instead",
+            ),
+            Self::Removed => f.write_str("the person was removed"),
+            Self::Unknown => f.write_str("no such open invitation"),
+            Self::Redeemed => f.write_str("the invitation was already redeemed"),
+        }
+    }
+}
+impl std::error::Error for InviteError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinError {
+    Invalid,
     Expired,
     Used,
+    Cancelled,
     OtherIdentity,
+    OtherApplication,
+    IdentityRequired,
+    AlreadyMember,
+    Removed,
+    IssuerUnreachable,
 }
-impl InvitationRefusal {
-    const ALL: [Self; 4] = [
-        Self::Unknown,
+impl JoinError {
+    const CARRIED: [Self; 7] = [
+        Self::Invalid,
         Self::Expired,
         Self::Used,
+        Self::Cancelled,
         Self::OtherIdentity,
+        Self::AlreadyMember,
+        Self::Removed,
     ];
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Unknown => "invitation_unknown",
+            Self::Invalid => "invitation_invalid",
             Self::Expired => "invitation_expired",
             Self::Used => "invitation_used",
+            Self::Cancelled => "invitation_cancelled",
             Self::OtherIdentity => "invitation_other_identity",
+            Self::OtherApplication => "invitation_other_application",
+            Self::IdentityRequired => "identity_required",
+            Self::AlreadyMember => "already_member",
+            Self::Removed => "removed",
+            Self::IssuerUnreachable => "issuer_unreachable",
         }
     }
-    fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|refusal| refusal.code() == code)
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::IssuerUnreachable)
     }
     fn carried(error: Failure) -> Failure {
-        match error
+        if let Some(code) = error
             .downcast_ref::<PeerError>()
-            .and_then(|peer| Self::from_code(&peer.code))
+            .map(|peer| peer.code.clone())
         {
-            Some(refusal) => Box::new(refusal),
-            None => error,
+            return match Self::CARRIED
+                .into_iter()
+                .find(|refusal| refusal.code() == code)
+            {
+                Some(refusal) => Box::new(refusal),
+                None => error,
+            };
+        }
+        match error.downcast_ref::<ServiceError>() {
+            Some(
+                ServiceError::Unreachable(_)
+                | ServiceError::TimedOut(_)
+                | ServiceError::NoRoute { .. },
+            ) => Box::new(Self::IssuerUnreachable),
+            _ => error,
         }
     }
 }
-impl std::fmt::Display for InvitationRefusal {
+impl std::fmt::Display for JoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Unknown => {
-                "the issuer holds no such invitation; it was withdrawn or never issued"
-            }
+            Self::Invalid => "the invitation code is not valid",
             Self::Expired => "the invitation expired",
-            Self::Used => "another node already used the invitation",
+            Self::Used => "another device already used the invitation",
+            Self::Cancelled => "the issuer holds no such invitation; it was cancelled",
             Self::OtherIdentity => "the invitation is for another identity",
+            Self::OtherApplication => "the invitation is for another application's database",
+            Self::IdentityRequired => {
+                "the invitation is for an identity; configure it with Configuration::identity"
+            }
+            Self::AlreadyMember => {
+                "the identity is already a member; link this device from another of its devices"
+            }
+            Self::Removed => "the identity was removed from this database",
+            Self::IssuerUnreachable => "the admin that issued the invitation is not reachable",
         })
     }
 }
-impl std::error::Error for InvitationRefusal {}
+impl std::error::Error for JoinError {}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Holder {
+    Person(PublicKey),
+    Token(#[serde(with = "crate::registry::hex32")] [u8; 32]),
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Code {
+    v: u32,
+    id: InvitationId,
+    publisher: PublicKey,
+    database: DatabaseContext,
+    issuer: PublicKey,
+    routes: Vec<Route>,
+    holder: Holder,
+    access: Access,
+    application: String,
+    expires: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct InvitationCode(Box<Code>);
+impl InvitationCode {
+    fn token(&self) -> Option<&[u8; 32]> {
+        match &self.0.holder {
+            Holder::Token(token) => Some(token),
+            Holder::Person(_) => None,
+        }
+    }
+    pub(crate) fn person(&self) -> Option<PublicKey> {
+        match self.0.holder {
+            Holder::Person(person) => Some(person),
+            Holder::Token(_) => None,
+        }
+    }
+    pub(crate) fn access(&self) -> &Access {
+        &self.0.access
+    }
+    pub(crate) fn application(&self) -> &str {
+        &self.0.application
+    }
+    pub(crate) fn intent(&self) -> Commitment {
+        rocky_core::commitment("rocky.sdk.invitation-join.v2", &self.0.id.0)
+    }
+}
+impl std::fmt::Display for InvitationCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = serde_json::to_vec(&self.0).map_err(|_| std::fmt::Error)?;
+        write!(f, "{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&bytes))
+    }
+}
+impl std::fmt::Debug for InvitationCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("InvitationCode");
+        debug
+            .field("id", &self.0.id)
+            .field("expires", &self.0.expires);
+        match &self.0.holder {
+            Holder::Person(person) => debug.field("person", person),
+            Holder::Token(_) => debug.field("token", &"<redacted>"),
+        };
+        debug.finish()
+    }
+}
+impl std::str::FromStr for InvitationCode {
+    type Err = JoinError;
+    fn from_str(text: &str) -> Result<Self, JoinError> {
+        let parsed = || -> Result<Code, Failure> {
+            let bytes = BASE64URL_NOPAD.decode(
+                text.trim()
+                    .strip_prefix(INVITE_PREFIX)
+                    .ok_or("invalid invitation code")?
+                    .as_bytes(),
+            )?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if value["v"].as_u64() != Some(u64::from(INVITE_VERSION)) {
+                return Err("unsupported invitation version".into());
+            }
+            let code: Code = serde_json::from_value(value)?;
+            if code.database.publisher != code.publisher || code.routes.is_empty() {
+                return Err("invalid invitation code".into());
+            }
+            Contact::checked(code.routes.clone())?;
+            Ok(code)
+        };
+        parsed()
+            .map(|code| Self(Box::new(code)))
+            .map_err(|_| JoinError::Invalid)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredValue {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+impl StoredValue {
+    fn of(value: &SqlValue) -> Self {
+        match value {
+            SqlValue::Null => Self::Null,
+            SqlValue::Integer(value) => Self::Integer(*value),
+            SqlValue::Real(value) => Self::Real(value.bits()),
+            SqlValue::Text(value) => Self::Text(value.clone()),
+            SqlValue::Blob(value) => Self::Blob(value.clone()),
+        }
+    }
+    fn value(&self) -> SqlValue {
+        match self {
+            Self::Null => SqlValue::Null,
+            Self::Integer(value) => SqlValue::Integer(*value),
+            Self::Real(bits) => {
+                rocky_core::Real::from_bits(*bits).map_or(SqlValue::Null, SqlValue::Real)
+            }
+            Self::Text(value) => SqlValue::Text(value.clone()),
+            Self::Blob(value) => SqlValue::Blob(value.clone()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Pending {
-    identity: PublicKey,
-    access: Access,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    partitions: BTreeSet<HeldPartition>,
-    label: Option<Vec<u8>>,
-    expires: u64,
-    redeemed_by: Option<PublicKey>,
+struct Named {
+    group: String,
+    values: Vec<StoredValue>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    holder: Holder,
+    access: Access,
+    partitions: BTreeSet<HeldPartition>,
+    named: Vec<Named>,
+    label: Option<String>,
+    expires: u64,
+    redeemed: Option<(PublicKey, PublicKey)>,
+}
+
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Book {
     version: u32,
     open: BTreeMap<InvitationId, Pending>,
+}
+struct Opening {
+    holder: Holder,
+    access: Access,
+    partitions: BTreeSet<HeldPartition>,
+    named: Vec<Named>,
+    label: Option<String>,
 }
 impl Book {
     fn empty() -> Self {
@@ -213,53 +484,62 @@ impl Book {
     }
     fn open(
         &mut self,
-        identity: PublicKey,
-        (access, partitions, label): (Access, BTreeSet<HeldPartition>, Option<Vec<u8>>),
+        opening: Opening,
         validity: u64,
         time: u64,
-    ) -> Result<(InvitationId, u64), Failure> {
+    ) -> Result<(InvitationId, u64), InviteError> {
         self.forget_expired(time);
-        if self.open.len() >= MAX_OPEN_INVITATIONS {
-            return Err(format!(
-                "at most {MAX_OPEN_INVITATIONS} invitations are open at once; withdraw one or let it expire"
-            )
-            .into());
+        let unredeemed = self
+            .open
+            .values()
+            .filter(|pending| pending.redeemed.is_none())
+            .count();
+        if unredeemed >= MAX_OPEN {
+            return Err(InviteError::TooManyOpen { limit: MAX_OPEN });
         }
         let id = InvitationId::fresh();
         let expires = time.saturating_add(validity);
         self.open.insert(
             id,
             Pending {
-                identity,
-                access,
-                partitions,
-                label,
+                holder: opening.holder,
+                access: opening.access,
+                partitions: opening.partitions,
+                named: opening.named,
+                label: opening.label,
                 expires,
-                redeemed_by: None,
+                redeemed: None,
             },
         );
         Ok((id, expires))
     }
     fn redeem(
         &mut self,
-        id: InvitationId,
+        wire: &InvitedEnrollmentRequest,
         device: NodeKeys,
         time: u64,
-    ) -> Result<Redemption, InvitationRefusal> {
-        let pending = self.open.get_mut(&id).ok_or(InvitationRefusal::Unknown)?;
+    ) -> Result<Redemption, JoinError> {
+        let id = InvitationId(wire.invitation);
+        let pending = self.open.get_mut(&id).ok_or(JoinError::Cancelled)?;
         if pending.expires < time {
-            return Err(InvitationRefusal::Expired);
+            return Err(JoinError::Expired);
         }
-        if pending.identity != device.identity {
-            return Err(InvitationRefusal::OtherIdentity);
+        match &pending.holder {
+            Holder::Person(person) if *person != device.identity => {
+                return Err(JoinError::OtherIdentity);
+            }
+            Holder::Person(_) => {}
+            Holder::Token(token) => {
+                if !wire.proves_token(token).map_err(|_| JoinError::Invalid)? {
+                    return Err(JoinError::Invalid);
+                }
+            }
         }
-        if pending
-            .redeemed_by
-            .is_some_and(|redeemed| redeemed != device.node)
-        {
-            return Err(InvitationRefusal::Used);
+        let held = (device.identity, device.node);
+        if pending.redeemed.is_some_and(|redeemed| redeemed != held) {
+            return Err(JoinError::Used);
         }
-        let first = pending.redeemed_by.replace(device.node).is_none();
+        let first = pending.redeemed.replace(held).is_none();
         Ok(Redemption {
             access: pending.access.clone(),
             partitions: pending.partitions.clone(),
@@ -269,106 +549,91 @@ impl Book {
     }
     pub(crate) fn release(&mut self, id: InvitationId, node: PublicKey) -> bool {
         match self.open.get_mut(&id) {
-            Some(pending) if pending.redeemed_by == Some(node) => {
-                pending.redeemed_by = None;
+            Some(pending) if pending.redeemed.is_some_and(|(_, held)| held == node) => {
+                pending.redeemed = None;
                 true
             }
             _ => false,
         }
     }
-    pub(crate) fn withdraw(&mut self, id: InvitationId, time: u64) -> Result<(), Failure> {
+    pub(crate) fn cancel(&mut self, id: InvitationId, time: u64) -> Result<(), InviteError> {
         self.forget_expired(time);
-        let pending = self.open.get(&id).ok_or(InvitationRefusal::Unknown)?;
-        if pending.redeemed_by.is_some() {
-            return Err(Box::new(InvitationRefusal::Used));
+        let pending = self.open.get(&id).ok_or(InviteError::Unknown)?;
+        if pending.redeemed.is_some() {
+            return Err(InviteError::Redeemed);
         }
         self.open.remove(&id);
         Ok(())
     }
-    pub(crate) fn listed(&self, time: u64) -> Vec<OpenInvitation> {
+    pub(crate) fn listed(&self, time: u64) -> Vec<PendingInvitation> {
         self.open
             .iter()
             .filter(|(_, pending)| time <= pending.expires)
-            .map(|(id, pending)| OpenInvitation {
+            .map(|(id, pending)| PendingInvitation {
                 id: *id,
-                identity: pending.identity,
                 access: pending.access.clone(),
-                expires: pending.expires,
-                redeemed_by: pending.redeemed_by,
+                partitions: pending
+                    .named
+                    .iter()
+                    .map(|named| {
+                        Partition::new(
+                            named.group.clone(),
+                            named.values.iter().map(StoredValue::value).collect(),
+                        )
+                    })
+                    .collect(),
+                label: pending.label.clone(),
+                expires: timestamp(pending.expires),
+                redeemed_by: pending
+                    .redeemed
+                    .map(|(identity, _)| PersonId::new(identity)),
             })
             .collect()
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Invite {
-    v: u32,
-    id: InvitationId,
-    publisher: PublicKey,
-    database: DatabaseContext,
-    issuer: PublicKey,
-    routes: Vec<Route>,
-    identity: PublicKey,
-    expires: u64,
-}
-impl Invite {
-    fn uri(&self) -> Result<String, Failure> {
-        Ok(format!(
-            "{INVITE_PREFIX}{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(self)?)
-        ))
-    }
-    fn parse(uri: &str) -> Result<Self, Failure> {
-        let bytes = BASE64URL_NOPAD.decode(
-            uri.trim()
-                .strip_prefix(INVITE_PREFIX)
-                .ok_or("invalid invitation URI")?
-                .as_bytes(),
-        )?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["v"].as_u64() != Some(u64::from(INVITE_VERSION)) {
-            return Err("unsupported invitation version".into());
-        }
-        let invite: Self = serde_json::from_value(value)?;
-        if invite.database.publisher != invite.publisher {
-            return Err("invitation database publisher mismatch".into());
-        }
-        if invite.routes.is_empty() {
-            return Err("the invitation names no route to its issuer".into());
-        }
-        Contact::checked(invite.routes.clone())?;
-        Ok(invite)
-    }
-}
-fn keeps_recorded_access(
+fn admissible(
+    settings: &Settings,
     registry: &Registry,
     identity: &PublicKey,
     access: &Access,
 ) -> Result<(), Failure> {
-    if registry
+    if settings.revoked_identity(identity, registry) {
+        return Err(Box::new(JoinError::Removed));
+    }
+    let other_access = registry
         .get(identity)
         .and_then(crate::registry::IdentityRecord::access)
-        .is_some_and(|held| held != access)
+        .is_some_and(|held| held != access);
+    if *identity == settings.identity
+        || *identity == settings.publisher
+        || registry.trusted.contains_key(identity)
+        || other_access
     {
-        return Err("the identity already holds other access in this database".into());
+        return Err(Box::new(JoinError::AlreadyMember));
     }
     Ok(())
 }
-pub(crate) fn check_uri(uri: &str) -> Result<(), Failure> {
-    Invite::parse(uri).map(drop)
-}
 
 pub(crate) struct Issued {
-    pub(crate) uri: String,
+    pub(crate) code: InvitationCode,
     pub(crate) id: InvitationId,
     pub(crate) expires: u64,
+}
+impl Issued {
+    pub(crate) fn invitation(self) -> Invitation {
+        Invitation {
+            id: self.id,
+            code: self.code,
+            expires: timestamp(self.expires),
+        }
+    }
 }
 #[derive(Debug, PartialEq)]
 struct Redemption {
     access: Access,
     partitions: BTreeSet<HeldPartition>,
-    label: Option<Vec<u8>>,
+    label: Option<String>,
     first: bool,
 }
 
@@ -385,54 +650,81 @@ impl Settings {
         &self,
         (vault, routes): (&Vault, Vec<Route>),
         book: &mut Book,
-        (identity, access, terms): (PublicKey, Access, &InviteTerms),
+        invite: &Invite,
         registry: &Registry,
         time: u64,
     ) -> Result<Issued, Failure> {
-        let validity = terms.validity()?;
-        if terms
+        if !self.issuer() {
+            return Err(Box::new(InviteError::AdminRequired));
+        }
+        let validity = invite.validity()?;
+        if invite
             .label
             .as_ref()
-            .is_some_and(|label| label.len() > crate::registry::MAX_LABEL)
+            .is_some_and(|label| label.len() > MAX_LABEL)
         {
-            return Err("identity label exceeds 256 bytes".into());
-        }
-        if !self.issuer() {
-            return Err("only an issuer invites identities".into());
+            return Err(Box::new(InviteError::LabelTooLong { limit: MAX_LABEL }));
         }
         let domain = self.domain()?;
-        let partitions = domain.partition_targets(&terms.partitions)?;
-        domain.compile(&access, &partitions)?;
-        if self.revoked_identity(&identity, registry) {
-            return Err("the identity was revoked".into());
-        }
-        keeps_recorded_access(registry, &identity, &access)?;
-        if identity == self.identity || registry.trusted.contains_key(&identity) {
-            return Err(
-                "a trusted identity links its nodes instead of accepting an invitation".into(),
-            );
-        }
-        if registry.full_for(&identity) {
-            return Err(Box::new(RegistryFull));
+        let targets: Vec<_> = invite.partitions.iter().map(Partition::target).collect();
+        let partitions = domain.partition_targets(&targets)?;
+        domain.compile(&invite.access, &partitions)?;
+        let holder = match invite.person {
+            Some(person) => {
+                let identity = person.key();
+                admissible(self, registry, &identity, &invite.access).map_err(|error| {
+                    match error.downcast_ref::<JoinError>() {
+                        Some(JoinError::Removed) => Box::new(InviteError::Removed) as Failure,
+                        Some(_) => Box::new(InviteError::AlreadyMember),
+                        None => error,
+                    }
+                })?;
+                if registry.full_for(&identity) {
+                    return Err(Box::new(RegistryFull));
+                }
+                Holder::Person(identity)
+            }
+            None => {
+                if registry.identities() >= crate::registry::MAX_IDENTITIES {
+                    return Err(Box::new(RegistryFull));
+                }
+                Holder::Token(rocky_platform::entropy::random())
+            }
+        };
+        if routes.is_empty() {
+            return Err(Box::new(InviteError::NetworkRequired));
         }
         let (id, expires) = book.open(
-            identity,
-            (access, partitions, terms.label.clone()),
+            Opening {
+                holder: holder.clone(),
+                access: invite.access.clone(),
+                partitions,
+                named: invite
+                    .partitions
+                    .iter()
+                    .map(|partition| Named {
+                        group: partition.group.clone(),
+                        values: partition.values.iter().map(StoredValue::of).collect(),
+                    })
+                    .collect(),
+                label: invite.label.clone(),
+            },
             validity,
             time,
         )?;
-        let uri = Invite {
+        let code = InvitationCode(Box::new(Code {
             v: INVITE_VERSION,
             id,
             publisher: self.publisher,
             database: self.database_context()?,
             issuer: Self::node_key(vault)?.public_key(),
             routes,
-            identity,
+            holder,
+            access: invite.access.clone(),
+            application: self.schema.application.clone(),
             expires,
-        }
-        .uri()?;
-        Ok(Issued { uri, id, expires })
+        }));
+        Ok(Issued { code, id, expires })
     }
 
     pub(crate) fn answer_invitation(
@@ -444,38 +736,41 @@ impl Settings {
         time: u64,
     ) -> Result<Redeemed, Failure> {
         if !self.issuer() {
-            return Err("only an issuer answers invitations".into());
+            return Err("only an admin answers invitations".into());
         }
         wire.verify_binding()?;
-        let request = wire.request;
         let answering = Self::node_key(vault)?;
-        request.verify(
+        wire.request.verify(
             answering.public_key(),
-            request.identity,
+            wire.request.identity,
             (time, SKEW),
             self.database_context()?,
         )?;
         let id = InvitationId(wire.invitation);
         let device = NodeKeys {
-            identity: request.identity,
-            node: request.node,
+            identity: wire.request.identity,
+            node: wire.request.node,
         };
         let Redemption {
             access,
             partitions,
             label,
             first,
-        } = book.redeem(id, device, time)?;
-        keeps_recorded_access(registry, &device.identity, &access)?;
+        } = book.redeem(&wire, device, time)?;
+        admissible(self, registry, &device.identity, &access)?;
+        if self.tombstoned(&device.node) {
+            return Err(Box::new(JoinError::Removed));
+        }
         let (enrollment, changes) = self.enrollment_for(
             vault,
             device,
-            (access, partitions, label),
+            (access, partitions, label.map(String::into_bytes)),
             Some(id),
             registry,
         )?;
         Ok(Redeemed {
-            answer: request
+            answer: wire
+                .request
                 .answer(&answering, &serde_json::to_vec(&enrollment)?)?
                 .to_bytes()?,
             changes,
@@ -488,33 +783,27 @@ impl Settings {
     pub(crate) fn prepare_invited(
         path: &Path,
         store: &Arc<dyn crate::SecretStore>,
-        provider: &Arc<dyn IdentityProvider>,
-        invitation: &str,
-    ) -> Result<(Intent, Vault), Failure> {
-        let invite = Invite::parse(invitation)?;
-        if provider.public_key()? != invite.identity {
-            return Err(Box::new(InvitationRefusal::OtherIdentity));
+        provider: Option<&Arc<dyn IdentityProvider>>,
+        code: &InvitationCode,
+    ) -> Result<crate::enrollment::Prepared, Failure> {
+        match (code.person(), provider) {
+            (Some(_), None) => return Err(Box::new(JoinError::IdentityRequired)),
+            (Some(person), Some(provider)) if provider.public_key()? != person => {
+                return Err(Box::new(JoinError::OtherIdentity));
+            }
+            _ => {}
         }
-        Intent::resume(
-            &Intent::path(path, false),
-            Some(rocky_core::commitment(
-                "rocky.sdk.invitation-join.v1",
-                &invite.id.0,
-            )),
-            store,
-            Some(provider),
-            false,
-        )
+        Intent::resume(&Intent::path(path, false), code.intent(), store, provider)
     }
 
     pub(crate) async fn enroll_invited(
         (path, schema): (&Path, Option<&Schema>),
         (intent, vault): (Intent, Vault),
         provider: Arc<dyn IdentityProvider>,
-        invitation: &str,
+        code: &InvitationCode,
         transport: &dyn Transport,
     ) -> Result<Self, Failure> {
-        let invite = Invite::parse(invitation)?;
+        let invite = &code.0;
         let addresses = invite
             .routes
             .iter()
@@ -522,11 +811,7 @@ impl Settings {
             .map(|route| route.address.clone())
             .collect::<Vec<_>>();
         if addresses.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer: "the inviting issuer",
-                network: transport.kind().into(),
-            }
-            .into());
+            return Err(Box::new(JoinError::IssuerUnreachable));
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let (request, secret) =
@@ -536,18 +821,18 @@ impl Settings {
             &addresses,
             invite.database.scope,
             &PeerRequest::Identity(Box::new(IdentityEnrollment::Invited(
-                InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, &node)?,
+                InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, code.token(), &node)?,
             ))),
         )
         .await
-        .map_err(InvitationRefusal::carried)?;
+        .map_err(JoinError::carried)?;
         let PeerReply::Identity(IdentityReply::Enrolled(sealed)) = reply else {
             return Err("invitation reply kind".into());
         };
         let enrollment: Enrollment =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&sealed)?.open(&request, &secret)?)?;
         if enrollment.issuer() != invite.issuer {
-            return Err("the answer comes from another issuer than the invitation names".into());
+            return Err("the answer comes from another admin than the invitation names".into());
         }
         let settings = Self::install_enrollment(
             schema,
@@ -555,13 +840,13 @@ impl Settings {
             EnrollingIssuer {
                 publisher: invite.publisher,
                 database: invite.database,
-                routes: invite.routes,
+                routes: invite.routes.clone(),
             },
             enrollment,
-            (provider, intent.single_use),
+            provider,
         )?;
         settings.save(path).await?;
-        rocky_platform::fs::remove_file(Intent::path(path, false))?;
+        intent.finish(path, &vault)?;
         Ok(settings)
     }
 }
@@ -582,51 +867,100 @@ mod tests {
             node: key(node),
         }
     }
-    fn writer() -> Access {
-        Access::Full
+    fn database() -> DatabaseContext {
+        DatabaseContext {
+            publisher: key(3),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        }
     }
-    fn opened(book: &mut Book, identity: u8) -> InvitationId {
-        book.open(
-            key(identity),
-            (writer(), BTreeSet::new(), None),
-            OPEN_FOR,
-            NOW,
-        )
-        .expect("open invitation")
-        .0
+    fn opening(holder: Holder) -> Opening {
+        Opening {
+            holder,
+            access: Access::Full,
+            partitions: BTreeSet::new(),
+            named: Vec::new(),
+            label: None,
+        }
+    }
+    fn opened(book: &mut Book, holder: Holder) -> InvitationId {
+        book.open(opening(holder), OPEN_FOR, NOW)
+            .expect("open invitation")
+            .0
+    }
+    fn wire(
+        id: InvitationId,
+        identity: u8,
+        node: u8,
+        token: Option<&[u8; 32]>,
+    ) -> InvitedEnrollmentRequest {
+        let person = PrivateKey::from_bytes(&[identity; 32]);
+        let node = PrivateKey::from_bytes(&[node; 32]);
+        let (request, _) =
+            IdentityRequest::sign(&person, &node, key(4), NOW, database()).expect("request");
+        InvitedEnrollmentRequest::sign(request, id.0, token, &node).expect("bound request")
+    }
+    fn redeemed(
+        book: &mut Book,
+        wire: &InvitedEnrollmentRequest,
+        time: u64,
+    ) -> Result<bool, JoinError> {
+        let device = NodeKeys {
+            identity: wire.request.identity,
+            node: wire.request.node,
+        };
+        book.redeem(wire, device, time)
+            .map(|redemption| redemption.first)
     }
 
     #[test]
-    fn an_invitation_admits_only_its_identity_and_then_only_the_node_that_redeemed_it() {
+    fn a_token_invitation_admits_the_first_device_that_proves_the_token_once() {
         let mut book = Book::empty();
-        let id = opened(&mut book, 1);
+        let token = [6; 32];
+        let id = opened(&mut book, Holder::Token(token));
         assert_eq!(
-            book.redeem(id, device(2, 10), NOW),
-            Err(InvitationRefusal::OtherIdentity)
+            redeemed(&mut book, &wire(id, 1, 10, Some(&[7; 32])), NOW),
+            Err(JoinError::Invalid),
+            "a wrong token proves nothing"
         );
         assert_eq!(
-            book.redeem(id, device(1, 10), NOW),
-            Ok(Redemption {
-                access: writer(),
-                partitions: BTreeSet::new(),
-                label: None,
-                first: true
-            })
+            redeemed(&mut book, &wire(id, 1, 10, None), NOW),
+            Err(JoinError::Invalid),
+            "a token invitation needs the token's proof"
         );
         assert_eq!(
-            book.redeem(id, device(1, 10), NOW + 1),
-            Ok(Redemption {
-                access: writer(),
-                partitions: BTreeSet::new(),
-                label: None,
-                first: false
-            }),
-            "the redeeming node retries an answer it lost"
+            redeemed(&mut book, &wire(id, 1, 10, Some(&token)), NOW),
+            Ok(true)
         );
         assert_eq!(
-            book.redeem(id, device(1, 11), NOW + 1),
-            Err(InvitationRefusal::Used),
-            "a second node of the same identity links instead"
+            redeemed(&mut book, &wire(id, 1, 10, Some(&token)), NOW + 1),
+            Ok(false),
+            "the redeeming device retries an answer it lost"
+        );
+        assert_eq!(
+            redeemed(&mut book, &wire(id, 2, 20, Some(&token)), NOW + 1),
+            Err(JoinError::Used),
+            "a token is single use"
+        );
+        assert_eq!(book.listed(NOW)[0].redeemed_by, Some(PersonId::new(key(1))));
+    }
+
+    #[test]
+    fn an_identity_invitation_admits_only_that_identity() {
+        let mut book = Book::empty();
+        let id = opened(&mut book, Holder::Person(key(1)));
+        assert_eq!(
+            redeemed(&mut book, &wire(id, 2, 10, None), NOW),
+            Err(JoinError::OtherIdentity)
+        );
+        assert_eq!(redeemed(&mut book, &wire(id, 1, 10, None), NOW), Ok(true));
+        assert_eq!(
+            redeemed(&mut book, &wire(id, 1, 11, None), NOW),
+            Err(JoinError::Used),
+            "a second device of the same identity links instead"
         );
     }
 
@@ -635,17 +969,22 @@ mod tests {
         let mut book = Book::empty();
         let id = book
             .open(
-                key(1),
-                (writer(), BTreeSet::new(), Some(b"Alice".to_vec())),
+                Opening {
+                    label: Some("Alice".into()),
+                    ..opening(Holder::Person(key(1)))
+                },
                 OPEN_FOR,
                 NOW,
             )
             .expect("open invitation")
             .0;
-        let first = book.redeem(id, device(1, 10), NOW).expect("redeemed");
-        assert!(first.first);
-        assert_eq!(first.label.as_deref(), Some(b"Alice".as_slice()));
-        let retried = book.redeem(id, device(1, 10), NOW).expect("redeemed");
+        let first = book
+            .redeem(&wire(id, 1, 10, None), device(1, 10), NOW)
+            .expect("redeemed");
+        assert_eq!(first.label.as_deref(), Some("Alice"));
+        let retried = book
+            .redeem(&wire(id, 1, 10, None), device(1, 10), NOW)
+            .expect("redeemed");
         assert!(!retried.first);
         assert_eq!(
             retried.label, None,
@@ -657,71 +996,59 @@ mod tests {
         );
         assert!(book.release(id, key(10)));
         assert!(book.listed(NOW)[0].redeemed_by.is_none());
-        let again = book.redeem(id, device(1, 11), NOW).expect("redeemed");
+        let again = book
+            .redeem(&wire(id, 1, 11, None), device(1, 11), NOW)
+            .expect("redeemed");
         assert!(again.first);
-        assert_eq!(again.label.as_deref(), Some(b"Alice".as_slice()));
     }
 
     #[test]
-    fn an_invitation_ends_at_its_expiry_even_for_the_node_that_redeemed_it() {
+    fn an_invitation_ends_at_its_expiry_even_for_the_device_that_redeemed_it() {
         let mut book = Book::empty();
-        let id = opened(&mut book, 1);
-        assert!(book.redeem(id, device(1, 10), NOW + OPEN_FOR).is_ok());
+        let id = opened(&mut book, Holder::Person(key(1)));
+        assert!(redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR).is_ok());
         assert_eq!(
-            book.redeem(id, device(1, 10), NOW + OPEN_FOR + 1),
-            Err(InvitationRefusal::Expired)
-        );
-        let unused = opened(&mut book, 2);
-        assert_eq!(
-            book.redeem(unused, device(2, 20), NOW + OPEN_FOR + 1),
-            Err(InvitationRefusal::Expired)
+            redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR + 1),
+            Err(JoinError::Expired)
         );
         assert!(book.listed(NOW + OPEN_FOR + 1).is_empty());
         book.forget_expired(NOW + OPEN_FOR + 1);
         assert_eq!(
-            book.redeem(unused, device(2, 20), NOW + OPEN_FOR + 1),
-            Err(InvitationRefusal::Unknown),
+            redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR + 1),
+            Err(JoinError::Cancelled),
             "an expired invitation is forgotten once the book is next written"
         );
     }
 
     #[test]
-    fn only_an_unused_invitation_is_withdrawn() {
+    fn only_an_unused_invitation_is_cancelled() {
         let mut book = Book::empty();
-        let unused = opened(&mut book, 1);
-        let used = opened(&mut book, 2);
-        assert!(book.redeem(used, device(2, 20), NOW).is_ok());
-        assert!(book.withdraw(unused, NOW).is_ok());
+        let unused = opened(&mut book, Holder::Person(key(1)));
+        let used = opened(&mut book, Holder::Person(key(2)));
+        assert!(redeemed(&mut book, &wire(used, 2, 20, None), NOW).is_ok());
+        assert_eq!(book.cancel(unused, NOW), Ok(()));
         assert_eq!(
-            book.redeem(unused, device(1, 10), NOW),
-            Err(InvitationRefusal::Unknown)
+            redeemed(&mut book, &wire(unused, 1, 10, None), NOW),
+            Err(JoinError::Cancelled)
         );
-        let refused = book
-            .withdraw(used, NOW)
-            .expect_err("a used invitation stays");
-        assert_eq!(
-            refused.downcast_ref::<InvitationRefusal>(),
-            Some(&InvitationRefusal::Used)
-        );
-        let listed = book.listed(NOW);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].redeemed_by, Some(key(20)));
+        assert_eq!(book.cancel(used, NOW), Err(InviteError::Redeemed));
+        assert_eq!(book.cancel(unused, NOW), Err(InviteError::Unknown));
     }
 
     #[test]
     fn the_book_holds_a_bounded_number_of_open_invitations() {
         let mut book = Book::empty();
-        for _ in 0..MAX_OPEN_INVITATIONS {
-            opened(&mut book, 1);
+        for _ in 0..MAX_OPEN {
+            opened(&mut book, Holder::Person(key(1)));
         }
-        assert!(
-            book.open(key(1), (writer(), BTreeSet::new(), None), OPEN_FOR, NOW)
-                .is_err()
+        assert_eq!(
+            book.open(opening(Holder::Person(key(1))), OPEN_FOR, NOW)
+                .err(),
+            Some(InviteError::TooManyOpen { limit: MAX_OPEN })
         );
         assert!(
             book.open(
-                key(1),
-                (writer(), BTreeSet::new(), None),
+                opening(Holder::Person(key(1))),
                 OPEN_FOR,
                 NOW + OPEN_FOR + 1
             )
@@ -733,78 +1060,72 @@ mod tests {
     #[test]
     fn the_book_reads_back_only_its_own_version() -> Result<(), Failure> {
         let mut book = Book::empty();
-        opened(&mut book, 1);
-        assert_eq!(Book::parse(&book.to_bytes()?)?, book);
+        opened(&mut book, Holder::Token([1; 32]));
+        assert!(Book::parse(&book.to_bytes()?)? == book);
         let mut other: serde_json::Value = serde_json::from_slice(&book.to_bytes()?)?;
-        other["version"] = serde_json::json!(BOOK_VERSION + 1);
+        other["version"] = serde_json::json!(BOOK_VERSION - 1);
         assert!(Book::parse(&serde_json::to_vec(&other)?).is_err());
         Ok(())
     }
 
-    #[test]
-    fn an_invitation_uri_carries_no_secret_and_needs_a_route() -> Result<(), Failure> {
-        let publisher = key(3);
-        let invite = Invite {
+    fn code(holder: Holder) -> Code {
+        Code {
             v: INVITE_VERSION,
             id: InvitationId([7; 32]),
-            publisher,
-            database: DatabaseContext {
-                publisher,
-                scope: rocky_core::Scope {
-                    mesh: rocky_core::MeshId([1; 16]),
-                    app: rocky_core::AppId([2; 16]),
-                    domain: rocky_core::DomainId([3; 16]),
-                },
-            },
+            publisher: key(3),
+            database: database(),
             issuer: key(4),
             routes: vec![Route {
                 transport: "memory".into(),
                 address: "issuer".into(),
             }],
-            identity: key(1),
+            holder,
+            access: Access::Full,
+            application: "shopping".into(),
             expires: NOW,
-        };
-        let parsed = Invite::parse(&invite.uri()?)?;
-        assert_eq!(parsed.id, invite.id);
-        assert_eq!(parsed.identity, key(1));
-        let fields: serde_json::Value = serde_json::to_value(&invite)?;
-        let mut names: Vec<&str> = fields
-            .as_object()
-            .ok_or("invite object")?
-            .keys()
-            .map(String::as_str)
-            .collect();
-        names.sort_unstable();
+        }
+    }
+
+    #[test]
+    fn a_code_round_trips_and_redacts_its_token() -> Result<(), Failure> {
+        let token = InvitationCode(Box::new(code(Holder::Token([9; 32]))));
+        let parsed: InvitationCode = token.to_string().parse()?;
+        assert!(parsed == token);
+        assert!(!format!("{token:?}").contains(&HEXLOWER.encode(&[9; 32])));
+        let person = InvitationCode(Box::new(code(Holder::Person(key(1)))));
         assert_eq!(
-            names,
-            [
-                "database",
-                "expires",
-                "id",
-                "identity",
-                "issuer",
-                "publisher",
-                "routes",
-                "v"
-            ],
-            "an invitation names public keys and routes only"
+            person.to_string().parse::<InvitationCode>()?.person(),
+            Some(key(1))
         );
-        let unroutable = Invite {
+        let unroutable = InvitationCode(Box::new(Code {
             routes: Vec::new(),
-            ..invite
-        };
-        assert!(Invite::parse(&unroutable.uri()?).is_err());
+            ..code(Holder::Person(key(1)))
+        }));
+        assert_eq!(
+            unroutable.to_string().parse::<InvitationCode>().err(),
+            Some(JoinError::Invalid)
+        );
+        let mut older = serde_json::to_value(code(Holder::Person(key(1))))?;
+        older["v"] = serde_json::json!(INVITE_VERSION - 1);
+        let older = format!(
+            "{INVITE_PREFIX}{}",
+            BASE64URL_NOPAD.encode(&serde_json::to_vec(&older)?)
+        );
+        assert_eq!(
+            older.parse::<InvitationCode>().err(),
+            Some(JoinError::Invalid)
+        );
         Ok(())
     }
 
     #[test]
     fn a_refusal_crosses_the_wire_as_its_code() {
-        for refusal in InvitationRefusal::ALL {
+        for refusal in JoinError::CARRIED {
             let failure: Failure = Box::new(refusal);
             let carried = crate::peer::failure(&failure);
             assert_eq!(carried.code, refusal.code());
-            let received = InvitationRefusal::carried(Box::new(carried));
-            assert_eq!(received.downcast_ref::<InvitationRefusal>(), Some(&refusal));
+            let received = JoinError::carried(Box::new(carried));
+            assert_eq!(received.downcast_ref::<JoinError>(), Some(&refusal));
         }
     }
 }

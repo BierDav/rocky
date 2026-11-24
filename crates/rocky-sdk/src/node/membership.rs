@@ -1,14 +1,55 @@
 use super::*;
 
 impl Node {
-    pub(super) async fn unlink(
+    pub(super) async fn unlink(&self, target: rocky_credentials::PeerId) -> Result<(), Failure> {
+        let (own, issuer) = {
+            let settings = self.settings.lock().await;
+            let mut known = self.replica.revocations().await;
+            known.merge_in(&settings.revocations, settings.database_context()?, now()?)?;
+            if let Some(certificate) = settings.credentials.certificate() {
+                known.link(certificate.clone())?;
+            }
+            let own = known.certificates().any(|certificate| {
+                certificate.issuer == settings.identity
+                    && rocky_credentials::PeerId::of(certificate.capability.subject) == target
+            });
+            (own, settings.issuer())
+        };
+        if own {
+            return self.unlink_own(target).await.map(drop);
+        }
+        let (owner, node) = self
+            .membership()
+            .await?
+            .all()
+            .find(|(_, linked)| rocky_credentials::PeerId::of(linked.node) == target)
+            .map(|(owner, linked)| (owner, linked.node))
+            .ok_or(crate::LinkError::UnknownDevice)?;
+        if !issuer {
+            return Err(Box::new(crate::LinkError::AdminRequired));
+        }
+        self.revoke_with(
+            crate::enrollment::Revoke::Node { owner, node },
+            &Root::default(),
+            false,
+        )
+        .await?;
+        self.activity.record(crate::ActivityKind::NodeUnlinked {
+            identity: owner,
+            node,
+        });
+        Ok(())
+    }
+    pub(super) async fn unlink_own(
         &self,
         target: rocky_credentials::PeerId,
     ) -> Result<crate::DeviceRevocationReceipt, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
-        let identity = settings.identity()?;
+        let identity = settings
+            .identity()
+            .map_err(|_| crate::LinkError::IdentityRequired)?;
         let mut known = settings.revocations.clone();
         known.merge_in(
             &self.replica.revocations().await,
@@ -348,7 +389,7 @@ impl Node {
             .identity_links()
             .with_certificate(certificate.clone())
             .historic_provenance(current.publisher, certificate.capability.subject)?;
-        if current.single_use || certificate.issuer != current.identity {
+        if certificate.issuer != current.identity {
             return Err(refused("only this identity links its nodes"));
         }
         let mut known = self.replica.revocations().await;

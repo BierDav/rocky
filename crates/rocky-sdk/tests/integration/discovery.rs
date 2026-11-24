@@ -157,7 +157,7 @@ async fn simulator_peer() -> Result<(), Failure> {
             None,
             Some(starter(None, true)),
         )
-        .join(invitation.trim())
+        .join(&invitation.parse()?)
         .await?,
     )?;
     snap::observe(host.sync_now())

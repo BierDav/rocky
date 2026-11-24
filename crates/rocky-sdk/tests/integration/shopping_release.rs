@@ -29,13 +29,15 @@ impl Peer {
         Ok(Self { database })
     }
 
-    async fn invite(&self, access: rocky_sdk::Access) -> Result<String, Failure> {
-        Ok(
-            snap::value(self.database.provision(access, None)).await?["uri"]
-                .as_str()
-                .ok_or("uri")?
-                .to_owned(),
-        )
+    async fn invite(
+        &self,
+        access: rocky_sdk::Access,
+    ) -> Result<rocky_sdk::InvitationCode, Failure> {
+        Ok(self
+            .database
+            .invite(rocky_sdk::Invite::new(access))
+            .await?
+            .code)
     }
 
     async fn node(&self) -> Result<Value, Failure> {
@@ -203,7 +205,8 @@ async fn topology() -> Result<Topology, Failure> {
     let custody = Peer::new(
         open(&root.path().join("custody"), &hub, "custody")
             .join(&a.invite(rocky_sdk::Access::Store).await?)
-            .await?,
+            .await?
+            .database,
     )?;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
@@ -213,7 +216,8 @@ async fn topology() -> Result<Topology, Failure> {
                 )))
                 .await?,
             )
-            .await?,
+            .await?
+            .database,
     )?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
@@ -343,7 +347,8 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     let c = Peer::new(
         open(&_root.path().join("c"), &hub, "c")
             .join(&a.invite(rocky_sdk::Access::Full).await?)
-            .await?,
+            .await?
+            .database,
     )?;
     c.sync().await?;
     for list in [&weekly, &weekend] {

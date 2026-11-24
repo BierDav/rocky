@@ -77,19 +77,27 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .await;
     assert_eq!(data["rows"][0][0]["value"], "30");
     let reader_path = root.path().join("reader");
-    let provisioned = db
-        .provision(
-            rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("reader")),
-            None,
-        )
+    let invitation = db
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Role(
+            rocky_sdk::RoleName::from_static("reader"),
+        )))
         .await
         .unwrap();
     let reader = open(&reader_path, &hub)
-        .join(&provisioned.uri)
+        .join(&invitation.code)
         .await
+        .unwrap()
+        .database;
+    let reader_identity: rocky_sdk::PublicKey = reader
+        .status()
+        .await
+        .unwrap()
+        .authority
+        .principal
+        .parse()
         .unwrap();
     snap::ok(db.grant_partition(
-        provisioned.identity,
+        reader_identity,
         rocky_sdk::PartitionTarget::Table {
             table: "items".to_owned(),
             values: values("A"),
@@ -169,7 +177,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     }))
     .await;
     let revoked =
-        snap::ok(db.revoke_identity(snap::public_key(&(provisioned.identity.to_string())))).await;
+        snap::ok(db.revoke_identity(snap::public_key(&(reader_identity.to_string())))).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();

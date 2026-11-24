@@ -150,12 +150,16 @@ async fn checkpoint_writer(
         .await?;
     snap::value(issuer.database.seal()).await?;
     snap::value(issuer.database.compact(0)).await?;
-    let invite = snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?;
+    let invite = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
     let writer_path = root.join("writer");
     let writer = Peer::new(
         at(&writer_path, hub, "writer", schema)
-            .join(invite["uri"].as_str().ok_or("uri")?)
-            .await?,
+            .join(&invite.code)
+            .await?
+            .database,
     )?;
     let writer_node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
@@ -205,11 +209,15 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    let invite = snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?;
+    let invite = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
     let writer = Peer::new(
         at(&root.path().join("writer"), &hub, "writer", ORDERED)
-            .join(invite["uri"].as_str().ok_or("uri")?)
-            .await?,
+            .join(&invite.code)
+            .await?
+            .database,
     )?;
     let node = snap::value(writer.database.info()).await?["node"].clone();
     snap::value(
@@ -365,11 +373,15 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
             .await?,
         [json!("Base list"), json!("Member list")]
     );
-    let read_invite = snap::value(issuer.database.provision(rocky_sdk::Access::Read, None)).await?;
+    let read_invite = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Read))
+        .await?;
     let reader = Peer::new(
         open(&root.path().join("reader"), &hub, "reader")
-            .join(read_invite["uri"].as_str().ok_or("uri")?)
-            .await?,
+            .join(&read_invite.code)
+            .await?
+            .database,
     )?;
     assert!(
         snap::value(reader.database.next_partition("lists"))
@@ -392,15 +404,16 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
             .await?
             .database,
     )?;
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     only_explicit_syncs(&[&issuer, &writer]).await?;
 
@@ -518,15 +531,16 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .await?
             .database,
     )?;
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     snap::value(writer.sync_now()).await?;
     snap::value(issuer.database.next_partition("lists")).await?;
@@ -572,7 +586,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
 
     let served = kinds(&snap::value(issuer.database.activity(0)).await?);
     for kind in [
-        "device_provisioned",
+        "invitation_redeemed",
         "partition_created",
         "partition_shared",
     ] {
@@ -643,15 +657,16 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             .await?
             .database,
     )?;
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     snap::value(writer.sync_now()).await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
@@ -768,15 +783,16 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
             .await?
             .database,
     )?;
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
@@ -862,14 +878,16 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             "INSERT INTO lists(id,title) VALUES(?,'Own list')",
         )
         .await?;
-    let invitation = snap::value(a.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation = a
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     snap::value(b.sync_now()).await?;
     assert_eq!(
@@ -921,14 +939,16 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     let created = open(&root.path().join("a"), &hub, "a").create().await?;
     let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.root);
     let a = Peer::new(created.database)?;
-    let invitation = snap::value(a.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-        .as_str()
-        .ok_or("uri")?
-        .to_owned();
+    let invitation = a
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     let trusted = a
         .database
@@ -984,12 +1004,13 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
-    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?.with_identity(&b);
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
+    let writer =
+        Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?.with_identity(&b);
     snap::value(
         writer.database.set_replica_role(
             serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
@@ -1111,12 +1132,13 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
-    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?.with_identity(&b);
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
+    let writer =
+        Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?.with_identity(&b);
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -1247,15 +1269,16 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let writer = Peer::new(
         at_without_identity(&b, &hub, "b", SCHEMA)
             .join(&invitation)
-            .await?,
+            .await?
+            .database,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
@@ -1379,12 +1402,12 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer = Peer::new(open(&a, &hub, "a").create().await?.database)?.with_identity(&a);
-    let invitation =
-        snap::value(issuer.database.provision(rocky_sdk::Access::Full, None)).await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned();
-    let member = Peer::new(open(&b, &hub, "b").join(&invitation).await?)?;
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
+    let member = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(

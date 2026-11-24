@@ -16,57 +16,39 @@ pub(super) struct RedemptionGate {
 impl Node {
     pub(super) async fn invite(
         &self,
-        identity: PublicKey,
-        access: crate::Access,
-        terms: crate::InviteTerms,
+        invite: &crate::Invite,
     ) -> Result<crate::Invitation, Failure> {
         let routes = self.own_routes().await;
-        if routes.is_empty() {
-            return Err(ServiceError::NetworkRequired("invite an identity").into());
-        }
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let issued = {
             let settings = self.settings.lock().await;
             let mut book = Book::read(&self.replica).await?;
             let time = now()?;
             let issued = settings
-                .invite(
-                    (&self.vault, routes),
-                    &mut book,
-                    (identity, access.clone(), &terms),
-                    &registry,
-                    time,
-                )
+                .invite((&self.vault, routes), &mut book, invite, &registry, time)
                 .map_err(named)?;
             self.replica
                 .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
                 .await?;
             issued
         };
-        let sequence = self.activity.record(crate::ActivityKind::IdentityInvited {
+        self.activity.record(crate::ActivityKind::IdentityInvited {
             invitation: issued.id,
-            identity,
-            access: access.clone(),
+            person: issued.code.person().map(crate::PersonId::new),
+            access: invite.access().clone(),
             expires: issued.expires,
         });
-        Ok(crate::Invitation {
-            uri: issued.uri,
-            id: issued.id,
-            identity,
-            access,
-            expires: issued.expires,
-            sequence,
-        })
+        Ok(issued.invitation())
     }
 
-    pub(super) async fn withdraw_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {
+    pub(super) async fn cancel_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {
         let settings = self.settings.lock().await;
         if !settings.issuer() {
-            return Err(refused("only an issuer withdraws invitations"));
+            return Err(Box::new(crate::InviteError::AdminRequired));
         }
         let mut book = Book::read(&self.replica).await?;
         let time = now()?;
-        book.withdraw(id, time)?;
+        book.cancel(id, time)?;
         self.replica
             .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
             .await?;
@@ -74,10 +56,10 @@ impl Node {
         Ok(())
     }
 
-    pub(super) async fn open_invitations(&self) -> Result<Vec<crate::OpenInvitation>, Failure> {
+    pub(super) async fn invitations(&self) -> Result<Vec<crate::PendingInvitation>, Failure> {
         let settings = self.settings.lock().await;
         if !settings.issuer() {
-            return Err(refused("only an issuer holds invitations"));
+            return Err(Box::new(crate::InviteError::AdminRequired));
         }
         let book = Book::read(&self.replica).await?;
         drop(settings);
@@ -121,6 +103,8 @@ impl Node {
                 error
             });
         }
+        self.see(redeemed.device.identity, redeemed.device.node)
+            .await?;
         if redeemed.first {
             self.activity
                 .record(crate::ActivityKind::InvitationRedeemed {

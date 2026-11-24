@@ -93,8 +93,12 @@ impl Device {
     async fn restart(self) -> Result<Self, Failure> {
         self.stop().await?.start().await
     }
-    async fn invite(&self, profile: crate::Access) -> Result<String, Failure> {
-        Ok(self.database.provision(profile, None).await?.uri)
+    async fn invite(&self, profile: crate::Access) -> Result<crate::InvitationCode, Failure> {
+        Ok(self
+            .database
+            .invite(crate::Invite::new(profile))
+            .await?
+            .code)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
         Ok(snap::value(
@@ -243,7 +247,10 @@ async fn join(
     let directory = root.path().join(name);
     let invitation = issuer.invite(profile).await?;
     let device = Device::new(
-        open(&directory, hub, name)?.join(&invitation).await?,
+        open(&directory, hub, name)?
+            .join(&invitation)
+            .await?
+            .database,
         directory,
         name,
         hub,

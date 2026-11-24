@@ -66,16 +66,12 @@ impl Member {
         self.root = Some(root.clone());
         self.start(hub, Install::create(root)).await
     }
-    pub(super) async fn join(&mut self, hub: &Arc<Hub>, provisioning: &str) -> Result<(), Failure> {
-        self.start(
-            hub,
-            Install::Join {
-                provisioning: provisioning.into(),
-                single_use: true,
-                phrase: Arc::new(std::sync::Mutex::new(None)),
-            },
-        )
-        .await
+    pub(super) async fn join(
+        &mut self,
+        hub: &Arc<Hub>,
+        code: &crate::InvitationCode,
+    ) -> Result<(), Failure> {
+        self.start(hub, Install::invited(code).0).await
     }
     pub(super) async fn open(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
         self.start(hub, Install::Installed).await

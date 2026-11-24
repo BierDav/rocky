@@ -31,7 +31,7 @@ async fn join(
     root: &Path,
     hub: &Arc<Hub>,
     name: &str,
-    invitation: &str,
+    invitation: &rocky_sdk::InvitationCode,
 ) -> Result<Device, Failure> {
     Device::new(open(&root.join(name), hub, name).join(invitation).await?)
 }
@@ -174,10 +174,9 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
     let writer = Access::Role(NOTE_WRITER);
     let r = join(root, &hub, "r", &a.invite_as(reader.clone()).await).await?;
     let w = join(root, &hub, "w", &a.invite_as(writer.clone()).await).await?;
-    let refused = snap::observe(
-        a.database
-            .provision(Access::Role(RoleName::new("unknown")?), None),
-    )
+    let refused = snap::observe(a.database.invite(rocky_sdk::Invite::new(Access::Role(
+        RoleName::new("unknown")?,
+    ))))
     .await;
     assert!(refused.is_err(), "an undeclared role invites nobody");
     item(&a, 1, "Milk").await?;
@@ -209,7 +208,7 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
             "a reader writes nothing"
         );
         assert!(
-            snap::observe(r.database.provision(reader.clone(), None))
+            snap::observe(r.database.invite(rocky_sdk::Invite::new(reader.clone())))
                 .await
                 .is_err()
         );

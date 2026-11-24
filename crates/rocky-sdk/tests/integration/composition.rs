@@ -126,7 +126,15 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
         "sync requires a network: {error}"
     );
     assert_eq!(error["retryable"], json!(false));
-    let provisioning = database.provision(rocky_sdk::Access::Full, None).await?;
+    let offline = database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await
+        .err()
+        .ok_or("an invitation needs a route to its admin")?;
+    assert_eq!(
+        offline.kind,
+        rocky_sdk::ErrorKind::Invite(rocky_sdk::InviteError::NetworkRequired)
+    );
     database.close().await?;
     database.close().await?;
 
@@ -135,21 +143,14 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(titles(&database).await, ["Eggs", "Milk"]);
     database.close().await?;
 
-    let joined = open(&root.path().join("b"), None)
-        .join(&provisioning.uri)
-        .await?;
-    assert_eq!(transport(&joined).await, None);
-    joined.close().await?;
-    assert!(
-        open(&root.path().join("c"), None)
-            .join("rocky://provision/x")
-            .await
-            .is_err()
+    assert_eq!(
+        "rocky://provision/x"
+            .parse::<rocky_sdk::InvitationCode>()
+            .err(),
+        Some(rocky_sdk::JoinError::Invalid),
+        "an invalid code is refused before anything is stored"
     );
-    assert!(
-        !root.path().join("c").exists(),
-        "an invalid provisioning bundle is refused before anything is stored"
-    );
+    assert!(!root.path().join("c").exists());
     assert!(open(&root.path().join("c"), None).open().await.is_err());
     assert!(open(&directory, None).create().await.is_err());
     Ok(())
@@ -166,21 +167,25 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     .create()
     .await?
     .database;
-    let invitation = creator.provision(rocky_sdk::Access::Full, None).await?.uri;
+    let invitation = creator
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let member = open(
         &root.path().join("b"),
         Some(Network::Owned(memory(&hub, "b"))),
     )
     .join(&invitation)
-    .await?;
+    .await?
+    .database;
     member.sync_now().await?;
     member.close().await?;
     creator.close().await?;
     let enrolled = hub.counts();
     assert_eq!(
         enrolled,
-        [2, 2, 2],
-        "starts, dials, closes: 0-RTT provisioning needs no enrollment dial and bootstrap shares a link"
+        [2, 3, 2],
+        "starts, dials, closes: one dial redeems the invitation and one bootstraps"
     );
     assert!(!hub.listens("a"));
 
@@ -277,14 +282,18 @@ async fn borrowed_networks_outlive_a_detach_and_owned_ones_are_released() -> Res
         Some("memory"),
         "the status names the attached network's kind"
     );
-    let invitation = creator.provision(rocky_sdk::Access::Full, None).await?.uri;
+    let invitation = creator
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
 
     let member = open(
         &root.path().join("b"),
         Some(Network::Attached(dialing.clone())),
     )
     .join(&invitation)
-    .await?;
+    .await?
+    .database;
     assert_eq!(
         transport(&member).await.as_deref(),
         Some("memory"),
@@ -366,13 +375,17 @@ async fn a_detach_cancels_work_that_outlasts_its_drain() -> Result<(), Failure> 
     .create()
     .await?
     .database;
-    let invitation = creator.provision(rocky_sdk::Access::Full, None).await?.uri;
+    let invitation = creator
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?
+        .code;
     let member = open(
         &root.path().join("b"),
         Some(Network::Owned(memory(&hub, "b"))),
     )
     .join(&invitation)
-    .await?;
+    .await?
+    .database;
     add(&member, 1, "Milk").await;
 
     hub.stalled.store(true, Ordering::SeqCst);

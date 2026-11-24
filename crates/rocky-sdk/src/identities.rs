@@ -75,9 +75,6 @@ pub(crate) fn with_identity<T>(
 
 impl Settings {
     pub(crate) fn identity(&self) -> Result<Arc<dyn IdentityProvider>, Failure> {
-        if self.single_use {
-            return Err("a single-use identity cannot link or unlink nodes".into());
-        }
         self.installing_identity()
     }
     fn installing_identity(&self) -> Result<Arc<dyn IdentityProvider>, Failure> {
@@ -197,8 +194,7 @@ mod tests {
     use super::*;
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn identity_signers_are_call_scoped_and_single_use_identities_refuse_them()
-    -> Result<(), Failure> {
+    async fn identity_signers_are_call_scoped_and_never_stored() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = crate::Schema::builder("identity_lifecycle", 1)
             .table(
@@ -212,7 +208,7 @@ mod tests {
         let key = crate::IdentityKey::generate();
         let provider = Arc::new(crate::IdentityKey::from_secret(key.secret()));
         let weak = Arc::downgrade(&provider);
-        let mut settings = Settings::create(
+        let settings = Settings::create(
             &schema,
             &store,
             crate::enrollment::DEFAULT_TTL,
@@ -244,18 +240,7 @@ mod tests {
             );
             Ok::<_, Failure>(())
         })?;
-        settings.single_use = true;
-        with_identity(provider, || {
-            assert!(
-                settings
-                    .identity()
-                    .err()
-                    .ok_or("accepted identity")?
-                    .to_string()
-                    .contains("single-use")
-            );
-            Ok::<_, Failure>(())
-        })?;
+        drop(provider);
         assert!(weak.upgrade().is_none());
         assert!(vault.find("identity")?.is_none());
         Ok(())

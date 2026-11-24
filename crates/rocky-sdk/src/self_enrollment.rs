@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 const SKEW: u64 = 300;
+const BUNDLE_FORMAT: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,9 +50,9 @@ impl Bundle {
     }
 }
 
-pub struct AwaitingLink {
-    pub code: String,
-    pub node: rocky_credentials::PublicKey,
+pub(crate) struct AwaitingLink {
+    pub(crate) code: crate::LinkCode,
+    pub(crate) node: rocky_credentials::PublicKey,
     pub(crate) request: IdentityRequest,
     pub(crate) secret: rocky_credentials::Exchange,
 }
@@ -69,16 +70,10 @@ impl std::fmt::Display for AwaitingLink {
     }
 }
 impl std::error::Error for AwaitingLink {}
-impl PartialEq for AwaitingLink {
-    fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.node == other.node
-    }
-}
-impl Eq for AwaitingLink {}
 
 pub(crate) use rocky_credentials::IdentityEnrollmentRequest as LinkRequest;
 
-pub(crate) struct PendingLink {
+pub(crate) struct HeldLink {
     pub request: Vec<u8>,
     pub code: String,
     pub received: u64,
@@ -91,9 +86,6 @@ impl Settings {
         vault: &Vault,
         request: &[u8],
     ) -> Result<Vec<u8>, Failure> {
-        if self.single_use {
-            return Err("a single-use identity cannot link nodes".into());
-        }
         let request = IdentityRequest::from_bytes(request)?;
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         request.verify(
@@ -123,7 +115,7 @@ impl Settings {
             .held()
             .ok_or("missing identity capability")?;
         let bundle = Bundle {
-            format: 7,
+            format: BUNDLE_FORMAT,
             mesh: self.mesh,
             domain: self.domain,
             record: crate::tip_schemas::Record::new(&self.schema, self.generation, self.engine),
@@ -159,17 +151,13 @@ impl Settings {
         store: &Arc<dyn crate::SecretStore>,
         provider: &Arc<dyn IdentityProvider>,
         contact: &str,
-    ) -> Result<(Intent, Vault), Failure> {
+    ) -> Result<crate::enrollment::Prepared, Failure> {
         let record = crate::enrollment::ContactRecord::parse(contact)?;
         Intent::resume(
             &Intent::path(path, false),
-            Some(rocky_core::commitment(
-                "rocky.sdk.identity-join.v1",
-                record.node.as_bytes(),
-            )),
+            rocky_core::commitment("rocky.sdk.identity-join.v2", record.node.as_bytes()),
             store,
             Some(provider),
-            false,
         )
     }
     pub(crate) async fn enroll_identity(
@@ -212,7 +200,7 @@ impl Settings {
                 let (request, secret) =
                     IdentityRequest::sign(&*provider, &node, record.node, now()?, record.database)?;
                 Some(AwaitingLink {
-                    code: request.confirmation_code()?,
+                    code: crate::LinkCode(request.confirmation_code()?),
                     node: node.public_key(),
                     request,
                     secret,
@@ -226,7 +214,7 @@ impl Settings {
         let request = &linking.request;
         let wire = LinkRequest {
             request: request.clone(),
-            code: confirmed.as_ref().map(|pending| pending.code.clone()),
+            code: confirmed.as_ref().map(|pending| pending.code.0.clone()),
         };
         let reply = exchange(
             transport,
@@ -236,7 +224,8 @@ impl Settings {
                 wire,
             ))),
         )
-        .await?;
+        .await
+        .map_err(crate::LinkError::carried)?;
         if confirmed.is_none() {
             if !matches!(
                 reply,
@@ -252,7 +241,7 @@ impl Settings {
         let secret = &linking.secret;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(request, secret)?)?;
-        if bundle.format != 7 {
+        if bundle.format != BUNDLE_FORMAT {
             return Err("unsupported identity enrollment format".into());
         }
         bundle.record.bytes()?;
@@ -275,7 +264,7 @@ impl Settings {
             return Err("the previous membership link is void; retry to link a fresh node".into());
         }
         let mut settings = Settings::installed(
-            (intent.installation.clone(), intent.single_use),
+            intent.installation.clone(),
             (record.publisher, identity),
             (bundle.mesh, bundle.domain, bundle.record.schema.clone()),
             bundle.genesis.clone(),
@@ -353,7 +342,7 @@ impl Settings {
             return Err("the membership link is void; retry to link a fresh node".into());
         }
         settings.save(path).await?;
-        rocky_platform::fs::remove_file(Intent::path(path, false))?;
+        intent.finish(path, &vault)?;
         Ok(settings)
     }
 }

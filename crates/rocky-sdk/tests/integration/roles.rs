@@ -130,15 +130,14 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
             .await?,
     )?;
     insert(&admin, "tickets", ["T1", "Ada"]).await?;
-    let provisioned = admin
+    let invitation = admin
         .database
-        .provision(Access::Role(SCANNER), None)
+        .invite(rocky_sdk::Invite::new(Access::Role(SCANNER)))
         .await?;
-    assert_eq!(provisioned.access, Access::Role(SCANNER));
     let scanner_dir = root.path().join("scanner");
     let scanner = Device::new(
         open(&scanner_dir, &schema, &hub, "scanner")
-            .join(&provisioned.uri)
+            .join(&invitation.code)
             .await?,
     )?;
     synced(&scanner).await?;
@@ -193,16 +192,17 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
         insert(&admin, "charts", [name, &format!("chart in {name}")]).await?;
     }
     ward_name(&admin, "A").await?;
-    let provisioned = admin
+    let invitation = admin
         .database
-        .provision(Access::Role(CLINICIAN), None)
+        .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)))
         .await?;
     let clinician = Device::new(
         open(&root.path().join("clinician"), &schema, &hub, "clinician")
-            .join(&provisioned.uri)
+            .join(&invitation.code)
             .await?,
     )?;
     synced(&clinician).await?;
+    let clinician_identity = clinician.database.info().await?.principal;
     assert_eq!(rows(&clinician, "SELECT name FROM wards").await?, ["A"]);
     assert!(
         rows(&clinician, "SELECT note FROM charts").await.is_err(),
@@ -210,7 +210,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     );
     admin
         .database
-        .grant_partition(provisioned.identity, ward("A"))
+        .grant_partition(clinician_identity, ward("A"))
         .await?;
     synced(&admin).await?;
     synced(&clinician).await?;
@@ -227,7 +227,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     assert!(
         clinician
             .database
-            .grant_partition(provisioned.identity, ward("B"))
+            .grant_partition(clinician_identity, ward("B"))
             .await
             .is_err(),
         "only an admin grants a partition"
@@ -258,7 +258,9 @@ async fn an_unknown_or_reserved_role_is_refused() -> Result<(), Failure> {
     assert!(
         admin
             .database
-            .provision(Access::Role(RoleName::new("usher")?), None)
+            .invite(rocky_sdk::Invite::new(Access::Role(RoleName::new(
+                "usher"
+            )?)))
             .await
             .is_err()
     );

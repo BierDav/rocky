@@ -98,26 +98,23 @@ impl Node {
             Request::Trust(identity, root, reply) => {
                 let _ = reply.send(self.trust_identity(identity, &root).await);
             }
-            Request::Provision(access, label, reply) => {
-                let _ = reply.send(self.provision(access, label).await);
+            Request::Invite(invite, reply) => {
+                let _ = reply.send(self.invite(&invite).await);
             }
-            Request::Invite(identity, access, terms, reply) => {
-                let _ = reply.send(self.invite(identity, access, terms).await);
+            Request::CancelInvitation(id, reply) => {
+                let _ = reply.send(self.cancel_invitation(id).await);
             }
-            Request::WithdrawInvitation(id, reply) => {
-                let _ = reply.send(self.withdraw_invitation(id).await);
-            }
-            Request::OpenInvitations(reply) => {
-                let _ = reply.send(self.open_invitations().await);
+            Request::Invitations(reply) => {
+                let _ = reply.send(self.invitations().await);
             }
             Request::Renew(reply) => {
                 let _ = reply.send(self.renew_now().await);
             }
-            Request::Discovered(reply) => {
-                let _ = reply.send(self.discovered().await);
+            Request::LinkRequests(reply) => {
+                let _ = reply.send(Ok(self.link_requests()));
             }
-            Request::ConfirmLink(node, code, reply) => {
-                let _ = reply.send(self.confirm_link(node, &code).await);
+            Request::ApproveLink(node, code, reply) => {
+                let _ = reply.send(self.approve_link(node, &code));
             }
             Request::Contact(reply) => {
                 let _ = reply.send(self.contact_info().await);

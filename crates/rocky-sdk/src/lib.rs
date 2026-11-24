@@ -58,20 +58,19 @@ pub use configuration::Configuration;
 pub use connection::{
     ChangeCause, SqlFailure, SqlReason, TableChange, TableEvents, Unavailability,
 };
-pub use database::{Created, Database, Joined};
+pub use database::{Created, Database};
 pub use delivery::State as DeliveryState;
 pub use enrollment::PublisherRequired;
 pub use error::{Error, ErrorKind};
 pub use extension::DeviceCredential;
 pub use inspection::*;
 pub use invitation::{
-    DEFAULT_INVITATION_VALIDITY, Invitation, InvitationId, InvitationRefusal, InviteTerms,
-    MAX_OPEN_INVITATIONS, OpenInvitation,
+    Invitation, InvitationCode, InvitationId, Invite, InviteError, JoinError, PendingInvitation,
 };
 pub use partitions::*;
 pub use people::{
-    DeviceInfo, DeviceRevocationReceipt, Discovered, DroppedStage, LinkRequest, Provisioning,
-    RevocationResult, SeenDevice, TrustGrant,
+    DeviceId, DeviceInfo, DeviceRevocationReceipt, DroppedStage, LinkCode, LinkError, LinkRequest,
+    Opened, PendingLink, PersonId, RevocationResult, TrustGrant,
 };
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
@@ -108,7 +107,6 @@ pub use store_only::StoreOnlyRefusal;
 #[cfg(any(test, feature = "test-support"))]
 pub use testing::*;
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
-pub use self_enrollment::AwaitingLink;
 
 #[cfg(test)]
 extern crate self as rocky_sdk;

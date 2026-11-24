@@ -183,17 +183,23 @@ impl Peer {
             .await
     }
     async fn enroll_as(&self, directory: &Path, access: Access) -> (Peer, NodeKeys) {
-        let provisioned = self.database.provision(access, None).await.unwrap();
-        let store = Arc::new(Store::default());
-        let database = open(directory, SCHEMA, &store, &self.hub)
-            .join(&provisioned.uri)
+        let invitation = self
+            .database
+            .invite(rocky_sdk::Invite::new(access))
             .await
             .unwrap();
+        let store = Arc::new(Store::default());
+        let database = open(directory, SCHEMA, &store, &self.hub)
+            .join(&invitation.code)
+            .await
+            .unwrap()
+            .database;
+        let authority = database.status().await.unwrap().authority;
         (
             Peer::new(database, store, self.hub.clone()),
             NodeKeys {
-                identity: provisioned.identity,
-                node: provisioned.node,
+                identity: authority.principal.parse().unwrap(),
+                node: authority.node.parse().unwrap(),
             },
         )
     }
@@ -1030,23 +1036,18 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     let invitation = issuer
         .database
         .invite(
-            person.public_key().unwrap(),
-            Access::Role(RoleName::from_static("reader")),
-            rocky_sdk::InviteTerms {
-                partitions: vec![rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: values("A"),
-                }],
-                ..rocky_sdk::InviteTerms::default()
-            },
+            rocky_sdk::Invite::new(Access::Role(RoleName::from_static("reader")))
+                .for_identity(rocky_sdk::PersonId::new(person.public_key().unwrap()))
+                .partition(rocky_sdk::Partition::new("list", values("A"))),
         )
         .await
         .unwrap();
     let first = Peer::new(
         open_with_identity(&first_directory, &first_store, &issuer.hub, &person)
-            .accept_invitation(&invitation.uri)
+            .join(&invitation.code)
             .await
-            .unwrap(),
+            .unwrap()
+            .database,
         first_store,
         issuer.hub.clone(),
     );
@@ -1112,10 +1113,9 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     let before = issuer.epochs("A").await.0;
     first
         .database
-        .unlink(
-            rocky_credentials::PeerId::of(info["node"].as_str().unwrap().parse().unwrap()),
-            person,
-        )
+        .unlink(rocky_sdk::DeviceId::new(
+            info["node"].as_str().unwrap().parse().unwrap(),
+        ))
         .await
         .unwrap();
     snap::ok(first.database.sync_now()).await;

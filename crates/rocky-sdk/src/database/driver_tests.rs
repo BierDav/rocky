@@ -718,13 +718,16 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
         Some(Network::Owned(hub.connector("a"))),
     )?)
     .await?;
-    let invitation = snap::value(a.provision(rocky_sdk::Access::Full, None)).await?;
+    let invitation = a
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
     let b = open(
         &root.path().join("b"),
         Some(Network::Owned(hub.connector("b"))),
     )?
-    .join(invitation["uri"].as_str().ok_or("uri")?)
-    .await?;
+    .join(&invitation.code)
+    .await?
+    .database;
     snap::value(b.sync_now()).await?;
 
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
@@ -810,14 +813,12 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
             .map(|configuration| configuration.network(Network::Owned(hub.connector(name))))
     };
     let a = setup(&a_path, "a")?.create().await?.database;
-    let invitation = snap::value(a.provision(
-        rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static("list_reader")),
-        None,
-    ))
-    .await?;
-    let b = setup(&b_path, "b")?
-        .join(invitation["uri"].as_str().ok_or("uri")?)
+    let invitation = a
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Role(
+            rocky_sdk::RoleName::from_static("list_reader"),
+        )))
         .await?;
+    let b = setup(&b_path, "b")?.join(&invitation.code).await?.database;
     {
         let reader = b.connect(READER).await?;
         all(&reader, "SELECT * FROM lists", vec![]).await?;

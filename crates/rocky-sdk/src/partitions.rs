@@ -4,6 +4,26 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Partition {
+    pub group: String,
+    pub values: Vec<SqlValue>,
+}
+impl Partition {
+    pub fn new(group: impl Into<String>, values: Vec<SqlValue>) -> Self {
+        Self {
+            group: group.into(),
+            values,
+        }
+    }
+    pub(crate) fn target(&self) -> PartitionTarget {
+        PartitionTarget::Group {
+            group: self.group.clone(),
+            values: self.values.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum PartitionTarget {
     Group {
         group: String,

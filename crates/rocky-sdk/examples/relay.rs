@@ -6,7 +6,7 @@ async fn main() -> Result<(), Failure> {
     let Ok(phrase) = std::env::var("ROCKY_RELAY_PHRASE") else {
         let identity = IdentityKey::generate();
         println!(
-            "Invite relay identity {} with store-only (custody) access,",
+            "Invite relay identity {} with store-only access (Invite::new(Access::Store).for_identity(..)),",
             identity.public_key().to_hex()
         );
         println!("then run with ROCKY_RELAY_PHRASE=\"{}\"", identity.phrase());
@@ -42,7 +42,7 @@ async fn open_tenants(
             .network(Network::Owned(Arc::new(rocky_iroh::Options::default())))
             .identity(identity.clone());
         let database = match invitation {
-            Some(invitation) => configuration.accept_invitation(invitation).await?,
+            Some(invitation) => configuration.join(&invitation.parse()?).await?.database,
             None => configuration.open().await?,
         };
         database.set_sync(rocky_sdk::SyncMode::Foreground).await?;

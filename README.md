@@ -38,7 +38,7 @@ durable, and `status` with `status_changes` reports progress, blockers and the
 network.
 
 Every call returns a typed `rocky_sdk::Error`: an `ErrorKind` (which keeps
-typed causes such as `ServiceError`, `AwaitingLink` or
+typed causes such as `ServiceError`, `JoinError` or
 `RolloutConfirmationRequired`), whether a retry can succeed, a detail and the
 blockers in the way. SQL calls return a `SqlFailure` whose `SqlReason` says why
 a table could not be read: `Unavailable { table, reason }`, where `Incomplete
@@ -49,17 +49,25 @@ A database's authority is an offline root key: `Configuration::create`
 returns it once as a 24-word phrase (`Created::root`), or
 `create_with_root` takes a passkey-backed signer. Rocky never stores it.
 The owner's identity is derived from that root. Identity signers are also
-never stored: a device joining with `Database::provision`'s URI joins as a
-single-use identity the issuer minted, or `Configuration::join_linkable`
-returns its identity phrase once. To keep an identity the person already
-has, an issuer calls `Database::invite` with its public key instead; the
-URI carries no secret, and `Configuration::accept_invitation` joins with
-the configured identity provider over the network, asking the issuing node
-for an enrollment that node signs. Such an invitation is single use and expires (ten
-minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
-unused one with `Database::withdraw_invitation`. Supply the identity for
-later linking; opening and renewal use the node key alone.
-`Database::provision` and `Database::invite` take an `Access`: `Full`,
+never stored. An admin invites with `Database::invite(Invite::new(access))`,
+optionally naming `partition`s, a `label`, a validity (`Invite::valid_for`,
+ten minutes by default) or the one person it is for (`for_identity`). The
+returned `Invitation` holds an `InvitationCode`; `Configuration::join` redeems
+it over the network with the issuing device and returns `Opened`. A default
+code carries a single-use secret, so whoever holds it joins once, as an
+identity Rocky mints and returns once in `Opened::identity`; a `for_identity`
+code carries no secret and admits only that person's configured identity. A
+refused join says why with a `JoinError` (`Expired`, `Used`, `Cancelled`,
+`OtherIdentity`, `AlreadyMember`, `Removed`, `IssuerUnreachable`, ...).
+`Database::invitations` lists open and redeemed invitations and
+`cancel_invitation` ends an unused one. A person links another device with
+`Configuration::link`, which returns a `PendingLink` whose `code` the person
+compares with `Database::link_requests` on a device they already hold,
+approves with `approve_link`, and finishes with `PendingLink::confirm`.
+`Database::unlink` ends one device: the person's own, or as an admin a
+member's lost device, while the member keeps the others. Opening and renewal
+use the device key alone.
+`Database::invite` takes an `Access`: `Full`,
 `Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
 A role reads, writes, appends to or updates named columns of the tables it
 lists; column lists restrict writes only. A role declared `per_partition`
@@ -69,7 +77,7 @@ group secret starts, carries the grant. `Full` and `Read` reach every
 partition. Only trusted identities grant partitions or share group secrets
 with members; a member hands the secret of a partition it created only to
 trusted nodes, and no access delegates further. A trusted identity becomes an
-administrator by provisioning it, granting `Database::trust` with the root key
+administrator by inviting it, granting `Database::trust` with the root key
 and calling `Database::install_trust` on its node.
 Copying a closed database folder is a valid backup; a restored copy that
 peers have moved past reads and syncs but refuses to write

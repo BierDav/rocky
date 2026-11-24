@@ -181,11 +181,18 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .create()
         .await?
         .database;
-    let invitation = issuer.provision(rocky_sdk::Access::Full, None).await?;
-    assert!(!invitation.uri.is_empty());
+    let invitation = issuer
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
+    assert!(invitation.code.to_string().starts_with("rocky://invite/"));
     let member_configuration = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")));
-    let member = member_configuration.join(&invitation.uri).await?;
+    let joined = member_configuration.join(&invitation.code).await?;
+    assert!(
+        joined.identity.is_some(),
+        "a joiner without an identity gets a fresh one, returned once"
+    );
+    let member = joined.database;
     member.set_sync(rocky_sdk::SyncMode::Manual).await?;
     issuer.set_sync(rocky_sdk::SyncMode::Manual).await?;
     member.sync_now().await?;
@@ -385,7 +392,7 @@ async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Fai
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
-async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure> {
+async fn invite_refuses_a_label_over_256_bytes() -> Result<(), Failure> {
     use rocky_sdk::{Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
@@ -398,16 +405,19 @@ async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure
         .database;
     let profile = rocky_sdk::Access::Full;
     let refused = issuer
-        .provision(profile.clone(), Some(vec![b'x'; 257]))
+        .invite(rocky_sdk::Invite::new(profile.clone()).label("x".repeat(257)))
         .await
         .err()
         .ok_or("a 257-byte device label is refused")?;
     assert!(refused.to_string().contains("256 bytes"), "{refused}");
-    let provisioning = issuer.provision(profile, Some(vec![b'x'; 256])).await?;
+    let invitation = issuer
+        .invite(rocky_sdk::Invite::new(profile).label("x".repeat(256)))
+        .await?;
     let joined = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")))
-        .join(&provisioning.uri)
-        .await?;
+        .join(&invitation.code)
+        .await?
+        .database;
     joined.close().await?;
     Ok(issuer.close().await?)
 }

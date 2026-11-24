@@ -42,9 +42,13 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 async fn create(root: &Path, network: Network) -> Result<Device, Failure> {
     Device::new(open(root, Some(network)).create().await?)
 }
-async fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, Failure> {
+async fn join(
+    directory: &Path,
+    network: Network,
+    invitation: &rocky_sdk::InvitationCode,
+) -> Result<Device, Failure> {
     let mut seed = directory.to_string_lossy().as_bytes().to_vec();
-    seed.extend_from_slice(invitation.as_bytes());
+    seed.extend_from_slice(invitation.to_string().as_bytes());
     let signer_stable_across_lost_answers_and_restarts =
         rocky_core::commitment("fixture.join-identity", &seed);
     let identity = Arc::new(rocky_sdk::IdentityKey::from_secret(
@@ -323,10 +327,14 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     snap::ok(b.database.remove_peer(snap::public_key(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let keys = a.database.provision(rocky_sdk::Access::Full, None).await?;
+    let keys = a
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
+    let joined = join(&root.join("k"), memory(&hub, "k"), &keys.code).await?;
     synced(&a).await?;
     synced(&b).await?;
-    assert!(identities(&b).await.contains_key(&keys.identity.to_hex()));
+    assert!(identities(&b).await.contains_key(&joined.identity().await));
 
     for name in ["c", "r", "w"] {
         let directory = root.join(name);
@@ -391,7 +399,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     a.admit(&b).await;
     a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
-    let started = |name: &str, invitation: String| {
+    let started = |name: &str, invitation: rocky_sdk::InvitationCode| {
         let (directory, network) = (root.join(name), memory(&hub, name));
         tokio::spawn(async move {
             join(&directory, network, &invitation)
@@ -701,42 +709,36 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         let directory = root.join(name);
         let requesting = Arc::new(Faults::default());
         let invitation = a.invite().await;
-        let recorded = identities(&a).await;
-        let fresh: Vec<&String> = recorded
-            .keys()
-            .filter(|identity| {
-                !members
-                    .iter()
-                    .any(|(_, known, _): &(Device, String, Arc<Faults>)| known == *identity)
-            })
-            .collect();
-        assert_eq!(fresh.len(), 1, "{name}: {recorded:?}");
-        let identity = fresh[0].clone();
+        let before = identities(&a).await;
         let member = join(&directory, faulty(&hub, name, &requesting), &invitation).await?;
-        assert_eq!(member.identity().await, identity, "{name}");
-        assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
+        let identity = member.identity().await;
+        let recorded = identities(&a).await;
+        assert_eq!(recorded.len(), before.len() + 1, "{name}");
+        assert!(recorded.contains_key(&identity), "{name}: {recorded:?}");
         members.push((member, identity, requesting));
     }
     let profile = rocky_sdk::Access::Full;
     let mut granted = Vec::new();
     for name in ["g", "h"] {
-        let keys = a.database.provision(profile.clone(), None).await?;
-        let recorded = identities(&a).await;
-        assert!(recorded.contains_key(&keys.identity.to_hex()));
+        let keys = a
+            .database
+            .invite(rocky_sdk::Invite::new(profile.clone()))
+            .await?;
+        let before = identities(&a).await;
         let requesting = Arc::new(Faults::default());
         let device = Device::new(
             open(&root.join(name), Some(faulty(&hub, name, &requesting)))
-                .join(&keys.uri)
+                .join(&keys.code)
                 .await?,
         )?;
-        assert_eq!(device.node().await, keys.node.to_hex());
+        let identity = device.identity().await;
         let listed = identities(&a).await;
-        assert_eq!(listed.len(), recorded.len());
+        assert_eq!(listed.len(), before.len() + 1);
         assert_eq!(
-            listed[&keys.identity.to_hex()]["capability"],
+            listed[&identity]["capability"],
             json!(chain_capability(&root.join(name))?)
         );
-        granted.push((device, keys.identity.to_hex(), requesting));
+        granted.push((device, identity, requesting));
     }
     for (index, (device, identity, requesting)) in granted.iter().enumerate() {
         let directory = root.join(["g", "h"][index]);
@@ -800,8 +802,16 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let invitation = a.invite_as(reader.clone()).await;
     let filled = Instant::now();
     let a_b_and_the_pending_invitation = 3;
-    for _ in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {
-        snap::ok(a.database.provision(reader.clone(), None)).await;
+    for index in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {
+        let name = format!("f{index}");
+        let code = a.invite_as(reader.clone()).await;
+        rocky_sdk::Configuration::new(root.join(&name), common::parsed_schema())?
+            .network(memory(&hub, &name))
+            .join(&code)
+            .await?
+            .database
+            .close()
+            .await?;
     }
     let filled = filled.elapsed();
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation).await?;
@@ -819,7 +829,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
     );
-    let refused = snap::observe(a.database.provision(reader.clone(), None))
+    let refused = snap::observe(a.database.invite(rocky_sdk::Invite::new(reader.clone())))
         .await
         .err()
         .ok_or("invited a 257th device")?;
@@ -868,22 +878,22 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let path = root.path().join("issuer");
     let owner = create(&path, memory(&hub, "issuer")).await?;
     let label = b"application-defined label";
-    let invitation = snap::ok(owner.database.provision(
-        issuer(),
-        Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
-    ))
-    .await;
+    let invitation = owner
+        .database
+        .invite(rocky_sdk::Invite::new(issuer()).label(String::from_utf8(label.to_vec())?))
+        .await?;
     let member = join(
         &root.path().join("member"),
         memory(&hub, "member"),
-        invitation["uri"].as_str().ok_or("uri")?,
+        &invitation.code,
     )
     .await?;
+    let invitation = json!({"id": invitation.id});
     let identity = member.identity().await;
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
-    snap::ok(owner.database.provision(issuer(), None)).await;
+    snap::ok(owner.database.invite(rocky_sdk::Invite::new(issuer()))).await;
     member.database.close().await?;
     owner.database.close().await?;
     let reopened = Device::new(open(&path, None).open().await?)?;

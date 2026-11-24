@@ -4,8 +4,7 @@ use rocky_sdk::{
 };
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn closing_the_database_ends_an_activity_wait_and_keeps_binary_identity_labels()
--> Result<(), Failure> {
+async fn closing_the_database_ends_an_activity_wait() -> Result<(), Failure> {
     let directory = rocky_platform::fs::Scratch::new().await;
     let schema = Schema::builder("typed_activity", 1)
         .table(Table::replayed("notes").column(Column::new("body", Affinity::Text)))
@@ -16,18 +15,6 @@ async fn closing_the_database_ends_an_activity_wait_and_keeps_binary_identity_la
         .database;
     let writer = database.clone();
     let observer = database.clone();
-    let labeled = writer.provision(rocky_sdk::Access::Read, None).await?;
-    let label = vec![0, 255, b'a', 0];
-    writer
-        .set_identity_label(labeled.identity, label.clone())
-        .await?;
-    let listed = writer.identities().await?;
-    let labeled = listed
-        .iter()
-        .find(|listed| listed.identity == labeled.identity)
-        .ok_or("issued identity")?;
-    assert_eq!(labeled.label.as_ref(), Some(&label));
-
     let after = observer.activity(0).await?.token;
     let (page, changed) =
         rocky_platform::time::timeout(std::time::Duration::from_secs(30), async {

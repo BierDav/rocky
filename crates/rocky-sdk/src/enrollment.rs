@@ -31,12 +31,11 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 42;
+pub const VERSION: u32 = 43;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
 pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
-const PROVISION_VERSION: u32 = 2;
 const CONTACT_VERSION: u32 = 4;
 pub const MAX_CONTACTS: usize = 64;
 pub const MAX_DIALED: usize = 16;
@@ -247,7 +246,6 @@ pub struct Settings {
     pub domain: DomainId,
     pub publisher: PublicKey,
     pub identity: PublicKey,
-    pub single_use: bool,
     pub genesis: String,
     pub generation: u32,
     pub engine: rocky_core::EngineIdentity,
@@ -297,6 +295,7 @@ pub struct Rotation {
 pub enum Revoke {
     Identity(PublicKey),
     TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
+    Node { owner: PublicKey, node: PublicKey },
 }
 enum ReadBound {
     Unbounded,
@@ -428,17 +427,6 @@ impl ContactRecord {
         Ok(record)
     }
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProvisioningBundle {
-    v: u32,
-    routes: Vec<Route>,
-    publisher: PublicKey,
-    database: rocky_credentials::DatabaseContext,
-    node_key: String,
-    identity_key: String,
-    enrollment: Box<Enrollment>,
-}
 pub(crate) struct EnrollingIssuer {
     pub(crate) publisher: PublicKey,
     pub(crate) database: rocky_credentials::DatabaseContext,
@@ -490,35 +478,22 @@ impl Sealed {
     }
 }
 
-impl ProvisioningBundle {
-    pub(crate) fn parse(uri: &str) -> Result<Self, Failure> {
-        let bytes = BASE64URL_NOPAD.decode(
-            uri.trim()
-                .strip_prefix("rocky://provision/")
-                .ok_or("invalid provisioning URI")?
-                .as_bytes(),
-        )?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["v"].as_u64() != Some(u64::from(PROVISION_VERSION)) {
-            return Err("unsupported provisioning version".into());
-        }
-        let bundle: Self = serde_json::from_value(value)?;
-        if bundle.database.publisher != bundle.publisher {
-            return Err("provisioning database publisher mismatch".into());
-        }
-        Contact::checked(bundle.routes.clone())?;
-        Ok(bundle)
-    }
-}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
-    invitation: Option<Commitment>,
+    purpose: Commitment,
     pub(crate) installation: String,
     nonce: String,
-    pub(crate) single_use: bool,
     identity: PublicKey,
+    minted: bool,
 }
+pub(crate) struct Prepared {
+    pub(crate) intent: Intent,
+    pub(crate) vault: Vault,
+    pub(crate) provider: Arc<dyn IdentityProvider>,
+    pub(crate) minted: Option<IdentityKey>,
+}
+const MINTED_ROLE: &str = "identity.minted";
 impl Intent {
     pub(crate) fn path(identity: &Path, supplied: bool) -> std::path::PathBuf {
         identity
@@ -532,39 +507,79 @@ impl Intent {
     }
     pub(crate) fn resume(
         path: &Path,
-        invitation: Option<Commitment>,
+        purpose: Commitment,
         store: &std::sync::Arc<dyn crate::SecretStore>,
         provider: Option<&Arc<dyn IdentityProvider>>,
-        single_use: bool,
-    ) -> Result<(Self, Vault), Failure> {
-        let identity = provider
-            .ok_or("supply an identity provider to prepare an installation")?
-            .public_key()?;
+    ) -> Result<Prepared, Failure> {
         if rocky_platform::fs::exists(path) {
             let previous: Self = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
             let vault = Vault::new(store.clone(), &previous.installation);
-            if previous.invitation == invitation {
-                if previous.identity != identity {
-                    return Err("unfinished enrollment needs its original identity; resume with the pending admission or the supplied provider".into());
+            let resumed = match (previous.purpose == purpose, provider, previous.minted) {
+                (true, Some(provider), false) => {
+                    if provider.public_key()? != previous.identity {
+                        return Err("unfinished enrollment needs its original identity; resume with the supplied provider".into());
+                    }
+                    Some((provider.clone(), None))
                 }
-                return Ok((previous, vault));
+                (true, None, true) => {
+                    let minted = IdentityKey::from_secret(vault.get(MINTED_ROLE)?);
+                    (minted.public_key() == previous.identity).then(|| {
+                        let provider: Arc<dyn IdentityProvider> =
+                            Arc::new(IdentityKey::from_secret(minted.secret()));
+                        (provider, Some(minted))
+                    })
+                }
+                _ => None,
+            };
+            if let Some((provider, minted)) = resumed {
+                return Ok(Prepared {
+                    intent: previous,
+                    vault,
+                    provider,
+                    minted,
+                });
             }
             rocky_platform::fs::remove_file(path)?;
-            vault.forget(["node", "transport"].into_iter().map(String::from))?;
+            vault.forget(
+                ["node", "transport", MINTED_ROLE]
+                    .into_iter()
+                    .map(String::from),
+            )?;
         }
+        let minted = provider.is_none().then(IdentityKey::generate);
+        let provider: Arc<dyn IdentityProvider> = match (provider, &minted) {
+            (Some(provider), _) => provider.clone(),
+            (None, Some(minted)) => Arc::new(IdentityKey::from_secret(minted.secret())),
+            (None, None) => return Err("an installation needs an identity".into()),
+        };
         let intent = Self {
-            invitation,
+            purpose,
             installation: HEXLOWER.encode(&random::<16>()),
             nonce: HEXLOWER.encode(&random::<32>()),
-            single_use,
-            identity,
+            identity: provider.public_key()?,
+            minted: minted.is_some(),
         };
         let vault = Vault::new(store.clone(), &intent.installation);
         for role in ["node", "transport"] {
             vault.create(role)?;
         }
+        if let Some(minted) = &minted {
+            vault.put(MINTED_ROLE, &minted.secret())?;
+        }
         write_private(path, &serde_json::to_vec(&intent)?)?;
-        Ok((intent, vault))
+        Ok(Prepared {
+            intent,
+            vault,
+            provider,
+            minted,
+        })
+    }
+    pub(crate) fn finish(&self, path: &Path, vault: &Vault) -> Result<(), Failure> {
+        rocky_platform::fs::remove_file(Self::path(path, false))?;
+        if self.minted {
+            vault.forget([MINTED_ROLE.to_owned()])?;
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1156,7 +1171,6 @@ impl Settings {
     ) -> Result<Self, Failure> {
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
-        let single_use = false;
         let identity: Arc<dyn IdentityProvider> = match provider {
             Some(provider) => provider,
             None => root
@@ -1183,7 +1197,7 @@ impl Settings {
         let grant =
             Authority::owner(root).issue_trusted(identity.public_key()?, bound.scope, now()?)?;
         let mut settings = Self::installed(
-            (installation, single_use),
+            installation,
             (publisher, identity.public_key()?),
             (mesh, domain, schema.clone()),
             HEXLOWER.encode(&manifest.to_bytes()?),
@@ -1208,7 +1222,7 @@ impl Settings {
         Ok(settings)
     }
     pub(crate) fn installed(
-        (installation, single_use): (String, bool),
+        installation: String,
         (publisher, identity): (PublicKey, PublicKey),
         (mesh, domain, schema): (MeshId, DomainId, Schema),
         manifest: String,
@@ -1222,7 +1236,6 @@ impl Settings {
             domain,
             publisher,
             identity,
-            single_use,
             generation: schema.version,
             engine: rocky_core::EngineIdentity::current(),
             genesis: manifest,
@@ -1575,42 +1588,6 @@ impl Settings {
             })
             .collect()
     }
-    pub(crate) fn provision(
-        &mut self,
-        vault: &Vault,
-        routes: Vec<Route>,
-        admission: (Access, Option<Vec<u8>>),
-        registry: &Registry,
-    ) -> Result<((String, PublicKey, PublicKey), Changes), Failure> {
-        let provisioned_node = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-        let provisioned_identity = IdentityKey::from_secret(rocky_platform::entropy::random());
-        let device = NodeKeys {
-            identity: provisioned_identity.public_key(),
-            node: provisioned_node.public_key(),
-        };
-        let (access, label) = admission;
-        let (enrollment, changes) = self.enrollment_for(
-            vault,
-            device,
-            (access, BTreeSet::new(), label),
-            None,
-            registry,
-        )?;
-        let bundle = ProvisioningBundle {
-            v: PROVISION_VERSION,
-            routes,
-            publisher: self.publisher,
-            database: self.database_context()?,
-            node_key: HEXLOWER.encode(provisioned_node.as_bytes()),
-            identity_key: HEXLOWER.encode(&provisioned_identity.secret()),
-            enrollment: Box::new(enrollment),
-        };
-        let uri = format!(
-            "rocky://provision/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
-        );
-        Ok(((uri, device.node, device.identity), changes))
-    }
     pub(crate) fn enrollment_for(
         &mut self,
         vault: &Vault,
@@ -1625,7 +1602,7 @@ impl Settings {
         {
             return Err("device label exceeds 256 bytes".into());
         }
-        self.issuing("provisions devices")?;
+        self.issuing("admits devices")?;
         if self.revoked_node(&device, registry) {
             return Err("the node or its identity was revoked".into());
         }
@@ -1659,7 +1636,6 @@ impl Settings {
                     .map(|origin| origin.identity),
                 enrolled: time,
                 invitation,
-                single_use: false,
             },
             other_access_replaces_record,
         )?;
@@ -1720,7 +1696,6 @@ impl Settings {
                 origin: self.link_origin()?,
                 enrolled: now()?,
                 invitation: None,
-                single_use: self.single_use,
             },
             false,
         )?;
@@ -1883,38 +1858,12 @@ fn refuse_oversized_revocation(
 }
 
 impl Settings {
-    pub(crate) async fn install_provisioned(
-        store: &Arc<dyn crate::SecretStore>,
-        schema: Option<&Schema>,
-        provisioning: &str,
-        single_use: bool,
-    ) -> Result<(Self, Vault, Option<String>), Failure> {
-        let bundle = ProvisioningBundle::parse(provisioning)?;
-        let installation = HEXLOWER.encode(&rocky_platform::entropy::random::<32>());
-        let vault = Vault::new(store.clone(), &installation);
-        vault.put("node", &hex32(&bundle.node_key)?)?;
-        vault.put("transport", &rocky_platform::entropy::random::<32>())?;
-        let identity_key = IdentityKey::from_secret(hex32(&bundle.identity_key)?);
-        let phrase = (!single_use).then(|| identity_key.phrase());
-        let settings = Self::install_enrollment(
-            schema,
-            (installation, &vault),
-            EnrollingIssuer {
-                publisher: bundle.publisher,
-                database: bundle.database,
-                routes: bundle.routes,
-            },
-            *bundle.enrollment,
-            (Arc::new(identity_key), single_use),
-        )?;
-        Ok((settings, vault, phrase))
-    }
     pub(crate) fn install_enrollment(
         schema: Option<&Schema>,
         (installation, vault): (String, &Vault),
         issuing: EnrollingIssuer,
         enrollment: Enrollment,
-        (provider, single_use): (Arc<dyn IdentityProvider>, bool),
+        provider: Arc<dyn IdentityProvider>,
     ) -> Result<Self, Failure> {
         enrollment.record.bytes()?;
         if enrollment.mesh != issuing.database.scope.mesh
@@ -1951,7 +1900,6 @@ impl Settings {
             domain: enrollment.domain,
             publisher: issuing.publisher,
             identity,
-            single_use,
             genesis: enrollment.genesis,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
@@ -1995,7 +1943,7 @@ impl Settings {
             || extended.issues
             || issued != expected
         {
-            return Err("the enrollment differs from its provisioning bundle".into());
+            return Err("the enrollment differs from its invitation".into());
         }
         let mut links = enrollment.chain.clone();
         links.0.push(enrollment.capability.clone());
@@ -2493,7 +2441,6 @@ impl Settings {
                 origin: prior.extended()?.origin.map(|origin| origin.identity),
                 enrolled: time,
                 invitation: None,
-                single_use: false,
             },
             false,
         )?;
@@ -2542,6 +2489,13 @@ impl Settings {
             Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
                 registry.trusted.contains_key(&identity)
             }
+            Revoke::Node { owner, .. } => {
+                if owner == own || owner == self.publisher || registry.trusted.contains_key(&owner)
+                {
+                    return Err("an admin's own devices are unlinked with its identity".into());
+                }
+                false
+            }
         };
         let root = if trusted {
             Some(root_signer(
@@ -2581,12 +2535,21 @@ impl Settings {
                 }
                 identities.into_iter().collect()
             }
+            Revoke::Node { node, .. } => {
+                if self.tombstoned(&node) {
+                    return Err("the device is already unlinked".into());
+                }
+                Vec::new()
+            }
         };
-        let nodes: Vec<PublicKey> = identities
-            .iter()
-            .flat_map(|identity| membership.nodes(identity))
-            .map(|linked| linked.node)
-            .collect();
+        let nodes: Vec<PublicKey> = match target {
+            Revoke::Node { node, .. } => vec![node],
+            _ => identities
+                .iter()
+                .flat_map(|identity| membership.nodes(identity))
+                .map(|linked| linked.node)
+                .collect(),
+        };
         if self.issuing("revokes devices")?.rotation.is_some() {
             return Err("another revocation is unfinished".into());
         }
@@ -2595,10 +2558,13 @@ impl Settings {
             return Err(Box::new(RevocationSetFull));
         }
         let domain = self.domain()?;
-        let records: Vec<Revoking> = identities
-            .iter()
-            .filter_map(|identity| Revoking::of(registry, identity))
-            .collect();
+        let records: Vec<Revoking> = match target {
+            Revoke::Node { owner, .. } => Revoking::of(registry, &owner).into_iter().collect(),
+            _ => identities
+                .iter()
+                .filter_map(|identity| Revoking::of(registry, identity))
+                .collect(),
+        };
         let issuer = if root.is_some() { self.publisher } else { own };
         let statement = match target {
             Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => Revocation {
@@ -2619,6 +2585,16 @@ impl Settings {
                     )
                     .collect(),
                 cut: if root.is_some() { cut } else { Vec::new() },
+            },
+            Revoke::Node { node, .. } => Revocation {
+                app: domain.manifest().app,
+                issuer,
+                time,
+                mode,
+                nodes: [rocky_credentials::PeerId::of(node)].into(),
+                identities: BTreeSet::new(),
+                capabilities: BTreeSet::new(),
+                cut: Vec::new(),
             },
         };
         let bounded_by_records = !records.is_empty();
@@ -3065,7 +3041,6 @@ impl Settings {
             domain,
             publisher,
             identity,
-            single_use,
             genesis,
             generation,
             engine,
@@ -3093,7 +3068,6 @@ impl Settings {
             && *domain == other.domain
             && *publisher == other.publisher
             && *identity == other.identity
-            && *single_use == other.single_use
             && *genesis == other.genesis
             && *generation == other.generation
             && *engine == other.engine

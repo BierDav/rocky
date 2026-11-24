@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure, introduce};
 use crate::support::snapshot as snap;
 use rocky_sdk::{
-    Configuration, IdentityKey, IdentityProvider, InviteTerms, Network, StoreOnlyRefusal,
+    Configuration, IdentityKey, IdentityProvider, Invite, Network, StoreOnlyRefusal,
     transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
@@ -26,10 +26,10 @@ async fn invited_relay(
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let invitation = issuer
         .database
-        .invite(person.public_key()?, store_only(), InviteTerms::default())
+        .invite(Invite::new(store_only()).for_identity(person.public_key()?.into()))
         .await?;
     let relay = relay_configuration(directory, hub, &person)
-        .accept_invitation(&invitation.uri)
+        .join(&invitation.code)
         .await?;
     Ok((Device::new(relay)?.with_identity(person.clone()), person))
 }
@@ -102,11 +102,7 @@ async fn devices_never_online_together_converge_through_a_store_only_relay() -> 
     assert!(
         relay
             .database
-            .invite(
-                IdentityKey::generate().public_key(),
-                store_only(),
-                InviteTerms::default()
-            )
+            .invite(Invite::new(store_only()))
             .await
             .is_err(),
         "a store-only relay cannot invite"
@@ -129,16 +125,15 @@ async fn a_new_device_bootstraps_from_the_relay_while_every_other_device_is_offl
     .await?;
     let (relay, _) = invited_relay(&issuer, &root.path().join("relay"), &hub).await?;
     introduce(&issuer, &relay).await;
-    issuer.add(1, "Milk").await;
-    issuer.sync().await.expect("upload");
-    let invitation = issuer.invite().await;
-    issuer.close().await;
     let device = Device::join(
         &root.path().join("device"),
-        &invitation,
+        &issuer.invite().await,
         Network::Owned(hub.connector("device")),
     )
     .await?;
+    issuer.add(1, "Milk").await;
+    issuer.sync().await.expect("upload");
+    issuer.close().await;
     introduce(&device, &relay).await;
     device.sync().await.expect("bootstrap from the relay");
     assert_eq!(device.titles().await, ["Milk"]);
@@ -190,17 +185,14 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let writer = issuer
         .database
-        .invite(
-            person.public_key()?,
-            rocky_sdk::Access::Full,
-            InviteTerms::default(),
-        )
+        .invite(Invite::new(rocky_sdk::Access::Full).for_identity(person.public_key()?.into()))
         .await?;
     assert_eq!(
         refusal(
             relay_configuration(&root.path().join("writer"), &hub, &person)
-                .accept_invitation(&writer.uri)
+                .join(&writer.code)
                 .await
+                .map(|opened| opened.database)
         ),
         Some(StoreOnlyRefusal::ReadableAccess)
     );
@@ -210,6 +202,7 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
                 .network(Network::Owned(hub.connector("bearer")))
                 .join(&issuer.invite().await)
                 .await
+                .map(|opened| opened.database)
         ),
         Some(StoreOnlyRefusal::ReadableAccess)
     );

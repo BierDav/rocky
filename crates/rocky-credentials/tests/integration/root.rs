@@ -114,11 +114,25 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
     let b = trusted(&root);
     let b_node = PrivateKey::new();
     let b_chain = b.1.clone().certify(&b.0, &b_node).unwrap();
-    let by_a = rocky_credentials::testing::authority(&a.0, &a.1).revoke(Revocation {
-        nodes: [rocky_credentials::PeerId::of(b_node.public_key())].into(),
-        ..revocation(&a.0, &b.0)
-    });
-    assert!(by_a.is_err(), "issuers cannot target nodes");
+    let node_by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
+        .revoke(Revocation {
+            nodes: [rocky_credentials::PeerId::of(b_node.public_key())].into(),
+            identities: Default::default(),
+            ..revocation(&a.0, &b.0)
+        })
+        .unwrap());
+    node_by_a.verify(root.public_key(), APP).unwrap();
+    assert!(
+        b_chain
+            .trusted_node(
+                root.public_key(),
+                SCOPE,
+                b_node.public_key(),
+                Some((&node_by_a, NOW))
+            )
+            .is_ok(),
+        "an issuer's node revocation cannot end another trusted identity's node"
+    );
     let by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
         .revoke(revocation(&a.0, &b.0))
         .unwrap());
@@ -160,6 +174,19 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
             .verify(root.public_key(), device.public_key(), &by_a, NOW)
             .is_err(),
         "a trusted identity still revokes what it did not get from the root"
+    );
+    let node_by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
+        .revoke(Revocation {
+            nodes: [rocky_credentials::PeerId::of(device.public_key())].into(),
+            identities: Default::default(),
+            ..revocation(&a.0, &b.0)
+        })
+        .unwrap());
+    assert!(
+        chain
+            .verify(root.public_key(), device.public_key(), &node_by_a, NOW)
+            .is_err(),
+        "an issuer ends one node of a member it did not get from the root"
     );
 }
 

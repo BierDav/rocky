@@ -156,20 +156,22 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = a.database.provision(role("lister"), None).await?;
-    grant(&a, &keys.identity.to_hex(), "L").await;
+    let person = join(root, &hub, "p", &a, role("lister")).await?;
+    let keys = person.identity().await;
+    person.close().await;
+    grant(&a, &keys.clone(), "L").await;
     sync(&b).await?;
     a.close().await;
     let before = identity(root, "b")?["keys"].clone();
     snap::ok(
         b.database
-            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
+            .revoke_identity(snap::public_key(&(keys.clone()))),
     )
     .await;
     assert_eq!(identity(root, "b")?["keys"], before);
     assert_eq!(epoch(&b, "L").await, json!([1, 2]));
     assert_eq!(epoch(&b, "M").await, json!([1]));
-    assert_eq!(listed(&b, &keys.identity.to_hex()).await["revoked"], true);
+    assert_eq!(listed(&b, &keys.clone()).await["revoked"], true);
     b.close().await;
     Ok(())
 }
@@ -232,18 +234,20 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
-    let keys = a.database.provision(rocky_sdk::Access::Store, None).await?;
+    let person = join(root, &hub, "p", &a, rocky_sdk::Access::Store).await?;
+    let keys = person.identity().await;
+    person.close().await;
     sync(&b).await?;
     let before_a = identity(root, "a")?["keys"].clone();
     let before_b = identity(root, "b")?["keys"].clone();
     let by_a = snap::ok(
         a.database
-            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
+            .revoke_identity(snap::public_key(&(keys.clone()))),
     )
     .await;
     let by_b = snap::ok(
         b.database
-            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
+            .revoke_identity(snap::public_key(&(keys.clone()))),
     )
     .await;
     assert_ne!(by_a["statement"], by_b["statement"]);
@@ -262,17 +266,14 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
             snap::ok(device.database.info()).await["revocations"]["statements"],
             2
         );
-        assert_eq!(
-            listed(device, &keys.identity.to_hex()).await["revoked"],
-            true
-        );
+        assert_eq!(listed(device, &keys.clone()).await["revoked"], true);
         let conn = rusqlite::Connection::open_with_flags(
             root.join(name).join("rocky.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM issuer_registry WHERE identity=? AND entry='revoked'",
-            [keys.identity.to_hex()],
+            [keys.clone()],
             |row| row.get(0),
         )?;
         assert_eq!(count, 1);

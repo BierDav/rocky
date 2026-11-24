@@ -67,7 +67,7 @@ pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, 
 
 pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Result<Todos, Failure> {
     let (role, uri) = parse_invitation(code)?;
-    let todos = Todos::new(configuration.join(uri).await?);
+    let todos = Todos::new(configuration.join(&uri.parse()?).await?.database);
     if role == Role::Partial {
         todos
             .database
@@ -85,8 +85,11 @@ impl Todos {
         Ok(self.database.status().await?.authority.node)
     }
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
-        let provisioning = self.database.provision(role.access()?, None).await?;
-        Ok(format!("{role}:{}", provisioning.uri))
+        let invitation = self
+            .database
+            .invite(rocky_sdk::Invite::new(role.access()?))
+            .await?;
+        Ok(format!("{role}:{}", invitation.code))
     }
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
         let node = self.node().await?;

@@ -75,7 +75,10 @@ fn refused(error: impl std::fmt::Display) -> Failure {
     Box::new(Refused(error.to_string()))
 }
 fn named(error: Failure) -> Failure {
-    if error.is::<crate::registry::RegistryFull>() || error.is::<crate::InvitationRefusal>() {
+    if error.is::<crate::registry::RegistryFull>()
+        || error.is::<crate::JoinError>()
+        || error.is::<crate::InviteError>()
+    {
         error
     } else {
         refused(error)
@@ -254,7 +257,7 @@ pub(crate) struct Node {
     pub(crate) activity: crate::activity::Activity,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
-    link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
+    link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::HeldLink>>,
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
     trusted_watch: std::sync::Mutex<health::TrustedWatch>,
@@ -671,52 +674,7 @@ impl Node {
         }
     }
 
-    async fn provision(
-        &self,
-        access: crate::Access,
-        label: Option<Vec<u8>>,
-    ) -> Result<crate::Provisioning, Failure> {
-        if label
-            .as_ref()
-            .is_some_and(|label| label.len() > crate::registry::MAX_LABEL)
-        {
-            return Err(refused("device label exceeds 256 bytes"));
-        }
-        let routes = self.own_routes().await;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let bootstrap = self.enrollment_bootstrap().await?;
-        let held = self.replica.revocations().await;
-        let ((uri, node, identity), changes) = {
-            let mut settings = self.settings.lock().await;
-            let mut draft = settings.clone();
-            draft.learn_revocations(&held)?;
-            draft.bootstrap = Some(bootstrap);
-            let provisioned = draft
-                .provision(&self.vault, routes, (access.clone(), label), &registry)
-                .map_err(named)?;
-            draft.bootstrap = None;
-            settings.commit(draft, &self.replica).await?;
-            provisioned
-        };
-        self.commit(changes).await?;
-        self.see(identity, node).await?;
-        let sequence = self
-            .activity
-            .record(crate::ActivityKind::DeviceProvisioned {
-                node,
-                identity,
-                access: access.clone(),
-            });
-        Ok(crate::Provisioning {
-            uri,
-            node,
-            identity,
-            access,
-            sequence,
-        })
-    }
-
-    async fn own_routes(&self) -> Vec<crate::enrollment::Route> {
+    pub(super) async fn own_routes(&self) -> Vec<crate::enrollment::Route> {
         let attached = self.network.read().await;
         match attached.as_deref() {
             Some(link) => match link.transport.address().await {
@@ -1037,6 +995,7 @@ impl Node {
                     .map(|linked| linked.node)
                     .collect(),
             ),
+            crate::enrollment::Revoke::Node { owner, node } => (owner, [node].into()),
         };
         let (mut cut, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
         for lane in lanes {
@@ -2276,8 +2235,12 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::PublisherRequired, false)
     } else if error.is::<crate::registry::RegistryFull>() {
         (crate::ErrorKind::RegistryFull, false)
-    } else if let Some(refusal) = error.downcast_ref::<crate::InvitationRefusal>() {
-        (crate::ErrorKind::Invitation(*refusal), false)
+    } else if let Some(error) = error.downcast_ref::<crate::InviteError>() {
+        (crate::ErrorKind::Invite(*error), false)
+    } else if let Some(error) = error.downcast_ref::<crate::JoinError>() {
+        (crate::ErrorKind::Join(*error), error.retryable())
+    } else if let Some(error) = error.downcast_ref::<crate::LinkError>() {
+        (crate::ErrorKind::Link(*error), error.retryable())
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
         (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {

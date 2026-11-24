@@ -26,7 +26,11 @@ async fn join(
     issuer: &Device,
     profile: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
-    let invitation = issuer.database.provision(profile, None).await?.uri;
+    let invitation = issuer
+        .database
+        .invite(rocky_sdk::Invite::new(profile))
+        .await?
+        .code;
     let device = Device::new(open(&root.join(name), hub, name).join(&invitation).await?)?;
     issuer.database.add_peer(&device.contact().await).await?;
     Ok(device)
@@ -255,10 +259,13 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     )?;
     let mut issuers = Vec::new();
     for name in ["b", "c"] {
-        let invitation = a.database.provision(rocky_sdk::Access::Full, None).await?;
+        let invitation = a
+            .database
+            .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+            .await?;
         let issuer = Device::new(
             open(&root.join(name), &hub, name)
-                .join(&invitation.uri)
+                .join(&invitation.code)
                 .await?,
         )?;
         a.database.add_peer(&issuer.contact().await).await?;

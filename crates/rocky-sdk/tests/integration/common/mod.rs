@@ -47,6 +47,11 @@ impl From<Database> for Opened {
         }
     }
 }
+impl From<rocky_sdk::Opened> for Opened {
+    fn from(opened: rocky_sdk::Opened) -> Self {
+        opened.database.into()
+    }
+}
 impl From<Created> for Opened {
     fn from(created: Created) -> Self {
         Self {
@@ -120,14 +125,13 @@ impl Device {
     }
     pub async fn join(
         directory: &Path,
-        invitation: &str,
+        invitation: &rocky_sdk::InvitationCode,
         network: Network,
     ) -> Result<Self, Failure> {
         let signer = external_identity(directory);
-        let joined = open(directory, Some(signer), Some(network))
-            .join_linkable(invitation)
+        let joined = open(directory, Some(signer.clone()), Some(network))
+            .join(invitation)
             .await?;
-        let signer = Arc::new(rocky_sdk::IdentityKey::from_phrase(&joined.identity)?);
         Self::new(joined.database).map(|device| device.with_identity(signer))
     }
     pub async fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
@@ -260,15 +264,15 @@ impl Device {
     pub async fn sync(&self) -> Result<Value, Value> {
         snap::observe(self.sync_now()).await
     }
-    pub async fn invite(&self) -> String {
+    pub async fn invite(&self) -> rocky_sdk::InvitationCode {
         self.invite_as(rocky_sdk::Access::Full).await
     }
-    pub async fn invite_as(&self, access: rocky_sdk::Access) -> String {
+    pub async fn invite_as(&self, access: rocky_sdk::Access) -> rocky_sdk::InvitationCode {
         self.database
-            .provision(access, None)
+            .invite(rocky_sdk::Invite::new(access))
             .await
             .expect("invitation")
-            .uri
+            .code
     }
     pub async fn admit(&self, admin: &Device) {
         let identity = admin.database.info().await.expect("session").principal;
@@ -287,15 +291,15 @@ impl Device {
         self.database.contact().await.expect("contact").uri
     }
     pub async fn node(&self) -> String {
-        self.database.info().await.expect("session").node.to_hex()
+        self.database.status().await.expect("status").authority.node
     }
     pub async fn identity(&self) -> String {
         self.database
-            .info()
+            .status()
             .await
-            .expect("session")
+            .expect("status")
+            .authority
             .principal
-            .to_hex()
     }
     pub async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {
@@ -370,24 +374,15 @@ pub async fn link(
     contact: &str,
     responder: &Database,
 ) -> Result<Database, Failure> {
-    let error = match config.link(contact, identity.clone()).await {
-        Ok(_) => return Err("unconfirmed link succeeded".into()),
-        Err(error) => error,
-    };
-    let rocky_sdk::ErrorKind::AwaitingLink(pending) = error.kind else {
-        return Err(format!("expected a pending link, found {error}").into());
-    };
+    let pending = config.identity(identity).link(contact).await?;
     let shown = responder
-        .discovered()
+        .link_requests()
         .await?
-        .links
         .into_iter()
-        .find(|request| request.node == pending.node)
+        .find(|request| request.device == pending.device())
         .ok_or("missing link request")?;
-    assert_eq!(shown.code, pending.code);
-    assert!(!shown.confirmed);
-    responder.confirm_link(pending.node, &shown.code).await?;
-    Ok(config
-        .confirm_link(contact, identity, pending.clone(), &shown.code)
-        .await?)
+    assert_eq!(&shown.code, pending.code());
+    assert!(!shown.approved);
+    responder.approve_link(shown.device, &shown.code).await?;
+    Ok(pending.confirm().await?.database)
 }

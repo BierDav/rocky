@@ -1,5 +1,5 @@
 use super::*;
-use crate::self_enrollment::{LinkRequest, PendingLink};
+use crate::self_enrollment::{HeldLink, LinkRequest};
 const SKEW: u64 = 300;
 impl Node {
     pub(super) fn answer_link(
@@ -16,13 +16,12 @@ impl Node {
             (time, SKEW),
             settings.database_context()?,
         )?;
-        if settings.single_use
-            || settings.tombstoned(&settings.identity)
+        if settings.tombstoned(&settings.identity)
             || settings
                 .revocations
                 .ends_node_of(settings.identity, request.node, false)
         {
-            return Err("identity or node cannot link".into());
+            return Err(Box::new(crate::LinkError::Removed));
         }
         let code = request.confirmation_code()?;
         let mut requests = self
@@ -33,9 +32,12 @@ impl Node {
         if let Some(confirmed) = wire.code {
             let held = requests
                 .get(&request.node)
-                .ok_or("link request expired or missing")?;
-            if !held.confirmed || held.request != request_bytes || confirmed != code {
-                return Err("link code is wrong or not confirmed on both devices".into());
+                .ok_or(crate::LinkError::UnknownRequest)?;
+            if held.request != request_bytes || confirmed != code {
+                return Err(Box::new(crate::LinkError::CodeMismatch));
+            }
+            if !held.confirmed {
+                return Err(Box::new(crate::LinkError::NotApproved));
             }
             drop(requests);
             return Ok(rocky_credentials::IdentityReply::Enrolled(
@@ -56,7 +58,7 @@ impl Node {
             }
             requests.insert(
                 request.node,
-                PendingLink {
+                HeldLink {
                     request: request_bytes,
                     code,
                     received: time,
@@ -66,14 +68,42 @@ impl Node {
         }
         Ok(rocky_credentials::IdentityReply::ConfirmationRequired)
     }
-    pub(super) async fn confirm_link(&self, node: PublicKey, code: &str) -> Result<(), Failure> {
+    pub(super) fn link_requests(&self) -> Vec<crate::LinkRequest> {
+        let time = now().unwrap_or(0);
+        self.link_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, held)| time.saturating_sub(held.received) < SKEW)
+            .map(|(node, held)| crate::LinkRequest {
+                device: crate::DeviceId::new(*node),
+                code: crate::LinkCode(held.code.clone()),
+                received: crate::Timestamp::from_unix_micros(
+                    i64::try_from(held.received)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(1_000_000),
+                ),
+                approved: held.confirmed,
+            })
+            .collect()
+    }
+    pub(super) fn approve_link(
+        &self,
+        node: PublicKey,
+        code: &crate::LinkCode,
+    ) -> Result<(), Failure> {
         let mut requests = self
             .link_requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let held = requests.get_mut(&node).ok_or("missing link request")?;
-        if now()?.saturating_sub(held.received) >= SKEW || held.code != code {
-            return Err("link code is wrong or expired".into());
+        let held = requests
+            .get_mut(&node)
+            .ok_or(crate::LinkError::UnknownRequest)?;
+        if now()?.saturating_sub(held.received) >= SKEW {
+            return Err(Box::new(crate::LinkError::UnknownRequest));
+        }
+        if held.code != code.0 {
+            return Err(Box::new(crate::LinkError::CodeMismatch));
         }
         held.confirmed = true;
         Ok(())

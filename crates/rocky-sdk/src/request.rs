@@ -84,18 +84,12 @@ pub(crate) enum Request {
         crate::node::Root,
         Reply<crate::TrustGrant>,
     ),
-    Provision(crate::Access, Option<Vec<u8>>, Reply<crate::Provisioning>),
-    Invite(
-        rocky_credentials::PublicKey,
-        crate::Access,
-        crate::InviteTerms,
-        Reply<crate::Invitation>,
-    ),
-    WithdrawInvitation(crate::InvitationId, Reply<()>),
-    OpenInvitations(Reply<Vec<crate::OpenInvitation>>),
+    Invite(Box<crate::Invite>, Reply<crate::Invitation>),
+    CancelInvitation(crate::InvitationId, Reply<()>),
+    Invitations(Reply<Vec<crate::PendingInvitation>>),
     Renew(Reply<()>),
-    Discovered(Reply<crate::Discovered>),
-    ConfirmLink(rocky_credentials::PublicKey, String, Reply<()>),
+    LinkRequests(Reply<Vec<crate::LinkRequest>>),
+    ApproveLink(rocky_credentials::PublicKey, crate::LinkCode, Reply<()>),
     Contact(Reply<crate::ContactInfo>),
     AddPeer(String, Reply<PublicKey>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
@@ -233,25 +227,22 @@ impl Request {
             Self::Trust(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Provision(_, _, reply) => {
+            Self::Invite(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Invite(_, _, _, reply) => {
+            Self::CancelInvitation(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::WithdrawInvitation(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::OpenInvitations(reply) => {
+            Self::Invitations(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Renew(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Discovered(reply) => {
+            Self::LinkRequests(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::ConfirmLink(_, _, reply) => {
+            Self::ApproveLink(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Contact(reply) => {

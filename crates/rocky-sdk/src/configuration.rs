@@ -1,5 +1,5 @@
 use crate::{
-    Created, Database, IdentityProvider, Joined, Network, Schema, SecretStore, database::Install,
+    Created, Database, IdentityProvider, Network, Opened, Schema, SecretStore, database::Install,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -71,58 +71,36 @@ impl Configuration {
     pub async fn open_confirmed(&self, removals: &str) -> Result<Database, crate::Error> {
         Database::launch(self, Install::Installed, Some(removals.into())).await
     }
-    pub async fn link(
-        &self,
-        contact: &str,
-        identity: Arc<dyn IdentityProvider>,
-    ) -> Result<Database, crate::Error> {
+    pub async fn link(&self, contact: &str) -> Result<crate::PendingLink, crate::Error> {
+        if self.identity.is_none() {
+            return Err(crate::LinkError::IdentityRequired.into());
+        }
         let install = Install::Identity {
             contact: contact.into(),
             confirmed: None,
         };
-        Database::launch(&self.clone().identity(identity), install, None).await
-    }
-    pub async fn confirm_link(
-        &self,
-        contact: &str,
-        identity: Arc<dyn IdentityProvider>,
-        pending: Arc<crate::AwaitingLink>,
-        code: &str,
-    ) -> Result<Database, crate::Error> {
-        if pending.code != code {
-            return Err(crate::Error::new(
-                crate::ErrorKind::Rejected,
-                "link code does not match",
-            ));
-        }
-        let install = Install::Identity {
-            contact: contact.into(),
-            confirmed: Some(pending),
-        };
-        Database::launch(&self.clone().identity(identity), install, None).await
-    }
-    pub async fn accept_invitation(&self, invitation: &str) -> Result<Database, crate::Error> {
-        let install = Install::Invited {
-            invitation: invitation.into(),
-        };
-        Database::launch(self, install, None).await
-    }
-    pub async fn join_linkable(&self, provisioning: &str) -> Result<Joined, crate::Error> {
-        let (database, identity) = Database::launch_join(self, provisioning, false).await?;
-        match identity {
-            Some(identity) => Ok(Joined { database, identity }),
-            None => {
+        match Database::launch_raw(self, install).await {
+            Ok(database) => {
                 database.close().await?;
                 Err(crate::Error::new(
                     crate::ErrorKind::Storage,
-                    "a linkable join minted no identity phrase",
+                    "the other device enrolled this one without asking for a link code",
                 ))
             }
+            Err(error) => match error.downcast::<crate::self_enrollment::AwaitingLink>() {
+                Ok(awaiting) => Ok(crate::PendingLink {
+                    configuration: self.clone(),
+                    contact: contact.into(),
+                    awaiting: Arc::new(*awaiting),
+                }),
+                Err(error) => Err(error.into()),
+            },
         }
     }
-    pub async fn join(&self, provisioning: &str) -> Result<Database, crate::Error> {
-        Database::launch_join(self, provisioning, true)
-            .await
-            .map(|(database, _)| database)
+    pub async fn join(&self, code: &crate::InvitationCode) -> Result<Opened, crate::Error> {
+        let (install, minted) = Install::invited(code);
+        let database = Database::launch(self, install, None).await?;
+        let identity = minted.lock().ok().and_then(|mut minted| minted.take());
+        Ok(Opened { database, identity })
     }
 }

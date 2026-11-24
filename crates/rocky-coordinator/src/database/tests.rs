@@ -4,10 +4,13 @@ use crate::{
     counters::Lookup,
 };
 use p2panda_core::PrivateKey;
-use rocky_sdk::{Access, Affinity, Column, Configuration, Schema, SqlValue, Table};
+use rocky_sdk::{
+    Access, Affinity, Column, Configuration, Network, Schema, SqlValue, Table,
+    transport::memory::Hub,
+};
 use std::path::Path;
 
-fn open(directory: &Path) -> Configuration {
+fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> Configuration {
     let schema = Schema::builder("billing", 1)
         .table(
             Table::replayed("invoices")
@@ -17,7 +20,9 @@ fn open(directory: &Path) -> Configuration {
         )
         .build()
         .unwrap();
-    Configuration::new(directory, &schema).unwrap()
+    Configuration::new(directory, &schema)
+        .unwrap()
+        .network(Network::Owned(hub.connector(name)))
 }
 fn invoices() -> Name {
     Name::new("invoices").unwrap()
@@ -25,6 +30,7 @@ fn invoices() -> Name {
 
 struct Office {
     _directory: tempfile::TempDir,
+    hub: Arc<Hub>,
     service: Service,
     transport: Arc<CallerOwned>,
     publisher: Database,
@@ -32,7 +38,8 @@ struct Office {
 impl Office {
     async fn open() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let created = open(&directory.path().join("publisher"))
+        let hub = Arc::new(Hub::default());
+        let created = open(&directory.path().join("publisher"), &hub, "publisher")
             .create()
             .await
             .unwrap();
@@ -41,20 +48,23 @@ impl Office {
         let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
         Self {
             _directory: directory,
+            hub,
             service,
             transport,
             publisher: database,
         }
     }
-    async fn join(&self, name: &str, uri: &str) -> Database {
-        open(&self._directory.path().join(name))
-            .join(uri)
+    async fn person(&self, name: &str, access: Access) -> Database {
+        let invitation = self
+            .publisher
+            .invite(rocky_sdk::Invite::new(access))
+            .await
+            .unwrap();
+        open(&self._directory.path().join(name), &self.hub, name)
+            .join(&invitation.code)
             .await
             .unwrap()
-    }
-    async fn person(&self, name: &str, access: Access) -> Database {
-        let invitation = self.publisher.provision(access, None).await.unwrap();
-        self.join(name, &invitation.uri).await
+            .database
     }
     async fn writer(&self, name: &str) -> Database {
         self.person(name, Access::Full).await

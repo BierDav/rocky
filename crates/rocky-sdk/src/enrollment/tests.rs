@@ -557,7 +557,6 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                 issuer,
                 enrolled: now()?,
                 invitation: None,
-                single_use: false,
             }),
             ..Default::default()
         })

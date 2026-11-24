@@ -27,26 +27,18 @@ pub struct Created {
     pub database: Database,
     pub root: crate::RootKey,
 }
-pub struct Joined {
-    pub database: Database,
-    pub identity: String,
-}
-
+type Minted = Arc<std::sync::Mutex<Option<crate::IdentityKey>>>;
 pub(crate) enum Install {
     Create {
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
     },
-    Join {
-        provisioning: String,
-        single_use: bool,
-        phrase: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    },
     Identity {
         contact: String,
-        confirmed: Option<Arc<crate::AwaitingLink>>,
+        confirmed: Option<Arc<crate::self_enrollment::AwaitingLink>>,
     },
     Invited {
-        invitation: String,
+        code: crate::InvitationCode,
+        minted: Minted,
     },
     Installed,
 }
@@ -56,28 +48,24 @@ impl Install {
             root: std::sync::Mutex::new(Some(root)),
         }
     }
-    fn join(provisioning: &str, single_use: bool) -> (Self, Arc<std::sync::Mutex<Option<String>>>) {
-        let phrase = Arc::new(std::sync::Mutex::new(None));
+    pub(crate) fn invited(code: &crate::InvitationCode) -> (Self, Minted) {
+        let minted = Arc::new(std::sync::Mutex::new(None));
         (
-            Self::Join {
-                provisioning: provisioning.into(),
-                single_use,
-                phrase: phrase.clone(),
+            Self::Invited {
+                code: code.clone(),
+                minted: minted.clone(),
             },
-            phrase,
+            minted,
         )
     }
     fn bootstraps_from_checkpoint(&self) -> bool {
-        matches!(
-            self,
-            Self::Join { .. } | Self::Identity { .. } | Self::Invited { .. }
-        )
+        matches!(self, Self::Identity { .. } | Self::Invited { .. })
     }
     fn unwinds_on_failure(&self) -> bool {
-        matches!(self, Self::Create { .. } | Self::Join { .. })
+        matches!(self, Self::Create { .. })
     }
     fn discards_secrets(&self) -> bool {
-        matches!(self, Self::Create { .. } | Self::Join { .. })
+        matches!(self, Self::Create { .. })
     }
 }
 struct Setup {
@@ -102,6 +90,7 @@ struct Senders {
     input: mpsc::Sender<Command>,
     cleanup: mpsc::UnboundedSender<Command>,
     handles: residence::Handles,
+    identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 enum Command {
     Request(Box<crate::request::Request>),
@@ -180,6 +169,7 @@ struct Shared {
     budget: Semaphore,
     closed: AtomicBool,
     worker: Mutex<Option<Worker>>,
+    identity: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
     _handles: residence::Handles,
 }
 impl Shared {
@@ -293,6 +283,16 @@ impl Database {
         let place = Worker::local;
         Ok(Self::launch_in(configuration, install, confirmation, place).await?)
     }
+    pub(crate) async fn launch_raw(
+        configuration: &Configuration,
+        install: Install,
+    ) -> Result<Self, Failure> {
+        #[cfg(not(target_family = "wasm"))]
+        let place = Worker::serving_thread;
+        #[cfg(target_family = "wasm")]
+        let place = Worker::local;
+        Self::launch_in(configuration, install, None, place).await
+    }
     async fn launch_in(
         configuration: &Configuration,
         install: Install,
@@ -315,33 +315,33 @@ impl Database {
             }
         }
     }
-    pub(crate) async fn launch_join(
-        configuration: &Configuration,
-        provisioning: &str,
-        single_use: bool,
-    ) -> Result<(Self, Option<String>), crate::Error> {
-        let (install, phrase) = Install::join(provisioning, single_use);
-        let database = Self::launch(configuration, install, None).await?;
-        let phrase = phrase.lock().ok().and_then(|mut guard| guard.take());
-        Ok((database, phrase))
-    }
     fn setup(
         configuration: &Configuration,
         install: Install,
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
         let directory = configuration.directory.clone();
-        if let Install::Join { provisioning, .. } = &install {
-            crate::enrollment::ProvisioningBundle::parse(provisioning)?;
-        }
-        if let Install::Invited { invitation } = &install {
-            crate::invitation::check_uri(invitation)?;
+        if let Install::Invited { code, .. } = &install {
             if configuration.network.is_none() {
-                return Err(ServiceError::NetworkRequired("accept an invitation").into());
+                return Err(ServiceError::NetworkRequired("join with an invitation").into());
             }
-            if configuration.identity.is_none() {
-                return Err("accepting an invitation needs the invited identity's provider".into());
+            if code.person().is_some() && configuration.identity.is_none() {
+                return Err(Box::new(crate::JoinError::IdentityRequired));
             }
+            match &configuration.schema {
+                None if *code.access() != crate::Access::Store => {
+                    return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
+                }
+                Some(schema) if schema.application != code.application() => {
+                    return Err(Box::new(crate::JoinError::OtherApplication));
+                }
+                _ => {}
+            }
+        }
+        if let Install::Identity { .. } = &install
+            && configuration.network.is_none()
+        {
+            return Err(Box::new(crate::LinkError::NetworkRequired));
         }
         if configuration.schema.is_none() && matches!(install, Install::Create { .. }) {
             return Err(crate::StoreOnlyRefusal::NeedsSchema.into());
@@ -388,6 +388,7 @@ impl Database {
                 input,
                 cleanup,
                 handles: claimed.handles,
+                identity: configuration.identity.clone(),
             },
         ))
     }
@@ -399,6 +400,7 @@ impl Database {
                 budget: Semaphore::new(ACTIVE_CALL_QUOTA),
                 closed: AtomicBool::new(false),
                 worker: Mutex::new(Some(worker)),
+                identity: std::sync::Mutex::new(senders.identity),
                 _handles: senders.handles,
             }),
             scope,
@@ -406,6 +408,13 @@ impl Database {
     }
     pub fn scope(&self) -> rocky_core::Scope {
         self.scope
+    }
+    pub(crate) fn identity(&self) -> Option<Arc<dyn crate::IdentityProvider>> {
+        self.shared
+            .identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub(crate) async fn send<T>(
         &self,
@@ -517,6 +526,13 @@ impl Database {
     }
     pub async fn close(&self) -> Result<(), crate::Error> {
         let mut worker = self.shared.worker.lock().await;
+        drop(
+            self.shared
+                .identity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
         if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
             let result = self.shared.request(Command::Close).await;
@@ -761,44 +777,6 @@ async fn identity(
                 }
             }
         }
-        Install::Join {
-            provisioning,
-            single_use,
-            phrase,
-        } => {
-            let (settings, vault, identity_phrase) =
-                Settings::install_provisioned(secrets, schema.as_ref(), provisioning, *single_use)
-                    .await?;
-            let started = async {
-                let link = match network {
-                    Some(network) => {
-                        let key = Settings::route_secret(&vault)?;
-                        Some(network.start(settings.issuer(), key).await?)
-                    }
-                    None => None,
-                };
-                if let Err(error) = settings.save(path).await {
-                    if let Some((transport, true)) = link {
-                        transport.close().await;
-                    }
-                    return Err(error);
-                }
-                Ok::<_, Failure>(link)
-            }
-            .await;
-            match started {
-                Ok(link) => {
-                    if let Ok(mut guard) = phrase.lock() {
-                        *guard = identity_phrase;
-                    }
-                    Ok((settings, link))
-                }
-                Err(error) => {
-                    let _ = vault.forget(settings.roles());
-                    Err(error)
-                }
-            }
-        }
         Install::Identity { contact, confirmed } => {
             let network =
                 network.ok_or(ServiceError::NetworkRequired("enroll an identity's node"))?;
@@ -807,11 +785,11 @@ async fn identity(
                 .clone()
                 .ok_or("another node of an identity needs that identity's provider")?;
             let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
-            let key = Settings::route_secret(&prepared.1)?;
+            let key = Settings::route_secret(&prepared.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_identity(
                 path,
-                prepared,
+                (prepared.intent, prepared.vault),
                 provider,
                 contact,
                 &*transport,
@@ -828,25 +806,27 @@ async fn identity(
                 }
             }
         }
-        Install::Invited { invitation } => {
-            let network = network.ok_or(ServiceError::NetworkRequired("accept an invitation"))?;
-            let provider = setup
-                .identity
-                .clone()
-                .ok_or("accepting an invitation needs the invited identity's provider")?;
-            let prepared = Settings::prepare_invited(path, secrets, &provider, invitation)?;
-            let key = Settings::route_secret(&prepared.1)?;
+        Install::Invited { code, minted } => {
+            let network =
+                network.ok_or(ServiceError::NetworkRequired("join with an invitation"))?;
+            let prepared = Settings::prepare_invited(path, secrets, setup.identity.as_ref(), code)?;
+            let key = Settings::route_secret(&prepared.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_invited(
                 (path, schema.as_ref()),
-                prepared,
-                provider,
-                invitation,
+                (prepared.intent, prepared.vault),
+                prepared.provider,
+                code,
                 &*transport,
             )
             .await
             {
-                Ok(settings) => Ok((settings, Some((transport, owned)))),
+                Ok(settings) => {
+                    if let Ok(mut slot) = minted.lock() {
+                        *slot = prepared.minted;
+                    }
+                    Ok((settings, Some((transport, owned))))
+                }
                 Err(error) => {
                     if owned {
                         transport.close().await;
@@ -1187,8 +1167,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         if setup.schema.is_none() && !settings.stores_only() {
             return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
         }
-        if let (Install::Join { .. } | Install::Invited { .. }, Some(inviter)) =
-            (&setup.install, settings.issuers.first())
+        if let (Install::Invited { .. }, Some(inviter)) = (&setup.install, settings.issuers.first())
         {
             bootstrap_intent.join(*inviter).await?;
         }
@@ -1347,8 +1326,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     };
     if hello.send(Ok(scope)).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
-        let created_root_undelivered =
-            fresh && matches!(setup.install, Install::Create { .. } | Install::Join { .. });
+        let created_root_undelivered = fresh && matches!(setup.install, Install::Create { .. });
         return Err(if created_root_undelivered {
             discard(node, replica, &directory, &setup.install, abandoned).await
         } else {
@@ -1949,6 +1927,7 @@ mod tests {
             budget: Semaphore::new(1),
             closed: AtomicBool::new(false),
             worker: Mutex::new(None),
+            identity: std::sync::Mutex::new(None),
             _handles: residence::claim(Path::new("unread-connection-reply"))?.handles,
         });
         let connection = Connection {

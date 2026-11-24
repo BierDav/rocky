@@ -17,7 +17,7 @@ const CONTEXT: &str = "rocky.group-secret-envelope.context.v4";
 const WRAPPING: &str = "rocky.group-secret-envelope.key.v4";
 const DERIVATION: &[u8] = b"rocky.group-table-key.v1";
 
-fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     let mut block = [0u8; 64];
     if key.len() > block.len() {
         block[..32].copy_from_slice(&Sha256::digest(key));

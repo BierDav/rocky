@@ -22,12 +22,14 @@ pub struct IdentityEnrollmentRequest {
 pub struct InvitedEnrollmentRequest {
     pub request: IdentityRequest,
     pub invitation: Commitment,
+    proof: Option<Commitment>,
     binding: Signature,
 }
 impl InvitedEnrollmentRequest {
     pub fn sign(
         request: IdentityRequest,
         invitation: Commitment,
+        token: Option<&[u8; 32]>,
         node: &PrivateKey,
     ) -> Result<Self, Error> {
         if request.node != node.public_key() {
@@ -35,10 +37,13 @@ impl InvitedEnrollmentRequest {
                 "the invitation binding needs the request's node key",
             ));
         }
-        let binding = node.sign(&Self::bound(&request, invitation)?);
+        let bound = Self::bound(&request, invitation)?;
+        let proof = token.map(|token| crate::group::hmac(token, &[TOKEN_PROOF, &bound]));
+        let binding = node.sign(&bound);
         Ok(Self {
             request,
             invitation,
+            proof,
             binding,
         })
     }
@@ -52,12 +57,25 @@ impl InvitedEnrollmentRequest {
         }
         Ok(())
     }
+    pub fn proves_token(&self, token: &[u8; 32]) -> Result<bool, Error> {
+        let expected = crate::group::hmac(
+            token,
+            &[TOKEN_PROOF, &Self::bound(&self.request, self.invitation)?],
+        );
+        Ok(self.proof.is_some_and(|proof| {
+            proof
+                .iter()
+                .zip(expected)
+                .fold(0, |difference, (left, right)| difference | (left ^ right))
+                == 0
+        }))
+    }
     fn bound(request: &IdentityRequest, invitation: Commitment) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.invited-enrollment.v1",
+            "rocky.credentials.invited-enrollment.v2",
             &(
                 rocky_core::commitment(
-                    "rocky.credentials.invited-enrollment-request.v1",
+                    "rocky.credentials.invited-enrollment-request.v2",
                     &request.to_bytes()?,
                 ),
                 invitation,
@@ -65,6 +83,7 @@ impl InvitedEnrollmentRequest {
         )
     }
 }
+const TOKEN_PROOF: &[u8] = b"rocky.credentials.invitation-token-proof.v1";
 #[derive(Serialize, Deserialize)]
 pub enum IdentityEnrollment {
     Shared(IdentityEnrollmentRequest),
@@ -191,7 +210,7 @@ fn receipt_bytes(
     )
 }
 
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -547,17 +566,22 @@ mod tests {
         let (signed, _) =
             IdentityRequest::sign(&identity, &node, issuer.public_key(), 1_000, database).unwrap();
         let mut substituted =
-            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &node).unwrap();
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], None, &node).unwrap();
         substituted.invitation = [8; 32];
         assert!(
             substituted.verify_binding().is_err(),
             "a request bound to one invitation redeems no other"
         );
         assert!(
-            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &issuer).is_err(),
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], None, &issuer).is_err(),
             "only the request's node binds it"
         );
-        let bound = InvitedEnrollmentRequest::sign(signed, [9; 32], &node).unwrap();
+        let bound = InvitedEnrollmentRequest::sign(signed, [9; 32], Some(&[4; 32]), &node).unwrap();
+        assert!(bound.proves_token(&[4; 32]).unwrap());
+        assert!(
+            !bound.proves_token(&[5; 32]).unwrap(),
+            "only the invitation's token proves it"
+        );
         let request = PeerRequest::Identity(Box::new(IdentityEnrollment::Invited(bound)));
         assert_eq!(
             request.requirements(),
@@ -574,6 +598,7 @@ mod tests {
         };
         assert_eq!(carried.invitation, [9; 32]);
         carried.verify_binding().unwrap();
+        assert!(carried.proves_token(&[4; 32]).unwrap());
         carried
             .request
             .verify(

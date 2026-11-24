@@ -19,14 +19,9 @@ pub enum ActivityKind {
     LinkAdmissionFailed {
         error: String,
     },
-    DeviceProvisioned {
-        node: PublicKey,
-        identity: PublicKey,
-        access: crate::Access,
-    },
     IdentityInvited {
         invitation: crate::InvitationId,
-        identity: PublicKey,
+        person: Option<crate::PersonId>,
         access: crate::Access,
         expires: u64,
     },

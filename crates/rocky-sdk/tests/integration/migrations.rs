@@ -193,10 +193,9 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a")).await?;
     let b_opened = open(&b_dir, common::SCHEMA, network("b"))
-        .join_linkable(&a.invite_as(rocky_sdk::Access::Full).await)
+        .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
-    let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::IdentityKey::from_phrase(&b_opened.identity)?);
+    let b_identity = common::external_identity(&b_dir);
     let b = Device::new(b_opened.database)?;
     a.admit(&b).await;
     introduce(&a, &b).await;
@@ -286,10 +285,9 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(open(&a_dir, LISTS, network("a")).create().await?)?;
     let b_opened = open(&b_dir, LISTS, network("b"))
-        .join_linkable(&a.invite_as(rocky_sdk::Access::Full).await)
+        .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
-    let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::IdentityKey::from_phrase(&b_opened.identity)?);
+    let b_identity = common::external_identity(&b_dir);
     let b = Device::new(b_opened.database)?;
     a.admit(&b).await;
     introduce(&a, &b).await;

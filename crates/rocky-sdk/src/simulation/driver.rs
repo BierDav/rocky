@@ -672,7 +672,7 @@ impl Simulation {
                 .find(|member| member.node_key.as_deref() == Some(key))
                 .map_or("?".into(), |member| member.name.clone())
         };
-        let described: Vec<String> = alerts
+        let mut described: Vec<String> = alerts
             .iter()
             .map(|alert| match &alert.kind {
                 crate::AlertKind::ClockAheadOfPeer { node, seconds } => {
@@ -709,6 +709,7 @@ impl Simulation {
                 ),
             })
             .collect();
+        described.sort();
         format!("alerts {described:?}")
     }
     async fn sync(&mut self, node: usize) -> Result<String, Failure> {
@@ -793,14 +794,14 @@ impl Simulation {
         if self.members[node].node_key.is_some() {
             return Err("skipped: already a member".into());
         }
-        let uri = self
+        let code = self
             .running(by)?
             .database()?
-            .provision(profile, None)
+            .invite(crate::Invite::new(profile))
             .await?
-            .uri;
+            .code;
         let hub = self.hub.clone();
-        self.members[node].join(&hub, &uri).await?;
+        self.members[node].join(&hub, &code).await?;
         self.synced[node] = false;
         self.introduce(node).await;
         Ok("joined".into())

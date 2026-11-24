@@ -40,7 +40,6 @@ pub struct Admitted {
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
     pub invitation: Option<crate::InvitationId>,
-    pub single_use: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,7 +212,7 @@ impl Registry {
 fn parse<T: DeserializeOwned>(value: &str) -> Result<T, Failure> {
     Ok(serde_json::from_str(value)?)
 }
-mod hex32 {
+pub(crate) mod hex32 {
     use data_encoding::HEXLOWER;
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
     pub fn serialize<S: Serializer>(value: &[u8; 32], to: S) -> Result<S::Ok, S::Error> {

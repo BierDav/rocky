@@ -1,3 +1,4 @@
+use super::references::SettledScopes;
 use super::*;
 
 pub(in crate::replica) type Written = (String, Vec<SqlValue>);
@@ -275,9 +276,10 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         };
         let checks = replayed_checks(typed.rows.schema(), written, deferred_all)?;
+        let mut settled = SettledScopes::new();
         let mut violated = Vec::new();
         for check in &checks {
-            match self.evaluate(check).await? {
+            match self.evaluate(check, &mut settled).await? {
                 Evaluated::Overflow => {
                     return Ok(Some(format!(
                         "{}: {}",
@@ -296,7 +298,7 @@ impl<A: RowApplication> Inner<A> {
             .before_the_transaction(undo_in_applied_order, async || {
                 let mut before = Vec::with_capacity(violated.len());
                 for (check, _) in &violated {
-                    before.push(match self.evaluate(check).await? {
+                    before.push(match self.evaluate(check, &mut settled).await? {
                         Evaluated::Rows(rows) => rows,
                         Evaluated::Overflow => Vec::new(),
                     });
@@ -333,10 +335,14 @@ impl<A: RowApplication> Inner<A> {
         Ok(read)
     }
 
-    async fn evaluate(&self, check: &Check<'_>) -> Result<Evaluated, Error> {
+    async fn evaluate(
+        &self,
+        check: &Check<'_>,
+        settled: &mut SettledScopes,
+    ) -> Result<Evaluated, Error> {
         match check {
             Check::Reference { child, partitions } => self
-                .violating_rows(child, partitions)
+                .violating_rows(child, partitions, settled)
                 .await
                 .map(Evaluated::Rows),
             Check::Assertion { sql, params, .. } => {
@@ -356,34 +362,24 @@ impl<A: RowApplication> Inner<A> {
         &self,
         child: &rocky_core::LogicalTable,
         partitions: &[&Vec<SqlValue>],
+        settled: &mut SettledScopes,
     ) -> Result<Vec<Vec<SqlValue>>, Error> {
-        let key = child
-            .primary_key
-            .iter()
-            .map(|column| format!("c.{}", typed::quoted(column)))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT k.fkid,{key} FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid",
-            typed::quoted(&child.sql_name)
-        );
-        if child.partition_by.is_empty() {
-            return collect_rows(self.conn.query(&sql, [child.sql_name.clone()]).await?).await;
-        }
-        let in_partition = child
-            .partition_by
-            .iter()
-            .enumerate()
-            .map(|(index, column)| format!("c.{}=?{}", typed::quoted(column), index + 2))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let sql = format!("{sql} WHERE {in_partition}");
         let mut violating = Vec::new();
-        for partition in partitions {
-            let mut values = vec![SqlValue::Text(child.sql_name.clone())];
-            values.extend(partition.iter().cloned());
-            violating.extend(collect_rows(self.conn.query(&sql, bindings(values)).await?).await?);
+        if child.partition_by.is_empty() {
+            violating.extend(
+                self.orphans_of_settled_parents(child, None, settled)
+                    .await?,
+            );
         }
-        Ok(violating)
+        for partition in partitions.iter().filter(|_| !child.partition_by.is_empty()) {
+            violating.extend(
+                self.orphans_of_settled_parents(child, Some(partition), settled)
+                    .await?,
+            );
+        }
+        Ok(violating
+            .into_iter()
+            .map(|orphan| orphan.identity)
+            .collect())
     }
 }

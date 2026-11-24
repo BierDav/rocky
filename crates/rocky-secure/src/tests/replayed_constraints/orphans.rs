@@ -408,3 +408,136 @@ async fn an_assertion_failing_before_a_transaction_refuses_only_what_the_transac
         );
     }
 }
+
+async fn a_membership_of_a_team_this_device_never_received(
+    c: &Constrained,
+    devices: &mut [Device],
+) -> Commitment {
+    let team = devices[0]
+        .commit(
+            c,
+            &["INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)"],
+        )
+        .await
+        .unwrap()[0];
+    let team_frames_kept_from_device_1 = devices[0].fresh().await;
+    assert!(!team_frames_kept_from_device_1.is_empty());
+    devices[0]
+        .commit(
+            c,
+            &[
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team},#next(people),'member',1,1,#id)"
+                ),
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let joined = devices[0].fresh().await;
+    devices[1].receive(&joined).await;
+    c.transaction(&joined)
+}
+
+async fn outcome(device: &Device, transaction: Commitment) -> Option<TransactionOutcome> {
+    device
+        .replica
+        .transaction_outcome(transaction)
+        .await
+        .unwrap()
+}
+
+async fn membership_rows(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    crate::storage::rows(&inner.conn, "SELECT * FROM memberships ORDER BY id")
+        .await
+        .unwrap()
+}
+
+async fn rebuilt_rows_match(c: &Constrained, device: &Device, transaction: Commitment) {
+    let replayed = membership_rows(&device.replica).await;
+    device
+        .replica
+        .rebuild_projection(c.scope("memberships"))
+        .await
+        .unwrap();
+    assert_eq!(
+        membership_rows(&device.replica).await,
+        replayed,
+        "a full rebuild keeps what replay kept"
+    );
+    assert_eq!(
+        outcome(device, transaction).await,
+        Some(TransactionOutcome::Applied { sealed: false })
+    );
+    device.replica.audit(c.scope("memberships")).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_new_reference_into_a_parent_scope_not_held_here_applies_as_a_rebuild_keeps_it() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    devices[1]
+        .replica
+        .set_role(crate::RoleConfig {
+            role: crate::ReplicaRole::Partial,
+        })
+        .await
+        .unwrap();
+    for name in ["people", "notes", "memberships"] {
+        devices[1].replica.subscribe(c.scope(name)).await.unwrap();
+    }
+    let transaction = a_membership_of_a_team_this_device_never_received(&c, &mut devices).await;
+    let applied = Some(TransactionOutcome::Applied { sealed: false });
+    assert_eq!(outcome(&devices[0], transaction).await, applied);
+    assert_eq!(
+        outcome(&devices[1], transaction).await,
+        applied,
+        "a membership of a team in a scope not held here is tolerated as a rebuild tolerates it"
+    );
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+    rebuilt_rows_match(&c, &devices[1], transaction).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_new_reference_into_a_parent_scope_still_being_restored_applies_as_a_rebuild_keeps_it() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    let own_frames_not_back_since_a_reset = format!(
+        "INSERT INTO secure_restoration_guards VALUES(?,7,X'{}')",
+        "11".repeat(32)
+    );
+    execute(
+        &devices[1].replica,
+        &own_frames_not_back_since_a_reset,
+        Some(c.scope("teams")),
+    )
+    .await;
+    let transaction = a_membership_of_a_team_this_device_never_received(&c, &mut devices).await;
+    assert_eq!(
+        outcome(&devices[1], transaction).await,
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "a held team scope with a restoration guard is not settled"
+    );
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+    rebuilt_rows_match(&c, &devices[1], transaction).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_new_reference_to_a_missing_row_of_a_held_and_settled_parent_scope_drops() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    let transaction = a_membership_of_a_team_this_device_never_received(&c, &mut devices).await;
+    assert_eq!(
+        outcome(&devices[1], transaction).await,
+        Some(TransactionOutcome::Dropped {
+            reason: DropReason::Constraint,
+            sealed: false,
+        }),
+        "a membership of a team missing from a held, settled scope is a violation"
+    );
+    assert_eq!(memberships(&devices[1].replica).await, 0);
+}

@@ -398,86 +398,28 @@ impl<A: RowApplication> Inner<A> {
         &self,
         touching: Option<&str>,
     ) -> Result<Option<BrokenReference>, Error> {
-        let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(None);
-        };
-        let mut settled_scopes = BTreeMap::new();
+        let mut settled = references::SettledScopes::new();
         for child in self.replayed_tables() {
-            if child.foreign_keys.is_empty() {
+            let touches = |parent: &str| {
+                touching.is_none_or(|table| {
+                    table.eq_ignore_ascii_case(&child.sql_name)
+                        || table.eq_ignore_ascii_case(parent)
+                })
+            };
+            if !child.foreign_keys.iter().any(|key| touches(&key.table)) {
                 continue;
             }
-            let projected = typed
-                .by_name(&child.sql_name)
-                .ok_or_else(|| Error::Corrupt("a replayed table is not projected".into()))?;
-            let sql = match child.partition_by.is_empty() {
-                true => "SELECT parent FROM pragma_foreign_key_check(?)".to_string(),
-                false => format!(
-                    "SELECT k.parent,{} FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid",
-                    child
-                        .columns
-                        .iter()
-                        .map(|column| format!("c.{}", typed::quoted(&column.sql_name)))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    typed::quoted(&child.sql_name)
-                ),
-            };
-            for record in
-                collect_rows(self.conn.query(sql, [child.sql_name.clone()]).await?).await?
-            {
-                let [SqlValue::Text(parent), values @ ..] = record.as_slice() else {
-                    return Err(Error::Corrupt("foreign key check".into()));
-                };
-                if touching.is_some_and(|table| {
-                    !table.eq_ignore_ascii_case(&child.sql_name)
-                        && !table.eq_ignore_ascii_case(parent)
-                }) {
-                    continue;
-                }
-                let Some(scope) = self.parent_scope(projected, parent, values)? else {
-                    continue;
-                };
-                let settled = match settled_scopes.get(&scope) {
-                    Some(settled) => *settled,
-                    None => {
-                        let settled = self.settled(scope).await?;
-                        settled_scopes.insert(scope, settled);
-                        settled
-                    }
-                };
-                if settled {
-                    return Ok(Some(BrokenReference(missing_parent(
-                        &child.sql_name,
-                        parent,
-                    ))));
-                }
+            let orphans = self
+                .orphans_of_settled_parents(child, None, &mut settled)
+                .await?;
+            if let Some(orphan) = orphans.iter().find(|orphan| touches(&orphan.parent)) {
+                return Ok(Some(BrokenReference(missing_parent(
+                    &child.sql_name,
+                    &orphan.parent,
+                ))));
             }
         }
         Ok(None)
-    }
-    async fn settled(&self, scope: ResourceScope) -> Result<bool, Error> {
-        Ok(self.holds(scope).await?
-            && !self.restoring(scope).await?
-            && self.readable_blockers(scope).await?.is_empty())
-    }
-    fn parent_scope(
-        &self,
-        child: &typed::Projected,
-        parent: &str,
-        values: &[SqlValue],
-    ) -> Result<Option<ResourceScope>, Error> {
-        let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(None);
-        };
-        let Some(parent) = typed.by_name(parent) else {
-            return Ok(None);
-        };
-        if !typed.partitioned(parent) {
-            return Ok(Some(parent.scope));
-        }
-        Ok(typed
-            .registered_row_scope(child, values, &self.partitions)?
-            .and_then(|row| self.group_member(row, parent.table.id)))
     }
     pub(in crate::replica) async fn mark_rederive_if_orphaned(
         &mut self,

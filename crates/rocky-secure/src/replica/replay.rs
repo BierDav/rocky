@@ -7,6 +7,7 @@ mod base;
 mod constraints;
 pub(crate) mod outcomes;
 mod rebuild;
+mod references;
 mod restrictions;
 mod sealed;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};

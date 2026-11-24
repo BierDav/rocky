@@ -18,7 +18,7 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
             .iter()
             .map(|member| member.role)
             .collect::<Vec<_>>(),
-        [Role::Trusted, Role::Full, Role::Partial]
+        [Role::Admin, Role::Full, Role::Partial]
     );
     assert_eq!(watch.role().await?, Role::Partial);
 
@@ -31,7 +31,7 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
         assert_eq!(
             device.lists().await?.len(),
             2,
-            "trusted and full devices hold every list"
+            "admin and full devices hold every list"
         );
     }
     assert!(

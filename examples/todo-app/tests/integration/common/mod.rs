@@ -27,11 +27,11 @@ impl World {
             .network(Network::Owned(hub.connector(name)))
             .sync(rocky_sdk::SyncMode::Manual))
     }
-    pub fn trusted(&self) -> &Todos {
+    pub fn admin(&self) -> &Todos {
         &self.devices[0]
     }
     pub async fn join(&mut self, name: &str, role: Role) -> Result<Todos, Failure> {
-        let code = self.trusted().invite(role).await?;
+        let code = self.admin().invite(role).await?;
         let joined = roles::join(
             &Self::config(self.root.path(), &self.hub, name)?,
             &code,

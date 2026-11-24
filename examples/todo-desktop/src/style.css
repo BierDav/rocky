@@ -12,7 +12,7 @@ h3 { margin: 18px 0 8px; font-size: 14px; text-transform: uppercase; letter-spac
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; min-width: 0; }
 .device-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #eceee9; }
-.badge.trusted { background: #e6e1f6; color: #4b3a8c; }
+.badge.admin { background: #e6e1f6; color: #4b3a8c; }
 .badge.full { background: var(--accent-soft); color: var(--accent); }
 .badge.partial { background: #f6eadd; color: #8a4f12; }
 .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }

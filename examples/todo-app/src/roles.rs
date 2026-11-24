@@ -4,18 +4,18 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
-    Trusted,
+    Admin,
     Full,
     Partial,
 }
 pub const PARTIAL: RoleName = RoleName::from_static("partial");
 
 impl Role {
-    pub const ALL: [Self; 3] = [Self::Trusted, Self::Full, Self::Partial];
+    pub const ALL: [Self; 3] = [Self::Admin, Self::Full, Self::Partial];
     pub const INVITABLE: [Self; 2] = [Self::Full, Self::Partial];
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Trusted => "trusted",
+            Self::Admin => "admin",
             Self::Full => "full",
             Self::Partial => "partial",
         }
@@ -25,7 +25,7 @@ impl Role {
     }
     fn access(self) -> Result<Access, TodoError> {
         match self {
-            Self::Trusted => Err(TodoError::NotInvitable),
+            Self::Admin => Err(TodoError::NotInvitable),
             Self::Full => Ok(Access::Full),
             Self::Partial => Ok(Access::Role(PARTIAL)),
         }
@@ -56,7 +56,7 @@ pub fn parse_invitation(code: &str) -> Result<(Role, &str), Failure> {
 
 pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, Failure> {
     let todos = Todos::new(configuration.create().await?.database);
-    todos.register(Role::Trusted, name).await?;
+    todos.register(Role::Admin, name).await?;
     Ok(todos)
 }
 
@@ -124,7 +124,7 @@ impl Todos {
     pub async fn role(&self) -> Result<Role, Failure> {
         let me = self.database.me().await?;
         Ok(if me.admin {
-            Role::Trusted
+            Role::Admin
         } else if me.access == Access::Role(PARTIAL) {
             Role::Partial
         } else {

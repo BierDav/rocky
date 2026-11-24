@@ -320,12 +320,12 @@ fn Start(name: String, phase: Signal<Phase>) -> Element {
         div { class: "choice",
             div {
                 h3 { "Start a new database" }
-                p { class: "muted", "A separate database; this device becomes trusted: it invites others and seals. To share another device's lists, join instead." }
+                p { class: "muted", "A separate database; this device becomes its admin: it invites others and seals. To share another device's lists, join instead." }
                 button { disabled: busy() || label().trim().is_empty(), onclick: move |_| create(None), "Start" }
             }
             div {
                 h3 { "Join a database" }
-                p { class: "muted", "Paste an invitation from a trusted device. It sets the role." }
+                p { class: "muted", "Paste an invitation from an admin device. It sets the role." }
                 textarea { rows: 3, placeholder: "full:rocky://…", value: code(), disabled: busy(), oninput: move |event| code.set(event.value()) }
                 button { disabled: busy() || code().trim().is_empty() || label().trim().is_empty(), onclick: move |_| join(Some(code().trim().to_owned())), "Join" }
             }
@@ -508,7 +508,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
         .filter(|node| partials.iter().any(|member| member.node == *node))
         .or(partials.first().map(|member| member.node.clone()));
     let shared_names: Vec<String> = view.shared.iter().map(|node| member_name(node)).collect();
-    let can_share = view.role == Some(Role::Trusted);
+    let can_share = view.role == Some(Role::Admin);
     let list = view.list;
     let rows = view.todos.clone();
     let creating = todos.clone();
@@ -523,8 +523,8 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
             if let Some(role) = view.role { span { class: "badge {role}", "{role}" } }
         }
         status::Sync { todos: Shared(todos.clone()), members: view.members.clone() }
-        if view.role == Some(Role::Trusted) { Invite { todos: Shared(todos.clone()) } }
-        Members { todos: Shared(todos.clone()), members: view.members.clone(), node: view.node.clone(), trusted: view.role == Some(Role::Trusted), closing }
+        if view.role == Some(Role::Admin) { Invite { todos: Shared(todos.clone()) } }
+        Members { todos: Shared(todos.clone()), members: view.members.clone(), node: view.node.clone(), admin: view.role == Some(Role::Admin), closing }
 
         h3 { "Lists" }
         form { class: "row",
@@ -548,7 +548,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
             button { r#type: "submit", disabled, "Create" }
         }
         if view.role == Some(Role::Partial) && view.lists.is_empty() {
-            p { class: "muted", "A partial device holds only the lists the trusted device shares with it." }
+            p { class: "muted", "A partial device holds only the lists the admin device shares with it." }
         }
         if let Some(list) = list {
             div { class: "row small",
@@ -618,7 +618,7 @@ fn Invite(todos: Shared) -> Element {
                     }
                 }
             }
-            p { class: "muted small", "Only this trusted device administers the lists. Full devices receive every list. Partial devices receive only lists this device grants them. Treat each code as a secret and mint a fresh code for each device; paste it into that device's Join box." }
+            p { class: "muted small", "Only this admin device administers the lists. Full devices receive every list. Partial devices receive only lists this device grants them. Treat each code as a secret and mint a fresh code for each device; paste it into that device's Join box." }
             if let Some(uri) = code() { textarea { class: "code", readonly: true, rows: 3, value: uri } }
             if let Some(message) = error() { p { role: "alert", "{message}" } }
         }
@@ -630,7 +630,7 @@ fn Members(
     todos: Shared,
     members: Vec<Member>,
     node: String,
-    trusted: bool,
+    admin: bool,
     closing: bool,
 ) -> Element {
     let todos = todos.0;
@@ -646,7 +646,7 @@ fn Members(
                         span { "{member.name}" if member.node == node { " (this device)" } }
                         span { class: "badge {member.role}", "{member.role}" }
                         code { class: "muted", "{short(&member.node)}" }
-                        if trusted && member.node != node {
+                        if admin && member.node != node {
                             span { class: "spacer" }
                             if confirming().as_deref() == Some(member.node.as_str()) {
                                 button { class: "danger", disabled: busy() || closing,
@@ -676,7 +676,7 @@ fn Members(
                     }
                 }
             }
-            if trusted {
+            if admin {
                 p { class: "muted small", "Removing revokes the device: it can no longer sync, and lists are no longer shared with it. Its local copy stays on that device." }
             }
             if let Some(message) = error() { p { role: "alert", "{message}" } }

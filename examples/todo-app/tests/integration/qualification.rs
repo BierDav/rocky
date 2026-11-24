@@ -34,7 +34,7 @@ async fn converged(
 }
 
 async fn seal(world: &World) -> Result<String, Failure> {
-    let tip = world.trusted().database().seal().await?.tip;
+    let tip = world.admin().database().seal().await?.tip;
     world.sync().await?;
     for device in &world.devices {
         assert_eq!(device.database().tip_status().await?.tip, tip);
@@ -80,7 +80,7 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     let phone = world.join("phone", Role::Full).await?;
     let tablet = world.join("tablet", Role::Full).await?;
     world.sync().await?;
-    let laptop = world.trusted().clone();
+    let laptop = world.admin().clone();
     let list = laptop.create_list("Errands").await?.id;
     let mut ids = Vec::new();
     for title in ["Post", "Bank", "Bakery", "Florist"] {
@@ -174,7 +174,7 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     let mut world = World::new().await?;
     let phone = world.join("phone", Role::Full).await?;
     world.sync().await?;
-    let laptop = world.trusted().clone();
+    let laptop = world.admin().clone();
     let list = laptop.create_list("Errands").await?.id;
     let post = laptop.add(list, "Post").await?.id;
     world.sync().await?;
@@ -212,7 +212,7 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
         }
     })
     .await
-    .map_err(|_| "the trusted device sealed no routine seal")??;
+    .map_err(|_| "the admin device sealed no routine seal")??;
     assert_ne!(sealed, opened);
 
     phone
@@ -258,7 +258,7 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
     let phone = world.join("phone", Role::Full).await?;
     let tablet = world.join("tablet", Role::Full).await?;
     world.sync().await?;
-    let laptop = world.trusted().clone();
+    let laptop = world.admin().clone();
     let list = laptop.create_list("Errands").await?.id;
     let shared = laptop.add(list, "Shared").await?.id;
     world.sync().await?;

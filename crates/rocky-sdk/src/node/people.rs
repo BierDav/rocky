@@ -80,19 +80,12 @@ impl Node {
             }
         }
         let node = rocky_secure::PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        let owner = settings.issuer()
-            && self
-                .registry(&settings)
-                .await?
-                .get(&settings.identity)
-                .and_then(|record| record.admitted.as_ref())
-                .is_some_and(|admitted| admitted.invited_by == settings.identity);
         Ok(Me {
             person: PersonId::new(settings.identity),
             device: DeviceId::new(node),
             access: settings.access.clone(),
             admin: settings.issuer(),
-            owner,
+            owner: settings.issuer() && settings.owns(),
             tables,
             expires: seconds(settings.expires()),
         })

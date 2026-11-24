@@ -31,7 +31,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 45;
+pub const VERSION: u32 = 46;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -276,7 +276,6 @@ pub struct Issuing {
         BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::TrustedObservation>>,
     pub stale_after: Option<u64>,
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
-    pub promoted: bool,
     pub rights_change: Option<RightsChange>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1220,7 +1219,7 @@ impl Settings {
             keys.insert(name.to_owned(), vec![epoch]);
         }
         let grant =
-            Authority::owner(root).issue_trusted(identity.public_key()?, bound.scope, now()?)?;
+            Authority::owner(root).issue_owner(identity.public_key()?, bound.scope, now()?)?;
         let mut settings = Self::installed(
             installation,
             (publisher, identity.public_key()?),
@@ -1346,11 +1345,16 @@ impl Settings {
         if identity != self.identity {
             return Err("the trusted grant names another identity".into());
         }
-        self.authority.get_or_insert_with(Issuing::default).promoted = true;
+        self.authority.get_or_insert_with(Issuing::default);
         self.access = Access::Full;
         let domain = self.domain()?;
         self.credentials = self.certify(vault, CredentialChain(vec![link]), &domain)?;
         Ok(())
+    }
+    pub(crate) fn owns(&self) -> bool {
+        self.trusted_links()
+            .and_then(|chain| chain.0.first()?.capability.extended().ok())
+            .is_some_and(|extended| extended.owner)
     }
     pub(crate) fn trusted_links(&self) -> Option<CredentialChain> {
         let chain = self.identity_links();
@@ -1726,11 +1730,7 @@ impl Settings {
         let links = self.identity_links();
         let root = links.0.last().ok_or("missing credentials")?;
         let mut changes = Changes::default();
-        let promoted = self
-            .authority
-            .as_ref()
-            .is_some_and(|authority| authority.promoted);
-        if !promoted {
+        if self.owns() {
             changes.admitted(
                 &own,
                 &registry::Admitted {

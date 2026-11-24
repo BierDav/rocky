@@ -110,6 +110,23 @@ impl<'a> Authority<'a> {
         scope: rocky_core::Scope,
         time: u64,
     ) -> Result<SignedCapability, Error> {
+        self.trusted_grant(subject, scope, time, false)
+    }
+    pub fn issue_owner(
+        &self,
+        subject: PublicKey,
+        scope: rocky_core::Scope,
+        time: u64,
+    ) -> Result<SignedCapability, Error> {
+        self.trusted_grant(subject, scope, time, true)
+    }
+    fn trusted_grant(
+        &self,
+        subject: PublicKey,
+        scope: rocky_core::Scope,
+        time: u64,
+        owner: bool,
+    ) -> Result<SignedCapability, Error> {
         if !self.chain.0.is_empty() {
             return Err(denied("only the root grants trusted identity authority"));
         }
@@ -124,6 +141,7 @@ impl<'a> Authority<'a> {
                 extension: Extension::new(Extended {
                     issues: true,
                     trusted: Some(scope),
+                    owner,
                     database: Some(crate::DatabaseContext {
                         publisher: self.identity()?,
                         scope,

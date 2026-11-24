@@ -103,6 +103,20 @@ async fn the_person_key_approves_a_link_of_the_owners_second_device_without_the_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_freshly_linked_owner_device_is_the_owner_before_it_syncs() -> Result<(), Failure> {
+    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let laptop = second_device(&owned).await?;
+    assert!(
+        laptop.database.me().await?.owner,
+        "ownership comes from the root-signed owner grant, not from the registry's arrival"
+    );
+    assert!(owned.owner.database.me().await?.owner);
+    laptop.close().await;
+    owned.owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_person_key_unlinks_one_of_the_owners_devices_without_the_root() -> Result<(), Failure>
 {
     let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;

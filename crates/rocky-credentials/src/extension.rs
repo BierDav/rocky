@@ -1,7 +1,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 16;
+const EXTENSION_VERSION: u32 = 17;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,7 @@ struct Body {
     role: Option<rocky_core::Commitment>,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
+    owner: bool,
     origin: Option<Origin>,
     sequence: Option<u64>,
     previous: Option<rocky_core::Commitment>,
@@ -35,6 +36,7 @@ pub struct Extended {
     pub role: Option<rocky_core::Commitment>,
     pub issues: bool,
     pub trusted: Option<rocky_core::Scope>,
+    pub owner: bool,
     pub origin: Option<Origin>,
     pub sequence: Option<u64>,
     pub previous: Option<rocky_core::Commitment>,
@@ -68,6 +70,7 @@ impl Extension {
             node: extended.node,
             issues: extended.issues,
             trusted: extended.trusted,
+            owner: extended.owner,
             origin: extended.origin,
             sequence: extended.sequence,
             previous: extended.previous,
@@ -93,6 +96,9 @@ impl Extension {
         {
             return Err(denied("invalid membership link"));
         }
+        if body.owner && body.trusted.is_none() {
+            return Err(denied("only a trusted grant names the owner"));
+        }
         if body.partitions.len() > crate::MAX_GRANTS {
             return Err(denied("invalid partition credential extension"));
         }
@@ -106,6 +112,7 @@ impl Extension {
             node: body.node,
             issues: body.issues,
             trusted: body.trusted,
+            owner: body.owner,
             origin: body.origin,
             sequence: body.sequence,
             previous: body.previous,
@@ -142,7 +149,8 @@ mod tests {
             13,
             14,
             15,
-            17,
+            16,
+            18,
             u32::MAX,
         ] {
             let other = Extension(
@@ -154,6 +162,7 @@ mod tests {
                     role: None,
                     issues: false,
                     trusted: None,
+                    owner: false,
                     origin: None,
                     sequence: None,
                     previous: None,
@@ -178,5 +187,30 @@ mod tests {
             .unwrap(),
         );
         assert!(missing.read().is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn only_a_trusted_grant_names_the_owner() {
+        assert!(
+            Extension::new(Extended {
+                owner: true,
+                ..Extended::default()
+            })
+            .is_err()
+        );
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        let owner = Extended {
+            trusted: Some(scope),
+            owner: true,
+            ..Extended::default()
+        };
+        assert_eq!(
+            Extension::new(owner.clone()).unwrap().read().unwrap(),
+            owner
+        );
     }
 }

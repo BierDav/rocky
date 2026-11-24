@@ -118,7 +118,8 @@ never its secret, and a device's replica follows its access.
 belongs to, its access and what it may do per table. Admins list people with
 `Database::people` (a `Person` per member with access, partitions and
 devices), change access with `set_access` and end a person with
-`remove(person, Removal::Departed | Removal::Compromised)`. Narrowing access
+`remove(person, Removal::Departed | Removal::Compromised)`. `Me::owner` comes from the root-signed owner grant, so every
+linked device of the owner knows it at once. Narrowing access
 or taking a partition back revokes the person's current credentials and
 rotates the keys of everything they could read before; the issuer records
 that revocation before it changes the access, so a crash in between still

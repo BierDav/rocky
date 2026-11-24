@@ -6,7 +6,7 @@ pub enum CoordinationError {
     ClockSkew { coordinator_time: u64 },
     CoordinationStateLost,
     UnknownDomain,
-    Denied,
+    Denied(Refusal),
     Configuration,
     StaleEpoch,
     StaleHead,
@@ -26,7 +26,7 @@ impl CoordinationError {
             Self::ClockSkew { .. } => "clock_skew",
             Self::CoordinationStateLost => "state_lost",
             Self::UnknownDomain => "unknown_domain",
-            Self::Denied => "denied",
+            Self::Denied(_) => "denied",
             Self::Configuration => "configuration",
             Self::StaleEpoch => "stale_epoch",
             Self::StaleHead => "stale_head",
@@ -40,6 +40,27 @@ impl CoordinationError {
             Self::Sealed => "sealed",
         }
     }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    Signature,
+    Oversized,
+    UnexpectedMessage,
+    UnknownVoter,
+    NotMember,
+    ReadOnly,
+    Revoked,
+    InvalidRevocations,
+    ClosedDomain,
+    InvalidControl,
+    NotDomainAuthority,
+    NotMembershipAuthority,
+    InvalidGrant,
+    NotAdmitted,
+    AlreadyRegistered,
+    UnknownTenant,
+    NoPublicService,
+    NoPublisher,
 }
 impl std::fmt::Display for CoordinationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

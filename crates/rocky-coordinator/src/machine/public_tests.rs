@@ -263,29 +263,35 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     }
 
     let log_head = read(sa);
-    for (key, operation) in [
-        (&b.executor, claim(sa)),
-        (&b.executor, log_head.clone()),
-        (&b.key, log_head.clone()),
+    for (key, operation, refusal) in [
+        (&b.executor, claim(sa), Refusal::NotMember),
+        (&b.executor, log_head.clone(), Refusal::NotMember),
+        (&b.key, log_head.clone(), Refusal::NotMember),
         (
             &b.key,
             Operation::Control(Box::new(b.control(sa, 2, &[&b.executor]))),
+            Refusal::NotDomainAuthority,
         ),
         (
             &b.key,
             Operation::Control(Box::new(a.signed_control(sa, 2, &[&b.executor], &b.key))),
+            Refusal::NotDomainAuthority,
         ),
-        (&b.key, Operation::Close { scope: sa }),
+        (
+            &b.key,
+            Operation::Close { scope: sa },
+            Refusal::NotDomainAuthority,
+        ),
     ] {
         assert_eq!(
             service.apply(&mut m, key, operation.clone(), T),
-            Err(CoordinationError::Denied),
+            Err(CoordinationError::Denied(refusal)),
             "nobody acts on another tenant's domain: {operation:?}"
         );
         if operation == log_head {
             assert_eq!(
                 service.read(&m, key, operation),
-                Err(CoordinationError::Denied)
+                Err(CoordinationError::Denied(refusal))
             );
         }
     }
@@ -296,7 +302,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     );
     assert_eq!(
         service.register(&mut m, &b, b.control(a.scope(3), 1, &[&b.executor]), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::InvalidGrant)),
         "B's grant names B's application, and A's scope belongs to A's"
     );
     let squatter = Tenant {
@@ -310,7 +316,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
             squatter.control(sa, 1, &[&squatter.executor]),
             T
         ),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::AlreadyRegistered)),
         "a changed authority is a migration, not an edit, even under A's publisher"
     );
     assert!(
@@ -341,7 +347,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     );
     assert_eq!(
         service.read(&m, &a.executor, Operation::Usage),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::UnknownTenant))
     );
 }
 
@@ -366,7 +372,7 @@ fn owners_change_trusted_nodes_and_keep_the_counters() {
     assert_eq!(service.reading(&m, &a.alternate, scope), taken);
     assert_eq!(
         service.apply(&mut m, &a.executor, claim(scope), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a node the owner dropped claims nothing"
     );
     assert_eq!(service.claim(&mut m, &a.alternate, scope), taken + 1);
@@ -382,7 +388,7 @@ fn owners_change_trusted_nodes_and_keep_the_counters() {
             ))),
             T
         ),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority)),
         "a revision signed by another key, even a trusted node, is refused"
     );
 }
@@ -399,7 +405,7 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     }));
     assert_eq!(
         service.apply(&mut m, &a.key, unadmitted, T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotAdmitted)),
         "without the provider's admission nothing registers"
     );
     let borrowed = Operation::Register(Box::new(Registration {
@@ -409,7 +415,7 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     }));
     assert_eq!(
         service.apply(&mut m, &a.key, borrowed, T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotAdmitted))
     );
     assert_eq!(m.retry_records(), 0, "refusals hold no retry records");
 
@@ -477,7 +483,7 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     let closed = a.scope(1);
     assert_eq!(
         service.register(&mut m, &a, a.control(closed, 1, &[&a.executor]), time),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::AlreadyRegistered)),
         "a closed identity is never registered again"
     );
     let roundtrip: Metadata = decode(&encode(&m).unwrap()).unwrap();
@@ -533,7 +539,7 @@ fn a_public_genesis_needs_disjoint_budgets() {
     genesis.public = None;
     assert_eq!(
         CertifiedGenesis::sign(genesis, &root).err(),
-        Some(CoordinationError::Denied),
+        Some(CoordinationError::Denied(Refusal::Signature)),
         "a genesis needs authorities or a public service"
     );
 }
@@ -599,7 +605,7 @@ fn a_registered_control_names_the_publisher_of_its_coordination_grant() {
             named(PrivateKey::new().public_key()),
             T
         ),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::InvalidGrant))
     );
     assert!(matches!(
         service.register(

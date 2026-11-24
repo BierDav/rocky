@@ -178,7 +178,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
     let reading = mesh.reading(&mut metadata, scope, t);
     assert_eq!(
         mesh.apply(&mut metadata, &mesh.executor, Operation::Close { scope }, t),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority))
     );
     assert_eq!(
         mesh.apply(
@@ -191,7 +191,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
     );
     assert_eq!(
         mesh.apply(&mut metadata, &mesh.executor, mesh.claim(scope, t), t),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::ClosedDomain))
     );
     for revision in [1, 2] {
         assert!(

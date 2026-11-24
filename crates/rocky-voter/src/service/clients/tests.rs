@@ -388,7 +388,7 @@ async fn a_full_unadmitted_budget_drops_further_streams_until_the_read_timeout_f
         ask_for_usage(&transport, &genesis)
             .await
             .map(|reply| reply.result),
-        Ok(Err(CoordinationError::Denied)),
+        Ok(Err(CoordinationError::Denied(Refusal::UnknownTenant))),
         "the freed budget admits the next client"
     );
 
@@ -427,7 +427,7 @@ async fn unadmitted_client_streams_beyond_their_budget_are_dropped_until_one_end
         ask_for_usage(&transport, &genesis)
             .await
             .map(|reply| reply.result),
-        Ok(Err(CoordinationError::Denied)),
+        Ok(Err(CoordinationError::Denied(Refusal::UnknownTenant))),
         "the unadmitted slot a failed read held admits the next client"
     );
     assert_eq!(voter.counters.snapshot().busy, 1);
@@ -511,7 +511,7 @@ async fn tenant_resolution_beyond_the_admission_deadline_is_refused_with_a_signe
         ask_for_usage(&transport, &genesis)
             .await
             .map(|reply| reply.result),
-        Ok(Err(CoordinationError::Denied)),
+        Ok(Err(CoordinationError::Denied(Refusal::UnknownTenant))),
         "a resolvable tenant is admitted again"
     );
 
@@ -628,7 +628,7 @@ async fn a_request_beyond_the_client_lanes_is_refused_with_a_signed_backpressure
         ask_for_usage(&transport, &genesis)
             .await
             .map(|reply| reply.result),
-        Ok(Err(CoordinationError::Denied))
+        Ok(Err(CoordinationError::Denied(Refusal::UnknownTenant)))
     );
 
     transport.pause_accepting();
@@ -792,7 +792,7 @@ async fn serving_clients_never_closes_the_callers_transport() {
     );
     assert_eq!(
         client.usage().await.map(drop),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::UnknownTenant)),
         "an unregistered client is answered with a refusal"
     );
     transport.pause_accepting();
@@ -801,7 +801,7 @@ async fn serving_clients_never_closes_the_callers_transport() {
     let aborted = tokio::spawn(voter.clone().serve_clients(transport.clone()));
     assert_eq!(
         client.usage().await.map(drop),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::UnknownTenant)),
         "the caller's transport serves another request"
     );
     aborted.abort();

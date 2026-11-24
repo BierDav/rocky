@@ -24,7 +24,7 @@ pub struct Proposal {
 
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
-const FORMAT: u32 = 14;
+const FORMAT: u32 = 15;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -141,7 +141,8 @@ impl StoreLock {
             .write(true)
             .open(root.join("LOCK"))
             .map_err(|_| CoordinationError::Corrupt)?;
-        file.try_lock().map_err(|_| CoordinationError::Denied)?;
+        file.try_lock()
+            .map_err(|_| CoordinationError::Configuration)?;
         Ok(Self(file))
     }
 }

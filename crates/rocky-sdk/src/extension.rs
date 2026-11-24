@@ -4,6 +4,7 @@ use rocky_credentials::{CredentialChain, PublicKey, RevocationSet, Signature};
 #[derive(Clone, Debug)]
 pub struct DeviceCredential {
     pub scope: crate::Scope,
+    pub application: String,
     pub publisher: PublicKey,
     pub identity: PublicKey,
     pub node: PublicKey,

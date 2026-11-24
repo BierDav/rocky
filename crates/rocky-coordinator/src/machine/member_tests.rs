@@ -209,7 +209,7 @@ fn readers_strangers_and_foreign_chains_never_claim() {
     assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(
         f.claim_by(&reader, "invoices", claim(2, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::ReadOnly)),
         "a person without write access claims nothing"
     );
     assert_eq!(
@@ -224,13 +224,13 @@ fn readers_strangers_and_foreign_chains_never_claim() {
     };
     assert_eq!(
         f.claim_by(&stranger, "invoices", claim(3, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a node presenting another node's chain claims nothing"
     );
     let foreign = f.person_of(&PrivateKey::new(), f.scope, &[Right::Insert]);
     assert_eq!(
         f.claim_by(&foreign, "invoices", claim(4, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a person of another publisher claims nothing"
     );
     let unchained = Request::sign_at(
@@ -247,14 +247,14 @@ fn readers_strangers_and_foreign_chains_never_claim() {
     .unwrap();
     assert_eq!(
         f.state.apply_at(T, &unchained),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotMember))
     );
     let mut elsewhere = f.scope;
     elsewhere.domain = DomainId([8; 16]);
     let elsewhere = f.person_of(&f.owner.clone(), elsewhere, &[Right::Insert]);
     assert_eq!(
         f.claim_by(&elsewhere, "invoices", claim(6, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a person of another domain claims nothing here"
     );
     assert_eq!(f.trusted_claim("invoices", claim(7, T), T), 2);
@@ -276,7 +276,10 @@ fn a_request_signed_outside_the_extension_label_is_refused() {
     );
     let body = request.extension_body().unwrap();
     let forged = request.clone().with_signature(writer.node.sign(&body));
-    assert_eq!(f.state.read(&forged), Err(CoordinationError::Denied));
+    assert_eq!(
+        f.state.read(&forged),
+        Err(CoordinationError::Denied(Refusal::Signature))
+    );
     let signed = request.with_signature(
         writer
             .node
@@ -292,7 +295,7 @@ fn a_member_never_closes_the_domain() {
     let request = f.presenting(&writer, Operation::Close { scope: f.scope }, T);
     assert_eq!(
         f.state.apply_at(T, &request),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority))
     );
 }
 
@@ -312,16 +315,16 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     );
     assert_eq!(
         f.claim_by(&removed, "invoices", claim(3, T), T + 1),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::Revoked))
     );
     assert_eq!(
         f.claim_by(&removed, "invoices", claim(1, T), T + 1),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::Revoked)),
         "a removed person cannot even replay an earlier claim"
     );
     assert_eq!(
         f.read_by(&removed, "invoices", None, T + 1),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::Revoked))
     );
     assert_eq!(
         f.push_removal(removed.identity.public_key(), &stranger, T + 1),
@@ -332,7 +335,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     f.state = crate::certified::decode(&image).unwrap();
     assert_eq!(
         f.claim_by(&removed, "invoices", claim(3, T), T + 2),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::Revoked))
     );
 
     assert_eq!(
@@ -341,7 +344,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     );
     assert_eq!(
         f.claim_by(&lapsing, "invoices", claim(5, T), T + LIFETIME + 1),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "an expired person link claims nothing"
     );
 
@@ -373,7 +376,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     .unwrap();
     assert_eq!(
         f.state.apply_at(T + 2, &request),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::InvalidRevocations)),
         "a statement another publisher signed is refused"
     );
 }
@@ -396,7 +399,7 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
     .unwrap();
     assert_eq!(
         f.state.apply_at(T, &request),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority)),
         "a revision cannot drop the domain's publisher"
     );
     let mut control = f.state.controls[0].control.clone();
@@ -404,7 +407,7 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
     f.state.controls[0] = ControlCertificate::sign(control, &f.owner).unwrap();
     assert_eq!(
         f.claim_by(&writer, "invoices", claim(1, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a control that names no publisher admits no person"
     );
     assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 1);

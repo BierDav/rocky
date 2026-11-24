@@ -154,7 +154,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     for key in [&stranger, &owner] {
         assert_eq!(
             fixture.claim_as(key, "invoices", claim(1, T), T),
-            Err(CoordinationError::Denied),
+            Err(CoordinationError::Denied(Refusal::NotMember)),
             "neither an unknown node nor the domain's control authority is a trusted node"
         );
         let read = Operation::Counter {
@@ -164,7 +164,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
         };
         assert_eq!(
             fixture.operate(key, read, T),
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied(Refusal::NotMember))
         );
     }
     let uncertified = Request::sign_at(
@@ -181,7 +181,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     .unwrap();
     assert_eq!(
         fixture.state.apply_at(T, &uncertified),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a request without a node certificate presents no trusted identity"
     );
     let mut unknown = fixture.scope;
@@ -208,12 +208,12 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     fixture.operate(&owner, close, T).unwrap();
     assert_eq!(
         fixture.claim(0, "invoices", claim(2, T), T),
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::ClosedDomain)),
         "a closed domain takes no claim, not even a retry"
     );
     assert_eq!(
         fixture.claim(0, "invoices", claim(1, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::ClosedDomain))
     );
     assert_eq!(
         fixture.reading("invoices", Some(claim(1, T)), T),
@@ -472,7 +472,7 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
         .unwrap();
         let result = f.state.apply_at(T, &request);
         if index == 1 {
-            assert_eq!(result, Err(CoordinationError::Denied));
+            assert_eq!(result, Err(CoordinationError::Denied(Refusal::NotMember)));
         } else {
             assert!(matches!(result, Ok(Outcome::Claimed(_))));
         }

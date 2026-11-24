@@ -1,5 +1,5 @@
-use crate::CoordinationError;
 use crate::certified::*;
+use crate::{CoordinationError, Refusal};
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -52,15 +52,25 @@ impl Envelope {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-wire.v5",
+            "rocky.coordination-wire.v6",
             &(self.genesis, self.key, self.nonce, self.time, &self.body),
         )
     }
     pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::Signature));
         }
         Ok(())
+    }
+    pub fn client_request(
+        &self,
+        genesis: Commitment,
+    ) -> Result<crate::machine::Request, CoordinationError> {
+        self.authenticate(genesis)?;
+        match decode::<Message>(&self.body)? {
+            WireMessage::Client(request) => Ok(*request),
+            _ => Err(CoordinationError::Denied(Refusal::UnexpectedMessage)),
+        }
     }
     #[cfg(not(target_family = "wasm"))]
     pub fn verify(&self, genesis: Commitment) -> Result<(), CoordinationError> {
@@ -99,7 +109,7 @@ pub async fn read_bounded(
         .await
         .map_err(|_| CoordinationError::Unavailable)? as usize;
     if len > max_frame.min(MAX_FRAME) {
-        return Err(CoordinationError::Denied);
+        return Err(CoordinationError::Denied(Refusal::Oversized));
     }
     let mut bytes = vec![0; len];
     stream
@@ -114,7 +124,7 @@ pub async fn write(
 ) -> Result<(), CoordinationError> {
     let bytes = encode(envelope)?;
     if bytes.len() > MAX_FRAME {
-        return Err(CoordinationError::Denied);
+        return Err(CoordinationError::Denied(Refusal::Oversized));
     }
     stream
         .write_u32(bytes.len() as u32)
@@ -141,7 +151,7 @@ pub async fn converse<T: Serialize + DeserializeOwned>(
     let response = read(stream).await?;
     response.authenticate(genesis)?;
     if response.key != voter || response.nonce != envelope.nonce {
-        return Err(CoordinationError::Denied);
+        return Err(CoordinationError::Denied(Refusal::Signature));
     }
     decode(&response.body)
 }
@@ -224,6 +234,32 @@ mod tests {
         Ok(())
     }
 
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_client_request_is_authorized_by_its_own_signature_whatever_key_carries_it()
+    -> Result<(), CoordinationError> {
+        let (genesis, node, session) = ([9; 32], PrivateKey::new(), PrivateKey::new());
+        let request = crate::machine::Request::sign_at(
+            genesis,
+            nonce(),
+            crate::service::Operation::Usage,
+            &node,
+            now()?,
+        )?;
+        let carried = Envelope::sign(
+            genesis,
+            nonce(),
+            &Message::Client(Box::new(request.clone())),
+            &session,
+        )?;
+        assert_eq!(carried.client_request(genesis)?, request);
+        let status = Envelope::sign(genesis, nonce(), &Message::Status, &session)?;
+        assert_eq!(
+            status.client_request(genesis),
+            Err(CoordinationError::Denied(Refusal::UnexpectedMessage))
+        );
+        Ok(())
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn an_answer_bound_to_another_request_nonce_is_refused() -> Result<(), CoordinationError>
     {
@@ -248,7 +284,7 @@ mod tests {
             if answer_to_this_call {
                 assert_eq!(reply, Ok(1));
             } else {
-                assert_eq!(reply, Err(CoordinationError::Denied));
+                assert_eq!(reply, Err(CoordinationError::Denied(Refusal::Signature)));
             }
         }
         Ok(())

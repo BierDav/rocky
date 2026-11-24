@@ -1,4 +1,4 @@
-use crate::CoordinationError;
+use crate::{CoordinationError, Refusal};
 use p2panda_core::Signature;
 use rocky_core::{AppId, ApplicationManifest};
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose};
@@ -13,9 +13,14 @@ fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Coordi
     rocky_credentials::signing_bytes(label, value).map_err(|_| CoordinationError::Corrupt)
 }
 
-fn current(not_before: u64, expires: u64, time: u64) -> Result<(), CoordinationError> {
+fn current(
+    not_before: u64,
+    expires: u64,
+    time: u64,
+    outside: Refusal,
+) -> Result<(), CoordinationError> {
     if not_before >= expires || not_before > time || expires <= time {
-        return Err(CoordinationError::Denied);
+        return Err(CoordinationError::Denied(outside));
     }
     Ok(())
 }
@@ -39,7 +44,7 @@ impl SignedCoordinationGrant {
         owner: &dyn IdentityProvider,
     ) -> Result<Self, CoordinationError> {
         if owner.public_key().ok() != Some(grant.publisher.0) {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::InvalidGrant));
         }
         Ok(Self {
             signature: owner
@@ -47,7 +52,7 @@ impl SignedCoordinationGrant {
                     Purpose::Statement,
                     &signing_bytes("rocky.coordination-grant.v1", &grant)?,
                 )
-                .map_err(|_| CoordinationError::Denied)?,
+                .map_err(|_| CoordinationError::Denied(Refusal::InvalidGrant))?,
             grant,
         })
     }
@@ -60,9 +65,9 @@ impl SignedCoordinationGrant {
                 &self.signature,
             )
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::InvalidGrant));
         }
-        current(grant.not_before, grant.expires, time)?;
+        current(grant.not_before, grant.expires, time, Refusal::InvalidGrant)?;
         Ok(ApplicationManifest::app_id(
             *grant.publisher.0.as_bytes(),
             &grant.application,
@@ -88,7 +93,7 @@ impl SignedTenantAdmission {
         provider: &PrivateKey,
     ) -> Result<Self, CoordinationError> {
         if admission.provider != provider.public_key() {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::NotAdmitted));
         }
         Ok(Self {
             signature: provider.sign(&signing_bytes("rocky.tenant-admission.v1", &admission)?),
@@ -107,10 +112,53 @@ impl SignedTenantAdmission {
                 &self.signature,
             )
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::NotAdmitted));
         }
-        current(admission.not_before, admission.expires, time)?;
+        current(
+            admission.not_before,
+            admission.expires,
+            time,
+            Refusal::NotAdmitted,
+        )?;
         Ok(admission.tenant)
+    }
+}
+
+pub struct Tenant {
+    key: PrivateKey,
+    admission: Option<SignedTenantAdmission>,
+}
+impl Tenant {
+    pub fn generate() -> Self {
+        Self::from_secret(*PrivateKey::new().as_bytes())
+    }
+    pub fn from_secret(secret: [u8; 32]) -> Self {
+        Self {
+            key: PrivateKey::from_bytes(&secret),
+            admission: None,
+        }
+    }
+    pub fn secret(&self) -> [u8; 32] {
+        *self.key.as_bytes()
+    }
+    pub fn control(&self) -> CoordinatorControl {
+        CoordinatorControl(self.key.public_key())
+    }
+    pub fn admitted(self, admission: SignedTenantAdmission) -> Result<Self, CoordinationError> {
+        if admission.admission.tenant != self.control() {
+            return Err(CoordinationError::Denied(Refusal::NotAdmitted));
+        }
+        Ok(Self {
+            admission: Some(admission),
+            ..self
+        })
+    }
+    #[cfg(feature = "database")]
+    pub(crate) fn key(&self) -> &PrivateKey {
+        &self.key
+    }
+    pub fn admission(&self) -> Option<&SignedTenantAdmission> {
+        self.admission.as_ref()
     }
 }
 

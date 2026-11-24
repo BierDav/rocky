@@ -87,9 +87,6 @@ impl ControlClient {
         if request.trusted.is_empty() || request.trusted.len() > 32 {
             return Err("trusted must list 1 through 32 identity keys".into());
         }
-        if !(60..=366 * 86_400).contains(&request.lifetime) {
-            return Err("lifetime must be 60 s to 366 days".into());
-        }
         let (revision, grant, admission) = match request.revision {
             ControlRevision::Register { grant, admission } => {
                 (1, grant.map(|g| *g), admission.map(|a| *a))
@@ -97,23 +94,28 @@ impl ControlClient {
             ControlRevision::Update(revision) if revision > 1 => (revision, None, None),
             ControlRevision::Update(_) => return Err("a later control revision is above 1".into()),
         };
-        let configuration = self.bundle.genesis()?.genesis.configuration;
-        let control = |time: u64| DomainControl {
-            scope: domain.scope,
-            configuration,
-            revision,
-            trusted: request.trusted.clone(),
-            publisher: Some(Box::new(domain.publisher)),
-            not_before: time.saturating_sub(60),
-            expires: time.saturating_add(request.lifetime),
+        let genesis = self.bundle.genesis()?.genesis;
+        let control = |time: u64| -> Result<DomainControl, Failure> {
+            let (not_before, expires) = genesis.control_window(time, request.lifetime)?;
+            Ok(DomainControl {
+                scope: domain.scope,
+                configuration: genesis.configuration,
+                revision,
+                trusted: request.trusted.clone(),
+                publisher: Some(Box::new(domain.publisher)),
+                not_before,
+                expires,
+            })
         };
 
         let inputs = rocky_core::commitment(
             "rocky.control-request.v1",
-            &crate::certified::encode(&(control(0), &grant, &admission))?,
+            &crate::certified::encode(&(control(0)?, &grant, &admission))?,
         );
         let time = self.signing_time(request.tenant.public_key(), request.id, inputs)?;
-        let certificate = ControlCertificate::sign(control(time), &request.tenant)?;
+        let control = control(time)?;
+        let expires = control.expires;
+        let certificate = ControlCertificate::sign(control, &request.tenant)?;
         let client = self.client(request.tenant.clone())?;
         let reference = if revision == 1 {
             let grant = match (grant, root) {
@@ -151,7 +153,7 @@ impl ControlClient {
             tenant: request.tenant.public_key(),
             revision,
             control: reference,
-            expires: time.saturating_add(request.lifetime),
+            expires,
         })
     }
     fn signing_time(

@@ -1,5 +1,5 @@
 use crate::support;
-use rocky_coordinator::CoordinationError;
+use rocky_coordinator::{CoordinationError, Refusal};
 use rocky_coordinator::{
     Limits,
     counters::Claim,
@@ -61,19 +61,19 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let b_on_a = b.client(&cluster, &b.executor).await;
     assert_eq!(
         reading(&b_on_a, sa).await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a tenant cannot read another tenant's counters"
     );
     assert_eq!(
         commit(&b_on_a, sa, fresh_claim(2)).await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a tenant cannot claim from another tenant's counters"
     );
     assert_eq!(
         b_owner
             .control(b.control(&cluster.genesis, sa, 2, &[&b.executor]), [8; 32])
             .await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority)),
         "a tenant cannot control another tenant's domain"
     );
     assert_eq!(
@@ -85,7 +85,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 [7; 32],
             )
             .await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::InvalidGrant)),
         "a tenant cannot register in another tenant's namespace"
     );
     assert_eq!(
@@ -97,7 +97,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 [6; 32],
             )
             .await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotAdmitted)),
         "a tenant cannot reuse another tenant's admission"
     );
     let voter_tcp = NetworkCoordinator::open(
@@ -109,8 +109,8 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     .unwrap();
     assert_eq!(
         reading(&voter_tcp, sa).await,
-        Err(CoordinationError::Unavailable),
-        "the voters' TCP carries administration only, never tenants"
+        Err(CoordinationError::Denied(Refusal::UnexpectedMessage)),
+        "the voters' TCP answers tenants with a refusal and carries administration only"
     );
 
     let a_alt = a.client(&cluster, &a.alternate).await;
@@ -426,7 +426,7 @@ async fn owner_closure_ends_the_counters_and_frees_only_open_quota() {
     assert_eq!(owner.usage().await.unwrap().open_domains, 2);
     assert_eq!(
         executor.close_domain(first, [8; 32]).await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotDomainAuthority))
     );
     assert_eq!(owner.usage().await.unwrap().closed_domains, 0);
     owner.close_domain(first, [9; 32]).await.unwrap();
@@ -436,7 +436,7 @@ async fn owner_closure_ends_the_counters_and_frees_only_open_quota() {
         .expect("a retried closure answers the same");
     assert_eq!(
         commit(&executor, first, fresh_claim(1)).await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::ClosedDomain)),
         "a closed domain takes no further claim"
     );
     let usage = owner.usage().await.unwrap();
@@ -461,6 +461,6 @@ async fn owner_closure_ends_the_counters_and_frees_only_open_quota() {
                 [4; 32]
             )
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::AlreadyRegistered))
     );
 }

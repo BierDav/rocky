@@ -1,5 +1,5 @@
 use crate::CoordinationError;
-pub use crate::client::{NetworkCoordinator, Observer};
+pub use crate::client::{CALL_DEADLINE, NetworkCoordinator, Observer};
 pub use crate::machine::Usage;
 pub use crate::machine::{Operation, Outcome, Registration};
 use serde::{Deserialize, Serialize};

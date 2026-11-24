@@ -1,6 +1,6 @@
 #[cfg(feature = "database")]
 pub use database::{CounterError, Counters};
-pub use error::CoordinationError;
+pub use error::{CoordinationError, Refusal};
 pub use retention::Limits;
 use rocky_core::*;
 

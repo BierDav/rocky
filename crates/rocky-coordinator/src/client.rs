@@ -1,5 +1,5 @@
 use crate::{
-    CoordinationError,
+    CoordinationError, Refusal,
     tenancy::{SignedCoordinationGrant, SignedTenantAdmission},
 };
 use crate::{
@@ -25,6 +25,9 @@ pub struct NetworkCoordinator {
     observer: Mutex<Option<Observer>>,
 }
 pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
+pub const CALL_DEADLINE: Duration = Duration::from_secs(12);
+const ATTEMPT_DEADLINE: Duration = Duration::from_secs(3);
+const PAUSE_BETWEEN_ROUNDS: Duration = Duration::from_millis(100);
 #[cfg(target_family = "wasm")]
 fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
     Err(CoordinationError::Configuration)
@@ -65,6 +68,10 @@ impl NetworkCoordinator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
+    #[cfg(feature = "database")]
+    pub(crate) fn certified_genesis(&self) -> &CertifiedGenesis {
+        &self.genesis
+    }
     pub fn genesis(&self) -> Result<Commitment, CoordinationError> {
         self.genesis.id()
     }
@@ -87,6 +94,7 @@ impl NetworkCoordinator {
     async fn attempt_leader_first(
         &self,
         request: &Request,
+        attempt_deadline: Duration,
     ) -> Vec<Result<Reply, CoordinationError>> {
         let genesis = match self.genesis.id() {
             Ok(id) => id,
@@ -127,7 +135,7 @@ impl NetworkCoordinator {
                         .iter()
                         .filter(|e| e.voter == id && e.kind == transport.kind())
                     {
-                        reply = timeout(Duration::from_secs(3), async {
+                        reply = timeout(attempt_deadline, async {
                             let mut stream = transport
                                 .connect(&endpoint.address, Protocol::Coordinate, None)
                                 .await
@@ -175,8 +183,15 @@ impl NetworkCoordinator {
         self.submit(&self.request(id, operation)?).await
     }
     pub async fn submit(&self, request: &Request) -> Result<Outcome, CoordinationError> {
+        self.submit_within(request, CALL_DEADLINE).await
+    }
+    pub async fn submit_within(
+        &self,
+        request: &Request,
+        deadline: Duration,
+    ) -> Result<Outcome, CoordinationError> {
         request.within_client_limit()?;
-        let result = self.send(request).await;
+        let result = self.send(request, deadline).await;
         let observer = self
             .observer
             .lock()
@@ -201,10 +216,15 @@ impl NetworkCoordinator {
             now()?,
         )
     }
-    async fn send(&self, request: &Request) -> Result<Outcome, CoordinationError> {
-        timeout(Duration::from_secs(12), async {
+    async fn send(
+        &self,
+        request: &Request,
+        deadline: Duration,
+    ) -> Result<Outcome, CoordinationError> {
+        let attempt_deadline = ATTEMPT_DEADLINE.min(deadline);
+        timeout(deadline, async {
             for _ in 0..3 {
-                for response in self.attempt_leader_first(request).await {
+                for response in self.attempt_leader_first(request, attempt_deadline).await {
                     match response {
                         Ok(reply) if reply.result != Err(CoordinationError::Unavailable) => {
                             return reply.result;
@@ -212,7 +232,7 @@ impl NetworkCoordinator {
                         _ => continue,
                     }
                 }
-                sleep(Duration::from_millis(100)).await;
+                sleep(PAUSE_BETWEEN_ROUNDS).await;
             }
             Err(CoordinationError::Unavailable)
         })
@@ -347,7 +367,7 @@ impl NetworkCoordinator {
             .voters
             .iter()
             .find(|v| v.id == id)
-            .ok_or(CoordinationError::Denied)
+            .ok_or(CoordinationError::Denied(Refusal::UnknownVoter))
     }
     #[cfg(not(target_family = "wasm"))]
     pub async fn initialize(&self, voter: u64) -> Result<(), CoordinationError> {

@@ -246,7 +246,7 @@ impl Request {
     }
     pub fn signed(mut self, key: &p2panda_core::PrivateKey) -> Result<Self, CoordinationError> {
         if key.public_key() != self.key {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::Signature));
         }
         self.signature = key.sign(&self.signing_bytes()?);
         Ok(self)
@@ -275,14 +275,14 @@ impl Request {
     }
     pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::Signature));
         }
         Ok(())
     }
     pub const MAX_CLIENT_BYTES: usize = 16 * 1024;
     pub fn within_client_limit(&self) -> Result<(), CoordinationError> {
         if encode(self)?.len() > Self::MAX_CLIENT_BYTES {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::Oversized));
         }
         Ok(())
     }
@@ -405,7 +405,7 @@ impl Metadata {
         match &request.operation {
             Operation::Control(c) => {
                 if c.issuer != request.key {
-                    return Err(CoordinationError::Denied);
+                    return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
                 }
                 self.control_authorized(c, time)
             }
@@ -413,7 +413,7 @@ impl Metadata {
                 if request.key == self.genesis.genesis.membership_authority {
                     Ok(())
                 } else {
-                    Err(CoordinationError::Denied)
+                    Err(CoordinationError::Denied(Refusal::NotMembershipAuthority))
                 }
             }
             Operation::Close { scope } => self.closure_authorized(request, *scope),
@@ -518,7 +518,7 @@ impl Metadata {
                 counter,
                 claim,
             } => self.counter(*scope, counter, *claim, request),
-            _ => Err(CoordinationError::Denied),
+            _ => Err(CoordinationError::Denied(Refusal::UnexpectedMessage)),
         }
     }
     fn counter_authorized(
@@ -529,21 +529,28 @@ impl Metadata {
         time: u64,
     ) -> Result<(), CoordinationError> {
         let control = self.current_control(scope, time)?;
-        if !self.trusts(control, request, time) && !self.member(control, claim, request, time) {
-            return Err(CoordinationError::Denied);
+        if !self.trusts(control, request, time) {
+            self.member(control, claim, request, time)
+                .map_err(CoordinationError::Denied)?;
         }
         if claim && !self.state.find(scope)?.open() {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::ClosedDomain));
         }
         Ok(())
     }
-    fn member(&self, control: &DomainControl, writes: bool, request: &Request, time: u64) -> bool {
+    fn member(
+        &self,
+        control: &DomainControl,
+        writes: bool,
+        request: &Request,
+        time: u64,
+    ) -> Result<(), Refusal> {
         let (Some(publisher), Some(chain), Ok(domain)) = (
             control.publisher.as_deref().copied(),
             request.credentials.as_ref(),
             self.state.find(control.scope),
         ) else {
-            return false;
+            return Err(Refusal::NotMember);
         };
         if chain
             .verify_database(rocky_credentials::DatabaseContext {
@@ -552,23 +559,33 @@ impl Metadata {
             })
             .is_err()
         {
-            return false;
+            return Err(Refusal::NotMember);
         }
+        let person = match chain.node_holder(publisher, request.key, &domain.revocations, time) {
+            Ok(person) => person,
+            Err(_)
+                if chain
+                    .node_holder(publisher, request.key, &RevocationSet::new(), time)
+                    .is_ok() =>
+            {
+                return Err(Refusal::Revoked);
+            }
+            Err(_) => return Err(Refusal::NotMember),
+        };
         let writing =
             |right: &Right| matches!(right, Right::Insert | Right::Update | Right::Delete);
-        chain
-            .node_holder(publisher, request.key, &domain.revocations, time)
-            .is_ok_and(|person| {
-                !writes
-                    || person.extended().is_ok_and(|extended| {
-                        extended
-                            .whole
-                            .is_some_and(|whole| whole.rights().iter().any(writing))
-                    })
-                    || person.grants.iter().any(|grant| {
-                        grant.scope.domain == control.scope && grant.rights.iter().any(writing)
-                    })
-            })
+        let may_write = person.extended().is_ok_and(|extended| {
+            extended
+                .whole
+                .is_some_and(|whole| whole.rights().iter().any(writing))
+        }) || person
+            .grants
+            .iter()
+            .any(|grant| grant.scope.domain == control.scope && grant.rights.iter().any(writing));
+        if writes && !may_write {
+            return Err(Refusal::ReadOnly);
+        }
+        Ok(())
     }
     fn merged_revocations(
         &self,
@@ -585,18 +602,18 @@ impl Metadata {
             .publisher
             .as_deref()
             .copied()
-            .ok_or(CoordinationError::Denied)?;
+            .ok_or(CoordinationError::Denied(Refusal::NoPublisher))?;
         let domain = self.state.find(scope)?;
         if !domain.open() {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::ClosedDomain));
         }
         pushed
             .verify_in(rocky_credentials::DatabaseContext { publisher, scope })
-            .map_err(|_| CoordinationError::Denied)?;
+            .map_err(|_| CoordinationError::Denied(Refusal::InvalidRevocations))?;
         let mut merged = domain.revocations.clone();
         merged
             .merge(pushed, publisher, scope.app, time)
-            .map_err(|_| CoordinationError::Denied)?;
+            .map_err(|_| CoordinationError::Denied(Refusal::InvalidRevocations))?;
         Ok(merged)
     }
     fn revoke(
@@ -672,7 +689,7 @@ impl Metadata {
         self.tenants
             .iter()
             .find(|t| t.key == key)
-            .ok_or(CoordinationError::Denied)
+            .ok_or(CoordinationError::Denied(Refusal::UnknownTenant))
     }
     fn genesis_bound(&self, scope: Scope) -> bool {
         self.genesis
@@ -704,7 +721,10 @@ impl Metadata {
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
             && !self.trusts(&certificate.control, request, request.time)
-            && !(counter && self.member(&certificate.control, false, request, request.time))
+            && !(counter
+                && self
+                    .member(&certificate.control, false, request, request.time)
+                    .is_ok())
         {
             return None;
         }
@@ -814,7 +834,7 @@ impl Metadata {
             return certificate.verify(&self.genesis.genesis, time);
         }
         if !self.is_scope_authority(scope, certificate.issuer) {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
         }
         certificate.check_without_authority(&self.genesis.genesis, time)
     }
@@ -839,7 +859,7 @@ impl Metadata {
             let changes_authority =
                 old.issuer != certificate.issuer || old.control.publisher != control.publisher;
             if changes_authority {
-                return Err(CoordinationError::Denied);
+                return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
             }
             let growth = Self::certificate_bytes(&certificate)?
                 .saturating_sub(Self::certificate_bytes(old)?);
@@ -847,7 +867,7 @@ impl Metadata {
                 return Err(CoordinationError::Backpressure);
             }
             if !self.state.find(control.scope)?.open() {
-                return Err(CoordinationError::Denied);
+                return Err(CoordinationError::Denied(Refusal::ClosedDomain));
             }
             self.controls[index] = certificate;
         } else {
@@ -893,7 +913,7 @@ impl Metadata {
             .genesis
             .public
             .as_ref()
-            .ok_or(CoordinationError::Denied)?;
+            .ok_or(CoordinationError::Denied(Refusal::NoPublicService))?;
         let day = self.state.time / DAY;
         let mut cost = Self::certificate_bytes(certificate)?;
         match self.tenants.iter().find(|t| t.key == tenant) {
@@ -942,9 +962,11 @@ impl Metadata {
             .genesis
             .public
             .as_ref()
-            .ok_or(CoordinationError::Denied)?;
+            .ok_or(CoordinationError::Denied(Refusal::NoPublicService))?;
         let scope = certificate.control.scope;
-        let app = grant.verify(time).map_err(|_| CoordinationError::Denied)?;
+        let app = grant
+            .verify(time)
+            .map_err(|_| CoordinationError::Denied(Refusal::InvalidGrant))?;
         let admitted = match (public.admission, admission) {
             (None, None) => true,
             (Some(provider), Some(admission)) => admission
@@ -952,8 +974,10 @@ impl Metadata {
                 .is_ok_and(|tenant| tenant.0 == request.key),
             _ => false,
         };
-        if !admitted
-            || certificate.issuer != request.key
+        if !admitted {
+            return Err(CoordinationError::Denied(Refusal::NotAdmitted));
+        }
+        if certificate.issuer != request.key
             || grant.grant.tenant.0 != request.key
             || scope.app != app
             || certificate
@@ -961,10 +985,14 @@ impl Metadata {
                 .publisher
                 .as_deref()
                 .is_some_and(|publisher| *publisher != grant.grant.publisher.0)
-            || certificate.control.revision != 1
-            || self.genesis_bound(scope)
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::InvalidGrant));
+        }
+        if certificate.control.revision != 1 {
+            return Err(CoordinationError::Denied(Refusal::InvalidControl));
+        }
+        if self.genesis_bound(scope) {
+            return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
         }
         self.trusted_budget(certificate, None)?;
         certificate.check_without_authority(&self.genesis.genesis, time)
@@ -1012,7 +1040,7 @@ impl Metadata {
     }
     fn closure_authorized(&self, request: &Request, scope: Scope) -> Result<(), CoordinationError> {
         if !self.is_scope_authority(scope, request.key) || self.issuer(scope) != Some(request.key) {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
         }
         Ok(())
     }
@@ -1021,7 +1049,7 @@ impl Metadata {
         match &request.operation {
             Operation::Control(certificate) => {
                 if certificate.issuer != request.key {
-                    return Err(CoordinationError::Denied);
+                    return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
                 }
                 self.control_authorized(certificate, time)?;
                 self.control((**certificate).clone())
@@ -1046,7 +1074,7 @@ impl Metadata {
                     return if same_registration_retried {
                         certificate.reference().map(Outcome::Controlled)
                     } else {
-                        Err(CoordinationError::Denied)
+                        Err(CoordinationError::Denied(Refusal::AlreadyRegistered))
                     };
                 }
                 self.public_admits(request.key, certificate)?;
@@ -1075,13 +1103,15 @@ impl Metadata {
                 expected,
                 expected_revision,
             } => {
-                if request.key != self.genesis.genesis.membership_authority
-                    || voters.len() < 2
+                if request.key != self.genesis.genesis.membership_authority {
+                    return Err(CoordinationError::Denied(Refusal::NotMembershipAuthority));
+                }
+                if voters.len() < 2
                     || !voters
                         .iter()
                         .all(|id| self.genesis.genesis.voters.iter().any(|v| v.id == *id))
                 {
-                    return Err(CoordinationError::Denied);
+                    return Err(CoordinationError::Denied(Refusal::UnknownVoter));
                 }
                 if expected != &self.desired_voters
                     || *expected_revision != self.membership_revision

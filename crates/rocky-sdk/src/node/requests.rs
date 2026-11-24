@@ -139,6 +139,7 @@ impl Node {
         let settings = self.settings.lock().await;
         Ok(crate::DeviceCredential {
             scope: self.domain().scope,
+            application: settings.schema.application.clone(),
             publisher: settings.publisher,
             identity: settings.identity,
             node,

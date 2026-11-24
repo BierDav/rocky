@@ -1,14 +1,20 @@
 use crate::{
-    CoordinationError,
-    certified::now,
+    CoordinationError, Refusal,
+    certified::{ControlCertificate, DomainControl, TrustBundle, encode, now},
+    control::ControlReceipt,
     counters::{Claim, Name, Reading},
     machine::{REQUEST_LABEL, Request},
-    service::{NetworkCoordinator, Operation, Outcome},
+    service::{CALL_DEADLINE, NetworkCoordinator, Operation, Outcome, Registration},
+    tenancy::{CoordinationGrant, SignedCoordinationGrant, Tenant},
     transport::nonce,
 };
 use rocky_core::Commitment;
-use rocky_sdk::{Database, DeviceCredential};
+use rocky_credentials::{IdentityProvider, PrivateKey, Publisher};
+use rocky_platform::time::Duration;
+use rocky_sdk::{Database, DeviceCredential, transport::Transport};
 use std::sync::Arc;
+
+const GRANT_LIFETIME_SECONDS: u64 = 3600;
 
 #[derive(Debug)]
 pub enum CounterError {
@@ -38,10 +44,71 @@ impl From<rocky_sdk::Error> for CounterError {
 pub struct Counters {
     database: Database,
     client: Arc<NetworkCoordinator>,
+    deadline: Duration,
 }
 impl Counters {
     pub fn new(database: Database, client: Arc<NetworkCoordinator>) -> Self {
-        Self { database, client }
+        Self {
+            database,
+            client,
+            deadline: CALL_DEADLINE,
+        }
+    }
+    pub fn connect(
+        database: Database,
+        bundle: &TrustBundle,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self, CounterError> {
+        let session = PrivateKey::new();
+        let client = NetworkCoordinator::connect(bundle, session, transport)?;
+        Ok(Self::new(database, Arc::new(client)))
+    }
+    pub fn with_deadline(self, deadline: Duration) -> Self {
+        Self { deadline, ..self }
+    }
+    pub async fn register(
+        &self,
+        owner: &dyn IdentityProvider,
+        tenant: &Tenant,
+        lifetime: u64,
+    ) -> Result<ControlReceipt, CounterError> {
+        let device = self.database.device_credential().await?;
+        if owner.public_key().ok() != Some(device.publisher) {
+            return Err(CoordinationError::Denied(Refusal::InvalidGrant).into());
+        }
+        let time = now()?;
+        let certificate = self.control(&device, tenant, 1, time, lifetime)?;
+        let grant = SignedCoordinationGrant::sign(
+            CoordinationGrant {
+                publisher: Publisher(device.publisher),
+                application: device.application,
+                tenant: tenant.control(),
+                not_before: certificate.control.not_before,
+                expires: time.saturating_add(GRANT_LIFETIME_SECONDS),
+            },
+            owner,
+        )?;
+        let operation = Operation::Register(Box::new(Registration {
+            grant,
+            admission: tenant.admission().cloned(),
+            certificate: certificate.clone(),
+        }));
+        self.publish(tenant, certificate, operation).await
+    }
+    pub async fn renew(
+        &self,
+        tenant: &Tenant,
+        current: &ControlReceipt,
+        lifetime: u64,
+    ) -> Result<ControlReceipt, CounterError> {
+        let device = self.database.device_credential().await?;
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(CoordinationError::Configuration)?;
+        let certificate = self.control(&device, tenant, revision, now()?, lifetime)?;
+        let operation = Operation::Control(Box::new(certificate.clone()));
+        self.publish(tenant, certificate, operation).await
     }
     pub async fn claim(&self, counter: &Name, claim: Claim) -> Result<u64, CounterError> {
         let device = self.database.device_credential().await?;
@@ -75,6 +142,53 @@ impl Counters {
         let device = self.database.device_credential().await?;
         Ok(self.client.revoke(device.scope, device.revocations).await?)
     }
+    fn control(
+        &self,
+        device: &DeviceCredential,
+        tenant: &Tenant,
+        revision: u64,
+        time: u64,
+        lifetime: u64,
+    ) -> Result<ControlCertificate, CoordinationError> {
+        let genesis = &self.client.certified_genesis().genesis;
+        let (not_before, expires) = genesis.control_window(time, lifetime)?;
+        ControlCertificate::sign(
+            DomainControl {
+                scope: device.scope,
+                configuration: genesis.configuration,
+                revision,
+                trusted: vec![device.publisher],
+                publisher: Some(Box::new(device.publisher)),
+                not_before,
+                expires,
+            },
+            tenant.key(),
+        )
+    }
+    async fn publish(
+        &self,
+        tenant: &Tenant,
+        certificate: ControlCertificate,
+        operation: Operation,
+    ) -> Result<ControlReceipt, CounterError> {
+        let id = rocky_core::commitment("rocky.counters-control.v1", &encode(&certificate)?);
+        let request = Request::certified(
+            self.client.genesis()?,
+            id,
+            operation,
+            (tenant.key(), None),
+            now()?,
+        )?;
+        match self.client.submit_within(&request, self.deadline).await? {
+            Outcome::Controlled(control) => Ok(ControlReceipt {
+                tenant: certificate.issuer,
+                revision: certificate.control.revision,
+                control,
+                expires: certificate.control.expires,
+            }),
+            _ => Err(CoordinationError::Corrupt.into()),
+        }
+    }
     async fn submit(
         &self,
         device: DeviceCredential,
@@ -93,10 +207,7 @@ impl Counters {
             .await?;
         Ok(self
             .client
-            .submit(&request.with_signature(signature))
+            .submit_within(&request.with_signature(signature), self.deadline)
             .await?)
     }
 }
-
-#[cfg(all(test, not(target_family = "wasm")))]
-mod tests;

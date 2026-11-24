@@ -4,7 +4,7 @@ use openraft::{
     BasicNode, LogId, RaftMetrics, SnapshotPolicy, error::Fatal, raft::ClientWriteResponse,
 };
 use p2panda_core::{PrivateKey, PublicKey};
-use rocky_coordinator::CoordinationError;
+use rocky_coordinator::{CoordinationError, Refusal};
 use rocky_coordinator::{
     certified::*,
     protocol::{Reply, Request},
@@ -94,7 +94,7 @@ impl Counters {
     fn record(&self, result: &Result<Outcome, CoordinationError>) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         match result {
-            Err(CoordinationError::Denied) => self.denied.fetch_add(1, Ordering::Relaxed),
+            Err(CoordinationError::Denied(_)) => self.denied.fetch_add(1, Ordering::Relaxed),
             Err(CoordinationError::Unavailable) => self.unavailable.fetch_add(1, Ordering::Relaxed),
             _ => 0,
         };
@@ -151,7 +151,7 @@ impl VoterService {
             .iter()
             .any(|v| v.id == node && v.key == key.public_key())
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::UnknownVoter));
         }
         let store = Store::open(path, genesis.clone(), provision, genesis.limits())?;
         Self::start(store, genesis, node, key, Route::Tcp).await
@@ -253,6 +253,11 @@ impl VoterService {
         metrics
             .current_leader
             .filter(|leader| *leader != self.node || quorum_acknowledged(&metrics))
+    }
+    fn refuse_unadmitted(&self, error: CoordinationError) -> Reply {
+        let reply = self.refuse(error);
+        self.counters.record(&reply.result);
+        reply
     }
     fn refuse(&self, error: CoordinationError) -> Reply {
         Reply {
@@ -451,9 +456,6 @@ impl VoterService {
         let tenants_use_client_lane = self.genesis.genesis.public.is_some();
         let body = match message {
             Message::Client(request) if !tenants_use_client_lane || administrative => {
-                if request.key != envelope.key {
-                    return Err(CoordinationError::Denied);
-                }
                 let reply = if administrative {
                     self.administer(*request).await
                 } else {
@@ -523,7 +525,10 @@ impl VoterService {
                         .map_err(|_| CoordinationError::Configuration),
                 )?
             }
-            _ => return Err(CoordinationError::Denied),
+            Message::Client(_) => encode(
+                &self.refuse_unadmitted(CoordinationError::Denied(Refusal::UnexpectedMessage)),
+            )?,
+            _ => return Err(CoordinationError::Denied(Refusal::UnexpectedMessage)),
         };
         let response = crate::transport::Envelope::from_body(
             self.genesis.id()?,

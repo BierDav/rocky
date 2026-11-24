@@ -70,7 +70,7 @@ fn stores_fail_closed_on_corruption_lost_state_and_old_formats() {
     let store = open(directory.path(), true).unwrap();
     assert!(matches!(
         open(directory.path(), false),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Configuration)
     ));
     drop(store);
     let path = directory.path().join("state.cbor");

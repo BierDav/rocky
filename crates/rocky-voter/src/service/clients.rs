@@ -69,14 +69,22 @@ impl VoterService {
         };
         let _ = tokio::time::timeout(CLIENT_REQUEST_TIMEOUT, async {
             let genesis = self.genesis.id()?;
-            let (nonce, request) = tokio::time::timeout_at(
+            let envelope = tokio::time::timeout_at(
                 unadmitted.deadline,
-                read_client_request(&mut stream, genesis),
+                read_bounded(&mut stream, MAX_CLIENT_FRAME),
             )
             .await
             .map_err(|_| CoordinationError::Unavailable)??;
-            let body = encode(&self.admit(request, Some(unadmitted)).await)?;
-            let response = crate::transport::Envelope::from_body(genesis, nonce, body, &self.key)?;
+            let reply = match envelope.client_request(genesis) {
+                Ok(request) => self.admit(request, Some(unadmitted)).await,
+                Err(error) => self.refuse_unadmitted(error),
+            };
+            let response = crate::transport::Envelope::from_body(
+                genesis,
+                envelope.nonce,
+                encode(&reply)?,
+                &self.key,
+            )?;
             write(&mut stream, &response).await
         })
         .await;
@@ -143,20 +151,5 @@ impl VoterService {
         ))
     }
 }
-async fn read_client_request(
-    stream: &mut rocky_core::net::Stream,
-    genesis: Commitment,
-) -> Result<(Commitment, Request), CoordinationError> {
-    let envelope = read_bounded(stream, MAX_CLIENT_FRAME).await?;
-    envelope.authenticate(genesis)?;
-    let Message::Client(request) = decode::<Message>(&envelope.body)? else {
-        return Err(CoordinationError::Denied);
-    };
-    if request.key != envelope.key {
-        return Err(CoordinationError::Denied);
-    }
-    Ok((envelope.nonce, *request))
-}
-
 #[cfg(test)]
 mod tests;

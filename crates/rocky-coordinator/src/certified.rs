@@ -1,4 +1,4 @@
-use crate::CoordinationError;
+use crate::{CoordinationError, Refusal};
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
 
@@ -53,7 +53,7 @@ impl ControlCertificate {
             .any(|a| a.scope == self.control.scope && a.issuer == self.issuer)
             || self.control.scope.mesh != genesis.mesh
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
         }
         self.check_without_authority(genesis, time)
     }
@@ -75,7 +75,7 @@ impl ControlCertificate {
                 .issuer
                 .verify(&bytes(CONTROL_LABEL, c)?, &self.signature)
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::InvalidControl));
         }
         Ok(())
     }
@@ -148,6 +148,21 @@ pub struct Genesis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<PublicService>,
 }
+pub const CONTROL_BACKDATE_SECONDS: u64 = 60;
+pub const MIN_CONTROL_LIFETIME: u64 = 60;
+impl Genesis {
+    pub fn control_window(
+        &self,
+        time: u64,
+        lifetime: u64,
+    ) -> Result<(u64, u64), CoordinationError> {
+        if !(MIN_CONTROL_LIFETIME..=self.max_control_lifetime).contains(&lifetime) {
+            return Err(CoordinationError::Configuration);
+        }
+        let not_before = time.saturating_sub(CONTROL_BACKDATE_SECONDS);
+        Ok((not_before, not_before.saturating_add(lifetime)))
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CertifiedGenesis {
     pub genesis: Genesis,
@@ -198,7 +213,7 @@ impl CertifiedGenesis {
                 != g.authorities.len()
             || !root.verify(&bytes("rocky.genesis.v2", g)?, &self.signature)
         {
-            return Err(CoordinationError::Denied);
+            return Err(CoordinationError::Denied(Refusal::Signature));
         }
         if let Some(public) = &g.public {
             public.validate(&g.voters)?;
@@ -227,7 +242,7 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CoordinationError> {
 }
 pub fn decode<T: Serialize + DeserializeOwned>(data: &[u8]) -> Result<T, CoordinationError> {
     if data.len() > MAX_STORE {
-        return Err(CoordinationError::Denied);
+        return Err(CoordinationError::Denied(Refusal::Oversized));
     }
     let value = p2panda_core::cbor::decode_cbor(data).map_err(|_| CoordinationError::Corrupt)?;
     if encode(&value)? != data {

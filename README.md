@@ -190,13 +190,24 @@ A dialer pins the node it expects, so a route must reach one node: behind a
 load balancer give each node its own path.
 Guarantees that need a global authority, gap-free numbers and at-most-once
 admission, come from the optional `rocky-coordinator` crate, an add-on to a
-`Database`: `Counters::new(database, client)` claims the next number of a
-named counter for any person with write access, and a claim key such as an
-order or ticket id keeps every retry on its first number. The application
-writes that number in its own transaction; an unreachable coordinator is a
-typed error that takes no number. The coordinator itself is `rocky-voter`, a
-three-voter Raft service: `scripts/coordinator-local DIR` builds it, starts
-three voters on loopback and prints the trust bundle clients pin.
+`Database`. `Counters::connect(database, &bundle, transport)` reaches the
+coordinator the trust bundle names; the database's owner registers it once with
+`counters.register(&root, &tenant, lifetime)`, where `tenant` is the
+coordinator account (`Tenant::generate()`, kept through `Tenant::secret`) and
+`lifetime` is at most the coordinator's `max_control_lifetime`, and renews it
+with `counters.renew(&tenant, &receipt, lifetime)` before it expires. Then
+`counters.claim(&name, claim)` takes the next number of a named counter for any
+person with write access, signed by the device inside the SDK, and a claim key
+such as an order or ticket id (`Claim::keyed`) keeps every retry, including one
+after a dropped or timed-out call, on its first number. The application writes
+that number in its own transaction. An unreachable coordinator is
+`CoordinationError::Unavailable` and takes no number; a refusal, such as a
+reader's or a removed person's claim, is `CoordinationError::Denied(Refusal)`.
+`with_deadline` bounds how long a call waits. The coordinator itself is
+`rocky-voter`, a three-voter Raft service: `scripts/coordinator-local DIR`
+builds it, starts three voters on loopback and prints the trust bundle that
+`cargo run -p rocky-coordinator --example counters -- BUNDLE EMPTY_DIR` claims
+from.
 
 Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
 it needs a clang that targets wasm32 and an `llvm-ar` that indexes wasm

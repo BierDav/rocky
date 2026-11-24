@@ -38,14 +38,12 @@ impl Memory {
     }
     async fn serve(self: Arc<Self>, mut stream: tokio::io::DuplexStream) {
         let served = async {
-            let envelope = read(&mut stream).await?;
-            envelope.authenticate(self.genesis)?;
-            let Message::Client(request) = decode(&envelope.body)? else {
-                return Err(CoordinationError::Denied);
-            };
+            let envelope = read_bounded(&mut stream, MAX_CLIENT_FRAME).await?;
             let reply = Reply {
                 leader: None,
-                result: self.answer(&request),
+                result: envelope
+                    .client_request(self.genesis)
+                    .and_then(|request| self.answer(&request)),
             };
             let response = crate::transport::Envelope::from_body(
                 self.genesis,
@@ -321,7 +319,7 @@ async fn only_trusted_nodes_claim() {
         stranger
             .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::NotMember))
     );
     let uncertified = NetworkCoordinator::connect(
         &service.bundle,
@@ -333,7 +331,7 @@ async fn only_trusted_nodes_claim() {
         uncertified
             .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
             .await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::NotMember)),
         "a trusted node's key without its certificate is no identity"
     );
     let trusted = service.client(&service.node);
@@ -364,7 +362,7 @@ async fn a_request_beyond_the_client_request_limit_is_denied_without_contacting_
     let oversized = control_beyond_the_client_request_limit(&service);
     assert_eq!(
         service.owner.control(oversized, nonce()).await,
-        Err(CoordinationError::Denied),
+        Err(CoordinationError::Denied(Refusal::Oversized)),
         "a request no voter answers is refused for good, not reported as an outage"
     );
     assert_eq!(
@@ -388,7 +386,7 @@ async fn an_observer_never_hears_of_a_request_refused_before_any_voter_was_conta
     let oversized = control_beyond_the_client_request_limit(&service);
     assert_eq!(
         service.owner.control(oversized, nonce()).await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied(Refusal::Oversized))
     );
     assert_eq!(
         *seen.lock().unwrap_or_else(PoisonError::into_inner),
@@ -548,7 +546,7 @@ async fn connecting_never_closes_the_callers_transport() {
             stranger
                 .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
                 .await,
-            Err(CoordinationError::Denied),
+            Err(CoordinationError::Denied(Refusal::NotMember)),
             "the voter refuses the request"
         );
         transport.refuse_connections(true);

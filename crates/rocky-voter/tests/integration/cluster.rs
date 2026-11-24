@@ -1,5 +1,5 @@
 use crate::support;
-use rocky_coordinator::CoordinationError;
+use rocky_coordinator::{CoordinationError, Refusal};
 use rocky_coordinator::{
     counters::{Claim, Lookup, Name},
     service::{NetworkCoordinator, Operation, Outcome},
@@ -406,12 +406,12 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     for client in [&issuer, &stranger] {
         assert_eq!(
             client.claim(scope, invoices.clone(), claim(104)).await,
-            Err(CoordinationError::Denied),
+            Err(CoordinationError::Denied(Refusal::NotMember)),
             "only the domain's trusted nodes claim"
         );
         assert_eq!(
             client.counter(scope, invoices.clone(), None).await,
-            Err(CoordinationError::Denied),
+            Err(CoordinationError::Denied(Refusal::NotMember)),
             "only the domain's trusted nodes read a counter"
         );
     }

@@ -155,21 +155,25 @@ impl<A: RowApplication> Inner<A> {
                 .any(|(table, _)| table.eq_ignore_ascii_case(name))
         };
         for table in &schema.tables {
+            let checked_parents: Vec<&str> = table
+                .foreign_keys
+                .iter()
+                .filter(|key| key.deferred || deferred_all)
+                .map(|key| key.table.as_str())
+                .collect();
             let checked = table.class == TableClass::Replayed
-                && table.foreign_keys.iter().any(|key| {
-                    (key.deferred || deferred_all) && (wrote(&table.sql_name) || wrote(&key.table))
-                });
+                && !checked_parents.is_empty()
+                && (wrote(&table.sql_name) || checked_parents.iter().any(|parent| wrote(parent)));
             if !checked {
                 continue;
             }
-            let mut rows = self
-                .conn
-                .query(
-                    "SELECT 1 FROM pragma_foreign_key_check(?) LIMIT 1",
-                    [table.sql_name.clone()],
-                )
-                .await?;
-            if rows.next().await?.is_some() {
+            let reached = written.iter().filter(|(name, _)| {
+                name.eq_ignore_ascii_case(&table.sql_name)
+                    || checked_parents
+                        .iter()
+                        .any(|parent| name.eq_ignore_ascii_case(parent))
+            });
+            if self.breaks_a_reference(table, reached).await? {
                 return Ok(Some(format!(
                     "FOREIGN KEY constraint failed: {}",
                     table.sql_name
@@ -233,5 +237,52 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(None)
+    }
+    async fn breaks_a_reference(
+        &self,
+        child: &rocky_core::LogicalTable,
+        reached: impl Iterator<Item = &Written>,
+    ) -> Result<bool, Error> {
+        if child.partition_by.is_empty() {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT 1 FROM pragma_foreign_key_check(?) LIMIT 1",
+                    [child.sql_name.clone()],
+                )
+                .await?;
+            return Ok(rows.next().await?.is_some());
+        }
+        let in_partition = child
+            .partition_by
+            .iter()
+            .enumerate()
+            .map(|(index, column)| format!("c.{}=?{}", typed::quoted(column), index + 2))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT 1 FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid WHERE {in_partition} LIMIT 1",
+            typed::quoted(&child.sql_name)
+        );
+        let mut partitions: Vec<&Vec<SqlValue>> = Vec::new();
+        for (_, partition) in reached {
+            if !partitions.contains(&partition) {
+                partitions.push(partition);
+            }
+        }
+        for partition in partitions {
+            if partition.len() != child.partition_by.len() {
+                return Err(Error::Corrupt(
+                    "a reference crosses partition groups".into(),
+                ));
+            }
+            let mut values = vec![SqlValue::Text(child.sql_name.clone())];
+            values.extend(partition.iter().cloned());
+            let mut rows = self.conn.query(&sql, bindings(values)).await?;
+            if rows.next().await?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

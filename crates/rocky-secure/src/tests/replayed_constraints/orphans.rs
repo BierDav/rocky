@@ -145,3 +145,50 @@ async fn a_replay_orphaning_a_row_of_a_parent_partition_not_held_here_keeps_it()
         .unwrap();
     assert_eq!(orphaned_memberships(&device.replica).await, 1);
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    let receiver = &devices[1].replica;
+    let missing = format!("X'{}'", "00".repeat(40));
+    execute(receiver, "PRAGMA foreign_keys=OFF", None).await;
+    execute(
+        receiver,
+        &format!(
+            "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(2,{missing},{missing},'member',1,1,{missing})"
+        ),
+        None,
+    )
+    .await;
+    execute(receiver, "PRAGMA foreign_keys=ON", None).await;
+    devices[0]
+        .commit(
+            &c,
+            &[
+                "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,#next(teams),#next(people),'member',1,1,#id)",
+                "INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)",
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let frames = devices[0].fresh().await;
+    let statuses = devices[1].replica.receive_all(frames.clone()).await;
+    assert_eq!(
+        statuses.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        vec![ReceiveStatus::Applied; frames.len()],
+        "a transaction in tenant 1 applies beside an orphan of tenant 2"
+    );
+    assert_eq!(
+        devices[1]
+            .replica
+            .transaction_outcome(c.transaction(&frames))
+            .await
+            .unwrap(),
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "a membership whose team lives in an evicted partition is no violation of this transaction"
+    );
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+}

@@ -76,8 +76,8 @@ async fn publication_delivers_an_individual_operation_above_64_kib() {
     .await;
     assert!(matches!(
         rejected,
-        Err(Error::Quota {
-            resource: "intent frame bytes",
+        Err(Error::TooLarge {
+            limit: rocky_storage::Limit::Intent,
             ..
         })
     ));

@@ -1,119 +1,291 @@
+use rocky_core::Blocker;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error {
+    kind: ErrorKind,
+    detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
-    Revoked,
+    Denied {
+        table: Option<String>,
+        need: Right,
+        reason: DenyReason,
+    },
+    Removed,
+    Blocked {
+        table: Option<String>,
+        blockers: Vec<Blocker>,
+    },
+    AuthorityChanged,
+    Conflict,
+    Busy,
+    TooLarge {
+        limit: Limit,
+        size: usize,
+        max: usize,
+    },
+    Quota,
+    Sql {
+        code: i32,
+        message: String,
+        unsupported: Option<Unsupported>,
+    },
+    Decode(crate::DecodeError),
+    Schema(Box<crate::SchemaError>),
+    MigrationPending,
+    MigrationFailed {
+        version: u32,
+        step: usize,
+    },
+    StoreSuperseded,
+    StoreOnly(crate::StoreOnlyRefusal),
+    UnsupportedGeneration,
     RegistryFull,
     RevocationSetFull,
     Rejected,
-    Denied,
-    Blocked,
-    UnsupportedGeneration,
-    MissingDependencies,
-    AuthorityChanged,
-    Conflict,
-    Quota,
-    Storage,
-    MigrationPending,
-    Schema(Box<crate::SchemaError>),
-    StoreSuperseded,
     Invite(crate::InviteError),
     Join(crate::JoinError),
     Link(crate::LinkError),
     Access(crate::AccessError),
     Service(crate::ServiceError),
-    StoreOnly(crate::StoreOnlyRefusal),
     RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
     RoleInUse(crate::RoleInUse),
-    Sql(Box<crate::SqlFailure>),
-    Decode(crate::DecodeError),
-    Other(String),
+    Remote {
+        retryable: bool,
+    },
+    Closed,
+    Storage,
+    Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Right {
+    Read,
+    Write,
+    Append,
+    Update(String),
+    Allocate,
+    Administer,
+    Sign,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DenyReason {
+    NotGranted,
+    PartitionNotGranted { group: String },
+    PartitionNotCreated { group: String },
+    StoreOnly,
+    AdminRequired,
+    OwnerRequired,
+    IdentityRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Limit {
+    Intent,
+    Frame,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Unsupported {
+    NonDeterministic(String),
+    With,
+    Statement,
 }
 
 impl ErrorKind {
-    pub fn code(&self) -> &str {
+    pub(crate) fn code(&self) -> &str {
         match self {
-            Self::Revoked => "revoked",
+            Self::Denied { reason, .. } => reason.code(),
+            Self::Removed => "removed",
+            Self::Blocked { .. } => "blocked",
+            Self::AuthorityChanged => "authority_changed",
+            Self::Conflict => "conflict",
+            Self::Busy => "busy",
+            Self::TooLarge { .. } => "too_large",
+            Self::Quota => "quota",
+            Self::Sql { .. } => "sql",
+            Self::Decode(_) => "decode",
+            Self::Schema(_) => "invalid_schema",
+            Self::MigrationPending => "migration_pending",
+            Self::MigrationFailed { .. } => "migration_failed",
+            Self::StoreSuperseded => "store_superseded",
+            Self::StoreOnly(_) => "store_only",
+            Self::UnsupportedGeneration => "unsupported_generation",
             Self::RegistryFull => "registry_full",
             Self::RevocationSetFull => "revocation_set_full",
             Self::Rejected => "rejected",
-            Self::Denied => "denied",
-            Self::Blocked => "blocked",
-            Self::UnsupportedGeneration => "unsupported_generation",
-            Self::MissingDependencies => "missing_dependencies",
-            Self::AuthorityChanged => "authority_changed",
-            Self::Conflict => "conflict",
-            Self::Quota => "quota",
-            Self::Storage => "storage",
-            Self::MigrationPending => "migration_pending",
-            Self::Schema(_) => "invalid_schema",
-            Self::StoreSuperseded => "store_superseded",
             Self::Invite(error) => error.code(),
             Self::Join(error) => error.code(),
             Self::Link(error) => error.code(),
             Self::Access(error) => error.code(),
             Self::Service(service) => service.code(),
-            Self::StoreOnly(_) => "store_only",
             Self::RolloutConfirmation(_) => "rollout_confirmation_required",
             Self::RoleInUse(_) => "role_in_use",
-            Self::Sql(failure) => match failure.reason {
-                crate::SqlReason::Unavailable {
-                    reason: crate::Unavailability::Incomplete { .. },
-                    ..
-                } => "missing_dependencies",
-                crate::SqlReason::Revoked => "revoked",
-                crate::SqlReason::Unavailable { .. } | crate::SqlReason::Statement => "sql",
-            },
-            Self::Decode(_) => "decode",
-            Self::Other(code) => code,
+            Self::Remote { .. } => "remote",
+            Self::Closed => "closed",
+            Self::Storage => "storage",
+            Self::Internal => "internal",
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error {
-    pub kind: ErrorKind,
-    pub retryable: bool,
-    pub detail: String,
-    pub blockers: Vec<rocky_core::Blocker>,
+impl DenyReason {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::NotGranted => "not_granted",
+            Self::PartitionNotGranted { .. } => "partition_not_granted",
+            Self::PartitionNotCreated { .. } => "partition_not_created",
+            Self::StoreOnly => "store_only",
+            Self::AdminRequired => "admin_required",
+            Self::OwnerRequired => "owner_required",
+            Self::IdentityRequired => "identity_required",
+        }
+    }
+}
+
+impl std::fmt::Display for Right {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read => f.write_str("read"),
+            Self::Write => f.write_str("write"),
+            Self::Append => f.write_str("append to"),
+            Self::Update(column) => write!(f, "update column {column} of"),
+            Self::Allocate => f.write_str("allocate a row id in"),
+            Self::Administer => f.write_str("administer"),
+            Self::Sign => f.write_str("sign for the person in"),
+        }
+    }
+}
+
+impl std::fmt::Display for DenyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotGranted => f.write_str("this device's access does not grant it"),
+            Self::PartitionNotGranted { group } => write!(
+                f,
+                "no partition of group `{group}` with these values is granted to this person; an admin grants one with grant_partition"
+            ),
+            Self::PartitionNotCreated { group } => write!(
+                f,
+                "no partition of group `{group}` with these values exists; create it with create_partition"
+            ),
+            Self::StoreOnly => f.write_str("a store-only device holds no readable data"),
+            Self::AdminRequired => f.write_str("only an admin does this"),
+            Self::OwnerRequired => f.write_str("only the owner's root key does this"),
+            Self::IdentityRequired => f.write_str(
+                "it needs the person's identity; supply it with Configuration::identity",
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Intent => "a replayed write's intent",
+            Self::Frame => "an encrypted frame",
+        })
+    }
 }
 
 impl Error {
     pub(crate) fn new(kind: ErrorKind, detail: impl Into<String>) -> Self {
         Self {
             kind,
-            retryable: false,
             detail: detail.into(),
-            blockers: Vec::new(),
         }
     }
 
-    pub fn from_failure(error: &crate::Failure) -> Self {
+    pub(crate) fn denied(table: Option<String>, need: Right, reason: DenyReason) -> Self {
+        let detail = match &table {
+            Some(table) => format!("cannot {need} table {table}: {reason}"),
+            None => format!("cannot {need} this database: {reason}"),
+        };
+        Self::new(
+            ErrorKind::Denied {
+                table,
+                need,
+                reason,
+            },
+            detail,
+        )
+    }
+
+    pub(crate) fn refused(need: Right, reason: DenyReason) -> Self {
+        Self::denied(None, need, reason)
+    }
+
+    pub(crate) fn removed() -> Self {
+        Self::new(
+            ErrorKind::Removed,
+            "the person or device was removed from this database",
+        )
+    }
+
+    pub(crate) fn sql(code: i32, message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self::new(
+            ErrorKind::Sql {
+                code,
+                message: message.clone(),
+                unsupported: None,
+            },
+            message,
+        )
+    }
+
+    pub(crate) fn closed(detail: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Closed, detail)
+    }
+
+    pub(crate) fn internal(detail: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Internal, detail)
+    }
+
+    pub(crate) fn from_failure(error: &crate::Failure) -> Self {
         crate::node::typed_error(error)
+    }
+
+    pub(crate) fn failed(error: crate::Failure) -> Self {
+        crate::node::typed_error(&error)
     }
 
     pub fn kind(&self) -> &ErrorKind {
         &self.kind
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> &str {
+        self.kind.code()
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn code(&self) -> &str {
         self.kind.code()
     }
 
     pub fn retryable(&self) -> bool {
-        self.retryable
+        match &self.kind {
+            ErrorKind::Blocked { .. }
+            | ErrorKind::AuthorityChanged
+            | ErrorKind::Conflict
+            | ErrorKind::Busy => true,
+            ErrorKind::Join(error) => error.retryable(),
+            ErrorKind::Link(error) => error.retryable(),
+            ErrorKind::Service(error) => error.retryable(),
+            ErrorKind::Remote { retryable } => *retryable,
+            _ => false,
+        }
     }
 
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
-
-    pub fn blockers(&self) -> &[rocky_core::Blocker] {
-        &self.blockers
-    }
-}
-
-impl From<crate::Failure> for Error {
-    fn from(error: crate::Failure) -> Self {
-        crate::node::typed_error(&error)
+    pub fn blockers(&self) -> &[Blocker] {
+        match &self.kind {
+            ErrorKind::Blocked { blockers, .. } => blockers,
+            _ => &[],
+        }
     }
 }
 
@@ -125,10 +297,7 @@ impl From<crate::InviteError> for Error {
 
 impl From<crate::JoinError> for Error {
     fn from(error: crate::JoinError) -> Self {
-        Self {
-            retryable: error.retryable(),
-            ..Self::new(ErrorKind::Join(error), error.to_string())
-        }
+        Self::new(ErrorKind::Join(error), error.to_string())
     }
 }
 
@@ -138,68 +307,37 @@ impl From<crate::AccessError> for Error {
         Self::new(ErrorKind::Access(error), detail)
     }
 }
+
 impl From<crate::LinkError> for Error {
     fn from(error: crate::LinkError) -> Self {
-        Self {
-            retryable: error.retryable(),
-            ..Self::new(ErrorKind::Link(error), error.to_string())
-        }
+        Self::new(ErrorKind::Link(error), error.to_string())
     }
 }
 
 impl From<crate::ServiceError> for Error {
     fn from(error: crate::ServiceError) -> Self {
-        Self {
-            retryable: error.retryable(),
-            detail: error.to_string(),
-            blockers: Vec::new(),
-            kind: ErrorKind::Service(error),
-        }
+        let detail = error.to_string();
+        Self::new(ErrorKind::Service(error), detail)
     }
 }
 
 impl From<crate::SchemaError> for Error {
     fn from(error: crate::SchemaError) -> Self {
-        Self::new(
-            ErrorKind::Schema(Box::new(error.clone())),
-            error.to_string(),
-        )
+        let detail = error.to_string();
+        Self::new(ErrorKind::Schema(Box::new(error)), detail)
     }
 }
 
 impl From<crate::DecodeError> for Error {
     fn from(error: crate::DecodeError) -> Self {
-        Self::new(ErrorKind::Decode(error.clone()), error.to_string())
+        let detail = error.to_string();
+        Self::new(ErrorKind::Decode(error), detail)
     }
 }
 
-impl From<rocky_secure::Error> for Error {
-    fn from(error: rocky_secure::Error) -> Self {
-        crate::Failure::from(error).into()
-    }
-}
-
-impl From<rocky_credentials::Error> for Error {
-    fn from(error: rocky_credentials::Error) -> Self {
-        crate::Failure::from(error).into()
-    }
-}
-
-impl From<crate::SqlFailure> for Error {
-    fn from(failure: crate::SqlFailure) -> Self {
-        let blockers = match &failure.reason {
-            crate::SqlReason::Unavailable {
-                reason: crate::Unavailability::Incomplete { blockers },
-                ..
-            } => blockers.clone(),
-            _ => Vec::new(),
-        };
-        Self {
-            retryable: failure.retryable,
-            detail: failure.to_string(),
-            blockers,
-            kind: ErrorKind::Sql(Box::new(failure)),
-        }
+impl From<crate::StoreOnlyRefusal> for Error {
+    fn from(refusal: crate::StoreOnlyRefusal) -> Self {
+        Self::new(ErrorKind::StoreOnly(refusal), refusal.to_string())
     }
 }
 
@@ -215,10 +353,10 @@ impl std::error::Error for Error {
             ErrorKind::Service(service) => Some(service),
             ErrorKind::StoreOnly(refusal) => Some(refusal),
             ErrorKind::RolloutConfirmation(required) => Some(required.as_ref()),
-            ErrorKind::Sql(failure) => Some(failure.as_ref()),
             ErrorKind::Invite(error) => Some(error),
             ErrorKind::Join(error) => Some(error),
             ErrorKind::Link(error) => Some(error),
+            ErrorKind::Access(error) => Some(error),
             ErrorKind::Schema(error) => Some(error.as_ref()),
             ErrorKind::Decode(error) => Some(error),
             _ => None,

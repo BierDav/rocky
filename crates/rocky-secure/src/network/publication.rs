@@ -247,7 +247,7 @@ impl link::channels::Handle {
         }
         let plan = match Plan::build(replica, peer, credentials, cursors).await {
             Ok(plan) => plan,
-            Err(error @ (Error::Rejected(_) | Error::Quota { .. })) => {
+            Err(error @ (Error::Rejected(_) | Error::Quota { .. } | Error::TooLarge { .. })) => {
                 tracing::debug!(%error, "live publication requires scoped repair");
                 return Ok(PublicationOutcome::Repair {
                     scopes: cursors.iter().map(|c| c.scope).collect(),

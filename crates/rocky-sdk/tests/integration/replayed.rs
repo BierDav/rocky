@@ -31,7 +31,10 @@ async fn create(database: &Database, key: &str, amount: i64) -> Result<Transacti
         ],
     )
     .await?;
-    Ok(tx.commit().await?.ok_or("a replayed insert publishes")?)
+    match tx.commit().await? {
+        rocky_sdk::Commit::Recorded(token) => Ok(token),
+        rocky_sdk::Commit::NoChanges => Err("a replayed insert publishes".into()),
+    }
 }
 
 async fn raise(database: &Database, key: &str) -> Result<TransactionToken, Failure> {
@@ -41,7 +44,10 @@ async fn raise(database: &Database, key: &str) -> Result<TransactionToken, Failu
         vec![SqlValue::Integer(1), SqlValue::Text(key.into())],
     )
     .await?;
-    Ok(tx.commit().await?.ok_or("a replayed update publishes")?)
+    match tx.commit().await? {
+        rocky_sdk::Commit::Recorded(token) => Ok(token),
+        rocky_sdk::Commit::NoChanges => Err("a replayed update publishes".into()),
+    }
 }
 
 async fn counters(database: &Database) -> Result<Vec<(String, i64)>, Failure> {

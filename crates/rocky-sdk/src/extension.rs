@@ -21,7 +21,8 @@ impl Database {
         label: &str,
         message: &[u8],
     ) -> Result<Signature, crate::Error> {
-        let signing = rocky_credentials::extension_message(label, message)?;
+        let signing = rocky_credentials::extension_message(label, message)
+            .map_err(|error| crate::Error::failed(error.into()))?;
         self.send(|reply| Request::SignExtension(signing, reply))
             .await
     }

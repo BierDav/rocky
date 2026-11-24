@@ -36,8 +36,6 @@ mod commitment;
 pub use commitment::*;
 mod tip;
 pub use tip::TipId;
-mod token;
-pub use token::TransactionToken;
 
 mod partition_groups;
 pub use partition_groups::{GroupAddress, PartitionGroup};

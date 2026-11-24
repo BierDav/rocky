@@ -14,7 +14,7 @@ pub fn peerless_ok(
     match result {
         Ok(report) => Ok(Some(report)),
         Err(error)
-            if error.kind
+            if *error.kind()
                 == rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached {
                     known: 0,
                 }) =>

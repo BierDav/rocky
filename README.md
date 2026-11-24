@@ -45,13 +45,23 @@ the named tables (an empty list means all), `flush` makes every returned commit
 durable, and `status` with `status_changes` reports progress, blockers and the
 network.
 
-Every call returns a typed `rocky_sdk::Error`: an `ErrorKind` (which keeps
-typed causes such as `ServiceError`, `JoinError` or
-`RolloutConfirmationRequired`), whether a retry can succeed, a detail and the
-blockers in the way. SQL calls return a `SqlFailure` whose `SqlReason` says why
-a table could not be read: `Unavailable { table, reason }`, where `Incomplete
-{ blockers }` names the scope that still waits and what clears it. `status`
-lists the same blockers until the missing data arrives.
+Every call, SQL included, returns one typed `rocky_sdk::Error`. Its `kind()`
+is an `ErrorKind` an application matches on, and `retryable()` follows from
+that kind. A refusal of access is `Denied { table, need, reason }`: the
+`Right` the call needed (`Read`, `Write`, `Append`, `Update(column)`,
+`Allocate` for a row id, `Administer`, `Sign`) and a `DenyReason`
+(`NotGranted`, `PartitionNotGranted { group }`, `PartitionNotCreated { group
+}`, `StoreOnly`, `AdminRequired`, `OwnerRequired`, `IdentityRequired`). A
+removed person or device gets `Removed`. A table that still waits for data is
+`Blocked { table, blockers }`, which names the scope and what clears it;
+`status` lists the same blockers until the data arrives. A statement SQLite or
+Rocky refuses is `Sql { code, message, unsupported }`, where `unsupported`
+names `NonDeterministic(function)` for a clock or random value in a replayed
+write (bind the value instead) and `With` for a `WITH` clause there. A write
+over a size limit is `TooLarge { limit, size, max }`, and a failed migration is
+`MigrationFailed { version, step }`. Other kinds keep their typed cause, such
+as `ServiceError`, `JoinError` or `RolloutConfirmationRequired`; an unknown
+internal failure is `Internal` and never retryable.
 
 A database's authority is an offline root key: `Configuration::create`
 returns it once as a 24-word phrase (`Created::root`) together with the
@@ -65,8 +75,8 @@ database signs with it for that session and drops it at close. With the person
 key alone, an owner or admin device publishes a new schema version, approves
 links of its person's devices, unlinks devices and invites; only `make_admin`
 and `revoke_admin` need the root. A call that needs the person key without one
-configured fails with `LinkError::IdentityRequired`, and `create` refuses a
-configured identity that is not the owner's (`AccessError::OwnerRequired`).
+configured is `Denied` with `IdentityRequired`, and `create` refuses a
+configured identity that is not the owner's with `OwnerRequired`.
 An admin invites with `Database::invite(Invite::new(access))`,
 optionally naming `partition`s, a `label`, a validity (`Invite::valid_for`,
 ten minutes by default) or the one person it is for (`for_identity`). The
@@ -83,7 +93,7 @@ identity Rocky mints and returns once in `Opened::identity` (an
 `IdentityKey` the application stores like the owner's); a `for_identity`
 code carries no secret and admits only that person's configured identity. A
 refused join says why with a `JoinError` (`Expired`, `Used`, `Cancelled`,
-`OtherIdentity`, `AlreadyMember`, `Removed`, `IssuerUnreachable`, ...).
+`OtherIdentity`, `AlreadyMember`, `IssuerUnreachable`, ...).
 `Database::invitations` lists open and redeemed invitations, naming the
 `PersonId` that redeemed each (`redeemed_by`), and
 `cancel_invitation` ends an unused one. A person links another device with
@@ -106,9 +116,9 @@ holds no partition of that group until an admin calls
 secret to every device of that person, including devices that join or link
 later (at an admin's next sync once it learns of them); granting a partition
 the person already holds delivers it to their devices again.
-`revoke_partition` takes it back. Before any grant, a table of that group
-reads as `Unavailable` with an `Incomplete` reason whose `PartitionNotGranted`
-blocker names the group, and `status` lists the same blocker.
+`revoke_partition` takes it back. Before any grant, a read of a table of that
+group is `Denied` with `PartitionNotGranted { group }`, and `status` lists a
+`PartitionNotGranted` blocker for the group.
 `Full` and `Read` reach every partition. A new partition's secret reaches
 every device of every person whose access covers it through the delivery
 mailboxes, with no application call; store-only devices hold its frames but
@@ -121,8 +131,7 @@ devices), change access with `set_access` and end a person with
 `remove(person, Removal::Departed | Removal::Compromised)`. A removed or
 unlinked device that learns of it at its next sync drops its keys, so it can
 no longer read the data, and refuses every SQL read and commit with
-`SqlReason::Revoked`, also after reopening; its syncs fail with
-`ErrorKind::Revoked`, and `logout(Logout::PurgeOnClose)` then deletes its
+`Removed`, also after reopening; its syncs fail the same way, and `logout(Logout::PurgeOnClose)` then deletes its
 directory. A device that is offline cannot know yet: it keeps
 reading and committing locally until it syncs, and those commits never reach
 anyone else. `Me::owner` comes from the root-signed owner grant, so every
@@ -133,9 +142,9 @@ that revocation before it changes the access, so a crash in between still
 revokes once on restart. Widening and `make_admin` leave a rights notice in
 the mailbox of each of the person's devices, so each renews into the wider
 rights at its next sync with an admin device. A
-refused call says why with an `AccessError` (`AdminRequired`,
-`OwnerRequired`, `UnknownPerson`, `TargetIsAdmin`, `PartialGroup`,
-`TooManyPartitions`, `Removed`, ...). The owner makes a member an admin with
+refused call says why with `Denied` (`AdminRequired`, `OwnerRequired`) or an
+`AccessError` (`UnknownPerson`, `TargetIsAdmin`, `PartialGroup`,
+`TooManyPartitions`, ...). The owner makes a member an admin with
 `make_admin(person, root)` and ends one with `revoke_admin(person, removal,
 root)`; both need the root key. An admin who should stay a member is invited
 again. `logout(Logout::KeepData | Logout::PurgeOnClose)` ends this device's

@@ -2,7 +2,7 @@ use crate::common::{self, Device, Failure};
 use crate::support::snapshot as snap;
 use rocky_sdk::{
     Access, Configuration, DeclaredSchema, ErrorKind, IdentityKey, IdentityProvider, Invite,
-    LinkError, Network, transport::memory::Hub,
+    Network, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -129,7 +129,7 @@ async fn the_person_key_unlinks_one_of_the_owners_devices_without_the_root() -> 
         .await
         .err()
         .ok_or("an unlinked device synced")?;
-    assert_eq!(refused["code"], "revoked", "{refused}");
+    assert_eq!(refused["code"], "removed", "{refused}");
     laptop.close().await;
     owned.owner.close().await;
     Ok(())
@@ -177,7 +177,14 @@ async fn without_the_person_key_an_unlink_is_refused_as_identity_required() -> R
         .await
         .err()
         .ok_or("unlinked without the person key")?;
-    assert_eq!(refused.kind, ErrorKind::Link(LinkError::IdentityRequired));
+    assert_eq!(
+        *refused.kind(),
+        ErrorKind::Denied {
+            table: None,
+            need: rocky_sdk::Right::Sign,
+            reason: rocky_sdk::DenyReason::IdentityRequired,
+        }
+    );
     keyless.close().await?;
     laptop.close().await;
     Ok(())

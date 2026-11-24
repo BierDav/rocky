@@ -21,7 +21,7 @@ impl Node {
                 .revocations
                 .ends_node_of(settings.identity, request.node, false)
         {
-            return Err(Box::new(crate::LinkError::Removed));
+            return Err(Box::new(crate::Error::removed()));
         }
         let code = request.confirmation_code()?;
         let mut requests = self

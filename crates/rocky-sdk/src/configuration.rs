@@ -88,7 +88,10 @@ impl Configuration {
     }
     pub async fn link(&self, contact: &str) -> Result<crate::PendingLink, crate::Error> {
         if self.identity.is_none() {
-            return Err(crate::LinkError::IdentityRequired.into());
+            return Err(crate::Error::refused(
+                crate::Right::Sign,
+                crate::DenyReason::IdentityRequired,
+            ));
         }
         let install = Install::Identity {
             contact: contact.into(),
@@ -108,7 +111,7 @@ impl Configuration {
                     contact: contact.into(),
                     awaiting: Arc::new(*awaiting),
                 }),
-                Err(error) => Err(error.into()),
+                Err(error) => Err(crate::Error::failed(error)),
             },
         }
     }

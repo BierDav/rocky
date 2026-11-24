@@ -60,6 +60,7 @@ pub enum SqlError {
     Statement { code: i32, message: String },
     Denied,
     Unsupported(String),
+    Refused(crate::partition_sql::IntentRefusal),
     Unavailable { table: String, reason: Unavailable },
     Aborted(AbortReason),
     Capture(String),
@@ -71,6 +72,7 @@ impl std::fmt::Display for SqlError {
             Self::Statement { code, message } => write!(f, "{message} (code {code})"),
             Self::Denied => write!(f, "statement is not authorized"),
             Self::Unsupported(reason) => write!(f, "unsupported statement: {reason}"),
+            Self::Refused(refusal) => write!(f, "a replayed write was refused: {refusal}"),
             Self::Unavailable { table, reason } => {
                 write!(f, "{table} is not available: {reason:?}")
             }

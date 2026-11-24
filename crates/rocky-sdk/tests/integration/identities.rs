@@ -200,7 +200,7 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
         assert_eq!(
-            refused["code"], "revoked",
+            refused["code"], "removed",
             "revoking an identity revokes every node of it, unrecorded ones too: {refused}"
         );
     }
@@ -425,8 +425,12 @@ async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> 
         .err()
         .ok_or("created under a configured identity that is not the owner")?;
     assert_eq!(
-        refused.kind,
-        rocky_sdk::ErrorKind::Access(rocky_sdk::AccessError::OwnerRequired)
+        *refused.kind(),
+        rocky_sdk::ErrorKind::Denied {
+            table: None,
+            need: rocky_sdk::Right::Sign,
+            reason: rocky_sdk::DenyReason::OwnerRequired,
+        }
     );
     let opened = config
         .create_with_root(
@@ -482,7 +486,7 @@ async fn an_identity_unlinks_one_sibling_and_the_issuer_rotates_its_reader_scope
             .await;
     }
     let refused = nodes[1].sync().await.err().ok_or("unlinked node synced")?;
-    assert_eq!(refused["code"], "revoked", "{refused}");
+    assert_eq!(refused["code"], "removed", "{refused}");
     for device in nodes.iter().chain([owner]) {
         device.close().await;
     }
@@ -815,13 +819,17 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
             .approve_link(pending.device(), &wrong)
             .await
             .err()
-            .map(|error| error.kind),
+            .map(|error| error.kind().clone()),
         Some(rocky_sdk::ErrorKind::Link(
             rocky_sdk::LinkError::CodeMismatch
         ))
     );
     assert_eq!(
-        pending.confirm().await.err().map(|error| error.kind),
+        pending
+            .confirm()
+            .await
+            .err()
+            .map(|error| error.kind().clone()),
         Some(rocky_sdk::ErrorKind::Link(
             rocky_sdk::LinkError::NotApproved
         )),

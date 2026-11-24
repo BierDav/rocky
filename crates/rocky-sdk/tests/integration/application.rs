@@ -1,5 +1,6 @@
+use crate::common::Failure;
 use rocky_platform::fs::Scratch;
-use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
+use rocky_sdk::{Affinity, Column, Configuration, Schema, Table, params};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 fn schema() -> Result<Schema, Failure> {
@@ -255,7 +256,7 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
         tx.commit().await?;
     }
     assert_eq!(
-        db.sync_now().await.err().map(|error| error.kind),
+        db.sync_now().await.err().map(|error| error.kind().clone()),
         Some(rocky_sdk::ErrorKind::Service(
             rocky_sdk::ServiceError::NoPeerReached { known: 0 }
         )),
@@ -306,7 +307,7 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
         params![outbox, id, token],
     )
     .await?;
-    assert_eq!(tx.commit().await?, Some(token));
+    assert_eq!(tx.commit().await?, rocky_sdk::Commit::Recorded(token));
 
     let mut tx = db.transaction().await?;
     let abandoned = tx.token();
@@ -354,7 +355,7 @@ async fn flush_persists_every_commit_returned_before_it() -> Result<(), Failure>
         tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
             .await?;
         let token = tx.token();
-        assert_eq!(tx.commit().await?, Some(token));
+        assert_eq!(tx.commit().await?, rocky_sdk::Commit::Recorded(token));
         tokens.push(token);
     }
     db.flush().await?;

@@ -103,17 +103,21 @@ impl Member {
             .database)
     }
     pub(super) async fn sync(&self) -> Result<Reconciled, crate::Error> {
-        let report = self.database()?.sync_now().await;
+        let report = self
+            .database()
+            .map_err(crate::Error::failed)?
+            .sync_now()
+            .await;
         match report {
             Ok(report) => Ok(Reconciled {
                 peers: report.reconciled(),
                 of: report.peers.len(),
             }),
-            Err(error) => match error.kind {
+            Err(error) => match error.kind() {
                 crate::ErrorKind::Service(crate::ServiceError::NoPeerReached { known }) => {
                     Ok(Reconciled {
                         peers: 0,
-                        of: known,
+                        of: *known,
                     })
                 }
                 _ => Err(error),

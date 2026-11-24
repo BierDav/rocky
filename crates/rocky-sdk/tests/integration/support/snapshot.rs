@@ -5,6 +5,7 @@
 use rocky_sdk as sdk;
 use serde_json::{Value, json};
 use std::future::Future;
+type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub trait Snapshot {
     fn snapshot(self) -> Value;
 }
@@ -31,29 +32,32 @@ pub async fn device(database: &sdk::Database) -> Result<Value, sdk::Error> {
         json!({"principal":authority.principal,"node":authority.node,"revocations":authority.revocations,"expires":authority.expires_at_epoch_seconds.to_string(),"issuer":authority.is_issuer,"access":authority.access}),
     )
 }
-pub async fn observe<T: Snapshot, E: Into<sdk::Failure>>(
+pub async fn observe<T: Snapshot, E: Into<Failure>>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Result<Value, Value> {
     future.await.map(Snapshot::snapshot).map_err(|error| {
-        let error: sdk::Failure = error.into();
-        if let Some(sql) = error.downcast_ref::<sdk::SqlFailure>() {
-            let retryable = matches!(sql.code, 5 | 6);
-            return json!({"code": if retryable { "busy" } else { "rejected" }, "retryable": retryable, "message": sql.message, "blockers": []});
+        let error: Failure = error.into();
+        let Some(failure) = error.downcast_ref::<sdk::Error>() else {
+            let code = if error.is::<FixtureRejection>() { "rejected" } else { "internal" };
+            return json!({"code": code, "retryable": false, "message": error.to_string(), "blockers": []});
+        };
+        if let sdk::ErrorKind::Sql { code, message, .. } = failure.kind() {
+            let retryable = matches!(code, 5 | 6);
+            return json!({"code": if retryable { "busy" } else { "rejected" }, "retryable": retryable, "message": message, "blockers": []});
         }
-        let failure = sdk::Error::from_failure(&error);
-        json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.detail,"blockers":failure.blockers})
+        json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.to_string(),"blockers":failure.blockers()})
     })
 }
-pub async fn ok<T: Snapshot, E: Into<sdk::Failure>>(
+pub async fn ok<T: Snapshot, E: Into<Failure>>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Value {
     observe(future)
         .await
         .unwrap_or_else(|error| panic!("operation failed: {error}"))
 }
-pub async fn value<T: Snapshot, E: Into<sdk::Failure>>(
+pub async fn value<T: Snapshot, E: Into<Failure>>(
     future: impl Future<Output = Result<T, E>>,
-) -> Result<Value, sdk::Failure> {
+) -> Result<Value, Failure> {
     future.await.map(Snapshot::snapshot).map_err(Into::into)
 }
 pub fn cell(value: sdk::SqlValue) -> Value {
@@ -71,7 +75,7 @@ pub async fn read(
     database: &sdk::Database,
     sql: &str,
     values: Vec<sdk::SqlValue>,
-) -> Result<Value, sdk::Failure> {
+) -> Result<Value, Failure> {
     let mut rows = database.query(sql, values).await?;
     let columns = rows.columns().to_vec();
     let mut out = Vec::new();
@@ -251,7 +255,7 @@ pub fn digest(value: &impl Scalar) -> [u8; 32] {
 pub fn key(value: &impl Scalar) -> rocky_credentials::PublicKey {
     value.text().parse().expect("public key")
 }
-pub async fn reply<T: Snapshot, E: Into<sdk::Failure>>(
+pub async fn reply<T: Snapshot, E: Into<Failure>>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Value {
     match observe(future).await {
@@ -301,7 +305,7 @@ pub async fn mutate(
     action: Action,
     entity: Option<String>,
     author: Option<String>,
-) -> Result<Value, sdk::Failure> {
+) -> Result<Value, Failure> {
     let handle = mutation_handle(database, &bytes, author.as_deref()).await?;
     let key = data_encoding::HEXLOWER.encode(&handle);
     let valid = |name: &str| {
@@ -388,7 +392,11 @@ pub async fn mutate(
         }
     };
     let committed = tx.commit().await?;
-    Ok(json!({"id":id,"handle":key,"frames":committed.map(|_| 1usize)}))
+    let frames = match committed {
+        sdk::Commit::Recorded(_) => Some(1usize),
+        sdk::Commit::NoChanges => None,
+    };
+    Ok(json!({"id":id,"handle":key,"frames":frames}))
 }
 
 impl Snapshot for sdk::ActivityPage {
@@ -455,7 +463,7 @@ impl Snapshot for sdk::ActivityPage {
     }
 }
 
-pub async fn string<T: Snapshot, E: Into<sdk::Failure>>(
+pub async fn string<T: Snapshot, E: Into<Failure>>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Result<Value, String> {
     observe(future).await.map_err(|error| error.to_string())
@@ -465,7 +473,7 @@ pub async fn mutation_handle(
     database: &sdk::Database,
     bytes: &[u8],
     author: Option<&str>,
-) -> Result<rocky_core::Commitment, sdk::Failure> {
+) -> Result<rocky_core::Commitment, Failure> {
     let author = match author {
         Some(author) => author.to_owned(),
         None => database.me().await?.device.to_string(),
@@ -474,11 +482,14 @@ pub async fn mutation_handle(
     identity.extend(serde_json::to_vec(bytes)?);
     Ok(rocky_core::commitment("fixture.sql.handle", &identity))
 }
-fn fixture_rejection(detail: &str) -> sdk::Failure {
-    Box::new(sdk::Error {
-        kind: sdk::ErrorKind::Rejected,
-        retryable: false,
-        detail: detail.into(),
-        blockers: Vec::new(),
-    })
+#[derive(Debug)]
+struct FixtureRejection(String);
+impl std::fmt::Display for FixtureRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for FixtureRejection {}
+fn fixture_rejection(detail: &str) -> Failure {
+    Box::new(FixtureRejection(detail.into()))
 }

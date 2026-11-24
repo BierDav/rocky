@@ -3,7 +3,7 @@ fn main() {}
 
 #[cfg(not(target_family = "wasm"))]
 #[tokio::main]
-async fn main() -> Result<(), rocky_sdk::Failure> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     native::main().await
 }
 
@@ -11,8 +11,10 @@ async fn main() -> Result<(), rocky_sdk::Failure> {
 mod native {
     use iroh_relay::server::{RelayConfig, Server, ServerConfig};
     use rocky_sdk::{
-        Access, Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, params,
+        Access, Affinity, Column, Configuration, Database, Network, Schema, Table, params,
     };
+
+    type Failure = Box<dyn std::error::Error + Send + Sync>;
     use serde_json::json;
     use std::{net::Ipv4Addr, sync::Arc};
 

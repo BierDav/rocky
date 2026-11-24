@@ -46,7 +46,7 @@ use rocky_core::{ResourceScope, TypedRows, commitment};
 use rocky_credentials::{IdentityEnrollment, IdentityReply};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
-    SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
+    SecureSql, SqlOptions, secure_node_id,
 };
 use serde::{Deserialize, Serialize};
 pub(crate) use shared::{SettingsCell, SettingsGuard, Shared};
@@ -78,7 +78,8 @@ fn refused(error: impl std::fmt::Display) -> Failure {
     Box::new(Refused(error.to_string()))
 }
 fn named(error: Failure) -> Failure {
-    if error.is::<crate::registry::RegistryFull>()
+    if error.is::<crate::Error>()
+        || error.is::<crate::registry::RegistryFull>()
         || error.is::<crate::JoinError>()
         || error.is::<crate::InviteError>()
         || error.is::<crate::AccessError>()
@@ -486,12 +487,10 @@ impl Node {
             return Err(refused("this device logged out of the domain"));
         }
         if self.own_revocation().await?.is_some() {
-            return Err(Box::new(crate::SqlFailure {
-                code: crate::connection::code::AUTH,
-                message: "this device was removed or unlinked; its data is purged".into(),
-                retryable: false,
-                reason: crate::SqlReason::Revoked,
-            }));
+            return Err(Box::new(crate::Error::new(
+                crate::ErrorKind::Removed,
+                "this device was removed or unlinked; its data is purged",
+            )));
         }
         Ok(())
     }
@@ -2215,18 +2214,6 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
         _ => None,
     }
 }
-fn migration_pending(error: &Failure) -> bool {
-    matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::Application(cause)) if cause.is::<rocky_secure::MigrationPending>()
-    )
-}
-fn store_superseded(error: &Failure) -> bool {
-    matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::Application(cause)) if cause.is::<rocky_secure::StoreSuperseded>()
-    )
-}
 fn renewal_cannot_repair(error: &Failure) -> bool {
     match error.downcast_ref::<Error>() {
         Some(Error::Io(_)) => true,
@@ -2242,109 +2229,111 @@ fn renewal_cannot_repair(error: &Failure) -> bool {
     }
 }
 pub(crate) fn typed_error(error: &Failure) -> crate::Error {
+    use crate::{DenyReason, Right};
+    if let Some(peer) = error.downcast_ref::<crate::peer::PeerError>() {
+        return crate::peer::remote(peer);
+    }
+    if error.is::<crate::enrollment::Revoked>() || revoked_by(error).is_some() {
+        return crate::Error::new(crate::ErrorKind::Removed, error.to_string());
+    }
+    if error.is::<crate::enrollment::PublisherRequired>() {
+        return crate::Error::refused(Right::Administer, DenyReason::OwnerRequired);
+    }
+    typed_cause(error.as_ref(), error.to_string())
+}
+fn typed_cause(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+    detail: String,
+) -> crate::Error {
+    use crate::ErrorKind as Kind;
     if let Some(error) = error.downcast_ref::<crate::Error>() {
         return error.clone();
     }
-    if let Some(peer) = error.downcast_ref::<crate::peer::PeerError>() {
-        return crate::Error {
-            kind: crate::ErrorKind::Other(peer.code.clone()),
-            retryable: peer.retryable,
-            detail: peer.message.clone(),
-            blockers: Vec::new(),
-        };
-    }
-    let (kind, retryable) = if error.is::<crate::enrollment::Revoked>() {
-        (crate::ErrorKind::Revoked, false)
-    } else if error.is::<crate::enrollment::PublisherRequired>() {
-        (
-            crate::ErrorKind::Access(crate::AccessError::OwnerRequired),
-            false,
-        )
-    } else if error.is::<crate::registry::RegistryFull>() {
-        (crate::ErrorKind::RegistryFull, false)
+    let kind = if error.is::<crate::registry::RegistryFull>() {
+        Kind::RegistryFull
     } else if let Some(error) = error.downcast_ref::<crate::InviteError>() {
-        (crate::ErrorKind::Invite(*error), false)
+        Kind::Invite(*error)
     } else if let Some(error) = error.downcast_ref::<crate::JoinError>() {
-        (crate::ErrorKind::Join(*error), error.retryable())
+        Kind::Join(*error)
     } else if let Some(error) = error.downcast_ref::<crate::LinkError>() {
-        (crate::ErrorKind::Link(*error), error.retryable())
+        Kind::Link(*error)
     } else if let Some(error) = error.downcast_ref::<crate::AccessError>() {
-        (crate::ErrorKind::Access(error.clone()), false)
+        Kind::Access(error.clone())
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
-        (crate::ErrorKind::RevocationSetFull, false)
+        Kind::RevocationSetFull
     } else if error.is::<Refused>() {
-        (crate::ErrorKind::Rejected, false)
-    } else if migration_pending(error) {
-        (crate::ErrorKind::MigrationPending, false)
-    } else if store_superseded(error) {
-        (crate::ErrorKind::StoreSuperseded, false)
+        Kind::Rejected
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
-        (
-            crate::ErrorKind::Service(service.clone()),
-            service.retryable(),
-        )
+        Kind::Service(service.clone())
     } else if let Some(schema) = error.downcast_ref::<crate::SchemaError>() {
-        (crate::ErrorKind::Schema(Box::new(schema.clone())), false)
+        Kind::Schema(Box::new(schema.clone()))
+    } else if let Some(decode) = error.downcast_ref::<crate::DecodeError>() {
+        Kind::Decode(decode.clone())
     } else if let Some(refusal) = error.downcast_ref::<crate::StoreOnlyRefusal>() {
-        (crate::ErrorKind::StoreOnly(*refusal), false)
+        Kind::StoreOnly(*refusal)
     } else if let Some(required) = error.downcast_ref::<crate::RolloutConfirmationRequired>() {
-        (
-            crate::ErrorKind::RolloutConfirmation(Box::new(required.clone())),
-            false,
-        )
+        Kind::RolloutConfirmation(Box::new(required.clone()))
     } else if let Some(in_use) = error.downcast_ref::<crate::RoleInUse>() {
-        (crate::ErrorKind::RoleInUse(in_use.clone()), false)
-    } else if let Some(failure) = error.downcast_ref::<crate::SqlFailure>() {
-        return failure.clone().into();
+        Kind::RoleInUse(in_use.clone())
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
         match credentials {
-            rocky_credentials::Error::Provider(_) => (crate::ErrorKind::Storage, false),
-            _ => (crate::ErrorKind::Denied, false),
+            rocky_credentials::Error::Provider(_) => Kind::Storage,
+            _ => Kind::Rejected,
         }
+    } else if error.is::<std::io::Error>() {
+        Kind::Storage
+    } else if let Some(error) = error.downcast_ref::<Error>() {
+        return storage_error(error, detail);
     } else {
-        match error.downcast_ref::<Error>() {
-            Some(Error::Rejected(_) | Error::Protocol(_)) => (crate::ErrorKind::Rejected, false),
-            Some(Error::Blocked(_)) => (crate::ErrorKind::Blocked, true),
-            Some(Error::Incompatible(_)) => (crate::ErrorKind::UnsupportedGeneration, false),
-            Some(Error::Sql(SqlError::Denied)) => (crate::ErrorKind::Denied, false),
-            Some(Error::Sql(
-                SqlError::Capture(_) | SqlError::Statement { .. } | SqlError::Unsupported(_),
-            )) => (crate::ErrorKind::Rejected, false),
-            Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
-                Unavailable::Incomplete { .. } | Unavailable::KeyMissing => {
-                    (crate::ErrorKind::MissingDependencies, true)
-                }
-                Unavailable::NotHeld => (crate::ErrorKind::Rejected, false),
-                Unavailable::Revoked => (crate::ErrorKind::AuthorityChanged, true),
-            },
-            Some(Error::Conflict) => (crate::ErrorKind::Conflict, true),
-            Some(Error::Backpressure) => (crate::ErrorKind::Quota, true),
-            _ => (crate::ErrorKind::Storage, true),
+        Kind::Internal
+    };
+    crate::Error::new(kind, detail)
+}
+fn storage_error(error: &Error, detail: String) -> crate::Error {
+    use crate::ErrorKind as Kind;
+    let kind = match error {
+        Error::Application(cause) if cause.is::<rocky_secure::MigrationPending>() => {
+            Kind::MigrationPending
         }
+        Error::Application(cause) if cause.is::<rocky_secure::StoreSuperseded>() => {
+            Kind::StoreSuperseded
+        }
+        Error::Application(cause) => return typed_cause(cause.as_ref(), detail),
+        Error::Rejected(_) | Error::Protocol(_) => Kind::Rejected,
+        Error::Blocked(blockers) => Kind::Blocked {
+            table: None,
+            blockers: blockers.clone(),
+        },
+        Error::Incompatible(_) => Kind::UnsupportedGeneration,
+        Error::Conflict => Kind::Conflict,
+        Error::Backpressure | Error::RetryExhausted => Kind::Busy,
+        Error::Storage(_) if error.is_retryable() => Kind::Busy,
+        Error::Quota { .. } => Kind::Quota,
+        Error::TooLarge { limit, size, max } => Kind::TooLarge {
+            limit: match limit {
+                rocky_storage::Limit::Intent => crate::Limit::Intent,
+                rocky_storage::Limit::Frame => crate::Limit::Frame,
+            },
+            size: *size,
+            max: *max,
+        },
+        Error::Closed => Kind::Closed,
+        Error::Sql(sql) => return crate::connection::sql_error(sql, detail),
+        Error::Io(_)
+        | Error::Storage(_)
+        | Error::Corrupt(_)
+        | Error::Durability(_)
+        | Error::Rollback { .. } => Kind::Storage,
+        Error::InjectedFailure => Kind::Internal,
     };
-    let blockers = match error.downcast_ref::<Error>() {
-        Some(
-            Error::Blocked(blockers)
-            | Error::Sql(SqlError::Unavailable {
-                reason: Unavailable::Incomplete { blockers },
-                ..
-            }),
-        ) => blockers.clone(),
-        _ => Vec::new(),
-    };
-    crate::Error {
-        kind,
-        retryable,
-        detail: error.to_string(),
-        blockers,
-    }
+    crate::Error::new(kind, detail)
 }
 #[cfg(test)]
 pub(crate) fn error(error: &Failure) -> serde_json::Value {
     let failure = typed_error(error);
-    let mut value = serde_json::json!({"code": failure.code(), "retryable": failure.retryable, "message": failure.detail});
-    if !failure.blockers.is_empty() {
-        value["blockers"] = serde_json::json!(failure.blockers);
+    let mut value = serde_json::json!({"code": failure.code(), "retryable": failure.retryable(), "message": failure.to_string()});
+    if !failure.blockers().is_empty() {
+        value["blockers"] = serde_json::json!(failure.blockers());
     }
     value
 }
@@ -2392,7 +2381,7 @@ mod error_tests {
         )));
         let typed = crate::Error::from_failure(&superseded);
         assert_eq!(typed.kind(), &crate::ErrorKind::StoreSuperseded);
-        assert!(typed.detail().contains("re-invite it as a new device"));
+        assert!(typed.to_string().contains("re-invite it as a new device"));
         assert_eq!(code(superseded), ("store_superseded".into(), false));
     }
 }

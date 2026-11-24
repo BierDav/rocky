@@ -1,5 +1,5 @@
-use crate::{Configuration, DEVICES, LIST_GROUP, TodoError, Todos};
-use rocky_sdk::{Access, Failure, RoleName, RowIdentity, params};
+use crate::{Configuration, DEVICES, Failure, LIST_GROUP, TodoError, Todos};
+use rocky_sdk::{Access, RoleName, RowIdentity, params};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

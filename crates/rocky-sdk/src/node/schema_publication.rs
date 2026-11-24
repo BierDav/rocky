@@ -311,12 +311,17 @@ impl Node {
                     sql.cancel().await;
                     drop(sql);
                     self.withdraw_stage(&stage).await?;
-                    return Err(format!(
-                        "migration to version {} failed at statement {}: {error}",
-                        migration.version,
-                        number + 1
-                    )
-                    .into());
+                    return Err(Box::new(crate::Error::new(
+                        crate::ErrorKind::MigrationFailed {
+                            version: migration.version,
+                            step: number + 1,
+                        },
+                        format!(
+                            "migration to version {} failed at step {}: {error}",
+                            migration.version,
+                            number + 1
+                        ),
+                    )));
                 }
             }
         }

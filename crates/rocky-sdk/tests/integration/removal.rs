@@ -355,8 +355,8 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
 fn confirmation(
     result: Result<rocky_sdk::Database, rocky_sdk::Error>,
 ) -> rocky_sdk::RolloutConfirmationRequired {
-    match result.err().expect("confirmation required").kind {
-        rocky_sdk::ErrorKind::RolloutConfirmation(required) => *required,
+    match result.err().expect("confirmation required").kind() {
+        rocky_sdk::ErrorKind::RolloutConfirmation(required) => (**required).clone(),
         other => panic!("expected a structured removal report, found {other:?}"),
     }
 }

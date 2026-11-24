@@ -228,7 +228,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             .await
             .err()
             .ok_or("renewed a cascaded identity")?;
-        assert_eq!(error.code(), "revoked", "{error}");
+        assert_eq!(error.kind(), &rocky_sdk::ErrorKind::Removed, "{error}");
         let status = early.database.status().await?;
         assert_eq!(
             status

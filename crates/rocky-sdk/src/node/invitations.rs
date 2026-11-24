@@ -44,7 +44,10 @@ impl Node {
     pub(super) async fn cancel_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {
         let settings = self.settings.lock().await;
         if !settings.issuer() {
-            return Err(Box::new(crate::InviteError::AdminRequired));
+            return Err(Box::new(crate::Error::refused(
+                crate::Right::Administer,
+                crate::DenyReason::AdminRequired,
+            )));
         }
         let mut book = Book::read(&self.replica).await?;
         let time = now()?;
@@ -59,7 +62,10 @@ impl Node {
     pub(super) async fn invitations(&self) -> Result<Vec<crate::PendingInvitation>, Failure> {
         let settings = self.settings.lock().await;
         if !settings.issuer() {
-            return Err(Box::new(crate::InviteError::AdminRequired));
+            return Err(Box::new(crate::Error::refused(
+                crate::Right::Administer,
+                crate::DenyReason::AdminRequired,
+            )));
         }
         let book = Book::read(&self.replica).await?;
         drop(settings);

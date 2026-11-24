@@ -31,6 +31,19 @@ impl From<sqlite::Error> for StorageFailure {
         Self { source }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    Intent,
+    Frame,
+}
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Intent => "a replayed write's intent frame",
+            Self::Frame => "an encrypted frame",
+        })
+    }
+}
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
@@ -45,6 +58,11 @@ pub enum Error {
         resource: &'static str,
         limit: usize,
     },
+    TooLarge {
+        limit: Limit,
+        size: usize,
+        max: usize,
+    },
     Rejected(String),
     Blocked(Vec<rocky_core::Blocker>),
     RetryExhausted,
@@ -55,7 +73,6 @@ pub enum Error {
         rollback: StorageFailure,
     },
     Sql(crate::sql::SqlError),
-    #[cfg(any(test, feature = "test-support", feature = "qualification"))]
     InjectedFailure,
 }
 impl Error {
@@ -70,6 +87,7 @@ impl Error {
             Self::Durability(_) => "durability",
             Self::Backpressure => "backpressure",
             Self::Quota { .. } => "quota",
+            Self::TooLarge { .. } => "too_large",
             Self::Rejected(_) => "rejected",
             Self::Blocked(_) => "blocked",
             Self::RetryExhausted => "retry_exhausted",
@@ -77,7 +95,6 @@ impl Error {
             Self::Closed => "closed",
             Self::Rollback { .. } => "rollback",
             Self::Sql(_) => "sql",
-            #[cfg(any(test, feature = "test-support", feature = "qualification"))]
             Self::InjectedFailure => "injected",
         }
     }
@@ -88,7 +105,7 @@ impl Error {
             | Self::Blocked(_)
             | Self::Sql(crate::sql::SqlError::Denied) => FailureReason::Denial,
             Self::Incompatible(_) => FailureReason::UnsupportedGeneration,
-            Self::Quota { .. } | Self::Backpressure => FailureReason::Quota,
+            Self::Quota { .. } | Self::TooLarge { .. } | Self::Backpressure => FailureReason::Quota,
             Self::Corrupt(_) | Self::Rollback { .. } => FailureReason::Corruption,
             Self::Conflict => FailureReason::Conflict,
             Self::Closed => FailureReason::Closed,
@@ -119,6 +136,9 @@ impl std::fmt::Display for Error {
             Self::Rejected(e) => write!(f, "replication data rejected: {e}"),
             Self::Blocked(blockers) => f.write_str(&rocky_core::describe_blockers(blockers)),
             Self::Quota { resource, limit } => write!(f, "{resource} quota reached ({limit})"),
+            Self::TooLarge { limit, size, max } => {
+                write!(f, "{limit} holds at most {max} bytes; this one is {size}")
+            }
             Self::Backpressure => {
                 write!(f, "storage queue is full; retry when pending work finishes")
             }
@@ -135,7 +155,6 @@ impl std::fmt::Display for Error {
             Self::Rollback { cause, rollback } => {
                 write!(f, "{cause}; rollback failed: {rollback}; replica stopped")
             }
-            #[cfg(any(test, feature = "test-support", feature = "qualification"))]
             Self::InjectedFailure => write!(f, "injected pre-commit failure"),
         }
     }

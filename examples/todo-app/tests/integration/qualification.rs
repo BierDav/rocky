@@ -1,13 +1,14 @@
 use crate::common;
 
 use common::{World, sync, titles};
-use rocky_sdk::{DropReason, Failure, TableEvents, TransactionOutcome, TransactionToken, params};
+use rocky_sdk::{Commit, DropReason, TableEvents, TransactionOutcome, TransactionToken, params};
 use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use todo_app::Failure;
 use todo_app::{Role, TODOS, Todo, Todos, configuration, position, roles};
 
 async fn state(
@@ -60,8 +61,11 @@ fn dropped(outcome: &Option<TransactionOutcome>) -> Option<(DropReason, bool)> {
     }
 }
 
-fn token(token: Option<TransactionToken>) -> Result<TransactionToken, Failure> {
-    Ok(token.ok_or("a replayed write publishes a transaction")?)
+fn token(commit: Commit) -> Result<TransactionToken, Failure> {
+    match commit {
+        Commit::Recorded(token) => Ok(token),
+        Commit::NoChanges => Err("a replayed write publishes a transaction".into()),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -189,7 +193,7 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
             let offline_phone = laptop.database().sync_now().await.err();
             assert!(
                 offline_phone.is_some_and(|error| matches!(
-                    error.kind,
+                    error.kind(),
                     rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached { .. })
                 )),
                 "a pass that reaches no peer says so while the phone is off"

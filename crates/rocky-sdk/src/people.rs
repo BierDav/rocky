@@ -91,39 +91,28 @@ pub struct LinkRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkError {
-    IdentityRequired,
     NetworkRequired,
     Unreachable,
     NotApproved,
     CodeMismatch,
     UnknownRequest,
     UnknownDevice,
-    AdminRequired,
-    Removed,
 }
 impl LinkError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::IdentityRequired => "identity_required",
             Self::NetworkRequired => "network_required",
             Self::Unreachable => "unreachable",
             Self::NotApproved => "link_not_approved",
             Self::CodeMismatch => "link_code_mismatch",
             Self::UnknownRequest => "link_request_unknown",
             Self::UnknownDevice => "device_unknown",
-            Self::AdminRequired => "admin_required",
-            Self::Removed => "removed",
         }
     }
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Unreachable | Self::NotApproved)
     }
-    const CARRIED: [Self; 4] = [
-        Self::NotApproved,
-        Self::CodeMismatch,
-        Self::UnknownRequest,
-        Self::Removed,
-    ];
+    const CARRIED: [Self; 3] = [Self::NotApproved, Self::CodeMismatch, Self::UnknownRequest];
     pub(crate) fn carried(error: crate::Failure) -> crate::Failure {
         if let Some(code) = error
             .downcast_ref::<crate::peer::PeerError>()
@@ -150,17 +139,12 @@ impl LinkError {
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::IdentityRequired => {
-                "this call needs the person's identity key; configure it with Configuration::identity"
-            }
             Self::NetworkRequired => "linking a device needs an attached network",
             Self::Unreachable => "the other device is not reachable",
             Self::NotApproved => "the other device has not approved this link yet",
             Self::CodeMismatch => "the link code does not match",
             Self::UnknownRequest => "no such link request; it expired or never arrived",
             Self::UnknownDevice => "no such device of a person in this database",
-            Self::AdminRequired => "only an admin unlinks another person's device",
-            Self::Removed => "the person or device was removed",
         })
     }
 }
@@ -259,8 +243,6 @@ pub enum Logout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccessError {
-    AdminRequired,
-    OwnerRequired,
     UnknownPerson,
     UnknownRole(crate::RoleName),
     TargetIsAdmin,
@@ -276,13 +258,10 @@ pub enum AccessError {
     TooManyPartitions {
         limit: usize,
     },
-    Removed,
 }
 impl AccessError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::AdminRequired => "admin_required",
-            Self::OwnerRequired => "owner_required",
             Self::UnknownPerson => "person_unknown",
             Self::UnknownRole(_) => "role_unknown",
             Self::TargetIsAdmin => "target_is_admin",
@@ -291,7 +270,6 @@ impl AccessError {
             Self::PartitionsHeld => "partitions_held",
             Self::PartialGroup { .. } => "role_reads_part_of_group",
             Self::TooManyPartitions { .. } => "too_many_partitions",
-            Self::Removed => "removed",
         }
     }
     pub(crate) fn of(
@@ -314,8 +292,6 @@ impl AccessError {
 impl std::fmt::Display for AccessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AdminRequired => f.write_str("only an admin manages people"),
-            Self::OwnerRequired => f.write_str("only the owner's root key manages admins"),
             Self::UnknownPerson => f.write_str("no such person in this database"),
             Self::UnknownRole(role) => write!(f, "the schema declares no role {role}"),
             Self::TargetIsAdmin => f.write_str("an admin's rights change only through the owner"),
@@ -333,7 +309,6 @@ impl std::fmt::Display for AccessError {
             Self::TooManyPartitions { limit } => {
                 write!(f, "a person holds at most {limit} partitions")
             }
-            Self::Removed => f.write_str("the person was removed"),
         }
     }
 }

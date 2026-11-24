@@ -1,13 +1,14 @@
 use crate::{Failure, node::Node};
 use rocky_core::{SqlValue, TypedRows};
-use rocky_secure::{Error, SecureSql, SqlError, Unavailable};
+use rocky_secure::{AbortReason, Error, SecureSql, SqlError, Unavailable};
+use rocky_storage::partition_sql::IntentRefusal;
 use rocky_storage::{
     cursor::{CursorLimits, SnapshotCursor},
     observe::TableObserver,
     sql::{Control, classify},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 use tokio::sync::Mutex;
@@ -15,6 +16,7 @@ use tokio::sync::Mutex;
 const PAGE_ROWS: usize = 256;
 const PAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULTS: usize = 64;
+const MAX_EXPLAINED_WRITES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionOptions {
@@ -41,141 +43,119 @@ pub(crate) struct Page {
     pub(crate) done: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SqlFailure {
-    pub code: i32,
-    pub message: String,
-    pub retryable: bool,
-    pub reason: SqlReason,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SqlReason {
-    Statement,
-    Revoked,
-    Unavailable {
-        table: String,
-        reason: Unavailability,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unavailability {
-    NotHeld,
-    KeyMissing,
-    Incomplete { blockers: Vec<rocky_core::Blocker> },
-    Revoked,
-}
-impl From<&Unavailable> for Unavailability {
-    fn from(reason: &Unavailable) -> Self {
-        match reason {
-            Unavailable::NotHeld => Self::NotHeld,
-            Unavailable::KeyMissing => Self::KeyMissing,
-            Unavailable::Incomplete { blockers } => Self::Incomplete {
-                blockers: blockers.clone(),
-            },
-            Unavailable::Revoked => Self::Revoked,
-        }
-    }
-}
-impl std::fmt::Display for SqlFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Error code: {}, message: {}", self.code, self.message)
-    }
-}
-impl std::error::Error for SqlFailure {}
-
 pub(crate) mod code {
     pub const ERROR: i32 = 1;
     pub const ABORT: i32 = 4;
-    pub const BUSY: i32 = 5;
     pub const READONLY: i32 = 8;
-    pub const TOOBIG: i32 = 18;
     pub const MISUSE: i32 = 21;
     pub const AUTH: i32 = 23;
 }
-pub(crate) fn failure(code: i32, message: impl Into<String>) -> SqlFailure {
-    SqlFailure {
-        code,
-        message: message.into(),
-        retryable: false,
-        reason: SqlReason::Statement,
-    }
+pub(crate) fn failure(code: i32, message: impl Into<String>) -> crate::Error {
+    crate::Error::sql(code, message)
 }
-async fn explained(node: &Node, sql: &str, error: Failure) -> Failure {
-    let Ok(withheld) = node.withheld_tables().await else {
-        return error;
+async fn explained(
+    node: &Node,
+    sql: &str,
+    next_id: Option<&str>,
+    writes: &BTreeSet<String>,
+    error: Failure,
+) -> Failure {
+    let typed = crate::Error::from_failure(&error);
+    let mut explained = match next_id {
+        Some(table) => node.allocation_refusal(table, &typed).await,
+        None => node.statement_refusal(sql).await,
     };
-    if withheld.is_empty() {
-        return error;
+    for write in writes {
+        if explained.is_some() {
+            break;
+        }
+        explained = node.statement_refusal(write).await;
     }
-    let Ok(prepared) = rocky_storage::partition_sql::prepare(sql, &node.domain().logical().views)
-    else {
-        return error;
-    };
-    let Some((table, blocker)) = prepared
-        .tables()
-        .iter()
-        .find_map(|referenced| withheld.get(referenced))
-    else {
-        return error;
-    };
-    Box::new(SqlFailure {
-        code: code::ERROR,
-        message: format!("{table} is not available: {blocker}"),
-        retryable: true,
-        reason: SqlReason::Unavailable {
-            table: table.clone(),
-            reason: Unavailability::Incomplete {
-                blockers: vec![blocker.clone()],
-            },
-        },
+    Box::new(match explained {
+        Some(explained) => explained,
+        None => node.partition_refusal(typed).await,
     })
 }
-pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
-    let error = match error.downcast::<SqlFailure>() {
-        Ok(failure) => return *failure,
-        Err(error) => error,
+pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
+    use crate::ErrorKind as Kind;
+    let sql = |code: i32, unsupported: Option<crate::Unsupported>| {
+        let message = error.to_string();
+        crate::Error::new(
+            Kind::Sql {
+                code,
+                message: message.clone(),
+                unsupported,
+            },
+            message,
+        )
     };
-    let Some(error) = error.downcast_ref::<Error>() else {
-        return failure(code::ERROR, error.to_string());
-    };
-    let code = match error {
-        Error::Sql(SqlError::Statement { code, .. }) => *code,
-        Error::Sql(SqlError::Denied) => code::AUTH,
-        Error::Sql(SqlError::Aborted(_)) => code::ABORT,
-        Error::Application(cause) if cause.is::<rocky_secure::StoreSuperseded>() => code::READONLY,
-        Error::Quota { .. } => code::TOOBIG,
-        Error::Backpressure => code::BUSY,
-        Error::Closed => code::MISUSE,
-        _ => code::ERROR,
-    };
-    let message = match error {
-        Error::Sql(SqlError::Statement { message, .. }) => message.clone(),
-        Error::Quota { resource, limit } => format!("{resource} exceed {limit}"),
-        other => other.to_string(),
-    };
-    let retryable = matches!(
-        error,
-        Error::Blocked(_)
-            | Error::Backpressure
-            | Error::Sql(SqlError::Unavailable { .. })
-            | Error::Sql(SqlError::Aborted(
-                rocky_secure::AbortReason::Timeout | rocky_secure::AbortReason::Preempted
-            ))
-    );
-    let reason = match error {
-        Error::Sql(SqlError::Unavailable { table, reason }) => SqlReason::Unavailable {
-            table: table.clone(),
-            reason: reason.into(),
-        },
-        _ => SqlReason::Statement,
-    };
-    SqlFailure {
-        code,
-        message,
-        retryable,
-        reason,
+    match error {
+        SqlError::Statement { code, .. } => sql(*code, None),
+        SqlError::Denied => sql(code::AUTH, Some(crate::Unsupported::Statement)),
+        SqlError::Unsupported(_) => sql(code::ERROR, Some(crate::Unsupported::Statement)),
+        SqlError::Refused(IntentRefusal::Unavailable { table, reason }) => {
+            unavailable(table, reason, detail)
+        }
+        SqlError::Refused(refusal) => {
+            let unsupported = match refusal {
+                IntentRefusal::Clock(name)
+                | IntentRefusal::Random(name)
+                | IntentRefusal::Environment(name)
+                | IntentRefusal::UnknownFunction(name) => {
+                    crate::Unsupported::NonDeterministic(name.clone())
+                }
+                IntentRefusal::With => crate::Unsupported::With,
+                _ => crate::Unsupported::Statement,
+            };
+            let hint = match &unsupported {
+                crate::Unsupported::NonDeterministic(_) => {
+                    "; compute the value in the application and bind it as a parameter"
+                }
+                crate::Unsupported::With => "; write the subquery inline instead",
+                crate::Unsupported::Statement => "",
+            };
+            let message = format!("{error}{hint}");
+            crate::Error::new(
+                Kind::Sql {
+                    code: code::ERROR,
+                    message: message.clone(),
+                    unsupported: Some(unsupported),
+                },
+                message,
+            )
+        }
+        SqlError::Unavailable { table, reason } => unavailable(table, reason, detail),
+        SqlError::Aborted(AbortReason::Timeout | AbortReason::Preempted) => {
+            crate::Error::new(Kind::Busy, detail)
+        }
+        SqlError::Aborted(_) => sql(code::ABORT, None),
+        SqlError::Capture(_) => sql(code::ERROR, None),
+        SqlError::Stale => crate::Error::new(Kind::AuthorityChanged, detail),
+    }
+}
+fn unavailable(table: &str, reason: &Unavailable, detail: String) -> crate::Error {
+    use crate::ErrorKind as Kind;
+    match reason {
+        Unavailable::Incomplete { blockers } => crate::Error::new(
+            Kind::Blocked {
+                table: Some(table.to_owned()),
+                blockers: blockers.clone(),
+            },
+            detail,
+        ),
+        Unavailable::KeyMissing => crate::Error::new(
+            Kind::Blocked {
+                table: Some(table.to_owned()),
+                blockers: Vec::new(),
+            },
+            detail,
+        ),
+        Unavailable::NotHeld => crate::Error::denied(
+            Some(table.to_owned()),
+            crate::Right::Read,
+            crate::DenyReason::NotGranted,
+        ),
+        Unavailable::Revoked => crate::Error::new(Kind::AuthorityChanged, detail),
     }
 }
 
@@ -401,8 +381,9 @@ pub(crate) struct State {
     open: bool,
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
-    committed: Option<rocky_core::TransactionToken>,
+    committed: Option<crate::TransactionToken>,
     handle: Option<rocky_core::Commitment>,
+    writes: BTreeSet<String>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -417,6 +398,7 @@ impl State {
             results: BTreeMap::new(),
             committed: None,
             handle: None,
+            writes: BTreeSet::new(),
         };
         state.sql().await?;
         Ok(state)
@@ -454,23 +436,31 @@ impl State {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> Result<Page, Failure> {
+        let normalized = rocky_storage::parsed::normalized(sql);
+        let sql = normalized.as_ref();
         self.results.remove(&statement);
         if self.results.len() >= MAX_RESULTS {
             return Err(failure(code::MISUSE, "too many statements with open results").into());
         }
-        let dispatched = match (query_only(sql), next_id(sql, &params)?) {
+        let allocation = next_id(sql, &params)?;
+        let allocated = allocation.as_ref().map(|(table, _)| table.as_str());
+        let dispatched = match (query_only(sql), &allocation) {
             (Some(set), _) => self.query_only(set),
-            (None, Some((table, values))) => self.next_id(&table, &values).await,
+            (None, Some((table, values))) => self.next_id(table, values).await,
             (None, None) if self.read_only => self.read(sql, params).await,
             (None, None) => self.write(sql, params).await,
         };
         let mut pending = match dispatched {
             Ok(pending) => pending,
-            Err(error) => return Err(explained(&self.node, sql, error).await),
+            Err(error) => {
+                return Err(explained(&self.node, sql, allocated, &self.writes, error).await);
+            }
         };
         let page = match pending.page().await {
             Ok(page) => page,
-            Err(error) => return Err(explained(&self.node, sql, error).await),
+            Err(error) => {
+                return Err(explained(&self.node, sql, allocated, &self.writes, error).await);
+            }
         };
         if !page.done {
             self.results.insert(statement, pending);
@@ -491,18 +481,16 @@ impl State {
     pub(crate) fn finish(&mut self, statement: u64) {
         self.results.remove(&statement);
     }
-    pub(crate) fn committed(&self) -> Option<rocky_core::TransactionToken> {
+    pub(crate) fn committed(&self) -> Option<crate::TransactionToken> {
         self.committed
     }
-    pub(crate) async fn begin_identified(
-        &mut self,
-    ) -> Result<rocky_core::TransactionToken, Failure> {
+    pub(crate) async fn begin_identified(&mut self) -> Result<crate::TransactionToken, Failure> {
         if self.read_only {
             return Err(failure(code::READONLY, "a reader connection cannot write").into());
         }
         self.write("BEGIN", Vec::new()).await?;
         let handle: rocky_core::Commitment = rocky_platform::entropy::random();
-        let token = rocky_core::TransactionToken(self.node.replica.transaction_of(handle));
+        let token = crate::TransactionToken::new(self.node.replica.transaction_of(handle));
         self.handle = Some(handle);
         Ok(token)
     }
@@ -569,6 +557,7 @@ impl State {
                     .into());
                 }
                 self.begin = Some(mode);
+                self.writes.clear();
                 return Ok(Pending::rows(Vec::new(), Vec::new()));
             }
             Control::Commit | Control::Rollback if self.begin.is_some() => {
@@ -597,7 +586,7 @@ impl State {
                     .filter(|commit| !commit.frames.is_empty())
             {
                 let transaction = self.node.replica.transaction_of(commit.handle);
-                self.committed = Some(rocky_core::TransactionToken(transaction));
+                self.committed = Some(crate::TransactionToken::new(transaction));
             }
         }
         let session_may_have_ended =
@@ -609,6 +598,11 @@ impl State {
             self.open = active || abort_awaits_acknowledgement;
         }
         let rows = ran?;
+        if ending {
+            self.writes.clear();
+        } else if control == Control::Statement && self.writes.len() < MAX_EXPLAINED_WRITES {
+            self.writes.insert(sql.to_owned());
+        }
         Ok(Pending::rows(rows.columns, rows.rows))
     }
 
@@ -744,6 +738,7 @@ impl State {
         }
         self.committed = None;
         self.handle = None;
+        self.writes.clear();
         self.read_only = self.options.read_only;
         true
     }
@@ -783,7 +778,7 @@ impl Registry {
             .lock()
             .map_err(|_| "connections poisoned")?;
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(failure(code::MISUSE, "the connection is closed").into());
+            return Err(crate::Error::closed("the connection is closed").into());
         }
         connections.insert(id, entry);
         Ok(())
@@ -849,7 +844,7 @@ impl Registry {
                 Ok(page) => (Ok(page), false),
                 Err(error) => {
                     let reusable = state.recycle();
-                    (Err(Failure::from(sql_failure(error))), reusable)
+                    (Err(error), reusable)
                 }
             }
         };
@@ -868,7 +863,7 @@ impl Registry {
             .map_err(|_| "connections poisoned")?
             .get(&id)
             .cloned()
-            .ok_or_else(|| failure(code::MISUSE, "the connection is closed").into())
+            .ok_or_else(|| crate::Error::closed("the connection is closed").into())
     }
     pub(crate) fn close(&self, id: Option<u64>) {
         let removed = if let Ok(mut connections) = self.connections.lock() {
@@ -928,10 +923,10 @@ pub(crate) enum Reply {
     Page(Page),
     #[cfg(test)]
     Flag(bool),
-    Token(Option<rocky_core::TransactionToken>),
+    Token(Option<crate::TransactionToken>),
     Done,
 }
-pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply, SqlFailure> {
+pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply, crate::Error> {
     let mut state = state.lock().await;
     let reply = match call {
         Call::Execute {
@@ -955,7 +950,7 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
             .await
             .map(|token| Reply::Token(Some(token))),
     };
-    reply.map_err(sql_failure)
+    reply.map_err(crate::Error::failed)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -984,8 +979,8 @@ pub struct TableEvents {
 pub struct TableChange {
     pub tables: Vec<String>,
     pub causes: Vec<ChangeCause>,
-    pub dropped: Vec<rocky_core::TransactionToken>,
-    pub sealed: Vec<rocky_core::TransactionToken>,
+    pub dropped: Vec<crate::TransactionToken>,
+    pub sealed: Vec<crate::TransactionToken>,
     pub reconcile: bool,
 }
 impl TableEvents {
@@ -995,19 +990,25 @@ impl TableEvents {
         }
     }
     pub async fn next(&self) -> Result<TableChange, crate::Error> {
-        let change = self.observer.lock().await.next().await?;
+        let change = self
+            .observer
+            .lock()
+            .await
+            .next()
+            .await
+            .map_err(|error| crate::Error::failed(error.into()))?;
         Ok(TableChange {
             tables: change.tables.into_iter().collect(),
             causes: change.causes.into_iter().map(ChangeCause::from).collect(),
             dropped: change
                 .dropped
                 .into_iter()
-                .map(rocky_core::TransactionToken)
+                .map(crate::TransactionToken::new)
                 .collect(),
             sealed: change
                 .sealed
                 .into_iter()
-                .map(rocky_core::TransactionToken)
+                .map(crate::TransactionToken::new)
                 .collect(),
             reconcile: change.reconcile,
         })
@@ -1049,7 +1050,7 @@ mod next_id_tests {
             next_id("SELECT [rocky_next_id]('it''s', `x`);", &[])
                 .unwrap_err()
                 .to_string(),
-            "Error code: 1, message: rocky_next_id requires scalar arguments"
+            "rocky_next_id requires scalar arguments"
         );
         assert_eq!(
             next_id("SELECT [rocky_next_id]('it''s', 7);", &[]).unwrap(),

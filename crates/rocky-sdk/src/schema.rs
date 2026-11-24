@@ -204,8 +204,8 @@ impl SchemaBuilder {
         self.0.roles.push(role.0);
         self
     }
-    pub fn build(self) -> Result<Schema, SchemaError> {
-        self.0.validated()
+    pub fn build(self) -> Result<Schema, crate::Error> {
+        Ok(self.0.validated()?)
     }
 }
 

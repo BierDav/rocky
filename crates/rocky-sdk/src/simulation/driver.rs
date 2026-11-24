@@ -1085,7 +1085,7 @@ impl Simulation {
                 .map_err(|error| error.to_string())?;
             drop(running);
             for (txn, (position, sealed)) in positions {
-                let token = TransactionToken(txn);
+                let token = TransactionToken::new(txn);
                 match self.positions.get_mut(&token) {
                     Some((known, true)) if sealed && known.0 != position.0 => {
                         return Err(format!(

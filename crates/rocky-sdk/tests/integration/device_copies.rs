@@ -3,8 +3,6 @@ use crate::support::snapshot as snap;
 use rocky_sdk::{AlertKind, ErrorKind, Network, SqlValue, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
 
-const READONLY: i32 = 8;
-
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
@@ -124,12 +122,9 @@ async fn a_restored_copy_never_authors_and_rejoins_as_a_new_device() -> Result<(
     let refused = try_add(&restored, "from the restored copy")
         .await
         .expect_err("superseded");
-    assert!(
-        matches!(refused.kind(), ErrorKind::Sql(failure) if failure.code == READONLY),
-        "{refused:?}"
-    );
+    assert_eq!(refused.kind(), &ErrorKind::StoreSuperseded, "{refused:?}");
     assert!(!refused.retryable());
-    assert!(refused.detail().contains("re-invite it as a new device"));
+    assert!(refused.to_string().contains("re-invite it as a new device"));
     let status = restored.database.status().await?;
     let restored_node = restored.node().await;
     assert!(

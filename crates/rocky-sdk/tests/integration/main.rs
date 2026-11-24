@@ -48,6 +48,8 @@ mod person_key;
 #[cfg(not(target_family = "wasm"))]
 mod readiness;
 #[cfg(not(target_family = "wasm"))]
+mod refusals;
+#[cfg(not(target_family = "wasm"))]
 mod registry;
 #[cfg(not(target_family = "wasm"))]
 mod registry_revocation;
@@ -69,6 +71,8 @@ mod shared_lists;
 mod shopping_release;
 #[cfg(not(target_family = "wasm"))]
 mod sqlite_contract;
+#[cfg(not(target_family = "wasm"))]
+mod statements;
 #[cfg(not(target_family = "wasm"))]
 mod support;
 #[cfg(not(target_family = "wasm"))]

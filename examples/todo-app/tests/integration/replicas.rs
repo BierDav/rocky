@@ -1,8 +1,8 @@
 use crate::common;
 
 use common::{World, titles};
-use rocky_sdk::{DropReason, Failure};
-use todo_app::Role;
+use rocky_sdk::{Commit, DropReason, TransactionToken};
+use todo_app::{Failure, Role};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lists_reach_devices_by_role() -> Result<(), Failure> {
@@ -130,8 +130,8 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
     );
 
     let tokens = [
-        laptop_pharmacy.token.ok_or("published")?,
-        phone_pharmacy.token.ok_or("published")?,
+        published(laptop_pharmacy.token)?,
+        published(phone_pharmacy.token)?,
     ];
     let mut outcomes = Vec::new();
     for device in [&laptop, &phone] {
@@ -158,4 +158,11 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
         "deleting a list cascades to its todos on every device"
     );
     world.close().await
+}
+
+fn published(commit: Commit) -> Result<TransactionToken, Failure> {
+    match commit {
+        Commit::Recorded(token) => Ok(token),
+        Commit::NoChanges => Err("published".into()),
+    }
 }

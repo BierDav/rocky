@@ -34,13 +34,8 @@ pub(super) fn quarantines(error: &Error) -> bool {
         )
         && !injected(error)
 }
-#[cfg(any(test, feature = "qualification"))]
 fn injected(error: &Error) -> bool {
     matches!(error, Error::InjectedFailure)
-}
-#[cfg(not(any(test, feature = "qualification")))]
-fn injected(_: &Error) -> bool {
-    false
 }
 
 impl<A: RowApplication> Inner<A> {

@@ -149,26 +149,22 @@ fn timestamp(seconds: u64) -> Timestamp {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InviteError {
-    AdminRequired,
     NetworkRequired,
     TooManyOpen { limit: usize },
     Validity { min: Duration, max: Duration },
     LabelTooLong { limit: usize },
     AlreadyMember,
-    Removed,
     Unknown,
     Redeemed,
 }
 impl InviteError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::AdminRequired => "admin_required",
             Self::NetworkRequired => "network_required",
             Self::TooManyOpen { .. } => "too_many_invitations",
             Self::Validity { .. } => "invitation_validity",
             Self::LabelTooLong { .. } => "label_too_long",
             Self::AlreadyMember => "already_member",
-            Self::Removed => "removed",
             Self::Unknown => "invitation_unknown",
             Self::Redeemed => "invitation_redeemed",
         }
@@ -177,7 +173,6 @@ impl InviteError {
 impl std::fmt::Display for InviteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AdminRequired => f.write_str("only an admin invites people"),
             Self::NetworkRequired => {
                 f.write_str("inviting needs an attached network the joiner can reach")
             }
@@ -195,7 +190,6 @@ impl std::fmt::Display for InviteError {
             Self::AlreadyMember => f.write_str(
                 "the person is already a member with other access or an admin; link a device instead",
             ),
-            Self::Removed => f.write_str("the person was removed"),
             Self::Unknown => f.write_str("no such open invitation"),
             Self::Redeemed => f.write_str("the invitation was already redeemed"),
         }
@@ -211,20 +205,17 @@ pub enum JoinError {
     Cancelled,
     OtherIdentity,
     OtherApplication,
-    IdentityRequired,
     AlreadyMember,
-    Removed,
     IssuerUnreachable,
 }
 impl JoinError {
-    const CARRIED: [Self; 7] = [
+    const CARRIED: [Self; 6] = [
         Self::Invalid,
         Self::Expired,
         Self::Used,
         Self::Cancelled,
         Self::OtherIdentity,
         Self::AlreadyMember,
-        Self::Removed,
     ];
     pub fn code(&self) -> &'static str {
         match self {
@@ -234,9 +225,7 @@ impl JoinError {
             Self::Cancelled => "invitation_cancelled",
             Self::OtherIdentity => "invitation_other_identity",
             Self::OtherApplication => "invitation_other_application",
-            Self::IdentityRequired => "identity_required",
             Self::AlreadyMember => "already_member",
-            Self::Removed => "removed",
             Self::IssuerUnreachable => "issuer_unreachable",
         }
     }
@@ -275,13 +264,9 @@ impl std::fmt::Display for JoinError {
             Self::Cancelled => "the issuer holds no such invitation; it was cancelled",
             Self::OtherIdentity => "the invitation is for another identity",
             Self::OtherApplication => "the invitation is for another application's database",
-            Self::IdentityRequired => {
-                "the invitation is for an identity; configure it with Configuration::identity"
-            }
             Self::AlreadyMember => {
                 "the identity is already a member; link this device from another of its devices"
             }
-            Self::Removed => "the identity was removed from this database",
             Self::IssuerUnreachable => "the admin that issued the invitation is not reachable",
         })
     }
@@ -550,7 +535,7 @@ fn admissible(
     access: &Access,
 ) -> Result<(), Failure> {
     if settings.revoked_identity(identity, registry) {
-        return Err(Box::new(JoinError::Removed));
+        return Err(Box::new(crate::Error::removed()));
     }
     let other_access = registry
         .get(identity)
@@ -606,7 +591,10 @@ impl Settings {
         time: u64,
     ) -> Result<Issued, Failure> {
         if !self.issuer() {
-            return Err(Box::new(InviteError::AdminRequired));
+            return Err(Box::new(crate::Error::refused(
+                crate::Right::Administer,
+                crate::DenyReason::AdminRequired,
+            )));
         }
         let validity = invite.validity()?;
         if invite
@@ -623,10 +611,10 @@ impl Settings {
             Some(person) => {
                 let identity = person.key();
                 admissible(self, registry, &identity, &invite.access).map_err(|error| {
-                    match error.downcast_ref::<JoinError>() {
-                        Some(JoinError::Removed) => Box::new(InviteError::Removed) as Failure,
-                        Some(_) => Box::new(InviteError::AlreadyMember),
-                        None => error,
+                    if error.is::<JoinError>() {
+                        Box::new(InviteError::AlreadyMember)
+                    } else {
+                        error
                     }
                 })?;
                 if registry.full_for(&identity) {
@@ -701,7 +689,7 @@ impl Settings {
         } = book.redeem(&wire, device, time)?;
         admissible(self, registry, &device.identity, &access)?;
         if self.tombstoned(&device.node) {
-            return Err(Box::new(JoinError::Removed));
+            return Err(Box::new(crate::Error::removed()));
         }
         let (enrollment, changes) = self.enrollment_for(
             vault,
@@ -729,7 +717,12 @@ impl Settings {
         code: &InvitationCode,
     ) -> Result<crate::enrollment::Prepared, Failure> {
         match (code.person(), provider) {
-            (Some(_), None) => return Err(Box::new(JoinError::IdentityRequired)),
+            (Some(_), None) => {
+                return Err(Box::new(crate::Error::refused(
+                    crate::Right::Sign,
+                    crate::DenyReason::IdentityRequired,
+                )));
+            }
             (Some(person), Some(provider)) if provider.public_key()? != person => {
                 return Err(Box::new(JoinError::OtherIdentity));
             }

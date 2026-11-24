@@ -26,7 +26,10 @@ impl Node {
             .map(|(owner, linked)| (owner, linked.node))
             .ok_or(crate::LinkError::UnknownDevice)?;
         if !issuer {
-            return Err(Box::new(crate::LinkError::AdminRequired));
+            return Err(Box::new(crate::Error::refused(
+                crate::Right::Administer,
+                crate::DenyReason::AdminRequired,
+            )));
         }
         self.revoke_with(
             crate::enrollment::Revoke::Node { owner, node },
@@ -46,7 +49,9 @@ impl Node {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
-        let identity = settings.identity()?;
+        let identity = settings.identity().map_err(|_| {
+            crate::Error::refused(crate::Right::Sign, crate::DenyReason::IdentityRequired)
+        })?;
         let mut known = settings.revocations.clone();
         known.merge_in(
             &self.replica.revocations().await,

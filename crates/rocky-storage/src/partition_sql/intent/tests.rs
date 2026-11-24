@@ -144,7 +144,7 @@ fn assertions_see_only_the_held_partition_of_their_own_tables() {
         ),
         (
             "WITH x AS (SELECT * FROM items) SELECT * FROM x",
-            IntentRefusal::Unsupported("WITH in a replayed statement".into()),
+            IntentRefusal::With,
         ),
         (
             "SELECT * FROM items WHERE amount > ?",

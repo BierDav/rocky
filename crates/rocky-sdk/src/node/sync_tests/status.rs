@@ -180,10 +180,10 @@ async fn committed_frames(
     Ok(committed.committed.ok_or("a committed bundle")?.frames)
 }
 
-async fn read_failure(node: &Node) -> Result<crate::SqlFailure, Failure> {
+async fn read_failure(node: &Node) -> Result<crate::Error, Failure> {
     match read_rows(node, "SELECT count(*) FROM items").await {
         Ok(rows) => Err(format!("an incomplete table was read: {rows:?}").into()),
-        Err(error) => Ok(crate::connection::sql_failure(error)),
+        Err(error) => Ok(crate::Error::from_failure(&error)),
     }
 }
 
@@ -213,15 +213,15 @@ async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arri
             );
 
             let failure = read_failure(&b).await?;
-            let crate::SqlReason::Unavailable {
-                table,
-                reason: crate::Unavailability::Incomplete { blockers },
-            } = &failure.reason
+            let crate::ErrorKind::Blocked {
+                table: Some(table),
+                blockers,
+            } = failure.kind()
             else {
                 return Err(format!("expected an incomplete table, found {failure:?}").into());
             };
             assert_eq!(table, "items");
-            assert!(failure.retryable);
+            assert!(failure.retryable());
             let pending = blockers
                 .iter()
                 .find(|blocker| {
@@ -235,9 +235,7 @@ async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arri
                 })
                 .ok_or_else(|| format!("no pending-frames blocker in {blockers:?}"))?;
             assert_eq!(pending.clears_by, rocky_core::ClearsBy::AnyPeer);
-            let error = crate::Error::from(failure.clone());
-            assert_eq!(error.code(), "missing_dependencies");
-            assert_eq!(error.blockers(), blockers.as_slice());
+            assert_eq!(failure.blockers(), blockers.as_slice());
             assert!(
                 b.observed_status().await?.data.blockers.contains(pending),
                 "status reports the blocker the read names"

@@ -1,5 +1,5 @@
 use crate::{
-    Database, Failure, RowIdentity, SqlFailure, SqlValue, TransactionToken,
+    Database, Error, RowIdentity, SqlValue,
     connection::{ConnectionOptions, Page},
     database::Connection,
 };
@@ -58,6 +58,23 @@ impl IntoSqlValue for TransactionToken {
         SqlValue::Blob(self.0.to_vec())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TransactionToken(rocky_core::Commitment);
+impl TransactionToken {
+    pub(crate) fn new(transaction: rocky_core::Commitment) -> Self {
+        Self(transaction)
+    }
+    pub(crate) fn commitment(self) -> rocky_core::Commitment {
+        self.0
+    }
+}
+impl std::fmt::Display for TransactionToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&data_encoding::HEXLOWER.encode(&self.0[..TOKEN_DISPLAY_BYTES]))
+    }
+}
+const TOKEN_DISPLAY_BYTES: usize = 6;
 impl IntoSqlValue for RowIdentity {
     fn into_sql_value(self) -> SqlValue {
         self.sql()
@@ -292,11 +309,9 @@ pub struct Rows<'a> {
     done: bool,
 }
 impl<'a> Rows<'a> {
-    async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, SqlFailure> {
-        let statement = source
-            .connection()
-            .ok_or_else(|| crate::connection::failure(crate::connection::code::MISUSE, "closed"))?
-            .statement();
+    async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, Error> {
+        let closed = || Error::closed("the transaction is finished");
+        let statement = source.connection().ok_or_else(closed)?.statement();
         let mut rows = Self {
             source,
             statement,
@@ -307,7 +322,7 @@ impl<'a> Rows<'a> {
         let page = rows
             .source
             .connection()
-            .ok_or_else(|| crate::connection::failure(crate::connection::code::MISUSE, "closed"))?
+            .ok_or_else(closed)?
             .execute(statement, sql.into(), params)
             .await?;
         rows.page(page);
@@ -332,7 +347,7 @@ impl<'a> Rows<'a> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
-    pub async fn next(&mut self) -> Result<Option<Row>, SqlFailure> {
+    pub async fn next(&mut self) -> Result<Option<Row>, Error> {
         loop {
             if let Some(values) = self.pending.pop_front() {
                 return Ok(Some(Row {
@@ -357,7 +372,7 @@ impl<'a> Rows<'a> {
             self.page(page);
         }
     }
-    pub async fn collect(mut self) -> Result<Vec<Row>, SqlFailure> {
+    pub async fn collect(mut self) -> Result<Vec<Row>, Error> {
         let mut rows = Vec::new();
         while let Some(row) = self.next().await? {
             rows.push(row);
@@ -381,7 +396,10 @@ impl Database {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> Result<Rows<'static>, crate::Error> {
-        let (page, connection) = self.query_once(sql.into(), params).await?;
+        let (page, connection) = self
+            .query_once(sql.into(), params)
+            .await
+            .map_err(Error::failed)?;
         let source = match connection {
             Some(connection) => Source::Owned(connection),
             None => Source::Done,
@@ -394,10 +412,17 @@ impl Database {
                 read_only: false,
                 transaction_timeout: None,
             })
-            .await?;
+            .await
+            .map_err(Error::failed)?;
         let token = connection.begin_identified().await?;
         Ok(Transaction { connection, token })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Commit {
+    NoChanges,
+    Recorded(TransactionToken),
 }
 
 #[must_use = "a transaction must be committed or it rolls back"]
@@ -413,7 +438,7 @@ impl Transaction {
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
     }
-    pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), SqlFailure> {
+    pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), Error> {
         let rows = self.query(sql, params).await?;
         if rows.done {
             return Ok(());
@@ -423,11 +448,7 @@ impl Transaction {
             None => Ok(()),
         }
     }
-    pub async fn query(
-        &mut self,
-        sql: &str,
-        params: Vec<SqlValue>,
-    ) -> Result<Rows<'_>, SqlFailure> {
+    pub async fn query(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'_>, Error> {
         if !matches!(
             rocky_storage::sql::classify(sql),
             Ok(rocky_storage::sql::Control::Statement)
@@ -443,17 +464,20 @@ impl Transaction {
         &mut self,
         table: &str,
         partition: Vec<SqlValue>,
-    ) -> Result<RowIdentity, Failure> {
+    ) -> Result<RowIdentity, Error> {
         let mut values = vec![SqlValue::Text(table.into())];
         values.extend(partition);
         let placeholders = vec!["?"; values.len()].join(",");
         let mut rows = self
             .query(&format!("SELECT rocky_next_id({placeholders})"), values)
             .await?;
-        let row = rows.next().await?.ok_or("ID allocation returned no row")?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| Error::internal("row id allocation returned no row"))?;
         Ok(row.get_at(0)?)
     }
-    pub async fn commit(self) -> Result<Option<TransactionToken>, SqlFailure> {
+    pub async fn commit(self) -> Result<Commit, Error> {
         let result = async {
             self.connection
                 .execute(self.connection.statement(), "COMMIT".into(), Vec::new())
@@ -462,9 +486,12 @@ impl Transaction {
         }
         .await;
         self.connection.close().await;
-        result
+        Ok(match result? {
+            Some(token) => Commit::Recorded(token),
+            None => Commit::NoChanges,
+        })
     }
-    pub async fn rollback(self) -> Result<(), SqlFailure> {
+    pub async fn rollback(self) -> Result<(), Error> {
         let result = self
             .connection
             .execute(self.connection.statement(), "ROLLBACK".into(), Vec::new())

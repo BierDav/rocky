@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Access, Affinity, Column, ErrorKind, Network, PersonId, Removal, Role, RoleName, Schema,
-    SqlValue, Table, TableRights, transport::memory::Hub,
+    Access, Affinity, Column, DenyReason, ErrorKind, Network, PersonId, Removal, Right, Role,
+    RoleName, Schema, SqlValue, Table, TableRights, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -221,8 +221,16 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
         Some((true, false, false))
     );
     assert_eq!(
-        scanner.database.people().await.map_err(|error| error.kind),
-        Err(ErrorKind::Access(rocky_sdk::AccessError::AdminRequired)),
+        scanner
+            .database
+            .people()
+            .await
+            .map_err(|error| error.kind().clone()),
+        Err(ErrorKind::Denied {
+            table: None,
+            need: Right::Administer,
+            reason: DenyReason::AdminRequired,
+        }),
         "only an admin lists people"
     );
     assert!(admin.database.me().await?.admin);
@@ -515,7 +523,7 @@ async fn a_rollout_that_narrows_a_role_needs_confirmation_and_ends_its_writes()
         .await
         .err()
         .ok_or("a narrowing rollout opens only once confirmed")?;
-    let ErrorKind::RolloutConfirmation(required) = refused.kind else {
+    let ErrorKind::RolloutConfirmation(required) = refused.kind() else {
         return Err(format!("expected a rollout confirmation, found {refused}").into());
     };
     assert_eq!(required.report.narrowed_roles, [SCANNER]);
@@ -570,8 +578,8 @@ async fn a_rollout_that_removes_a_held_role_fails_with_role_in_use() -> Result<(
     .err()
     .ok_or("a rollout keeps every held role")?;
     assert_eq!(
-        refused.kind,
-        ErrorKind::RoleInUse(rocky_sdk::RoleInUse {
+        refused.kind(),
+        &ErrorKind::RoleInUse(rocky_sdk::RoleInUse {
             role: SCANNER,
             people: vec![holder],
         })
@@ -896,28 +904,16 @@ async fn a_partitioned_table_without_a_granted_partition_says_which_grant_clears
         .await
         .err()
         .ok_or("a per-partition role reads no partition before a grant")?;
-    let ErrorKind::Sql(failure) = refused.kind else {
-        return Err(format!("expected an SQL refusal, found {refused}").into());
-    };
-    let rocky_sdk::SqlReason::Unavailable {
-        table,
-        reason: rocky_sdk::Unavailability::Incomplete { blockers },
-    } = failure.reason
-    else {
-        return Err(format!("expected an unavailable table, found {failure:?}").into());
-    };
-    assert_eq!(table, "charts");
     assert_eq!(
-        blockers
-            .iter()
-            .map(|blocker| (&blocker.kind, &blocker.clears_by))
-            .collect::<Vec<_>>(),
-        [(
-            &rocky_core::BlockerKind::PartitionNotGranted {
+        refused.kind(),
+        &ErrorKind::Denied {
+            table: Some("charts".into()),
+            need: Right::Read,
+            reason: DenyReason::PartitionNotGranted {
                 group: "ward".into()
             },
-            &rocky_core::ClearsBy::Application
-        )]
+        },
+        "{refused}"
     );
     assert!(
         phone
@@ -956,14 +952,14 @@ async fn a_role_holding_only_partitioned_tables_opens_and_names_the_missing_gran
         .downcast_ref::<rocky_sdk::Error>()
         .ok_or("a typed SDK error")?;
     assert_eq!(
-        refused
-            .blockers
-            .iter()
-            .map(|blocker| &blocker.kind)
-            .collect::<Vec<_>>(),
-        [&rocky_core::BlockerKind::PartitionNotGranted {
-            group: "ward".into()
-        }],
+        refused.kind(),
+        &ErrorKind::Denied {
+            table: Some("charts".into()),
+            need: Right::Read,
+            reason: DenyReason::PartitionNotGranted {
+                group: "ward".into()
+            },
+        },
         "{refused}"
     );
     let inspector = person(&tablet).await?;

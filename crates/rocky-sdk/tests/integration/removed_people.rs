@@ -1,5 +1,5 @@
 use crate::common::{self, Device, Failure};
-use rocky_sdk::{Network, PersonId, Removal, SqlReason, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Network, PersonId, Removal, SqlValue, transport::memory::Hub};
 use std::sync::Arc;
 
 async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
@@ -20,18 +20,18 @@ async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
 }
 
 async fn read(device: &Device) -> Result<Vec<rocky_sdk::Row>, rocky_sdk::Error> {
-    Ok(device
+    device
         .database
         .query("SELECT title FROM items", Vec::new())
         .await?
         .collect()
-        .await?)
+        .await
 }
 
 fn revoked(result: Result<impl std::fmt::Debug, rocky_sdk::Error>) -> Result<(), Failure> {
     let error = result.err().ok_or("a removed device used its data")?;
-    match &error.kind {
-        rocky_sdk::ErrorKind::Sql(failure) if failure.reason == SqlReason::Revoked => Ok(()),
+    match error.kind() {
+        rocky_sdk::ErrorKind::Removed => Ok(()),
         _ => Err(format!("expected a revoked refusal, got {error:?}").into()),
     }
 }
@@ -81,7 +81,7 @@ async fn remove(household: &Household) -> Result<(), Failure> {
 
 async fn learns_its_removal(member: &Device) -> Result<(), Failure> {
     let refused = member.sync().await.err().ok_or("a removed device synced")?;
-    assert_eq!(refused["code"], "revoked", "{refused}");
+    assert_eq!(refused["code"], "removed", "{refused}");
     Ok(())
 }
 

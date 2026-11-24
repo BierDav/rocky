@@ -713,7 +713,10 @@ async fn an_import_of_another_scope_does_not_make_an_unwritable_table_retry_allo
     let session = sql(&replica, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
     assert!(
-        matches!(session.next_id("items").await, Err(Error::Rejected(_))),
+        matches!(
+            session.next_id("items").await,
+            Err(Error::Sql(SqlError::Denied))
+        ),
         "only an import of the table's own scope may make its allocation retry"
     );
 }

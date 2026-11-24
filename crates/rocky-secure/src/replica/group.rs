@@ -870,7 +870,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
 pub(super) fn shared(error: &Error) -> Error {
     match error {
-        #[cfg(test)]
         Error::InjectedFailure => Error::InjectedFailure,
         Error::RetryExhausted => Error::RetryExhausted,
         Error::Closed => Error::Closed,
@@ -881,6 +880,11 @@ pub(super) fn shared(error: &Error) -> Error {
         Error::Quota { resource, limit } => Error::Quota {
             resource,
             limit: *limit,
+        },
+        Error::TooLarge { limit, size, max } => Error::TooLarge {
+            limit: *limit,
+            size: *size,
+            max: *max,
         },
         Error::Rejected(message) => Error::Rejected(message.clone()),
         Error::Incompatible(message) => Error::Incompatible(message.clone()),

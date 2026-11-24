@@ -82,9 +82,14 @@ impl Settings {
             .try_with(|loan| loan.provider.clone())
             .ok()
             .flatten()
-            .ok_or(crate::LinkError::IdentityRequired)?;
+            .ok_or_else(|| {
+                crate::Error::refused(crate::Right::Sign, crate::DenyReason::IdentityRequired)
+            })?;
         if provider.public_key()? != self.identity {
-            return Err("the identity provider supplies another identity".into());
+            return Err(Box::new(crate::Error::new(
+                crate::ErrorKind::Rejected,
+                "the identity provider supplies another identity",
+            )));
         }
         Ok(provider)
     }

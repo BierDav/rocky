@@ -266,11 +266,7 @@ impl Device {
     }
     pub async fn purged(&self) -> bool {
         match self.database.query("SELECT 1", Vec::new()).await {
-            Err(error) => matches!(
-                error.kind,
-                rocky_sdk::ErrorKind::Sql(failure)
-                    if failure.reason == rocky_sdk::SqlReason::Revoked
-            ),
+            Err(error) => matches!(error.kind(), rocky_sdk::ErrorKind::Removed),
             Ok(_) => false,
         }
     }
@@ -395,7 +391,7 @@ pub async fn confirmed(configuration: Configuration) -> Result<Database, Failure
         .await
         .err()
         .ok_or("expected removal confirmation")?;
-    let rocky_sdk::ErrorKind::RolloutConfirmation(required) = error.kind else {
+    let rocky_sdk::ErrorKind::RolloutConfirmation(required) = error.kind() else {
         return Err(format!("expected removal confirmation, found {error}").into());
     };
     Ok(configuration

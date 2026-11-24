@@ -145,7 +145,7 @@ impl RequestRefusal {
                     Self::Unavailable
                 }
             }
-            Error::Quota { .. } | Error::Backpressure => Self::OverBudget,
+            Error::Quota { .. } | Error::TooLarge { .. } | Error::Backpressure => Self::OverBudget,
             Error::Conflict | Error::Incompatible(_) => Self::WrongTip,
             Error::Protocol(_) | Error::Corrupt(_) => Self::Malformed,
             Error::Rejected(reason) if reason.contains("quota") || reason.contains("budget") => {

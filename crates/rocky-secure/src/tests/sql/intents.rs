@@ -141,16 +141,23 @@ async fn nondeterministic_replayed_writes_are_refused_before_they_run() {
     insert(&session, "INSERT INTO salaries VALUES('ann',10)", vec![])
         .await
         .unwrap();
-    for refused in [
-        "UPDATE salaries SET amount=random()",
-        "UPDATE salaries SET amount=amount WHERE rowid=1",
-        "WITH raise AS (SELECT 1 AS x) UPDATE salaries SET amount=amount+(SELECT x FROM raise)",
+    for (refused, refusal) in [
+        (
+            "UPDATE salaries SET amount=random()",
+            rocky_storage::partition_sql::IntentRefusal::Random("random".into()),
+        ),
+        (
+            "UPDATE salaries SET amount=amount WHERE rowid=1",
+            rocky_storage::partition_sql::IntentRefusal::RowId,
+        ),
+        (
+            "WITH raise AS (SELECT 1 AS x) UPDATE salaries SET amount=amount+(SELECT x FROM raise)",
+            rocky_storage::partition_sql::IntentRefusal::With,
+        ),
     ] {
-        assert!(
-            matches!(
-                sql_error(session.run(refused, vec![]).await),
-                SqlError::Unsupported(_)
-            ),
+        assert_eq!(
+            sql_error(session.run(refused, vec![]).await),
+            SqlError::Refused(refusal),
             "{refused}"
         );
     }

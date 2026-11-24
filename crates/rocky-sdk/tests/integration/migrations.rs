@@ -131,12 +131,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
         .await
         .err()
         .ok_or("a failing migration opened")?;
-    assert!(
-        failed
-            .to_string()
-            .contains("migration to version 2 failed at statement 2"),
-        "{failed}"
-    );
+    assert!(failed_at(&failed, 2, 2), "{failed}");
     let a = reopen(root.path(), common::SCHEMA, None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
@@ -891,9 +886,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
         .err()
         .ok_or("a failing migration opened")?;
     assert!(
-        failed
-            .to_string()
-            .contains("migration to version 2 failed at statement 1"),
+        failed_at(&failed, 2, 1),
         "withdrawing the stage returns to the schema whose reference its rows satisfy: {failed}"
     );
     let a = reopen(root.path(), LISTED, None).await?;
@@ -922,9 +915,7 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
         .err()
         .ok_or("a failing migration opened")?;
     assert!(
-        failed
-            .to_string()
-            .contains("migration to version 2 failed at statement 1"),
+        failed_at(&*failed, 2, 1),
         "the withdrawal restores the dropped field from history instead of refusing: {failed}"
     );
     let a = reopen(root.path(), common::SCHEMA, None).await?;
@@ -1082,4 +1073,12 @@ async fn a_member_joining_after_a_removal_holds_every_row_the_owner_holds() -> R
 async fn a_member_joining_after_a_migration_and_a_removal_holds_every_migrated_row()
 -> Result<(), Failure> {
     a_member_joining_after(&[MEMO, UNTITLED], MEMOS).await
+}
+
+fn failed_at(error: &(dyn std::error::Error + 'static), version: u32, step: usize) -> bool {
+    matches!(
+        error.downcast_ref::<rocky_sdk::Error>().map(rocky_sdk::Error::kind),
+        Some(rocky_sdk::ErrorKind::MigrationFailed { version: failed, step: at })
+            if *failed == version && *at == step
+    )
 }

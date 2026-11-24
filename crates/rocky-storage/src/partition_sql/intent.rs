@@ -45,6 +45,7 @@ pub enum IntentRefusal {
     Autoincrement,
     PartitionMove { table: String, column: String },
     CorrelatedSubquery,
+    With,
     Unavailable { table: String, reason: Unavailable },
     TooManyPartitions(usize),
     Unsupported(String),
@@ -70,6 +71,7 @@ impl std::fmt::Display for IntentRefusal {
             Self::CorrelatedSubquery => {
                 f.write_str("a read of other partitions refers to the outer statement")
             }
+            Self::With => f.write_str("WITH in a replayed statement"),
             Self::Unavailable { table, reason } => {
                 write!(f, "{table} is not available: {reason:?}")
             }
@@ -205,6 +207,9 @@ pub fn split_intent_within<E>(
         statement,
         Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
     ) {
+        if let Err(IntentRefusal::With) = target(&statement) {
+            return Err(IntentRefusal::With.into());
+        }
         let refusal = keyword(sql).unwrap_or_else(|| {
             IntentRefusal::Unsupported(format!(
                 "{} statements",
@@ -402,6 +407,15 @@ fn target(statement: &Statement) -> Result<(String, Option<String>), IntentRefus
                 _ => unsupported("this DELETE target"),
             }
         }
+        Statement::Query(query)
+            if query.with.is_some()
+                && matches!(
+                    *query.body,
+                    SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_)
+                ) =>
+        {
+            Err(IntentRefusal::With)
+        }
         _ => Err(IntentRefusal::NotAWrite),
     }
 }
@@ -508,9 +522,7 @@ impl Visitor for Determinism<'_> {
     type Break = IntentRefusal;
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<IntentRefusal> {
         if query.with.is_some() {
-            return ControlFlow::Break(IntentRefusal::Unsupported(
-                "WITH in a replayed statement".into(),
-            ));
+            return ControlFlow::Break(IntentRefusal::With);
         }
         ControlFlow::Continue(())
     }

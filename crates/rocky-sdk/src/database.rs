@@ -1,7 +1,7 @@
 use crate::{
     Configuration, Failure,
     bootstrap_intent::BootstrapIntentFile,
-    connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
+    connection::{self, ConnectionOptions, Page, TableEvents},
     enrollment::{DEFAULT_TTL, Settings, now},
     node::{self, Node},
     pause,
@@ -126,7 +126,7 @@ enum Command {
         call: connection::Call,
         #[cfg(feature = "qualification")]
         queued: web_time::Instant,
-        reply: oneshot::Sender<Result<connection::Reply, SqlFailure>>,
+        reply: oneshot::Sender<Result<connection::Reply, crate::Error>>,
     },
     Disconnect {
         connection: u64,
@@ -143,7 +143,7 @@ enum Command {
         oneshot::Sender<Result<rocky_storage::observe::TableObserver, Failure>>,
     ),
     Outcome(
-        rocky_core::TransactionToken,
+        crate::TransactionToken,
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
@@ -275,7 +275,7 @@ impl Database {
         self.shared
             .request(Command::ReactorMeasurements)
             .await?
-            .ok_or_else(|| "reactor measurement context missing".into())
+            .ok_or_else(|| crate::Error::internal("reactor measurement context missing"))
     }
     pub(crate) async fn launch(
         configuration: &Configuration,
@@ -286,7 +286,9 @@ impl Database {
         let place = Worker::serving_thread;
         #[cfg(target_family = "wasm")]
         let place = Worker::local;
-        Ok(Self::launch_in(configuration, install, confirmation, place).await?)
+        Self::launch_in(configuration, install, confirmation, place)
+            .await
+            .map_err(crate::Error::failed)
     }
     pub(crate) async fn launch_raw(
         configuration: &Configuration,
@@ -331,7 +333,10 @@ impl Database {
                 return Err(ServiceError::NetworkRequired("join with an invitation").into());
             }
             if code.person().is_some() && configuration.identity.is_none() {
-                return Err(Box::new(crate::JoinError::IdentityRequired));
+                return Err(Box::new(crate::Error::refused(
+                    crate::Right::Sign,
+                    crate::DenyReason::IdentityRequired,
+                )));
             }
             match &configuration.schema {
                 None if *code.access() != crate::Access::Store => {
@@ -356,7 +361,11 @@ impl Database {
             && configured.public_key()? != owner.public_key()?
         {
             return Err(Box::new(crate::Error::new(
-                crate::ErrorKind::Access(crate::AccessError::OwnerRequired),
+                crate::ErrorKind::Denied {
+                    table: None,
+                    need: crate::Right::Sign,
+                    reason: crate::DenyReason::OwnerRequired,
+                },
                 "the configured identity is not the owner's person key; create without it or pass it as the owner",
             )));
         }
@@ -445,13 +454,14 @@ impl Database {
         ) -> crate::request::Request,
     ) -> Result<T, crate::Error> {
         if self.shared.closed.load(Ordering::SeqCst) {
-            return Err(Failure::from(ServiceError::Closed("database")).into());
+            return Err(ServiceError::Closed("database").into());
         }
-        let _permit = self
-            .shared
-            .budget
-            .try_acquire()
-            .map_err(|_| Failure::from("pending call quota"))?;
+        let _permit = self.shared.budget.try_acquire().map_err(|_| {
+            crate::Error::new(
+                crate::ErrorKind::Busy,
+                "too many calls are pending; retry when one finishes",
+            )
+        })?;
         let (loan, returned) = provider.map(crate::identities::lend).unzip();
         let result = self
             .shared
@@ -460,13 +470,13 @@ impl Database {
         if let Some(returned) = returned {
             returned.released().await;
         }
-        result.map_err(Failure::from)?.map_err(crate::Error::from)
+        result?.map_err(crate::Error::failed)
     }
     pub async fn attach(&self, network: Network) -> Result<(), crate::Error> {
         self.shared
             .request(|reply| Command::Attach(network, reply))
             .await?
-            .map_err(crate::Error::from)
+            .map_err(crate::Error::failed)
     }
     pub async fn detach(&self) -> Result<(), crate::Error> {
         Ok(self.shared.request(Command::Detach).await?)
@@ -498,25 +508,26 @@ impl Database {
     }
     pub async fn transaction_outcome(
         &self,
-        token: rocky_core::TransactionToken,
+        token: crate::TransactionToken,
     ) -> Result<Option<rocky_core::replay::TransactionOutcome>, crate::Error> {
         self.shared
             .request(|reply| Command::Outcome(token, reply))
             .await?
-            .map_err(crate::Error::from)
+            .map_err(crate::Error::failed)
     }
     pub async fn flush(&self) -> Result<(), crate::Error> {
         self.shared
             .request(Command::Flush)
             .await?
-            .map_err(crate::Error::from)
+            .map_err(crate::Error::failed)
     }
     pub async fn observe(&self, tables: &[&str]) -> Result<TableEvents, crate::Error> {
         let tables = tables.iter().map(|table| (*table).to_owned()).collect();
         let observer = self
             .shared
             .request(|reply| Command::Observe(tables, reply))
-            .await??;
+            .await?
+            .map_err(crate::Error::failed)?;
         Ok(TableEvents::new(observer))
     }
     pub async fn close(&self) -> Result<(), crate::Error> {
@@ -524,9 +535,9 @@ impl Database {
         if let Some(worker) = worker.take() {
             self.shared.closed.store(true, Ordering::SeqCst);
             let result = self.shared.request(Command::Close).await;
-            worker.join().await?;
+            worker.join().await.map_err(crate::Error::failed)?;
             if let Ok(result) = result {
-                result.map_err(|message| -> Failure { message.into() })?;
+                result.map_err(|message| crate::Error::failed(message.into()))?;
             }
         }
         Ok(())
@@ -606,12 +617,9 @@ impl Connection {
     pub(crate) fn statement(&self) -> u64 {
         self.statements.fetch_add(1, Ordering::Relaxed)
     }
-    async fn call(&self, call: connection::Call) -> Result<connection::Reply, SqlFailure> {
+    async fn call(&self, call: connection::Call) -> Result<connection::Reply, crate::Error> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(connection::failure(
-                connection::code::MISUSE,
-                "the connection is closed",
-            ));
+            return Err(crate::Error::closed("the connection is closed"));
         }
         let connection = self.id;
         self.shared
@@ -623,14 +631,14 @@ impl Connection {
                 reply,
             })
             .await
-            .map_err(|error| connection::failure(connection::code::MISUSE, error.to_string()))?
+            .map_err(crate::Error::from)?
     }
     pub(crate) async fn execute(
         &self,
         statement: u64,
         sql: String,
         params: Vec<rocky_core::SqlValue>,
-    ) -> Result<Page, SqlFailure> {
+    ) -> Result<Page, crate::Error> {
         match self
             .call(connection::Call::Execute {
                 statement,
@@ -640,13 +648,17 @@ impl Connection {
             .await?
         {
             connection::Reply::Page(page) => Ok(page),
-            _ => Err(connection::failure(connection::code::MISUSE, "no page")),
+            _ => Err(crate::Error::internal(
+                "the connection replied without a page",
+            )),
         }
     }
-    pub(crate) async fn next(&self, statement: u64) -> Result<Page, SqlFailure> {
+    pub(crate) async fn next(&self, statement: u64) -> Result<Page, crate::Error> {
         match self.call(connection::Call::Next { statement }).await? {
             connection::Reply::Page(page) => Ok(page),
-            _ => Err(connection::failure(connection::code::MISUSE, "no page")),
+            _ => Err(crate::Error::internal(
+                "the connection replied without a page",
+            )),
         }
     }
     pub(crate) fn discard(&self, statement: u64) {
@@ -658,32 +670,34 @@ impl Connection {
             reply: oneshot::channel().0,
         });
     }
-    pub(crate) async fn finish(&self, statement: u64) -> Result<(), SqlFailure> {
+    pub(crate) async fn finish(&self, statement: u64) -> Result<(), crate::Error> {
         self.call(connection::Call::Finish { statement })
             .await
             .map(drop)
     }
-    pub(crate) async fn committed(
-        &self,
-    ) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
+    pub(crate) async fn committed(&self) -> Result<Option<crate::TransactionToken>, crate::Error> {
         match self.call(connection::Call::Committed).await? {
             connection::Reply::Token(token) => Ok(token),
-            _ => Err(connection::failure(connection::code::MISUSE, "no token")),
+            _ => Err(crate::Error::internal(
+                "the connection replied without a token",
+            )),
         }
     }
-    pub(crate) async fn begin_identified(
-        &self,
-    ) -> Result<rocky_core::TransactionToken, SqlFailure> {
+    pub(crate) async fn begin_identified(&self) -> Result<crate::TransactionToken, crate::Error> {
         match self.call(connection::Call::Begin).await? {
             connection::Reply::Token(Some(token)) => Ok(token),
-            _ => Err(connection::failure(connection::code::MISUSE, "no token")),
+            _ => Err(crate::Error::internal(
+                "the connection replied without a token",
+            )),
         }
     }
     #[cfg(test)]
-    pub(crate) async fn in_transaction(&self) -> Result<bool, SqlFailure> {
+    pub(crate) async fn in_transaction(&self) -> Result<bool, crate::Error> {
         match self.call(connection::Call::InTransaction).await? {
             connection::Reply::Flag(flag) => Ok(flag),
-            _ => Err(connection::failure(connection::code::MISUSE, "no state")),
+            _ => Err(crate::Error::internal(
+                "the connection replied without its state",
+            )),
         }
     }
     pub(crate) async fn close(&self) {
@@ -768,10 +782,9 @@ async fn identity(
         Install::Identity { contact, confirmed } => {
             let network =
                 network.ok_or(ServiceError::NetworkRequired("enroll an identity's node"))?;
-            let provider = setup
-                .identity
-                .clone()
-                .ok_or(crate::LinkError::IdentityRequired)?;
+            let provider = setup.identity.clone().ok_or_else(|| {
+                crate::Error::refused(crate::Right::Sign, crate::DenyReason::IdentityRequired)
+            })?;
             let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
             let key = Settings::route_secret(&prepared.vault)?;
             let (transport, owned) = network.start(false, key).await?;
@@ -1483,7 +1496,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 Err(error) => {
                     #[cfg(feature = "qualification")]
                     crate::reactor::CallTimer::start(queued).finish(connection);
-                    drop(reply.send(Err(connection::sql_failure(error))));
+                    drop(reply.send(Err(crate::Error::failed(error))));
                 }
             },
             Command::Disconnect {
@@ -1529,7 +1542,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 crate::reactor::spawn_in(&mut tasks, "outcome", async move {
                     let outcome = node
                         .replica
-                        .transaction_outcome(token.0)
+                        .transaction_outcome(token.commitment())
                         .await
                         .map_err(Failure::from);
                     let _ = reply.send(outcome);
@@ -2186,7 +2199,7 @@ mod tests {
             .await
             .err()
             .expect("invalid table should fail");
-        assert!(matches!(err.kind, crate::ErrorKind::Sql(_)), "{err}");
+        assert!(matches!(err.kind(), crate::ErrorKind::Sql { .. }), "{err}");
 
         let rows = database
             .query(

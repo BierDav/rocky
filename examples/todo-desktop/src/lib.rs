@@ -1,13 +1,13 @@
 mod status;
 
 use dioxus::prelude::*;
-use rocky_sdk::{Configuration, Failure, Network, TransactionToken, transport::memory::Hub};
+use rocky_sdk::{Commit, Configuration, Network, TransactionToken, transport::memory::Hub};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use todo_app::{List, Member, Role, Todo, Todos, configuration, roles};
+use todo_app::{Failure, List, Member, Role, Todo, Todos, configuration, roles};
 
 #[derive(Clone)]
 pub enum Link {
@@ -391,7 +391,7 @@ fn submit(
     mut busy: Signal<bool>,
     mut error: Signal<Option<String>>,
     mut own: Signal<BTreeSet<TransactionToken>>,
-    write: impl Future<Output = Result<Option<TransactionToken>, Failure>> + 'static,
+    write: impl Future<Output = Result<Commit, Failure>> + 'static,
 ) {
     if busy() {
         return;
@@ -399,8 +399,10 @@ fn submit(
     busy.set(true);
     spawn(async move {
         match write.await {
-            Ok(token) => {
-                own.write().extend(token);
+            Ok(commit) => {
+                if let Commit::Recorded(token) = commit {
+                    own.write().insert(token);
+                }
                 error.set(None);
             }
             Err(failure) => error.set(Some(failure.to_string())),
@@ -570,7 +572,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                                 submit(busy, error, own, async move {
                                     todos.share(list, &[node]).await?;
                                     revision += 1;
-                                    Ok(None)
+                                    Ok(Commit::NoChanges)
                                 });
                             },
                             "Share with partial device"

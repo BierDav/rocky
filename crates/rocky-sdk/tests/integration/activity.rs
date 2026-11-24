@@ -1,6 +1,6 @@
+type Failure = Box<dyn std::error::Error + Send + Sync>;
 use rocky_sdk::{
-    ActivityKind, Affinity, Column, Configuration, Failure, Partition, Schema, ServiceError,
-    SqlValue, Table,
+    ActivityKind, Affinity, Column, Configuration, Partition, Schema, ServiceError, SqlValue, Table,
 };
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -47,8 +47,8 @@ async fn closing_the_database_ends_an_activity_wait() -> Result<(), Failure> {
         .await?;
     closed?;
     assert_eq!(
-        ended.unwrap_err().kind,
-        rocky_sdk::ErrorKind::Service(ServiceError::Closed("database"))
+        ended.unwrap_err().kind(),
+        &rocky_sdk::ErrorKind::Service(ServiceError::Closed("database"))
     );
     Ok(())
 }

@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Configuration, DeviceId, ErrorKind, IdentityKey, IdentityProvider, Invite, InviteError,
-    JoinError, Network, Opened, PersonId, transport::memory::Hub,
+    Configuration, DenyReason, DeviceId, ErrorKind, IdentityKey, IdentityProvider, Invite,
+    InviteError, JoinError, Network, Opened, PersonId, Right, transport::memory::Hub,
 };
 use serde_json::json;
 use std::{path::Path, sync::Arc};
@@ -39,7 +39,7 @@ fn joining(
     directory: &Path,
     hub: &Arc<Hub>,
     person: Option<&Arc<dyn IdentityProvider>>,
-) -> Result<Configuration, Failure> {
+) -> Result<Configuration, rocky_sdk::Error> {
     let configuration = Configuration::new(directory, common::parsed_schema())?
         .network(Network::Owned(hub.connector(&directory.to_string_lossy())))
         .sync(rocky_sdk::SyncMode::Manual);
@@ -54,15 +54,12 @@ async fn join(
     person: Option<&Arc<dyn IdentityProvider>>,
     code: &rocky_sdk::InvitationCode,
 ) -> Result<Opened, rocky_sdk::Error> {
-    joining(directory, hub, person)
-        .map_err(|error| rocky_sdk::Error::from_failure(&error))?
-        .join(code)
-        .await
+    joining(directory, hub, person)?.join(code).await
 }
 fn refusal(outcome: Result<Opened, rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
     match outcome {
         Ok(_) => Err("the invitation was accepted".into()),
-        Err(error) => Ok(error.kind),
+        Err(error) => Ok(error.kind().clone()),
     }
 }
 fn generated_identity() -> Arc<dyn IdentityProvider> {
@@ -134,7 +131,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
             .cancel_invitation(invitation.id)
             .await
             .err()
-            .map(|error| error.kind),
+            .map(|error| error.kind().clone()),
         Some(ErrorKind::Invite(InviteError::Redeemed))
     );
     member.close().await;
@@ -173,7 +170,11 @@ async fn an_identity_code_carries_no_secret_and_admits_only_that_identity() -> R
     );
     assert_eq!(
         refusal(join(&root.path().join("nobody"), &hub, None, &invitation.code).await)?,
-        ErrorKind::Join(JoinError::IdentityRequired)
+        ErrorKind::Denied {
+            table: None,
+            need: Right::Sign,
+            reason: DenyReason::IdentityRequired,
+        }
     );
     let opened = join(
         &root.path().join("member"),
@@ -197,7 +198,7 @@ async fn an_identity_code_carries_no_secret_and_admits_only_that_identity() -> R
             .invite(Invite::new(rocky_sdk::Access::Read).for_identity(PersonId::new(identity)))
             .await
             .err()
-            .map(|error| error.kind),
+            .map(|error| error.kind().clone()),
         Some(ErrorKind::Invite(InviteError::AlreadyMember)),
         "a member is not invited into other access"
     );
@@ -220,7 +221,7 @@ async fn a_cancelled_invitation_admits_no_one_and_leaves_no_record() -> Result<(
             .cancel_invitation(invitation.id)
             .await
             .err()
-            .map(|error| error.kind),
+            .map(|error| error.kind().clone()),
         Some(ErrorKind::Invite(InviteError::Unknown))
     );
     let before = owner.database.people().await?.len();
@@ -306,7 +307,7 @@ async fn removing_the_identity_ends_its_unused_invitation() -> Result<(), Failur
             )
             .await
         )?,
-        ErrorKind::Join(JoinError::Removed)
+        ErrorKind::Removed
     );
     assert_eq!(
         owner
@@ -314,8 +315,8 @@ async fn removing_the_identity_ends_its_unused_invitation() -> Result<(), Failur
             .invite(Invite::new(writer()).for_identity(PersonId::new(identity)))
             .await
             .err()
-            .map(|error| error.kind),
-        Some(ErrorKind::Invite(InviteError::Removed)),
+            .map(|error| error.kind().clone()),
+        Some(ErrorKind::Removed),
         "a removed identity is not invited again"
     );
     owner.close().await;
@@ -343,8 +344,8 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
         .err()
         .ok_or("an unroutable invitation was issued")?;
     assert_eq!(
-        unroutable.kind,
-        ErrorKind::Invite(InviteError::NetworkRequired)
+        unroutable.kind(),
+        &ErrorKind::Invite(InviteError::NetworkRequired)
     );
     offline.close().await;
     let hub = Arc::new(Hub::default());

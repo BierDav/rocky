@@ -27,7 +27,7 @@ fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration 
     )
 }
 fn service(error: &rocky_sdk::Error) -> Option<&ServiceError> {
-    match &error.kind {
+    match &error.kind() {
         rocky_sdk::ErrorKind::Service(service) => Some(service),
         _ => None,
     }
@@ -132,8 +132,8 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
         .err()
         .ok_or("an invitation needs a route to its admin")?;
     assert_eq!(
-        offline.kind,
-        rocky_sdk::ErrorKind::Invite(rocky_sdk::InviteError::NetworkRequired)
+        offline.kind(),
+        &rocky_sdk::ErrorKind::Invite(rocky_sdk::InviteError::NetworkRequired)
     );
     database.close().await?;
     database.close().await?;

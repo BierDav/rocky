@@ -43,7 +43,10 @@ async fn write(
 ) -> Result<TransactionToken, Failure> {
     let mut tx = database.transaction().await?;
     tx.execute(sql, params).await?;
-    Ok(tx.commit().await?.ok_or("a replayed write publishes")?)
+    match tx.commit().await? {
+        rocky_sdk::Commit::Recorded(token) => Ok(token),
+        rocky_sdk::Commit::NoChanges => Err("a replayed write publishes".into()),
+    }
 }
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<(), Failure> {

@@ -155,12 +155,17 @@ impl EncryptedFrame {
             }))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let too_large = |size, max| Error::TooLarge {
+            limit: rocky_storage::Limit::Frame,
+            size,
+            max,
+        };
         if self.weight() > MAX_SECURE_FRAME {
-            return Err(denied("secure frame quota"));
+            return Err(too_large(self.weight(), MAX_SECURE_FRAME));
         }
         let bytes = encode(self)?;
         if bytes.len() > 2 * MAX_SECURE_FRAME {
-            return Err(denied("secure frame quota"));
+            return Err(too_large(bytes.len(), 2 * MAX_SECURE_FRAME));
         }
         Ok(bytes)
     }

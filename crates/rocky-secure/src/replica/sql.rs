@@ -260,9 +260,13 @@ impl<A: RowApplication> SecureSql<A> {
             .typed
             .as_ref()
             .ok_or_else(|| refused("no typed tables"))?;
-        let table = typed
-            .by_name(table)
-            .ok_or_else(|| refused("unknown typed table"))?;
+        let not_held = |table: &str| {
+            Error::Sql(SqlError::Unavailable {
+                table: table.into(),
+                reason: crate::sql::Unavailable::NotHeld,
+            })
+        };
+        let table = typed.by_name(table).ok_or_else(|| not_held(table))?;
         let author = inner
             .node_author
             .as_ref()
@@ -325,7 +329,7 @@ impl<A: RowApplication> SecureSql<A> {
                 table.table.id,
                 tuple,
             )
-            .ok_or_else(|| denied("identity allocation requires a writable table"))?,
+            .ok_or_else(|| not_held(&table.table.sql_name))?,
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {
@@ -341,7 +345,7 @@ impl<A: RowApplication> SecureSql<A> {
                     },
                 }));
             }
-            return Err(denied("identity allocation requires a writable table"));
+            return Err(Error::Sql(SqlError::Denied));
         }
         let number = author.writer;
         let allocation = inner.identity_allocation_scope(scope);

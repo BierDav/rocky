@@ -2,12 +2,14 @@ pub mod position;
 pub mod roles;
 
 use rocky_sdk::{
-    Affinity, Column, Configuration, Database, DeleteAction, DropReason, Failure,
+    Affinity, Column, Commit, Configuration, Database, DeleteAction, DropReason,
     ForeignKeyDefinition, IndexColumn, IndexDefinition, Row, RowIdentity, Schema, SqlValue, Table,
     TableDefinition, Transaction, TransactionOutcome, TransactionToken, params,
 };
 pub use roles::{Member, Role};
 use std::path::PathBuf;
+
+pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 pub const APPLICATION: &str = "todo";
 pub const LISTS: &str = "lists";
@@ -128,7 +130,7 @@ const TODO_COLUMNS: &str = "id,list,title,completed,priority,position";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Created {
     pub id: RowIdentity,
-    pub token: Option<TransactionToken>,
+    pub token: Commit,
 }
 
 #[derive(Debug)]
@@ -183,19 +185,12 @@ impl Todos {
         let token = transaction.commit().await?;
         Ok(Created { id, token })
     }
-    pub async fn rename_list(
-        &self,
-        list: RowIdentity,
-        name: &str,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    pub async fn rename_list(&self, list: RowIdentity, name: &str) -> Result<Commit, Failure> {
         let name = title(name)?;
         self.write("UPDATE lists SET title=? WHERE id=?", params![name, list])
             .await
     }
-    pub async fn delete_list(
-        &self,
-        list: RowIdentity,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    pub async fn delete_list(&self, list: RowIdentity) -> Result<Commit, Failure> {
         self.write("DELETE FROM lists WHERE id=?", params![list])
             .await
     }
@@ -240,7 +235,7 @@ impl Todos {
         list: RowIdentity,
         todo: RowIdentity,
         name: &str,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    ) -> Result<Commit, Failure> {
         let name = title(name)?;
         self.write(
             "UPDATE todos SET title=? WHERE list=? AND id=?",
@@ -253,7 +248,7 @@ impl Todos {
         list: RowIdentity,
         todo: RowIdentity,
         completed: bool,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    ) -> Result<Commit, Failure> {
         self.write(
             "UPDATE todos SET completed=? WHERE list=? AND id=?",
             params![completed, list, todo],
@@ -264,7 +259,7 @@ impl Todos {
         &self,
         list: RowIdentity,
         todo: RowIdentity,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    ) -> Result<Commit, Failure> {
         self.write(
             "UPDATE todos SET priority=priority+? WHERE list=? AND id=?",
             params![1_i64, list, todo],
@@ -276,7 +271,7 @@ impl Todos {
         list: RowIdentity,
         todo: RowIdentity,
         index: usize,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    ) -> Result<Commit, Failure> {
         let mut transaction = self.database.transaction().await?;
         let others = positions(&mut transaction, list, Some(todo)).await?;
         let index = index.min(others.len());
@@ -290,11 +285,7 @@ impl Todos {
             .await?;
         Ok(transaction.commit().await?)
     }
-    pub async fn delete(
-        &self,
-        list: RowIdentity,
-        todo: RowIdentity,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    pub async fn delete(&self, list: RowIdentity, todo: RowIdentity) -> Result<Commit, Failure> {
         self.write(
             "DELETE FROM todos WHERE list=? AND id=?",
             params![list, todo],
@@ -325,11 +316,7 @@ impl Todos {
         })
     }
 
-    async fn write(
-        &self,
-        sql: &str,
-        params: Vec<SqlValue>,
-    ) -> Result<Option<TransactionToken>, Failure> {
+    async fn write(&self, sql: &str, params: Vec<SqlValue>) -> Result<Commit, Failure> {
         let mut transaction = self.database.transaction().await?;
         transaction.execute(sql, params).await?;
         Ok(transaction.commit().await?)

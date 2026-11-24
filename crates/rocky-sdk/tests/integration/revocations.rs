@@ -48,7 +48,7 @@ async fn revocations(device: &Device) -> RevocationStatus {
     for _ in 0..3 {
         match device.database.status().await {
             Ok(status) => return status.authority.revocations,
-            Err(error) if error.kind == rocky_sdk::ErrorKind::Blocked => {
+            Err(error) if matches!(error.kind(), rocky_sdk::ErrorKind::Blocked { .. }) => {
                 let _ = device.sync_now().await;
             }
             Err(error) => panic!("status: {error}"),
@@ -338,7 +338,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
         .await
         .err()
         .ok_or("renewed after cascade")?;
-    assert_eq!(error.code(), "revoked", "{error}");
+    assert_eq!(error.kind(), &rocky_sdk::ErrorKind::Removed, "{error}");
     let status = early.database.status().await?;
     assert_eq!(
         status

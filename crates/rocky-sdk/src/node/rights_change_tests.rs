@@ -46,10 +46,12 @@ async fn open_rolled_out(
     let configuration = configuration(directory, schema, hub)
         .map_err(|error| crate::Error::from_failure(&error))?;
     match configuration.open().await {
-        Err(crate::Error {
-            kind: ErrorKind::RolloutConfirmation(required),
-            ..
-        }) => configuration.open_confirmed(&required.report.digest).await,
+        Err(error) => match error.kind() {
+            ErrorKind::RolloutConfirmation(required) => {
+                configuration.open_confirmed(&required.report.digest).await
+            }
+            _ => Err(error),
+        },
         opened => opened,
     }
 }

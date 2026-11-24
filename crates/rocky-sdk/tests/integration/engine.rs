@@ -205,7 +205,11 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
 
     snap::ok(member.engine.set_sync(rocky_sdk::SyncMode::Off)).await;
     assert_eq!(
-        member.engine.sync_now().await.map_err(|error| error.kind),
+        member
+            .engine
+            .sync_now()
+            .await
+            .map_err(|error| error.kind().clone()),
         Err(rocky_sdk::ErrorKind::Service(
             rocky_sdk::ServiceError::SyncOff
         ))
@@ -491,7 +495,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
             .await
             .err()
             .map(|refusal| refusal["code"].clone()),
-        Some(serde_json::json!("revoked")),
+        Some(serde_json::json!("removed")),
         "a revoked device purged what it held and reads nothing"
     );
 

@@ -356,6 +356,24 @@ impl<F: Fn(&str) -> Option<String>> Visitor for Resolver<'_, F> {
     }
 }
 
+pub fn updated_columns(sql: &str) -> Vec<String> {
+    let Ok(statements) = crate::parsed::parse(sql) else {
+        return Vec::new();
+    };
+    let [Statement::Update(update)] = &*statements else {
+        return Vec::new();
+    };
+    update
+        .assignments
+        .iter()
+        .flat_map(|assignment| match &assignment.target {
+            sqlparser::ast::AssignmentTarget::ColumnName(name) => std::slice::from_ref(name),
+            sqlparser::ast::AssignmentTarget::Tuple(names) => names.as_slice(),
+        })
+        .filter_map(|name| single(name).map(|ident| ident.value.clone()))
+        .collect()
+}
+
 pub fn analyze(
     sql: &str,
     physical: impl Fn(&str) -> Option<String>,
@@ -388,7 +406,12 @@ fn analyze_with(
         _ => return unsupported("one statement per call"),
     };
     let kind = match statement {
-        Statement::Query(_) => Kind::Read,
+        Statement::Query(query) => match &*query.body {
+            sqlparser::ast::SetExpr::Insert(_) => Kind::Insert,
+            sqlparser::ast::SetExpr::Update(_) => Kind::Update,
+            sqlparser::ast::SetExpr::Delete(_) => Kind::Delete,
+            _ => Kind::Read,
+        },
         Statement::Insert(_) => Kind::Insert,
         Statement::Update(_) => Kind::Update,
         Statement::Delete(_) => Kind::Delete,
@@ -447,6 +470,16 @@ fn analyze_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_update_names_the_columns_it_assigns() {
+        assert_eq!(
+            updated_columns("UPDATE items SET title = ?, (done, \"Rank\") = (1, 2)"),
+            ["title", "done", "Rank"]
+        );
+        assert!(updated_columns("INSERT INTO items(title) VALUES('x')").is_empty());
+        assert!(updated_columns("UPDATE").is_empty());
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn migration_parents_are_bound_by_position_and_cannot_be_written() {

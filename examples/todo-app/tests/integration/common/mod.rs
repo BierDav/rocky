@@ -1,6 +1,6 @@
-use rocky_sdk::{Failure, Network, transport::memory::Hub};
+use rocky_sdk::{Network, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
-use todo_app::{Role, Todos, configuration, roles};
+use todo_app::{Failure, Role, Todos, configuration, roles};
 
 pub struct World {
     pub root: tempfile::TempDir,

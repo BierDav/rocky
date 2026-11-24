@@ -78,9 +78,7 @@ impl<A: RowApplication> Inner<A> {
                     }
                     blockers::refuse(blocked)?;
                 }
-                return Err(Error::Sql(SqlError::Unsupported(format!(
-                    "a replayed write was refused: {refusal}"
-                ))));
+                return Err(Error::Sql(SqlError::Refused(refusal)));
             }
         };
         let logical = schema
@@ -252,7 +250,15 @@ impl<A: RowApplication> Inner<A> {
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;
-        let witnessed = RowPayload::witness(payload(sequence, base)?, Vec::new())?;
+        let encoded = payload(sequence, base)?;
+        if encoded.len() > crate::network::MAX_PAGE_BYTES {
+            return Err(Error::TooLarge {
+                limit: rocky_storage::Limit::Intent,
+                size: encoded.len(),
+                max: crate::network::MAX_PAGE_BYTES,
+            });
+        }
+        let witnessed = RowPayload::witness(encoded, Vec::new())?;
         let compacted = RowPayload::compact(&witnessed, &self.definition, scope)?;
         let opened_payload = RowPayload::decode_source(&compacted, &self.definition, scope)?;
         let frame = author(
@@ -276,13 +282,14 @@ impl<A: RowApplication> Inner<A> {
                 plaintext: &compacted,
             },
         )?;
-        self.verify_frame(&frame, time)?;
         if frame.weight() > crate::network::MAX_PAGE_BYTES {
-            return Err(Error::Quota {
-                resource: "intent frame bytes",
-                limit: crate::network::MAX_PAGE_BYTES,
+            return Err(Error::TooLarge {
+                limit: rocky_storage::Limit::Intent,
+                size: frame.weight(),
+                max: crate::network::MAX_PAGE_BYTES,
             });
         }
+        self.verify_frame(&frame, time)?;
         let operation = frame.operation_ref()?;
         self.check_budget(
             usize::try_from(frame.stored_bytes()?).map_err(|_| denied("stored frame size"))?,

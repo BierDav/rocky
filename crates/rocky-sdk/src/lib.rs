@@ -55,13 +55,11 @@ pub mod transport;
 pub use access::Access;
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use configuration::Configuration;
-pub use connection::{
-    ChangeCause, SqlFailure, SqlReason, TableChange, TableEvents, Unavailability,
-};
+pub use connection::{ChangeCause, TableChange, TableEvents};
 pub use database::{Created, Database};
 #[cfg(any(test, feature = "test-support"))]
 pub use delivery::State as DeliveryState;
-pub use error::{Error, ErrorKind};
+pub use error::{DenyReason, Error, ErrorKind, Limit, Right, Unsupported};
 pub use extension::DeviceCredential;
 pub use inspection::*;
 pub use invitation::{
@@ -82,7 +80,7 @@ pub use rocky_core::{
     TableDefinition,
 };
 pub use rocky_core::{RoleError, SchemaError};
-pub use rocky_core::{RowIdentity, Scope, SqlValue, TransactionToken};
+pub use rocky_core::{RowIdentity, Scope, SqlValue};
 pub use rocky_credentials::{
     FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
 };
@@ -97,12 +95,15 @@ pub use schema::{
 };
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
-pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
+pub use sql::{
+    Commit, DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction,
+    TransactionToken,
+};
 pub use status::*;
 pub use store_only::StoreOnlyRefusal;
 #[cfg(any(test, feature = "test-support"))]
 pub use testing::*;
-pub type Failure = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 #[cfg(test)]
 extern crate self as rocky_sdk;

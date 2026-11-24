@@ -1,4 +1,6 @@
-use rocky_sdk::{Configuration, Database, Failure, IdentityKey, IdentityProvider, Network};
+use rocky_sdk::{Configuration, Database, IdentityKey, IdentityProvider, Network};
+
+type Failure = Box<dyn std::error::Error + Send + Sync>;
 use std::sync::Arc;
 
 #[tokio::main]

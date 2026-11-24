@@ -20,9 +20,15 @@ use std::{
 
 type Failure = crate::Failure;
 
+fn sql_code(error: &crate::Error) -> i32 {
+    match error.kind() {
+        crate::ErrorKind::Sql { code, .. } => *code,
+        _ => 0,
+    }
+}
+
 const SQLITE_ERROR: i32 = 1;
 const SQLITE_READONLY: i32 = 8;
-const SQLITE_TOOBIG: i32 = 18;
 const SQLITE_AUTH: i32 = 23;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 
@@ -320,10 +326,11 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     .err()
     .ok_or("duplicate key")?;
     let duplicate = duplicate
-        .downcast::<rocky_sdk::SqlFailure>()
+        .downcast::<rocky_sdk::Error>()
         .map_err(|_| "code")?;
     assert_eq!(
-        duplicate.code, SQLITE_CONSTRAINT_PRIMARYKEY,
+        sql_code(&duplicate),
+        SQLITE_CONSTRAINT_PRIMARYKEY,
         "engine errors keep SQLite's extended codes: {duplicate}"
     );
     assert!(
@@ -337,11 +344,10 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
         "SELECT * FROM secure_operations",
     ] {
         let error = all(&writer, sql, Vec::new()).await.err().ok_or(sql)?;
-        let error = error
-            .downcast::<rocky_sdk::SqlFailure>()
-            .map_err(|_| "code")?;
+        let error = error.downcast::<rocky_sdk::Error>().map_err(|_| "code")?;
         assert_eq!(
-            error.code, SQLITE_AUTH,
+            sql_code(&error),
+            SQLITE_AUTH,
             "the engine catalog and pragmas stay denied: {sql}: {error}"
         );
     }
@@ -355,7 +361,7 @@ async fn exact(
     connection: &Connection,
     sql: &str,
     params: Vec<SqlValue>,
-) -> Result<Vec<Vec<SqlValue>>, rocky_sdk::SqlFailure> {
+) -> Result<Vec<Vec<SqlValue>>, rocky_sdk::Error> {
     let page = connection
         .execute(connection.statement(), sql.into(), params)
         .await?;
@@ -425,15 +431,19 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
         .err()
         .ok_or("outside a transaction")?;
     assert_eq!(
-        outside.code, SQLITE_ERROR,
+        sql_code(&outside),
+        SQLITE_ERROR,
         "only a write transaction reserves ids: {outside}"
     );
-    assert!(outside.message.contains("open transaction"), "{outside}");
+    assert!(
+        outside.to_string().contains("open transaction"),
+        "{outside}"
+    );
     let read = exact(&reader, "SELECT rocky_next_id('items')", vec![])
         .await
         .err()
         .ok_or("on a reader")?;
-    assert_eq!(read.code, SQLITE_READONLY, "{read}");
+    assert_eq!(sql_code(&read), SQLITE_READONLY, "{read}");
     exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
     for (sql, params) in [
         ("SELECT rocky_next_id(7)", vec![]),
@@ -442,7 +452,7 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
         ("SELECT rocky_next_id('absent')", vec![]),
     ] {
         let refused = exact(&writer, sql, params).await.err().ok_or(sql)?;
-        assert_ne!(refused.code, 0, "{sql}");
+        assert_ne!(sql_code(&refused), 0, "{sql}");
         assert!(writer.in_transaction().await?, "{sql}");
     }
     exact(&writer, "ROLLBACK", vec![]).await?;
@@ -460,11 +470,7 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     let database = create(open(root.path(), None)?).await?;
     let writer = database.connect(WRITER).await?;
     let before = published(root.path())?;
-    let code = |error: Failure| {
-        error
-            .downcast::<rocky_sdk::SqlFailure>()
-            .map(|failure| *failure)
-    };
+    let code = |error: Failure| error.downcast::<rocky_sdk::Error>().map(|failure| *failure);
 
     let (title_a_seeds, all_seeds) = (32, 65);
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
@@ -497,7 +503,8 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     )
     .map_err(|_| "code")?;
     assert_eq!(
-        refused.code, SQLITE_TOOBIG,
+        refused.kind(),
+        &crate::ErrorKind::Quota,
         "a statement replaying more rows than a bundle holds fails the commit: {refused}"
     );
     assert!(!writer.in_transaction().await?);
@@ -521,7 +528,14 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     )
     .map_err(|_| "code")?;
     assert!(
-        refused.message.contains("quota"),
+        matches!(
+            refused.kind(),
+            &crate::ErrorKind::TooLarge {
+                limit: crate::Limit::Intent,
+                size,
+                max: 131_072,
+            } if size > 131_072
+        ),
         "an intent frame over a range page's bytes fails the commit: {refused}"
     );
     assert_eq!(count(&writer, "lists").await?, all_seeds);
@@ -649,11 +663,10 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     assert_eq!(count(&reader, "lists").await?, 100);
     for sql in ["DELETE FROM lists", "BEGIN IMMEDIATE TRANSACTION"] {
         let error = all(&reader, sql, Vec::new()).await.err().ok_or(sql)?;
-        let error = error
-            .downcast::<rocky_sdk::SqlFailure>()
-            .map_err(|_| "code")?;
+        let error = error.downcast::<rocky_sdk::Error>().map_err(|_| "code")?;
         assert_eq!(
-            error.code, SQLITE_READONLY,
+            sql_code(&error),
+            SQLITE_READONLY,
             "readers refuse writes with SQLite's read-only code: {sql}: {error}"
         );
     }
@@ -827,7 +840,18 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
             let error = all(&reader, &format!("SELECT * FROM {table}"), vec![])
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("no such table"), "{error}");
+            let refused_by_access = matches!(
+                error.downcast_ref::<crate::Error>().map(crate::Error::kind),
+                Some(crate::ErrorKind::Denied {
+                    need: crate::Right::Read,
+                    reason: crate::DenyReason::NotGranted,
+                    ..
+                })
+            );
+            assert!(
+                refused_by_access || error.to_string().contains("no such table"),
+                "{error}"
+            );
             let file = rusqlite::Connection::open_with_flags(
                 b_path.join("rocky.sqlite"),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -844,12 +868,20 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     b.close().await?;
     let b = setup(&b_path, "b")?.open().await?;
     let reader = b.connect(READER).await?;
-    assert!(
-        all(&reader, "SELECT * FROM devices", vec![])
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("no such table")
+    let refused = all(&reader, "SELECT * FROM devices", vec![])
+        .await
+        .err()
+        .ok_or("a reader read devices")?;
+    assert_eq!(
+        refused
+            .downcast_ref::<crate::Error>()
+            .map(crate::Error::kind),
+        Some(&crate::ErrorKind::Denied {
+            table: Some("devices".into()),
+            need: crate::Right::Read,
+            reason: crate::DenyReason::NotGranted,
+        }),
+        "{refused}"
     );
     all(&reader, "SELECT * FROM lists", vec![]).await?;
     reader.close().await;

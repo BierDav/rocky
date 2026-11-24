@@ -58,8 +58,8 @@ async fn reads_nothing(relay: &Device) -> bool {
     .is_err()
 }
 fn refusal(opened: Result<rocky_sdk::Database, rocky_sdk::Error>) -> Option<StoreOnlyRefusal> {
-    match opened.err()?.kind {
-        rocky_sdk::ErrorKind::StoreOnly(refusal) => Some(refusal),
+    match opened.err()?.kind() {
+        rocky_sdk::ErrorKind::StoreOnly(refusal) => Some(*refusal),
         _ => None,
     }
 }

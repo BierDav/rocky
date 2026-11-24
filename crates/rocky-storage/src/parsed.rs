@@ -52,6 +52,67 @@ pub fn parse(sql: &str) -> Result<Parsed, String> {
     parse_through(&PARSED, sql)
 }
 
+pub fn normalized(sql: &str) -> std::borrow::Cow<'_, str> {
+    use sqlparser::{
+        keywords::Keyword,
+        tokenizer::{Token, Tokenizer},
+    };
+    let Ok(tokens) = Tokenizer::new(&SQLiteDialect {}, sql).tokenize() else {
+        return std::borrow::Cow::Borrowed(sql);
+    };
+    let significant =
+        |from: usize| (from..tokens.len()).find(|&at| !matches!(tokens[at], Token::Whitespace(_)));
+    let keyword = |at: Option<usize>| match at.map(|at| &tokens[at]) {
+        Some(Token::Word(word)) => Some(word.keyword),
+        _ => None,
+    };
+    let tests_a_truth_value = |at: Option<usize>| {
+        matches!(
+            keyword(at),
+            Some(
+                Keyword::NULL
+                    | Keyword::TRUE
+                    | Keyword::FALSE
+                    | Keyword::UNKNOWN
+                    | Keyword::DISTINCT
+                    | Keyword::JSON
+                    | Keyword::NORMALIZED
+            )
+        )
+    };
+    let mut rewrites = Vec::new();
+    for at in 0..tokens.len() {
+        if keyword(Some(at)) != Some(Keyword::IS) {
+            continue;
+        }
+        let next = significant(at + 1);
+        if keyword(next) == Some(Keyword::NOT) {
+            let Some(not) = next else { continue };
+            if !tests_a_truth_value(significant(not + 1)) {
+                rewrites.push((at, not, "IS DISTINCT FROM"));
+            }
+        } else if !tests_a_truth_value(next) {
+            rewrites.push((at, at, "IS NOT DISTINCT FROM"));
+        }
+    }
+    if rewrites.is_empty() {
+        return std::borrow::Cow::Borrowed(sql);
+    }
+    let mut rewritten = String::with_capacity(sql.len() + 16 * rewrites.len());
+    let mut at = 0;
+    for (start, end, replacement) in rewrites {
+        tokens[at..start]
+            .iter()
+            .for_each(|token| rewritten.push_str(&token.to_string()));
+        rewritten.push_str(replacement);
+        at = end + 1;
+    }
+    tokens[at..]
+        .iter()
+        .for_each(|token| rewritten.push_str(&token.to_string()));
+    std::borrow::Cow::Owned(rewritten)
+}
+
 fn parse_through(cache: &Recent<Arc<str>, Parsed>, sql: &str) -> Result<Parsed, String> {
     let cached = sql.len() <= CACHED_BYTES;
     if cached && let Some(hit) = cache.get(sql) {
@@ -80,6 +141,39 @@ pub fn parses() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn sqlite_is_comparisons_become_distinct_from_and_parse() {
+        for (sql, expected) in [
+            (
+                "SELECT 1 WHERE a IS ?",
+                "SELECT 1 WHERE a IS NOT DISTINCT FROM ?",
+            ),
+            (
+                "SELECT 1 WHERE a IS NOT lower(?)",
+                "SELECT 1 WHERE a IS DISTINCT FROM lower(?)",
+            ),
+            (
+                "SELECT 'a IS b' WHERE a is 7",
+                "SELECT 'a IS b' WHERE a IS NOT DISTINCT FROM 7",
+            ),
+        ] {
+            assert_eq!(normalized(sql), expected);
+            assert!(parse(&normalized(sql)).is_ok(), "{sql}");
+        }
+        for sql in [
+            "SELECT 1 WHERE a IS NULL",
+            "SELECT 1 WHERE a IS NOT NULL",
+            "SELECT 1 WHERE a IS TRUE",
+            "SELECT 1 WHERE a IS NOT DISTINCT FROM ?",
+            "SELECT 1 WHERE a IS DISTINCT FROM ?",
+        ] {
+            assert!(
+                matches!(normalized(sql), std::borrow::Cow::Borrowed(_)),
+                "{sql}"
+            );
+        }
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_text_is_parsed_once_while_it_stays_in_use() {

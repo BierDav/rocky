@@ -726,7 +726,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
         .await
         .err()
         .map(|refusal| refusal["code"].clone()),
-        Some(json!("revoked")),
+        Some(json!("removed")),
         "the removed reader is refused later rows and purges the earlier ones"
     );
     let (secrets, tables) = removed.epochs("A").await;

@@ -536,7 +536,7 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
 
 #[tokio::test]
 async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(), Failure> {
-    use crate::connection::{Call, ConnectionOptions, Registry, Reply, code, serve};
+    use crate::connection::{Call, ConnectionOptions, Registry, Reply, serve};
     tokio::task::LocalSet::new()
         .run_until(async {
             let root = tempfile::tempdir()?;
@@ -606,9 +606,9 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
             let Err(error) = execute("SELECT count(*) FROM items").await else {
                 return Err("a statement after the lease clock passed the timeout ran".into());
             };
-            assert_eq!(error.code, code::ABORT, "{error}");
+            assert_eq!(error.kind(), &crate::ErrorKind::Busy, "{error}");
             assert!(
-                error.message.contains("Timeout"),
+                error.to_string().contains("Timeout"),
                 "the lease ends on its own: {error}"
             );
             assert!(

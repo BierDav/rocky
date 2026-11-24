@@ -53,6 +53,39 @@ pub(crate) mod code {
 pub(crate) fn failure(code: i32, message: impl Into<String>) -> crate::Error {
     crate::Error::sql(code, message)
 }
+fn blocked_table(node: &Node, sql: &str, error: &crate::Error) -> Option<crate::Error> {
+    let crate::ErrorKind::Blocked {
+        table: None,
+        blockers,
+    } = error.kind()
+    else {
+        return None;
+    };
+    let domain = node.domain();
+    let prepared = rocky_storage::partition_sql::prepare(sql, &domain.logical().views).ok()?;
+    let whole = rocky_core::domain_label(&domain.scope);
+    let (table, blockers) = prepared.tables().iter().find_map(|referenced| {
+        let (_, scope) = domain.scopes().find(|(name, _)| name == referenced)?;
+        let label = rocky_core::scope_label(&scope);
+        let own: Vec<_> = blockers
+            .iter()
+            .filter(|blocker| blocker.scope == label || blocker.scope == whole)
+            .cloned()
+            .collect();
+        (!own.is_empty()).then(|| (referenced.clone(), own))
+    })?;
+    let detail = format!(
+        "{table} is not available: {}",
+        rocky_core::describe_blockers(&blockers)
+    );
+    Some(crate::Error::new(
+        crate::ErrorKind::Blocked {
+            table: Some(table),
+            blockers,
+        },
+        detail,
+    ))
+}
 async fn explained(
     node: &Node,
     sql: &str,
@@ -61,6 +94,9 @@ async fn explained(
     error: Failure,
 ) -> Failure {
     let typed = crate::Error::from_failure(&error);
+    if let Some(blocked) = blocked_table(node, sql, &typed) {
+        return Box::new(blocked);
+    }
     if let crate::ErrorKind::Sql {
         code: code::ERROR,
         unsupported: None,

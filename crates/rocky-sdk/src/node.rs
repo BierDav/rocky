@@ -1899,7 +1899,7 @@ impl Node {
         let node = peer.to_hex();
         blockers.iter().any(|blocker| {
             let clears = match &blocker.clears_by {
-                ClearsBy::AnyPeer => true,
+                ClearsBy::AnyPeer | ClearsBy::Admin => true,
                 ClearsBy::Peer { node: by } => *by == node,
                 ClearsBy::LocalWork
                 | ClearsBy::Application

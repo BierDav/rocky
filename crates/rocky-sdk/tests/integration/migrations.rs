@@ -1465,3 +1465,114 @@ async fn an_admin_sees_the_schema_version_each_device_last_reported() -> Result<
     owner.close().await;
     Ok(())
 }
+
+fn waits_for_removal_checkpoint(blocker: &rocky_sdk::status::Blocker) -> bool {
+    matches!(
+        blocker.kind,
+        rocky_sdk::status::BlockerKind::SealRebootstrap {
+            replay: rocky_sdk::status::FrameReplay::Never,
+            ..
+        }
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let owner = Device::create(&dirs("owner"), network("owner")).await?;
+    let bob = Device::join(
+        &dirs("bob"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("bob")),
+    )
+    .await?;
+    let person: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(rocky_sdk::IdentityKey::generate());
+    let invitation = owner
+        .database
+        .invite(
+            rocky_sdk::Invite::new(rocky_sdk::Access::Store)
+                .for_identity(person.public_key()?.into()),
+        )
+        .await?;
+    let relay = Device::new(
+        rocky_sdk::Configuration::store_only(dirs("relay"))
+            .sync(rocky_sdk::SyncMode::Manual)
+            .network(Network::Owned(hub.connector("relay")))
+            .identity(person)
+            .join(&invitation.code)
+            .await?,
+    )?;
+    introduce(&owner, &bob).await;
+    introduce(&owner, &relay).await;
+    owner.add(1, "Coffee").await;
+    sync(&bob).await;
+    bob.close().await;
+    owner.close().await;
+    let owner =
+        Device::new(common::confirmed(open(&dirs("owner"), &unmemoed(), network("owner"))).await?)?;
+    sync(&relay).await;
+    owner.close().await;
+
+    let bob = reopen(&dirs("bob"), &unmemoed(), network("bob")).await?;
+    introduce(&relay, &bob).await;
+    sync(&bob).await;
+    let blockers = bob.database.status().await?.data.blockers;
+    let waiting: Vec<_> = blockers
+        .iter()
+        .filter(|blocker| waits_for_removal_checkpoint(blocker))
+        .cloned()
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        1,
+        "a relay cannot serve the checkpoint: {blockers:?}"
+    );
+    assert_eq!(waiting[0].clears_by, rocky_sdk::status::ClearsBy::Admin);
+    let explained = waiting[0].to_string();
+    assert!(
+        explained.contains("removed a table or field")
+            && explained.contains("the next sync with an admin device"),
+        "{explained}"
+    );
+    let refused = bob
+        .database
+        .query("SELECT key FROM items", Vec::new())
+        .await
+        .err()
+        .ok_or("a scope waiting for its checkpoint was read")?;
+    let rocky_sdk::ErrorKind::Blocked {
+        table: Some(table),
+        blockers,
+    } = refused.kind()
+    else {
+        return Err(format!("not blocked on a table: {refused:?}").into());
+    };
+    assert_eq!(table, "items");
+    assert!(
+        blockers.iter().any(waits_for_removal_checkpoint),
+        "{blockers:?}"
+    );
+    assert!(refused.retryable());
+
+    let owner = reopen(&dirs("owner"), &unmemoed(), network("owner")).await?;
+    introduce(&owner, &bob).await;
+    sync(&bob).await;
+    assert!(
+        !bob.database
+            .status()
+            .await?
+            .data
+            .blockers
+            .iter()
+            .any(waits_for_removal_checkpoint),
+        "the next sync with an admin clears the wait"
+    );
+    assert_eq!(rows(&bob, KEPT).await.as_array().map(Vec::len), Some(1));
+    bob.close().await;
+    relay.close().await;
+    owner.close().await;
+    Ok(())
+}

@@ -177,7 +177,11 @@ does not clear. Each `Device` in `people` carries the application schema
 version it last reported in its signed health report (`Device::schema`, a
 `ReportedSchema { version, reported }`), so an admin sees when every device
 runs the version a removal needs; a device that has not reported since this
-device opened is `None`.
+device opened is `None`. A device whose data predates a version that removed
+a table or field starts from the checkpoint taken there; until it has it,
+`status` and the `ErrorKind::Blocked { table, blockers }` of a refused read
+name a `SealRebootstrap { replay: FrameReplay::Never, .. }` blocker that
+`ClearsBy::Admin`, the next sync with an admin device.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that

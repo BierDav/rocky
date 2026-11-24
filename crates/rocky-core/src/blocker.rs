@@ -72,6 +72,7 @@ pub enum FrameReplay {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClearsBy {
     AnyPeer,
+    Admin,
     Peer { node: String },
     LocalWork,
     Application,
@@ -139,6 +140,11 @@ impl fmt::Display for Blocker {
                 pages_complete,
             } => format!("staged import (sealed={sealed}, pages complete={pages_complete})"),
             BlockerKind::LostCompaction => "lost compaction".into(),
+            BlockerKind::SealRebootstrap {
+                replay: FrameReplay::Never,
+                ..
+            } => "waits for the checkpoint taken where a schema version removed a table or field"
+                .into(),
             BlockerKind::SealRebootstrap { replay, listed } => {
                 format!("seal rebootstrap (replay={replay:?}, listed={listed})")
             }
@@ -176,6 +182,7 @@ impl fmt::Display for Blocker {
         };
         let clears = match &self.clears_by {
             ClearsBy::AnyPeer => "any permitted peer".into(),
+            ClearsBy::Admin => "the next sync with an admin device".into(),
             ClearsBy::Peer { node } => format!("peer {}", node.get(..12).unwrap_or(node)),
             ClearsBy::LocalWork => "local work".into(),
             ClearsBy::Application => "the application".into(),

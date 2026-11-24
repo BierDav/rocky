@@ -213,6 +213,13 @@ pub struct Device {
     pub label: Option<String>,
     pub linked: Timestamp,
     pub last_seen: Option<Timestamp>,
+    pub schema: Option<ReportedSchema>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReportedSchema {
+    pub version: u32,
+    pub reported: Timestamp,
 }
 
 #[derive(Clone, Debug, PartialEq)]

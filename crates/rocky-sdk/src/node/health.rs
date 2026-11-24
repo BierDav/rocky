@@ -468,6 +468,7 @@ impl Node {
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {
             produced_at_epoch_seconds: self.status_time()?,
+            schema: self.declared.version,
             alerts,
             blockers: counts
                 .into_iter()
@@ -596,6 +597,16 @@ impl Node {
             })
             .filter(|(node, _, heard)| forwarded.get(node).is_none_or(|sent| sent < heard))
             .collect()
+    }
+    pub(super) fn reported_schema(&self, node: PublicKey, time: u64) -> Option<(u32, u64)> {
+        if node == self.replica.node_key() {
+            return Some((self.declared.version, time));
+        }
+        self.mesh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&node)
+            .map(|held| (held.report.schema, held.received))
     }
     pub(super) fn last_seen(&self, node: PublicKey, time: u64) -> Option<u64> {
         if self.linked(node) {

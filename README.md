@@ -173,7 +173,11 @@ field it declares gets `ErrorKind::UpgradeRequired { current, declared }` on
 open, and a statement failing on such a removal mid-session returns the
 same kind. A failing migration step withdraws its version
 and returns `ErrorKind::MigrationFailed { version, step }`, which a retry
-does not clear.
+does not clear. Each `Device` in `people` carries the application schema
+version it last reported in its signed health report (`Device::schema`, a
+`ReportedSchema { version, reported }`), so an admin sees when every device
+runs the version a removal needs; a device that has not reported since this
+device opened is `None`.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that

@@ -425,6 +425,7 @@ pub const TRUSTED_STALE_AFTER: std::time::Duration =
 #[serde(deny_unknown_fields)]
 pub struct HealthReport {
     pub produced_at_epoch_seconds: u64,
+    pub schema: u32,
     pub alerts: Vec<Alert>,
     pub blockers: Vec<BlockerCount>,
 }

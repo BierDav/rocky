@@ -429,6 +429,12 @@ impl Node {
                     label: record.device_labels.get(&linked.node).cloned(),
                     linked: seconds(linked.linked),
                     last_seen: self.last_seen(linked.node, time).map(seconds),
+                    schema: self
+                        .reported_schema(linked.node, time)
+                        .map(|(version, reported)| crate::ReportedSchema {
+                            version,
+                            reported: seconds(reported),
+                        }),
                 })
                 .collect();
             let owner = admitted.invited_by == *identity;

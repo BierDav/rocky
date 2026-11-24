@@ -1388,3 +1388,80 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
     late.close().await;
     Ok(())
 }
+
+async fn reported_schemas(admin: &Device) -> Result<Vec<(String, Option<u32>)>, Failure> {
+    let mut reported: Vec<(String, Option<u32>)> = admin
+        .database
+        .people()
+        .await?
+        .into_iter()
+        .flat_map(|person| person.devices)
+        .map(|device| {
+            (
+                device.id.to_string(),
+                device.schema.map(|schema| schema.version),
+            )
+        })
+        .collect();
+    reported.sort();
+    Ok(reported)
+}
+
+async fn until_reported(
+    admin: &Device,
+    device: &Device,
+    version: u32,
+) -> Result<Vec<(String, Option<u32>)>, Failure> {
+    let node = device.database.me().await?.device.to_string();
+    for _ in 0..8 {
+        sync(device).await;
+        let reported = reported_schemas(admin).await?;
+        if reported.contains(&(node.clone(), Some(version))) {
+            return Ok(reported);
+        }
+    }
+    Err(format!("{node} never reported schema version {version}").into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_sees_the_schema_version_each_device_last_reported() -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let owner = Device::create(&dirs("owner"), network("owner")).await?;
+    let bob = Device::join(
+        &dirs("bob"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("bob")),
+    )
+    .await?;
+    introduce(&owner, &bob).await;
+    let own = owner.database.me().await?.device.to_string();
+    let bobs = bob.database.me().await?.device.to_string();
+    assert_eq!(until_reported(&owner, &bob, 1).await?, {
+        let mut both = vec![(own.clone(), Some(1)), (bobs.clone(), Some(1))];
+        both.sort();
+        both
+    });
+    owner.close().await;
+
+    let owner = reopen(&dirs("owner"), &memoed(), network("owner")).await?;
+    let reported = reported_schemas(&owner).await?;
+    assert!(
+        reported.contains(&(own.clone(), Some(2))) && reported.contains(&(bobs.clone(), None)),
+        "a device that has not reported since this admin opened is unknown: {reported:?}"
+    );
+    assert!(
+        until_reported(&owner, &bob, 1)
+            .await?
+            .contains(&(bobs.clone(), Some(1)))
+    );
+    bob.close().await;
+    let bob = reopen(&dirs("bob"), &memoed(), network("bob")).await?;
+    introduce(&owner, &bob).await;
+    until_reported(&owner, &bob, 2).await?;
+    bob.close().await;
+    owner.close().await;
+    Ok(())
+}

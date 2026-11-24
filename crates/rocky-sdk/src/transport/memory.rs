@@ -436,7 +436,6 @@ impl Hub {
         let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
         match gate.budget {
             None => Poll::Ready(Ok(wanted)),
-            Some(left) if left > 0 => Poll::Ready(Ok(wanted.min(left))),
             Some(0) => {
                 if !self.hold_cut.load(Ordering::SeqCst) {
                     return Poll::Ready(Err(cut()));
@@ -446,7 +445,7 @@ impl Hub {
                 }
                 Poll::Pending
             }
-            Some(_) => unreachable!(),
+            Some(left) => Poll::Ready(Ok(wanted.min(left))),
         }
     }
     fn spend(&self, written: usize) {

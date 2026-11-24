@@ -23,7 +23,9 @@ impl World {
         hub: &Arc<Hub>,
         name: &str,
     ) -> Result<rocky_sdk::Configuration, Failure> {
-        Ok(configuration(root.join(name))?.network(Network::Owned(hub.connector(name))))
+        Ok(configuration(root.join(name))?
+            .network(Network::Owned(hub.connector(name)))
+            .sync(rocky_sdk::SyncMode::Manual))
     }
     pub fn trusted(&self) -> &Todos {
         &self.devices[0]

@@ -223,6 +223,7 @@ impl Node {
         self.seal_skipped(routine.or(members));
         self.close_migrations().await?;
         self.settle_rights_change().await;
+        self.settle_grant_deliveries().await;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         Ok(())
     }

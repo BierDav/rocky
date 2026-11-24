@@ -396,6 +396,7 @@ impl Node {
         &self,
         partition: &GroupPartition,
         recipients: &BTreeSet<PublicKey>,
+        again: bool,
     ) -> Result<usize, Failure> {
         let mut settings = self.settings.lock().await;
         self.reads_group(&settings, partition)?;
@@ -413,7 +414,7 @@ impl Node {
             (&record, epoch, secret),
             recipients,
             crate::delivery::Reason::Share,
-            true,
+            again,
         )?;
         settings.commit(draft, &self.replica).await?;
         Ok(queued)

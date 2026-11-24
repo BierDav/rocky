@@ -7,6 +7,7 @@ use std::{path::Path, sync::Arc};
 
 const SCANNER: RoleName = RoleName::from_static("scanner");
 const CLINICIAN: RoleName = RoleName::from_static("clinician");
+const INSPECTOR: RoleName = RoleName::from_static("inspector");
 
 fn venue() -> Result<Schema, Failure> {
     venue_at(
@@ -73,6 +74,7 @@ fn clinic() -> Result<Schema, Failure> {
                 .write("charts")
                 .per_partition("ward"),
         )
+        .role(Role::new(INSPECTOR).write("charts").per_partition("ward"))
         .build()?)
 }
 fn open<'a>(
@@ -613,5 +615,379 @@ async fn a_rollout_that_widens_a_role_reaches_its_holders_at_their_next_sync() -
     write(&scanner, "UPDATE check_ins SET gate='south'").await?;
     scanner.close().await;
     admin.close().await;
+    Ok(())
+}
+
+struct Clinic {
+    root: tempfile::TempDir,
+    hub: Arc<Hub>,
+    schema: Schema,
+    admin: Device,
+}
+impl Clinic {
+    async fn new() -> Result<Self, Failure> {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let schema = clinic()?;
+        let admin = Device::new(
+            open(&root.path().join("admin"), &schema, &hub, "admin")
+                .create()
+                .await?,
+        )?;
+        admin.database.create_partition(&ward("A")).await?;
+        insert(&admin, "charts", ["A", "chart in A"]).await?;
+        Ok(Self {
+            root,
+            hub,
+            schema,
+            admin,
+        })
+    }
+    fn open(&self, name: &str) -> rocky_sdk::Configuration {
+        open(&self.root.path().join(name), &self.schema, &self.hub, name)
+    }
+    async fn clinician(
+        &self,
+        name: &str,
+    ) -> Result<(Device, Arc<dyn rocky_sdk::IdentityProvider>), Failure> {
+        let invitation = self
+            .admin
+            .database
+            .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)).label(name))
+            .await?;
+        let mut opened = self.open(name).join(&invitation.code).await?;
+        let identity: Arc<dyn rocky_sdk::IdentityProvider> =
+            Arc::new(opened.identity.take().ok_or("a minted identity")?);
+        let device = Device::new(opened)?;
+        synced(&device).await?;
+        Ok((device, identity))
+    }
+    async fn link(
+        &self,
+        name: &str,
+        identity: Arc<dyn rocky_sdk::IdentityProvider>,
+        approver: &Device,
+    ) -> Result<Device, Failure> {
+        Device::new(
+            common::link(
+                self.open(name),
+                identity,
+                &approver.contact().await,
+                &approver.database,
+            )
+            .await?,
+        )
+    }
+    async fn reinvited(
+        &self,
+        name: &str,
+        identity: Arc<dyn rocky_sdk::IdentityProvider>,
+        label: &str,
+    ) -> Result<Device, Failure> {
+        let invitation = self
+            .admin
+            .database
+            .invite(
+                rocky_sdk::Invite::new(Access::Role(CLINICIAN))
+                    .for_identity(PersonId::new(identity.public_key()?))
+                    .label(label),
+            )
+            .await?;
+        Device::new(
+            self.open(name)
+                .identity(identity)
+                .join(&invitation.code)
+                .await?,
+        )
+    }
+    async fn close(self, devices: impl IntoIterator<Item = Device>) {
+        for device in devices {
+            device.close().await;
+        }
+        self.admin.close().await;
+    }
+}
+async fn reads_ward_a(device: &Device) -> Result<(), Failure> {
+    for _ in 0..3 {
+        synced(device).await?;
+    }
+    assert_eq!(
+        rows(device, "SELECT note FROM charts").await?,
+        ["chart in A"]
+    );
+    assert!(
+        device
+            .database
+            .me()
+            .await?
+            .tables
+            .get("charts")
+            .is_some_and(|rights| rights.read),
+        "the device reports read on the granted table"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replacement_device_invited_for_the_person_holds_their_granted_partitions()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let (phone, identity) = clinic.clinician("phone").await?;
+    let clinician = person(&phone).await?;
+    clinic
+        .admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&phone).await?;
+    let lost = phone.database.me().await?.device;
+    phone.close().await;
+    clinic.admin.database.unlink(lost).await?;
+    let tablet = clinic
+        .reinvited("tablet", identity, "replacement tablet")
+        .await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&tablet).await?;
+    let listed = clinic.admin.database.people().await?;
+    let listed = listed
+        .iter()
+        .find(|listed| listed.id == clinician)
+        .ok_or("the clinician is listed")?;
+    assert_eq!(listed.partitions, [ward("A")]);
+    assert_eq!(
+        listed.label.as_deref(),
+        Some("phone"),
+        "the first invitation labels the person once"
+    );
+    assert_eq!(
+        listed
+            .devices
+            .iter()
+            .map(|device| (device.id, device.label.as_deref()))
+            .collect::<Vec<_>>(),
+        [(
+            tablet.database.me().await?.device,
+            Some("replacement tablet")
+        )],
+        "each invitation labels the device it admits"
+    );
+    clinic.close([tablet]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_device_linked_before_its_approver_learns_of_a_grant_still_receives_it()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let (phone, identity) = clinic.clinician("phone").await?;
+    let clinician = person(&phone).await?;
+    clinic
+        .admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    synced(&clinic.admin).await?;
+    let laptop = clinic.link("laptop", identity, &phone).await?;
+    synced(&laptop).await?;
+    synced(&clinic.admin).await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&laptop).await?;
+    reads_ward_a(&phone).await?;
+    clinic.close([phone, laptop]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_device_linked_after_a_grant_holds_it() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let (phone, identity) = clinic.clinician("phone").await?;
+    let clinician = person(&phone).await?;
+    clinic
+        .admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&phone).await?;
+    let laptop = clinic.link("laptop", identity, &phone).await?;
+    reads_ward_a(&laptop).await?;
+    clinic.close([phone, laptop]).await;
+    Ok(())
+}
+
+async fn shared_recipients(device: &Device) -> Result<Vec<usize>, Failure> {
+    let mut recipients = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = device.database.activity(after).await?;
+        if page.events.is_empty() {
+            return Ok(recipients);
+        }
+        after = page.token;
+        recipients.extend(
+            page.events
+                .into_iter()
+                .filter_map(|event| match event.detail {
+                    rocky_sdk::ActivityKind::PartitionShared {
+                        partition,
+                        recipients,
+                    } if partition == ward("A") => Some(recipients),
+                    _ => None,
+                }),
+        );
+    }
+}
+
+#[tokio::test]
+async fn granting_a_held_partition_again_delivers_it_to_every_device_of_the_person()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let (phone, identity) = clinic.clinician("phone").await?;
+    let clinician = person(&phone).await?;
+    let laptop = clinic.link("laptop", identity, &phone).await?;
+    for device in [&laptop, &phone, &clinic.admin] {
+        synced(device).await?;
+    }
+    clinic
+        .admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&phone).await?;
+    reads_ward_a(&laptop).await?;
+    let before = shared_recipients(&clinic.admin).await?;
+    clinic
+        .admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    let after = shared_recipients(&clinic.admin).await?;
+    assert_eq!(
+        after.get(before.len()..),
+        Some([2].as_slice()),
+        "granting a held partition again delivers it to both devices"
+    );
+    synced(&clinic.admin).await?;
+    reads_ward_a(&phone).await?;
+    reads_ward_a(&laptop).await?;
+    let listed = clinic.admin.database.people().await?;
+    assert_eq!(
+        listed
+            .iter()
+            .find(|listed| listed.id == clinician)
+            .map(|listed| listed.partitions.clone()),
+        Some(vec![ward("A")]),
+        "granting twice records the partition once"
+    );
+    clinic.close([phone, laptop]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_partitioned_table_without_a_granted_partition_says_which_grant_clears_it()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let (phone, _) = clinic.clinician("phone").await?;
+    let refused = phone
+        .database
+        .query("SELECT note FROM charts", Vec::new())
+        .await
+        .err()
+        .ok_or("a per-partition role reads no partition before a grant")?;
+    let ErrorKind::Sql(failure) = refused.kind else {
+        return Err(format!("expected an SQL refusal, found {refused}").into());
+    };
+    let rocky_sdk::SqlReason::Unavailable {
+        table,
+        reason: rocky_sdk::Unavailability::Incomplete { blockers },
+    } = failure.reason
+    else {
+        return Err(format!("expected an unavailable table, found {failure:?}").into());
+    };
+    assert_eq!(table, "charts");
+    assert_eq!(
+        blockers
+            .iter()
+            .map(|blocker| (&blocker.kind, &blocker.clears_by))
+            .collect::<Vec<_>>(),
+        [(
+            &rocky_core::BlockerKind::PartitionNotGranted {
+                group: "ward".into()
+            },
+            &rocky_core::ClearsBy::Application
+        )]
+    );
+    assert!(
+        phone
+            .database
+            .status()
+            .await?
+            .data
+            .blockers
+            .iter()
+            .any(|blocker| matches!(
+                &blocker.kind,
+                rocky_core::BlockerKind::PartitionNotGranted { group } if group == "ward"
+            )),
+        "status lists the missing grant"
+    );
+    clinic.close([phone]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_role_holding_only_partitioned_tables_opens_and_names_the_missing_grant()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let invitation = clinic
+        .admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(INSPECTOR)))
+        .await?;
+    let tablet = Device::new(clinic.open("tablet").join(&invitation.code).await?)?;
+    synced(&tablet).await?;
+    let refused = rows(&tablet, "SELECT note FROM charts")
+        .await
+        .err()
+        .ok_or("an inspector reads no partition before a grant")?;
+    let refused = refused
+        .downcast_ref::<rocky_sdk::Error>()
+        .ok_or("a typed SDK error")?;
+    assert_eq!(
+        refused
+            .blockers
+            .iter()
+            .map(|blocker| &blocker.kind)
+            .collect::<Vec<_>>(),
+        [&rocky_core::BlockerKind::PartitionNotGranted {
+            group: "ward".into()
+        }],
+        "{refused}"
+    );
+    let inspector = person(&tablet).await?;
+    clinic
+        .admin
+        .database
+        .grant_partition(inspector, &ward("A"))
+        .await?;
+    synced(&clinic.admin).await?;
+    reads_ward_a(&tablet).await?;
+    assert!(
+        tablet
+            .database
+            .status()
+            .await?
+            .data
+            .blockers
+            .iter()
+            .all(|blocker| !matches!(
+                blocker.kind,
+                rocky_core::BlockerKind::PartitionNotGranted { .. }
+            )),
+        "a grant clears the blocker"
+    );
+    clinic.close([tablet]).await;
     Ok(())
 }

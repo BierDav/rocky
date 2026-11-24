@@ -101,6 +101,36 @@ pub(crate) fn failure(code: i32, message: impl Into<String>) -> SqlFailure {
         reason: SqlReason::Statement,
     }
 }
+async fn explained(node: &Node, sql: &str, error: Failure) -> Failure {
+    let Ok(withheld) = node.withheld_tables().await else {
+        return error;
+    };
+    if withheld.is_empty() {
+        return error;
+    }
+    let Ok(prepared) = rocky_storage::partition_sql::prepare(sql, &node.domain().logical().views)
+    else {
+        return error;
+    };
+    let Some((table, blocker)) = prepared
+        .tables()
+        .iter()
+        .find_map(|referenced| withheld.get(referenced))
+    else {
+        return error;
+    };
+    Box::new(SqlFailure {
+        code: code::ERROR,
+        message: format!("{table} is not available: {blocker}"),
+        retryable: true,
+        reason: SqlReason::Unavailable {
+            table: table.clone(),
+            reason: Unavailability::Incomplete {
+                blockers: vec![blocker.clone()],
+            },
+        },
+    })
+}
 pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
     let error = match error.downcast::<SqlFailure>() {
         Ok(failure) => return *failure,
@@ -427,13 +457,20 @@ impl State {
         if self.results.len() >= MAX_RESULTS {
             return Err(failure(code::MISUSE, "too many statements with open results").into());
         }
-        let mut pending = match (query_only(sql), next_id(sql, &params)?) {
-            (Some(set), _) => self.query_only(set)?,
-            (None, Some((table, values))) => self.next_id(&table, &values).await?,
-            (None, None) if self.read_only => self.read(sql, params).await?,
-            (None, None) => self.write(sql, params).await?,
+        let dispatched = match (query_only(sql), next_id(sql, &params)?) {
+            (Some(set), _) => self.query_only(set),
+            (None, Some((table, values))) => self.next_id(&table, &values).await,
+            (None, None) if self.read_only => self.read(sql, params).await,
+            (None, None) => self.write(sql, params).await,
         };
-        let page = pending.page().await?;
+        let mut pending = match dispatched {
+            Ok(pending) => pending,
+            Err(error) => return Err(explained(&self.node, sql, error).await),
+        };
+        let page = match pending.page().await {
+            Ok(page) => page,
+            Err(error) => return Err(explained(&self.node, sql, error).await),
+        };
         if !page.done {
             self.results.insert(statement, pending);
         }

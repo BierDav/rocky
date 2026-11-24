@@ -1646,16 +1646,19 @@ impl Settings {
         let node = Self::node_key(vault)?;
         let links = self.issuer_links();
         let time = now()?;
+        let other_access_replaces_record = known
+            .and_then(registry::IdentityRecord::access)
+            .is_some_and(|known| *known != access);
         let targets: Vec<_> = named.iter().map(crate::Partition::target).collect();
-        let partitions = domain.partition_targets(&targets)?;
+        let mut partitions = domain.partition_targets(&targets)?;
+        if let Some(record) = known.filter(|_| !other_access_replaces_record) {
+            partitions.extend(record.held(&domain)?);
+        }
         let granted = domain.compile(&access, &partitions)?;
         let grants = domain.expand(&granted);
         let authority = self.authority(&node)?;
         let issued = authority.issue_person(device.identity, granted.clone(), self.validity()?)?;
         let mut changes = Changes::default();
-        let other_access_replaces_record = known
-            .and_then(registry::IdentityRecord::access)
-            .is_some_and(|known| *known != access);
         changes.admitted(
             &device.identity,
             &registry::Admitted {
@@ -1679,7 +1682,10 @@ impl Settings {
             )?;
         }
         if let Some(label) = &label {
-            changes.label(&device.identity, label)?;
+            if known.is_none_or(|record| record.label.is_none()) {
+                changes.label(&device.identity, label)?;
+            }
+            changes.device_label(&device.identity, &device.node, label)?;
         }
         changes.capability(
             &device.identity,

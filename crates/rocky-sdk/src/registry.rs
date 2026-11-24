@@ -62,6 +62,7 @@ pub struct IdentityRecord {
     pub capabilities: Vec<Capability>,
     pub grants: Vec<Grant>,
     pub label: Option<Vec<u8>>,
+    pub device_labels: BTreeMap<PublicKey, String>,
 }
 impl IdentityRecord {
     pub fn capability(&self) -> Option<Capability> {
@@ -184,6 +185,13 @@ impl Registry {
             ("label", "") => {
                 let label: Label = parse(value)?;
                 record.label = Some(BASE64URL_NOPAD.decode(label.label.as_bytes())?);
+            }
+            (DEVICE_LABEL, node) => {
+                let label: Label = parse(value)?;
+                record.device_labels.insert(
+                    node.parse()?,
+                    String::from_utf8(BASE64URL_NOPAD.decode(label.label.as_bytes())?)?,
+                );
             }
             ("capability", _) => record.capabilities.push(parse(value)?),
             ("grant", _) => record.grants.push(parse(value)?),
@@ -331,8 +339,29 @@ impl Changes {
         };
         self.push(identity, "label".into(), &label, Mode::Replace)
     }
+    pub fn device_label(
+        &mut self,
+        identity: &PublicKey,
+        node: &PublicKey,
+        label: &[u8],
+    ) -> Result<(), Failure> {
+        if label.len() > MAX_LABEL {
+            return Err(format!("a device label holds at most {MAX_LABEL} bytes").into());
+        }
+        std::str::from_utf8(label)?;
+        let label = Label {
+            label: BASE64URL_NOPAD.encode(label),
+        };
+        self.push(
+            identity,
+            format!("{DEVICE_LABEL}/{}", node.to_hex()),
+            &label,
+            Mode::Replace,
+        )
+    }
 }
 const IDENTITY: &str = "identity";
+const DEVICE_LABEL: &str = "device-label";
 const TRUSTED: &str = "trusted";
 fn grant_entry(grant: &Grant) -> Result<String, Failure> {
     let digest = rocky_core::commitment("rocky.sdk.registry-grant.v2", &serde_json::to_vec(grant)?);

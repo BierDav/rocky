@@ -163,9 +163,6 @@ impl<A: RowApplication> Inner<A> {
         scopes: &BTreeSet<ResourceScope>,
         time: u64,
     ) -> Result<SessionStatus, Error> {
-        if scopes.is_empty() {
-            return Err(denied("session scope quota"));
-        }
         let grants = self.local_grants(time)?;
         let mut status = SessionStatus {
             principal: self

@@ -55,6 +55,9 @@ pub enum BlockerKind {
         held: u64,
         reported: u64,
     },
+    PartitionNotGranted {
+        group: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -165,6 +168,9 @@ impl fmt::Display for Blocker {
             ),
             BlockerKind::StoreSuperseded { held, reported } => format!(
                 "this device's store is older than what peers hold for its key ({held} of {reported} positions); re-invite it as a new device"
+            ),
+            BlockerKind::PartitionNotGranted { group } => format!(
+                "no partition of group `{group}` is granted to this person; an admin grants one with grant_partition"
             ),
         };
         let clears = match &self.clears_by {

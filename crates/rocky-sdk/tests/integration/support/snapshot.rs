@@ -431,6 +431,7 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::RoleChanged { partial } => json!({"kind":"role_changed","partial":partial}),
                 sdk::ActivityKind::PartitionCreated { partition: created, id } => json!({"kind":"partition_created","partition":partition(created),"id":id}),
                 sdk::ActivityKind::PartitionShared { partition: shared, recipients } => json!({"kind":"partition_shared","partition":partition(shared),"recipients":recipients}),
+                sdk::ActivityKind::PartitionShareFailed { partition: failed, error } => json!({"kind":"partition_share_failed","partition":failed.map(partition),"error":error}),
                 sdk::ActivityKind::EnvelopesDelivered { peer, handed, deposited, refused, received, receipts } => json!({"kind":"envelopes_delivered","peer":peer,"handed":handed,"deposited":deposited,"refused":refused,"received":received,"receipts":receipts}),
                 sdk::ActivityKind::EnvelopeRefused { peer, error } => json!({"kind":"envelope_refused","peer":peer,"error":error}),
                 sdk::ActivityKind::PartitionKeyInstalled { partition: installed } => json!({"kind":"partition_key_installed","partition":partition(installed)}),

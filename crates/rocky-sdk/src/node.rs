@@ -275,6 +275,7 @@ pub(crate) struct Node {
     pub(crate) verified_under_settings: AtomicU64,
     learned: AtomicBool,
     rights_notice: std::sync::Mutex<Option<PublicKey>>,
+    granted_devices: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     import_sources: std::sync::Mutex<
         BTreeMap<
@@ -385,6 +386,7 @@ impl Node {
             clocks: std::sync::Mutex::new(BTreeMap::new()),
             learned: AtomicBool::new(false),
             rights_notice: std::sync::Mutex::new(None),
+            granted_devices: std::sync::Mutex::new(Default::default()),
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),
             sync_failures: Default::default(),

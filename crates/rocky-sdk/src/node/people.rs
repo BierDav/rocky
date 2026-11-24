@@ -98,6 +98,65 @@ impl Node {
         })
     }
 
+    pub(crate) async fn withheld_tables(
+        &self,
+    ) -> Result<BTreeMap<String, (String, rocky_core::Blocker)>, crate::Failure> {
+        let settings = self.settings_snapshot().await;
+        let mut withheld = BTreeMap::new();
+        let crate::Access::Role(role) = &settings.access else {
+            return Ok(withheld);
+        };
+        let domain = self.domain();
+        let logical = domain.logical();
+        let Some(definition) = logical
+            .role(role.as_str())
+            .filter(|definition| !definition.per_partition.is_empty())
+        else {
+            return Ok(withheld);
+        };
+        let Some(held) = settings.credentials.held() else {
+            return Ok(withheld);
+        };
+        let partitioned = domain.expand_partitions(&crate::access::granted_of(held)?);
+        for entry in &definition.tables {
+            let Some(table) = logical.table(&entry.table) else {
+                continue;
+            };
+            let Some(group) = table
+                .group()
+                .filter(|group| definition.per_partition.iter().any(|named| named == group))
+            else {
+                continue;
+            };
+            let id = logical.table_id(table);
+            if partitioned.iter().any(|grant| grant.table == id) {
+                continue;
+            }
+            let Some(scope) = domain
+                .scopes()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&table.sql_name))
+                .map(|(_, scope)| scope)
+            else {
+                continue;
+            };
+            withheld.insert(
+                table.sql_name.to_ascii_lowercase(),
+                (
+                    table.sql_name.clone(),
+                    rocky_core::Blocker {
+                        scope: rocky_core::scope_label(&scope),
+                        kind: rocky_core::BlockerKind::PartitionNotGranted {
+                            group: group.to_owned(),
+                        },
+                        clears_by: rocky_core::ClearsBy::Application,
+                        since: None,
+                    },
+                ),
+            );
+        }
+        Ok(withheld)
+    }
+
     async fn administered(
         &self,
     ) -> Result<(crate::enrollment::Settings, Registry), crate::Failure> {
@@ -162,6 +221,7 @@ impl Node {
                 .filter(|linked| !settings.tombstoned(&linked.node))
                 .map(|linked| Device {
                     id: DeviceId::new(linked.node),
+                    label: record.device_labels.get(&linked.node).cloned(),
                     linked: seconds(linked.linked),
                     last_seen: self.last_seen(linked.node, time).map(seconds),
                 })
@@ -240,48 +300,150 @@ impl Node {
         let record = registry.get(&identity).ok_or(AccessError::UnknownPerson)?;
         let access = record.access().cloned().ok_or(AccessError::UnknownPerson)?;
         let stored = StoredPartition::of(partition);
-        if record.grants.contains(&stored) {
-            return Ok(());
-        }
-        if record.grants.len() >= MAX_PARTITIONS {
-            return Err(Box::new(AccessError::TooManyPartitions {
-                limit: MAX_PARTITIONS,
-            }));
-        }
-        let domain = self.domain();
-        let target = partition.target();
-        let fresh = domain.partition_targets(std::slice::from_ref(&target))?;
-        let mut held = record.held(&domain)?;
-        held.extend(fresh.iter().cloned());
-        let refusal = |error: crate::Failure| {
-            AccessError::of(&error, &access, std::slice::from_ref(partition))
+        let fresh = if record.grants.contains(&stored) {
+            None
+        } else {
+            Some(self.grantable(record, &access, partition)?)
         };
-        domain.compile(&access, &held).map_err(refusal)?;
-        let granted = domain.compile(&access, &fresh).map_err(refusal)?;
         let group = self
-            .group_partition(&target, super::partition::Naming::Known)
+            .group_partition(&partition.target(), super::partition::Naming::Known)
             .await?;
-        let reads_every_member = group.members.iter().all(|member| {
-            granted.partitions.iter().any(|grant| {
-                grant.table == member.scope.table && grant.rights.contains(&Right::Read)
-            })
-        });
-        if !reads_every_member {
-            return Err(Box::new(AccessError::PartialGroup {
-                group: partition.group.clone(),
-            }));
+        if let Some(granted) = fresh {
+            let reads_every_member = group.members.iter().all(|member| {
+                granted.partitions.iter().any(|grant| {
+                    grant.table == member.scope.table && grant.rights.contains(&Right::Read)
+                })
+            });
+            if !reads_every_member {
+                return Err(Box::new(AccessError::PartialGroup {
+                    group: partition.group.clone(),
+                }));
+            }
+            let mut changes = Changes::default();
+            changes.grant(&identity, &stored, Some(record))?;
+            self.commit(changes).await?;
         }
-        let mut changes = Changes::default();
-        changes.grant(&identity, &stored, Some(record))?;
-        self.commit(changes).await?;
         let nodes = self.identity_nodes(identity).await?;
-        let recipients = self.share_with(&group, &nodes).await?;
+        let recipients = self.share_with(&group, &nodes, true).await?;
         self.activity.record(crate::ActivityKind::PartitionShared {
             partition: partition.clone(),
             recipients,
         });
         self.wake_sync();
         Ok(())
+    }
+
+    fn grantable(
+        &self,
+        record: &crate::registry::IdentityRecord,
+        access: &crate::Access,
+        partition: &Partition,
+    ) -> Result<rocky_credentials::Granted, crate::Failure> {
+        if record.grants.len() >= MAX_PARTITIONS {
+            return Err(Box::new(AccessError::TooManyPartitions {
+                limit: MAX_PARTITIONS,
+            }));
+        }
+        let domain = self.domain();
+        let fresh = domain.partition_targets(std::slice::from_ref(&partition.target()))?;
+        let mut held = record.held(&domain)?;
+        held.extend(fresh.iter().cloned());
+        let refusal = |error: crate::Failure| -> crate::Failure {
+            Box::new(AccessError::of(
+                &error,
+                access,
+                std::slice::from_ref(partition),
+            ))
+        };
+        domain.compile(access, &held).map_err(refusal)?;
+        domain.compile(access, &fresh).map_err(refusal)
+    }
+
+    pub(super) async fn deliver_grants_to_new_devices(&self) -> Result<(), crate::Failure> {
+        let settings = self.settings_snapshot().await;
+        if !settings.issuer() {
+            return Ok(());
+        }
+        let registry = self.registry(&settings).await?;
+        let membership = self.membership().await?;
+        let served = self
+            .granted_devices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for (identity, record) in &registry.records {
+            if record.grants.is_empty()
+                || record.admitted.is_none()
+                || registry.trusted.contains_key(identity)
+                || settings.revoked_identity(identity, &registry)
+            {
+                continue;
+            }
+            let seen = settings
+                .authority
+                .iter()
+                .flat_map(|issuing| &issuing.seen)
+                .filter(|(_, seen)| seen.identity == *identity)
+                .map(|(node, _)| *node);
+            let unserved: std::collections::BTreeSet<PublicKey> = membership
+                .nodes(identity)
+                .map(|linked| linked.node)
+                .chain(seen)
+                .filter(|node| !served.contains(node) && !settings.tombstoned(node))
+                .collect();
+            if unserved.is_empty() {
+                continue;
+            }
+            let mut delivered = true;
+            for partition in record.partitions() {
+                match self.share_new(&partition, &unserved).await {
+                    Ok(0) => {}
+                    Ok(recipients) => {
+                        self.activity.record(crate::ActivityKind::PartitionShared {
+                            partition,
+                            recipients,
+                        });
+                        self.wake_sync();
+                    }
+                    Err(error) => {
+                        delivered = false;
+                        self.activity
+                            .record(crate::ActivityKind::PartitionShareFailed {
+                                partition: Some(partition),
+                                error: error.to_string(),
+                            });
+                    }
+                }
+            }
+            if delivered {
+                self.granted_devices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(unserved);
+            }
+        }
+        Ok(())
+    }
+
+    async fn share_new(
+        &self,
+        partition: &Partition,
+        nodes: &std::collections::BTreeSet<PublicKey>,
+    ) -> Result<usize, crate::Failure> {
+        let group = self
+            .group_partition(&partition.target(), super::partition::Naming::Known)
+            .await?;
+        self.share_with(&group, nodes, false).await
+    }
+
+    pub(super) async fn settle_grant_deliveries(&self) {
+        if let Err(error) = self.deliver_grants_to_new_devices().await {
+            self.activity
+                .record(crate::ActivityKind::PartitionShareFailed {
+                    partition: None,
+                    error: error.to_string(),
+                });
+        }
     }
 
     pub(super) async fn revoke_partition(

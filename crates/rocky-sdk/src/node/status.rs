@@ -186,7 +186,14 @@ impl Node {
             || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let revision = *self.replica.observe_revision().borrow();
-        let blockers = self.blockers().await?;
+        let mut blockers = self.blockers().await?;
+        blockers.extend(
+            self.withheld_tables()
+                .await?
+                .into_values()
+                .map(|(_, blocker)| blocker),
+        );
+        blockers.sort();
         let mut status = DatabaseStatus {
             token: String::new(),
             observed_at_epoch_millis: epoch_millis(),

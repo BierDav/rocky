@@ -226,6 +226,7 @@ pub struct Me {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Device {
     pub id: DeviceId,
+    pub label: Option<String>,
     pub linked: Timestamp,
     pub last_seen: Option<Timestamp>,
 }

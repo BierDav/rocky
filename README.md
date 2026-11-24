@@ -60,6 +60,8 @@ The owner's identity is derived from that root. Identity signers are also
 never stored. An admin invites with `Database::invite(Invite::new(access))`,
 optionally naming `partition`s, a `label`, a validity (`Invite::valid_for`,
 ten minutes by default) or the one person it is for (`for_identity`). The
+label names the device the invitation admits (`Device::label`) and, on the
+person's first invitation, the person. The
 returned `Invitation` holds an `InvitationCode`; `Configuration::join` redeems
 it over the network with the issuing device and returns `Opened`. A default
 code carries a single-use secret, so whoever holds it joins once, as an
@@ -73,7 +75,11 @@ refused join says why with a `JoinError` (`Expired`, `Used`, `Cancelled`,
 compares with `Database::link_requests` on a device they already hold,
 approves with `approve_link`, and finishes with `PendingLink::confirm`.
 `Database::unlink` ends one device: the person's own, or as an admin a
-member's lost device, while the member keeps the others. Opening and renewal
+member's lost device, while the member keeps the others. Linking needs a
+device the person still holds, so a person who lost their only device gets a
+replacement through an admin: `unlink` the lost device and invite the person
+again with `for_identity` and the same access; the replacement joins with the
+person's identity and every partition they were granted. Opening and renewal
 use the device key alone.
 `Database::invite` takes an `Access`: `Full`,
 `Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
@@ -81,7 +87,12 @@ A role reads, writes, appends to or updates named columns of the tables it
 lists; column lists restrict writes only. A role declared `per_partition`
 holds no partition of that group until an admin calls
 `Database::grant_partition(person, &partition)`, which delivers the group
-secret to every device of that person; `revoke_partition` takes it back.
+secret to every device of that person, including devices that join or link
+later (at an admin's next sync once it learns of them); granting a partition
+the person already holds delivers it to their devices again.
+`revoke_partition` takes it back. Before any grant, a table of that group
+reads as `Unavailable` with an `Incomplete` reason whose `PartitionNotGranted`
+blocker names the group, and `status` lists the same blocker.
 `Full` and `Read` reach every partition. A new partition's secret reaches
 every device of every person whose access covers it through the delivery
 mailboxes, with no application call; store-only devices hold its frames but

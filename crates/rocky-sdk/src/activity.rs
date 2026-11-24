@@ -139,6 +139,10 @@ pub enum ActivityKind {
         partition: crate::Partition,
         recipients: usize,
     },
+    PartitionShareFailed {
+        partition: Option<crate::Partition>,
+        error: String,
+    },
     EnvelopesDelivered {
         peer: PublicKey,
         handed: u64,

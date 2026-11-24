@@ -50,6 +50,8 @@ mod person_key;
 #[cfg(not(target_family = "wasm"))]
 mod readiness;
 #[cfg(not(target_family = "wasm"))]
+mod readme_examples;
+#[cfg(not(target_family = "wasm"))]
 mod refusals;
 #[cfg(not(target_family = "wasm"))]
 mod registry;

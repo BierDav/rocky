@@ -56,7 +56,6 @@ pub use lanes::{LaneAlerts, PeerRegression, StoreSuperseded};
 mod metadata;
 pub(crate) mod migrate;
 pub(crate) mod moves;
-mod offload;
 mod partition;
 mod placements;
 pub(super) mod positions;
@@ -135,7 +134,6 @@ pub use checkpoint::{
 pub use generation::{EngineStatus, GenerationStatus};
 pub use held::{CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, SignedVoid};
 pub use migrate::ProjectionPlan;
-pub use offload::RemotePage;
 use p2panda_core::validate_backlink;
 use p2panda_store::operations::LocalOperationStore;
 #[cfg(feature = "qualification")]

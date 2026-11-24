@@ -175,12 +175,6 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
             window: 4,
         }
         .into(),
-        RowMessage::Read {
-            scope,
-            after: None,
-            max_rows: 1,
-        }
-        .into(),
     ]
 }
 
@@ -242,15 +236,6 @@ async fn transcript_case(custody: bool) {
             .contains(&scope)
     );
     let (mut c, mut s) = pair(&member, &server).await;
-    c.send(RowMessage::ScopesQuery { after: None })
-        .await
-        .unwrap();
-    s.serve_once(&server).await.unwrap();
-    let RowMessage::Scopes { scopes, next } = c.reply().await.unwrap() else {
-        panic!("scopes reply")
-    };
-    assert_eq!(scopes, vec![f.scope("products", 0)]);
-    assert!(next.is_none());
     for asked in [scope, unknown] {
         c.send(FrontierMessage::FrontiersQuery {
             frontiers: vec![ScopeFrontier {
@@ -321,15 +306,6 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         1,
         "a later raw scoped request needs no proof or extra message"
     );
-    c.send(RowMessage::ScopesQuery { after: None })
-        .await
-        .unwrap();
-    s.serve_once(&server).await.unwrap();
-    let RowMessage::Scopes { scopes, next } = c.reply().await.unwrap() else {
-        panic!("scopes")
-    };
-    assert_eq!(scopes, vec![scope]);
-    assert!(next.is_none());
     c2.send(query(captured.clone())).await.unwrap();
     s2.serve_once(&server).await.unwrap();
     let FrontierMessage::Frontiers { states } = c2.reply().await.unwrap() else {

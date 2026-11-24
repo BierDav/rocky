@@ -924,16 +924,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         after: Option<ResourceScope>,
     ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
-        self.held_scopes_proved(peer, credentials, after, None)
-            .await
-    }
-    pub(crate) async fn held_scopes_proved(
-        &self,
-        peer: PublicKey,
-        credentials: &CredentialChain,
-        after: Option<ResourceScope>,
-        proved: Option<&BTreeSet<ResourceScope>>,
-    ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.peer_grants(peer, credentials)?;
         let mut scopes = BTreeSet::new();
@@ -950,10 +940,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let mut held = Vec::new();
         for scope in scopes {
-            if proved.is_some_and(|proved| inner.partitioned(scope) && !proved.contains(&scope))
-                || after.is_some_and(|after| scope <= after)
-                || !inner.holds(scope).await?
-            {
+            if after.is_some_and(|after| scope <= after) || !inner.holds(scope).await? {
                 continue;
             }
             if grants.iter().any(|grant| {

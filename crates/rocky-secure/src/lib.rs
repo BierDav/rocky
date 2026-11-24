@@ -25,12 +25,12 @@ pub use replica::{
     MigrationPending, MigrationStorage, OpenConfig, OutcomeDivergence, PUBLICATION_CHUNK_BUNDLES,
     PageCache, PeerRegression, PeerScopeFrontier, PendingSchema, Placement, PlacementPage,
     PlacementRequest, ProjectionPlan, PruneBlock, PruneReport, PrunedPage, Publication,
-    ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, RemotePage, ReplicaRole,
-    RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier,
-    SealRebootstrap, SealedOutcome, SealedOutcomes, SealedTransaction, SecureCommit, SecureConfig,
-    SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql, SecureTransaction,
-    SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, StateAdvice, StoreSuperseded,
-    TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode, created_name,
+    ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, ReplicaRole, RetentionLimits,
+    RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier, SealRebootstrap,
+    SealedOutcome, SealedOutcomes, SealedTransaction, SecureCommit, SecureConfig, SecurePage,
+    SecureRows, SecureSession, SecureSnapshot, SecureSql, SecureTransaction, SessionStatus,
+    SetSummary, SignedCheckpoint, SignedVoid, StateAdvice, StoreSuperseded, TipDevice,
+    TipNodeObservation, TipObservation, TipStatement, UpdateMode, created_name,
     installed_tip_schema, read_authority_entry, remove_authority_entry, write_authority_entry,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};

@@ -275,7 +275,6 @@ impl NativeSession {
                 }
                 RowMessage::FrontierQuery { scope }
                 | RowMessage::Push { scope, .. }
-                | RowMessage::Read { scope, .. }
                 | RowMessage::RevokedHeadsQuery { scope, .. } => vec![*scope],
                 _ => Vec::new(),
             },

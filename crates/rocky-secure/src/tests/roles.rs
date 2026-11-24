@@ -368,8 +368,6 @@ async fn a_partial_replica_holds_only_its_subscription() {
         insert(&f, &full, *scope, 0..20, 5).await;
     }
     let (mut session, server) = connect(&device, &full).await;
-    let (offered, next) = session.peer_scopes(None).await.unwrap();
-    assert_eq!((offered.len(), next), (20, None));
     let held: Vec<_> = device
         .replica
         .subscriptions()
@@ -422,86 +420,6 @@ async fn a_partial_replica_holds_only_its_subscription() {
         outside.is_err(),
         "a partial replica cannot author outside its subscription"
     );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_remote_read_states_its_source_and_is_never_local_state() {
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let scopes = departments(&f, 2);
-    let full = open_node(
-        &f,
-        &dir.path().join("full.db"),
-        &PrivateKey::new(),
-        &scopes,
-        &scopes,
-    )
-    .await;
-    let device = open_node(
-        &f,
-        &dir.path().join("device.db"),
-        &PrivateKey::new(),
-        &scopes,
-        &scopes,
-    )
-    .await;
-    let stranger = open_node(
-        &f,
-        &dir.path().join("stranger.db"),
-        &PrivateKey::new(),
-        &scopes[..1],
-        &scopes[..1],
-    )
-    .await;
-    device.replica.set_role(partial()).await.unwrap();
-    device.replica.subscribe(scopes[0]).await.unwrap();
-    insert(&f, &full, scopes[1], 0..50, 10).await;
-    let revision = *device.replica.observe_revision().borrow();
-
-    let (mut session, server) = connect(&device, &full).await;
-    let mut rows = BTreeMap::new();
-    let mut cursor = None;
-    loop {
-        let page = session
-            .read_remote(&device.replica, scopes[1], cursor, 16)
-            .await
-            .unwrap();
-        assert_eq!(
-            (page.source, page.scope),
-            (full.key.public_key(), scopes[1])
-        );
-        assert!(page.complete);
-        assert_eq!(page.frontier.iter().map(|log| log.applied).sum::<u64>(), 5);
-        rows.extend(page.rows);
-        cursor = page.next;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    drop(session);
-    server.await.unwrap();
-    assert_eq!(rows, all_rows(&full.replica, scopes[1]).await);
-    assert_eq!(stored_rows(&device.replica, scopes[1]).await, 0);
-    assert_eq!(*device.replica.observe_revision().borrow(), revision);
-    assert!(
-        !device
-            .replica
-            .snapshot_page(scopes[1], None, 16)
-            .await
-            .unwrap()
-            .complete
-    );
-
-    let (mut session, server) = connect(&stranger, &full).await;
-    assert!(
-        session
-            .read_remote(&stranger.replica, scopes[1], None, 16)
-            .await
-            .is_err(),
-        "without read authority over the scope nothing is served"
-    );
-    drop(session);
-    server.await.unwrap();
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -735,9 +653,7 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     )
     .await;
     let (mut session, server) = connect(&replacement, &full).await;
-    let (offered, _) = session.peer_scopes(None).await.unwrap();
-    assert_eq!(offered.len(), 3);
-    for scope in offered {
+    for scope in scopes.iter().copied() {
         session
             .sync_scope(&replacement.replica, scope, QUOTA)
             .await

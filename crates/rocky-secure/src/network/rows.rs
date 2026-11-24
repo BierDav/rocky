@@ -32,21 +32,6 @@ pub(super) enum RowMessage {
         frames: Vec<EncryptedFrame>,
         voids: Vec<SignedVoid>,
     },
-    ScopesQuery {
-        after: Option<ResourceScope>,
-    },
-    Scopes {
-        scopes: Vec<ResourceScope>,
-        next: Option<ResourceScope>,
-    },
-    Read {
-        scope: ResourceScope,
-        after: Option<Commitment>,
-        max_rows: usize,
-    },
-    ReadRows {
-        package: EncryptedPackage,
-    },
     RevokedHeadsQuery {
         scope: ResourceScope,
         heads: Vec<Hash>,
@@ -328,49 +313,6 @@ impl NativeSession {
             .await?;
         Ok(frontier)
     }
-    pub async fn peer_scopes(
-        &mut self,
-        after: Option<ResourceScope>,
-    ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
-        self.send(RowMessage::ScopesQuery { after }).await?;
-        let RowMessage::Scopes { scopes, next } = self.reply::<RowMessage>().await? else {
-            return Err(denied("unexpected scope list response"));
-        };
-        if scopes.len() > 64
-            || scopes.windows(2).any(|pair| pair[0] >= pair[1])
-            || scopes
-                .first()
-                .is_some_and(|first| after.is_some_and(|after| *first <= after))
-        {
-            return Err(denied("scope list outside request"));
-        }
-        Ok((scopes, next))
-    }
-    pub async fn read_remote<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        scope: ResourceScope,
-        after: Option<Commitment>,
-        max_rows: usize,
-    ) -> Result<RemotePage, Error> {
-        self.ensure_holding(replica, &[scope]).await?;
-        self.send(RowMessage::Read {
-            scope,
-            after,
-            max_rows,
-        })
-        .await?;
-        let RowMessage::ReadRows { package } = self.reply::<RowMessage>().await? else {
-            return Err(denied("unexpected remote read response"));
-        };
-        let page = replica
-            .open_remote_read(self.peer, scope, after, &package)
-            .await?;
-        if page.rows.len() > max_rows {
-            return Err(denied("remote read outside request"));
-        }
-        Ok(page)
-    }
     pub(super) async fn answer_rows<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -460,22 +402,6 @@ impl NativeSession {
                 }
                 let frontier = replica.frontier(scope).await?;
                 self.send(RowMessage::Frontier { frontier }).await
-            }
-            RowMessage::ScopesQuery { after } => {
-                let (scopes, next) = replica
-                    .held_scopes_proved(self.peer, &self.credentials, after, Some(&self.proved))
-                    .await?;
-                self.send(RowMessage::Scopes { scopes, next }).await
-            }
-            RowMessage::Read {
-                scope,
-                after,
-                max_rows,
-            } => {
-                let package = replica
-                    .remote_read(self.peer, &self.credentials, scope, after, max_rows)
-                    .await?;
-                self.send(RowMessage::ReadRows { package }).await
             }
             RowMessage::RevokedHeadsQuery { scope, heads } => {
                 let heads = replica

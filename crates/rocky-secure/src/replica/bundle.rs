@@ -315,7 +315,7 @@ impl<A: RowApplication> Inner<A> {
                     );
                     self.refuse_intent_blockers(opening.scope).await?;
                     let frame = self
-                        .author_log_frame(
+                        .author_intent_frame(
                             (opening.scope, tips.remove(&opening.scope).flatten()),
                             time,
                             |sequence, base| {

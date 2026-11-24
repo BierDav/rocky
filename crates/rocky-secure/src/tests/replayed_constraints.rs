@@ -13,6 +13,7 @@ mod clock;
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
 mod orphans;
+mod records;
 mod restrictions;
 
 fn definition() -> serde_json::Value {

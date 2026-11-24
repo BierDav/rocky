@@ -125,10 +125,34 @@ impl<A: RowApplication> Inner<A> {
             .map(Some)
     }
 
-    pub(super) async fn author_log_frame(
+    pub(super) async fn author_intent_frame(
+        &self,
+        log: (ResourceScope, Option<checkpoint::Log>),
+        time: u64,
+        payload: impl FnOnce(u64, Vec<BaseMark>) -> Result<Vec<u8>, Error>,
+    ) -> Result<EncryptedFrame, Error> {
+        let heads = self.applied_heads(log.0).await?;
+        self.author_log_frame(log, time, heads, payload).await
+    }
+
+    pub(super) async fn author_outcome_frame(
+        &self,
+        log: (ResourceScope, Option<checkpoint::Log>),
+        time: u64,
+        record: &rocky_core::replay::OutcomeRecord,
+    ) -> Result<EncryptedFrame, Error> {
+        let names_only_its_own_log = Vec::new();
+        self.author_log_frame(log, time, names_only_its_own_log, |_, _| {
+            RowPayload::outcome_record(record.clone())
+        })
+        .await
+    }
+
+    async fn author_log_frame(
         &self,
         (scope, tip): (ResourceScope, Option<checkpoint::Log>),
         time: u64,
+        heads: Vec<(Hash, p2panda_core::Header<Extensions>)>,
         payload: impl FnOnce(u64, Vec<BaseMark>) -> Result<Vec<u8>, Error>,
     ) -> Result<EncryptedFrame, Error> {
         self.ensure_tip_writable(scope.domain)?;
@@ -176,7 +200,6 @@ impl<A: RowApplication> Inner<A> {
             ),
             None => (0, None, 0),
         };
-        let heads = self.applied_heads(scope).await?;
         if heads.len() > 64 {
             return Err(denied("dependency quota"));
         }

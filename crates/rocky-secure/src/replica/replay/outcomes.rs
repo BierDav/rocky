@@ -269,9 +269,7 @@ impl<A: RowApplication> Inner<A> {
         for (scope, id) in logs {
             let tip = self.author_tip(*scope, *id, node).await?;
             let frame = self
-                .author_log_frame((*scope, tip), time, |_, _| {
-                    RowPayload::outcome_record(record.clone())
-                })
+                .author_outcome_frame((*scope, tip), time, record)
                 .await?;
             sequence = frame.operation_ref()?.header.extensions.author_sequence;
         }

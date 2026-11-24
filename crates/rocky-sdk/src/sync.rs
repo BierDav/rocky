@@ -265,6 +265,8 @@ pub(crate) async fn bootstrap(
         .set_importing(pending.iter().copied().collect())
         .await;
     use futures_util::{StreamExt, stream};
+    let settling = tokio::sync::Mutex::new((pending, expected));
+    let (progress, totals) = (&settling, &totals);
     let mut imports = stream::iter(planned.into_iter().map(|plan| {
         let mut first = first.take();
         async move {
@@ -311,32 +313,43 @@ pub(crate) async fn bootstrap(
                 Err(Box::new(Unfinished) as Failure)
             }
             .await;
-            (scope, checkpoint, moved, imported)
+            let settled = match &imported {
+                Ok(()) => {
+                    async {
+                        let mut progress = progress.lock().await;
+                        let (pending, expected) = &mut *progress;
+                        pending.retain(|known| *known != scope);
+                        *expected = file.record_progress(expected, pending, totals).await?;
+                        replica
+                            .set_importing(pending.iter().copied().collect())
+                            .await;
+                        Ok::<_, Failure>(())
+                    }
+                    .await
+                }
+                Err(error) if counts_against_import(error) => replica
+                    .import_failed(scope, checkpoint)
+                    .await
+                    .map(drop)
+                    .map_err(Failure::from),
+                Err(_) => Ok(()),
+            };
+            (scope, moved, imported, settled)
         }
     }))
     .buffer_unordered(PARALLEL);
-    while let Some((scope, checkpoint, moved, imported)) = imports.next().await {
+    while let Some((scope, moved, imported, settled)) = imports.next().await {
         transfer.extend(moved);
-        match imported {
-            Ok(()) => {
-                pending.retain(|known| *known != scope);
-                expected = file.record_progress(&expected, &pending, &totals).await?;
-                replica
-                    .set_importing(pending.iter().copied().collect())
-                    .await;
-            }
-            Err(error) => {
-                if counts_against_import(&error) {
-                    replica.import_failed(scope, checkpoint).await?;
-                }
-                transfer.request_failed(scope, &error);
-            }
+        settled?;
+        if let Err(error) = imported {
+            transfer.request_failed(scope, &error);
         }
     }
     drop(imports);
     if let Some(session) = first.take() {
         session.close().await?;
     }
+    let (pending, expected) = settling.into_inner();
     Ok(pending.is_empty().then_some(expected))
 }
 async fn deferred(

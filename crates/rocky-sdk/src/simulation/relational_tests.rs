@@ -627,4 +627,41 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_joiner_writing_while_it_imports_two_lists_does_not_stall() -> Result<(), Failure> {
+        let board = |node, list: &str, code, cap| {
+            Change(
+                node,
+                Change::Board {
+                    list: list.into(),
+                    code,
+                    cap,
+                },
+            )
+        };
+        holds_at(
+            20050,
+            soak_at(20050, Wall::Moving),
+            vec![
+                board(0, "l0", 0, 12),
+                Sync(0),
+                board(0, "l1", 3, 8),
+                Change(
+                    1,
+                    Change::Recode {
+                        list: "l0".into(),
+                        board: 6,
+                        code: 2,
+                    },
+                ),
+                Sync(1),
+                Seal(0),
+                Sync(0),
+                Invite(0, 2),
+                board(2, "l0", 3, 10),
+            ],
+        )
+        .await
+    }
 }

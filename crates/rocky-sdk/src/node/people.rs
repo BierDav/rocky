@@ -297,6 +297,39 @@ impl Node {
         self.change_rights(identity, changes).await
     }
 
+    pub(super) fn role_holders(
+        settings: &crate::enrollment::Settings,
+        registry: &Registry,
+        role: &crate::RoleName,
+    ) -> Vec<PersonId> {
+        let access = crate::Access::Role(role.clone());
+        registry
+            .records
+            .iter()
+            .filter(|(identity, record)| {
+                record
+                    .admitted
+                    .as_ref()
+                    .is_some_and(|admitted| admitted.access == access)
+                    && !settings.revoked_identity(identity, registry)
+            })
+            .map(|(identity, _)| PersonId::new(*identity))
+            .collect()
+    }
+
+    pub(super) async fn narrow(&self, people: &[PersonId]) -> Result<(), crate::Failure> {
+        for person in people {
+            self.revoke_with(Revoke::Rights(person.key()), &Root::default())
+                .await?;
+            self.activity
+                .record(crate::ActivityKind::RightsChanged { person: *person });
+        }
+        if !people.is_empty() {
+            self.wake_sync();
+        }
+        Ok(())
+    }
+
     async fn change_rights(
         &self,
         identity: PublicKey,

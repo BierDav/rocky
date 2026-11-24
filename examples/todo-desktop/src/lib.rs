@@ -364,10 +364,7 @@ struct View {
 async fn load(todos: &Todos, chosen: Option<rocky_sdk::RowIdentity>) -> Result<View, Failure> {
     let node = todos.node().await?;
     let members = todos.members().await?;
-    let role = members
-        .iter()
-        .find(|member| member.node == node)
-        .map(|member| member.role);
+    let role = Some(todos.role().await?);
     let lists = todos.lists().await?;
     let list = chosen
         .filter(|id| lists.iter().any(|list| list.id == *id))

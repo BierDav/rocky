@@ -2255,6 +2255,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
             crate::ErrorKind::RolloutConfirmation(Box::new(required.clone())),
             false,
         )
+    } else if let Some(in_use) = error.downcast_ref::<crate::RoleInUse>() {
+        (crate::ErrorKind::RoleInUse(in_use.clone()), false)
     } else if let Some(failure) = error.downcast_ref::<crate::SqlFailure>() {
         return failure.clone().into();
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {

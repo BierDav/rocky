@@ -136,14 +136,15 @@ impl Todos {
         let _ = self.database.remove_peer(node_key).await;
         Ok(())
     }
-    pub async fn role(&self) -> Result<Option<Role>, Failure> {
-        let node = self.node().await?;
-        Ok(self
-            .members()
-            .await?
-            .into_iter()
-            .find(|member| member.node == node)
-            .map(|member| member.role))
+    pub async fn role(&self) -> Result<Role, Failure> {
+        let me = self.database.me().await?;
+        Ok(if me.admin {
+            Role::Trusted
+        } else if me.access == Access::Role(PARTIAL) {
+            Role::Partial
+        } else {
+            Role::Full
+        })
     }
     pub async fn members(&self) -> Result<Vec<Member>, Failure> {
         let rows = self
@@ -233,7 +234,7 @@ impl Todos {
         self.share(list, &missing).await
     }
     pub async fn share_lists_with_members(&self) -> Result<(), Failure> {
-        if self.role().await? != Some(Role::Trusted) {
+        if self.role().await? != Role::Trusted {
             return Ok(());
         }
         for list in self.lists().await? {

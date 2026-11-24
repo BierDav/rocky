@@ -205,7 +205,7 @@ impl Todos {
             .database
             .query("SELECT id,title FROM lists ORDER BY title,id", params![])
             .await;
-        let partial = self.database.info().await?.access == rocky_sdk::Access::Role(roles::PARTIAL);
+        let partial = self.database.me().await?.access == rocky_sdk::Access::Role(roles::PARTIAL);
         let rows = match query {
             Ok(rows) => rows.collect().await?,
             Err(_) if partial => return Ok(Vec::new()),

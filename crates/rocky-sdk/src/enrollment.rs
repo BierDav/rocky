@@ -1784,6 +1784,29 @@ impl Settings {
     fn revoked(&self, node: &PublicKey) -> bool {
         self.revocations.revokes(node)
     }
+    pub(crate) fn released_key_roles(&self, after: &Self) -> Vec<String> {
+        self.keys
+            .iter()
+            .filter(|(name, _)| !after.keys.contains_key(*name))
+            .flat_map(|(name, epochs)| epochs.iter().map(|epoch| key_role(name, *epoch)))
+            .collect()
+    }
+    fn release_unreadable_keys(&mut self) -> Result<(), Failure> {
+        let Some(capability) = self.credentials.held() else {
+            return Ok(());
+        };
+        let domain = self.domain()?;
+        let (_, granted) = held(capability, &domain)?;
+        let unreadable: Vec<String> = domain
+            .scopes()
+            .filter(|(_, scope)| !reads(&granted, *scope))
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        for name in unreadable {
+            self.keys.remove(&name);
+        }
+        Ok(())
+    }
     pub(crate) fn forget_revoked(&mut self) {
         self.contact_refs
             .retain(|id, _| !self.revocations.revokes_reference(id));
@@ -2355,6 +2378,7 @@ impl Settings {
         }
         draft.learn_revocations(&renewed.revocations)?;
         draft.credentials = renewed.chain.clone();
+        draft.release_unreadable_keys()?;
         draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
@@ -2374,10 +2398,12 @@ impl Settings {
         renewed: &Renewed,
     ) -> Result<(Vec<NewKey>, bool), Failure> {
         let (draft, held, changed) = self.adopt_into(vault, renewed)?;
+        let released = self.released_key_roles(&draft);
         if changed {
             draft.save(path).await?;
         }
         *self = draft;
+        vault.forget(released)?;
         Ok((held, changed))
     }
     pub fn renew(

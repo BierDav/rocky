@@ -20,7 +20,7 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
             .collect::<Vec<_>>(),
         [Role::Trusted, Role::Full, Role::Partial]
     );
-    assert_eq!(watch.role().await?, Some(Role::Partial));
+    assert_eq!(watch.role().await?, Role::Partial);
 
     let errands = laptop.create_list("Errands").await?.id;
     laptop.add(errands, "Post").await?;

@@ -86,6 +86,13 @@ renewal. A refused call says why with an `AccessError` (`AdminRequired`,
 `TooManyPartitions`, `Removed`, ...). The owner makes a member an admin with
 `make_admin(person, root)` and ends one with `revoke_admin(person,
 AdminRevocation::Remove(removal), root)`; both need the root key.
+A schema version that drops tables or fields or narrows a role opens on an
+issuer only through `Configuration::open_confirmed` with the digest of the
+`RolloutImpact` its refusal carries; `narrowed_roles` names the roles that
+lose rights. Once the version is published, the issuer revokes the
+capabilities of everyone holding a narrowed role and rotates their keys. A
+version that drops a role someone still holds fails with `RoleInUse`;
+widened roles reach their holders at the next renewal.
 Copying a closed database folder is a valid backup; a restored copy that
 peers have moved past reads and syncs but refuses to write
 (`StoreSuperseded`), and rejoins as a new device.

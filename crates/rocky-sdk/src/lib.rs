@@ -93,7 +93,7 @@ pub use rocky_secure::{
     RetentionLimits, RetentionPolicy,
 };
 pub use rocky_secure::{PageCache, PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};
-pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
+pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{
     Column, InvalidName, Migration, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,
 };

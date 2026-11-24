@@ -138,11 +138,13 @@ impl SettingsGuard<'_> {
         renewed: &Renewed,
     ) -> Result<(Vec<NewKey>, bool), Failure> {
         let (draft, held, changed) = self.held.adopt_into(vault, renewed)?;
+        let released = self.held.released_key_roles(&draft);
         if changed {
             self.commit(Shared::new(draft), replica).await?;
         } else {
             *self.held = Shared::new(draft);
         }
+        vault.forget(released)?;
         Ok((held, changed))
     }
 }

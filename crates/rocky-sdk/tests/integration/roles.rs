@@ -9,7 +9,13 @@ const SCANNER: RoleName = RoleName::from_static("scanner");
 const CLINICIAN: RoleName = RoleName::from_static("clinician");
 
 fn venue() -> Result<Schema, Failure> {
-    Ok(Schema::builder("venue", 1)
+    venue_at(
+        1,
+        Some(Role::new(SCANNER).read("tickets").append("check_ins")),
+    )
+}
+fn venue_at(version: u32, scanner: Option<Role>) -> Result<Schema, Failure> {
+    let builder = Schema::builder("venue", version)
         .table(
             Table::replayed("tickets")
                 .column(Column::new("code", Affinity::Text).required())
@@ -19,9 +25,36 @@ fn venue() -> Result<Schema, Failure> {
             Table::replayed("check_ins")
                 .column(Column::new("code", Affinity::Text).required())
                 .column(Column::new("gate", Affinity::Text).required()),
-        )
-        .role(Role::new(SCANNER).read("tickets").append("check_ins"))
-        .build()?)
+        );
+    Ok(match scanner {
+        Some(role) => builder.role(role),
+        None => builder,
+    }
+    .build()?)
+}
+async fn venue_with_scanner(root: &Path, hub: &Arc<Hub>) -> Result<(Device, Device), Failure> {
+    let schema = venue()?;
+    let admin = Device::new(
+        open(&root.join("admin"), &schema, hub, "admin")
+            .create()
+            .await?,
+    )?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(SCANNER)))
+        .await?;
+    let scanner = Device::new(
+        open(&root.join("scanner"), &schema, hub, "scanner")
+            .join(&invitation.code)
+            .await?,
+    )?;
+    synced(&scanner).await?;
+    insert(&scanner, "check_ins", ["T1", "north"]).await?;
+    synced(&scanner).await?;
+    Ok((admin, scanner))
+}
+async fn check_in_rights(device: &Device) -> Result<Option<TableRights>, Failure> {
+    Ok(device.database.me().await?.tables.get("check_ins").cloned())
 }
 fn clinic() -> Result<Schema, Failure> {
     Ok(Schema::builder("clinic", 1)
@@ -462,6 +495,123 @@ async fn an_unknown_or_reserved_role_is_refused() -> Result<(), Failure> {
     for reserved in ["admin", "Full", "read", "store", "not a name"] {
         assert!(RoleName::new(reserved).is_err(), "{reserved}");
     }
+    admin.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rollout_that_narrows_a_role_needs_confirmation_and_ends_its_writes()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (admin, scanner) = venue_with_scanner(root.path(), &hub).await?;
+    admin.close().await;
+    scanner.close().await;
+    let narrowed = venue_at(2, Some(Role::new(SCANNER).read("tickets")))?;
+    let refused = open(&root.path().join("admin"), &narrowed, &hub, "admin")
+        .open()
+        .await
+        .err()
+        .ok_or("a narrowing rollout opens only once confirmed")?;
+    let ErrorKind::RolloutConfirmation(required) = refused.kind else {
+        return Err(format!("expected a rollout confirmation, found {refused}").into());
+    };
+    assert_eq!(required.report.narrowed_roles, [SCANNER]);
+    let admin = Device::new(
+        open(&root.path().join("admin"), &narrowed, &hub, "admin")
+            .open_confirmed(&required.report.digest)
+            .await?,
+    )?;
+    synced(&admin).await?;
+    let scanner = Device::new(
+        open(&root.path().join("scanner"), &narrowed, &hub, "scanner")
+            .open()
+            .await?,
+    )?;
+    let _ = scanner.sync().await;
+    synced(&scanner).await?;
+    assert!(
+        !holds_reader_key(&root.path().join("scanner"), "check_ins")?,
+        "a narrowed scanner keeps no reader key for check_ins"
+    );
+    assert_eq!(
+        check_in_rights(&scanner).await?,
+        None,
+        "the narrowed role no longer reaches check_ins"
+    );
+    assert!(
+        insert(&scanner, "check_ins", ["T2", "south"])
+            .await
+            .is_err(),
+        "a narrowed scanner appends nothing"
+    );
+    scanner.close().await;
+    admin.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rollout_that_removes_a_held_role_fails_with_role_in_use() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (admin, scanner) = venue_with_scanner(root.path(), &hub).await?;
+    let holder = person(&scanner).await?;
+    admin.close().await;
+    let refused = open(
+        &root.path().join("admin"),
+        &venue_at(2, None)?,
+        &hub,
+        "admin",
+    )
+    .open()
+    .await
+    .err()
+    .ok_or("a rollout keeps every held role")?;
+    assert_eq!(
+        refused.kind,
+        ErrorKind::RoleInUse(rocky_sdk::RoleInUse {
+            role: SCANNER,
+            people: vec![holder],
+        })
+    );
+    scanner.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rollout_that_widens_a_role_reaches_its_holders_at_renewal() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (admin, scanner) = venue_with_scanner(root.path(), &hub).await?;
+    admin.close().await;
+    scanner.close().await;
+    let widened = venue_at(
+        2,
+        Some(Role::new(SCANNER).read("tickets").write("check_ins")),
+    )?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &widened, &hub, "admin")
+            .open()
+            .await?,
+    )?;
+    synced(&admin).await?;
+    let scanner = Device::new(
+        open(&root.path().join("scanner"), &widened, &hub, "scanner")
+            .open()
+            .await?,
+    )?;
+    synced(&scanner).await?;
+    scanner.database.renew().await?;
+    assert_eq!(
+        check_in_rights(&scanner).await?.map(|rights| (
+            rights.insert,
+            rights.update,
+            rights.delete
+        )),
+        Some((true, true, true))
+    );
+    write(&scanner, "UPDATE check_ins SET gate='south'").await?;
+    scanner.close().await;
     admin.close().await;
     Ok(())
 }

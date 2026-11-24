@@ -22,6 +22,7 @@ pub enum ErrorKind {
     Service(crate::ServiceError),
     StoreOnly(crate::StoreOnlyRefusal),
     RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
+    RoleInUse(crate::RoleInUse),
     Sql(Box<crate::SqlFailure>),
     Decode(crate::DecodeError),
     Other(String),
@@ -52,6 +53,7 @@ impl ErrorKind {
             Self::Service(service) => service.code(),
             Self::StoreOnly(_) => "store_only",
             Self::RolloutConfirmation(_) => "rollout_confirmation_required",
+            Self::RoleInUse(_) => "role_in_use",
             Self::Sql(failure) => match failure.reason {
                 crate::SqlReason::Unavailable {
                     reason: crate::Unavailability::Incomplete { .. },

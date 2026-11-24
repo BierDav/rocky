@@ -34,6 +34,7 @@ impl Node {
         if graph.bookmark(&bookmark)? != Some(source) || graph.seal(source)?.is_some() {
             return Ok(());
         }
+        let narrowed = self.role_changes(&settings).await?;
         crate::rollout::confirm(&settings, &self.path, &self.declared, confirmation).await?;
         let migrates = crate::generation::migrates(&self.declared, settings.generation);
         if migrates && !settings.may_migrate(&self.domain())? {
@@ -131,7 +132,24 @@ impl Node {
             )
             .await?;
         self.follow_schema().await?;
-        self.run_staged_migration().await
+        self.run_staged_migration().await?;
+        self.narrow(&narrowed).await
+    }
+
+    async fn role_changes(&self, settings: &Settings) -> Result<Vec<crate::PersonId>, Failure> {
+        let current = settings.domain()?.logical().clone();
+        let target = crate::domain::logical(&self.declared, *settings.publisher.as_bytes())?;
+        let registry = self.registry(settings).await?;
+        for role in crate::rollout::removed_roles(&current, &target) {
+            let people = Self::role_holders(settings, &registry, &role);
+            if !people.is_empty() {
+                return Err(Box::new(crate::RoleInUse { role, people }));
+            }
+        }
+        Ok(crate::rollout::narrowed_roles(&current, &target)
+            .iter()
+            .flat_map(|role| Self::role_holders(settings, &registry, role))
+            .collect())
     }
 
     pub(super) async fn close_migrations(&self) -> Result<(), Failure> {

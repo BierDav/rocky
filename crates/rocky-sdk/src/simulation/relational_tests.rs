@@ -600,4 +600,31 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn members_finalize_the_seal_before_a_revocation() -> Result<(), Failure> {
+        holds_at(
+            20025,
+            soak_at(20025, Wall::Moving),
+            vec![
+                Invite(0, 2),
+                Invite(0, 3),
+                Partition("l16".into()),
+                Seal(0),
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l16".into(),
+                        code: 1,
+                        name: 0,
+                        points: 3,
+                    },
+                ),
+                Sync(0),
+                Sync(0),
+                Revoke(2),
+            ],
+        )
+        .await
+    }
 }

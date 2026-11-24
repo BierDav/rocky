@@ -194,13 +194,14 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             }
             let chain = self.stored_chain(e.chain).await?;
-            if self
-                .config
-                .revocations
-                .revoking(chain.credentials())
-                .map_err(credential)?
-                .is_some()
-            {
+            let offered = match self.standing(chain.credentials())? {
+                Standing::Unrevoked => true,
+                Standing::Departed { at } => {
+                    self.written_before_departure(&decoded, request.seal, at)?
+                }
+                Standing::Distrusted => false,
+            };
+            if !offered {
                 continue;
             }
             if headers.len() == MAX_PLACEMENTS {
@@ -290,7 +291,7 @@ impl<A: RowApplication> Inner<A> {
             )? {
                 return Err(denied("placement not inside the seal's state"));
             }
-            self.placement_authority(&header, chain.credentials(), time)?;
+            self.sealed_placement_authority(&header, chain.credentials(), request.seal, time)?;
             let needs_frame_itself = custody.contains(&e.scope)
                 && self.holds(e.scope).await?
                 && !self

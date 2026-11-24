@@ -29,7 +29,7 @@ async fn keyed(
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_revoked_authors_unheld_partition_header_is_omitted() {
+async fn a_departed_authors_unheld_partition_header_is_placed_and_a_compromised_ones_omitted() {
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let writer = f
@@ -117,26 +117,41 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
         .0[0]
         .id()
         .unwrap();
-    writer
-        .learn_revocations(&crate::tests::revoking(
+    let revoking = |mode| {
+        crate::tests::revoking_as(
             &f.publisher,
             f.schema.app_id(),
             &[],
             &[grant],
-        ))
+            mode,
+            now().unwrap(),
+        )
+    };
+    let departed = revoking(rocky_credentials::RevocationMode::Lost);
+    writer.learn_revocations(&departed).await.unwrap();
+    reader.learn_revocations(&departed).await.unwrap();
+    let served = page(*revoked_request).await;
+    assert_eq!(
+        served.headers.len(),
+        1,
+        "a departed author's sealed header is still offered"
+    );
+    assert_eq!(
+        reader
+            .receive_placements(*revoked_request, served)
+            .await
+            .unwrap(),
+        1,
+        "a departed author's unheld partition header is verified at its own time"
+    );
+    writer
+        .learn_revocations(&revoking(rocky_credentials::RevocationMode::Compromised))
         .await
         .unwrap();
     let omitted = page(*revoked_request).await;
     assert!(
         omitted.headers.is_empty() && omitted.chains.is_empty(),
-        "revoked candidates alone answer like an empty position: {omitted:?}"
+        "a compromise outweighs a departure, and its candidates alone answer like an empty position: {omitted:?}"
     );
     assert_eq!(page(*eligible_request).await.headers.len(), 1);
-    assert_eq!(
-        reader
-            .receive_placements(*revoked_request, omitted)
-            .await
-            .unwrap(),
-        0
-    );
 }

@@ -2133,23 +2133,76 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.header_authority(header, credentials, &self.config.revocations, time)
     }
-    pub(super) fn placement_authority(
+    pub(super) fn standing(&self, credentials: &CredentialChain) -> Result<Standing, Error> {
+        let ending = self
+            .config
+            .revocations
+            .ending(credentials)
+            .map_err(credential)?;
+        if ending.iter().any(|revocation| {
+            revocation.statement.mode == rocky_credentials::RevocationMode::Compromised
+        }) {
+            return Ok(Standing::Distrusted);
+        }
+        Ok(ending
+            .iter()
+            .map(|revocation| revocation.statement.time)
+            .min()
+            .map_or(Standing::Unrevoked, |at| Standing::Departed { at }))
+    }
+    pub(super) fn written_before_departure(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        seal: Commitment,
+        departed_at: u64,
+    ) -> Result<bool, Error> {
+        let revoked = &self.graph_for(header.extensions.scope.domain)?.revoked;
+        Ok(header.timestamp / 1_000_000 <= departed_at
+            && !revoked.contains(&seal)
+            && !revoked.contains(&header.extensions.tip.0))
+    }
+    pub(super) fn sealed_placement_authority(
         &self,
         header: &p2panda_core::Header<Extensions>,
         credentials: &CredentialChain,
+        seal: Commitment,
+        time: u64,
+    ) -> Result<(), Error> {
+        match self.standing(credentials)? {
+            Standing::Unrevoked => {
+                self.placement_authority(header, credentials, &self.config.revocations, time)
+            }
+            Standing::Departed { at } => {
+                if !self.written_before_departure(header, seal, at)? {
+                    return Err(denied("placement written after its author's revocation"));
+                }
+                self.placement_authority(
+                    header,
+                    credentials,
+                    &RevocationSet::default(),
+                    header.timestamp / 1_000_000,
+                )
+            }
+            Standing::Distrusted => Err(denied("placement author is compromised")),
+        }
+    }
+    fn placement_authority(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        credentials: &CredentialChain,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<(), Error> {
         let extension = &header.extensions;
         if !self.partitioned(extension.scope) || self.partitions.contains_key(&extension.scope) {
             return self
-                .verify_header_authority(header, credentials, time)
+                .header_authority(header, credentials, revocations, time)
                 .map(|_| ());
         }
         self.check_header_table(extension)?;
         if !extension.authored {
             return Err(denied("node author missing"));
         }
-        let revocations = &self.config.revocations;
         self.verified_chain(credentials, revocations, time)?
             .unseen_partition_author(header.public_key, extension.scope, revocations, time)
             .map_err(credential)
@@ -2385,6 +2438,12 @@ impl<A: RowApplication> Inner<A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
     }
+}
+
+pub(super) enum Standing {
+    Unrevoked,
+    Departed { at: u64 },
+    Distrusted,
 }
 
 enum PragmaValue {

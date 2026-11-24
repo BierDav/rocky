@@ -1,5 +1,6 @@
 use super::compaction::{
-    Replica, follow_main, import_checkpoint, insert, list_checkpoints, open, scalar, seal, sync,
+    Replica, follow_main, import_checkpoint, insert, list_checkpoints, open, publish_seal, scalar,
+    seal, sign_seal, sync,
 };
 use super::generations::{Lineage, identity_insert, session};
 use super::*;
@@ -172,6 +173,9 @@ async fn a_joiner_places_a_frame_its_newer_base_covers_to_finalize_an_older_base
 }
 
 async fn pair() -> Pair {
+    pair_sealed_by(None).await
+}
+async fn pair_sealed_by(sealer: Option<&PrivateKey>) -> Pair {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
     let alice = lineage
@@ -196,7 +200,19 @@ async fn pair() -> Pair {
         .await
         .unwrap();
     }
-    let seal = seal(&lineage, &alice).await.id().unwrap();
+    let seal = match sealer {
+        None => seal(&lineage, &alice).await,
+        Some(sealer) => {
+            publish_seal(
+                &lineage,
+                &alice,
+                trusted_seal(&lineage, &alice, sealer).await,
+            )
+            .await
+        }
+    }
+    .id()
+    .unwrap();
     sync(&lineage, &alice, &bob, &bob_key).await;
     Pair {
         lineage,
@@ -513,10 +529,42 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_placement_from_a_revoked_author_is_refused() {
-    let pair = pair().await;
+async fn trusted_seal(
+    lineage: &Lineage,
+    replica: &Replica,
+    sealer: &PrivateKey,
+) -> rocky_credentials::SignedSeal {
+    let chain = CredentialChain(vec![
+        rocky_credentials::Authority::owner_in(
+            lineage.publisher(),
+            rocky_credentials::DatabaseContext {
+                publisher: lineage.publisher().public_key(),
+                scope: lineage.domain,
+            },
+        )
+        .unwrap()
+        .issue_trusted(sealer.public_key(), lineage.domain, now().unwrap())
+        .unwrap(),
+    ]);
+    let node_chain = chain.clone().certify(sealer, sealer).unwrap();
+    let tip = replica.followed_tip().await;
+    let frontier = replica.seal_frontier(lineage.domain, false).await.unwrap();
+    rocky_credentials::SignedSeal::endorse_linked(
+        sign_seal(lineage, tip, frontier).statement,
+        rocky_credentials::Signer::node(sealer, &node_chain).unwrap(),
+        &chain,
+        Some(rocky_credentials::ChainLink::first(sealer.public_key())),
+    )
+    .unwrap()
+}
+
+async fn revoke_alice_and_receive(
+    pair: &Pair,
+    mode: rocky_credentials::RevocationMode,
+    also: &[PublicKey],
+) -> Result<usize, crate::Error> {
     let request = pair.bob.1.wanted_placements().await.unwrap()[0];
+    assert_eq!(request.seal, pair.seal);
     let credentials = chain(&pair.bob.1).await;
     let page = pair
         .alice
@@ -532,14 +580,68 @@ async fn a_placement_from_a_revoked_author_is_refused() {
         .node
         .public_key();
     let user = PrivateKey::from_bytes(&rocky_core::commitment("lineage.user", node.as_bytes()));
-    let revocations = crate::tests::revoking(
-        pair.lineage.publisher(),
-        pair.lineage.domain.app,
-        &[user.public_key()],
-        &[],
+    let revoked: Vec<_> = [user.public_key()]
+        .into_iter()
+        .chain(also.iter().copied())
+        .collect();
+    pair.bob
+        .1
+        .learn_revocations(&crate::tests::revoking_as(
+            pair.lineage.publisher(),
+            pair.lineage.domain.app,
+            &revoked,
+            &[],
+            mode,
+            now().unwrap(),
+        ))
+        .await
+        .unwrap();
+    pair.bob.1.receive_placements(request, page).await
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_placement_from_a_compromised_author_is_refused() {
+    let pair = pair().await;
+    assert!(
+        revoke_alice_and_receive(&pair, rocky_credentials::RevocationMode::Compromised, &[])
+            .await
+            .is_err()
     );
-    pair.bob.1.learn_revocations(&revocations).await.unwrap();
-    assert!(pair.bob.1.receive_placements(request, page).await.is_err());
+    assert_eq!(
+        scalar(&pair.bob.1, "SELECT count(*) FROM secure_placements").await,
+        0
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_departed_authors_placement_under_a_seal_past_the_revocation_cut_is_refused() {
+    let sealer = PrivateKey::new();
+    let pair = pair_sealed_by(Some(&sealer)).await;
+    let refused = revoke_alice_and_receive(
+        &pair,
+        rocky_credentials::RevocationMode::Lost,
+        &[sealer.public_key()],
+    )
+    .await;
+    assert!(
+        pair.bob
+            .1
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .graph_for(pair.lineage.domain)
+            .unwrap()
+            .revoked
+            .contains(&pair.seal),
+        "a revocation without a cut puts every statement of its sealer past the cut"
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("after its author's revocation"),
+        "a seal past the cut no longer vouches for a departed author's positions"
+    );
     assert_eq!(
         scalar(&pair.bob.1, "SELECT count(*) FROM secure_placements").await,
         0
@@ -655,165 +757,228 @@ async fn sync_scope(
     }
     let _ = lineage;
 }
-fn revoking_node(lineage: &Lineage, node: PublicKey) -> RevocationSet {
+fn revoking_node(
+    lineage: &Lineage,
+    node: PublicKey,
+    mode: rocky_credentials::RevocationMode,
+    time: u64,
+) -> RevocationSet {
     let user = PrivateKey::from_bytes(&rocky_core::commitment("lineage.user", node.as_bytes()));
-    crate::tests::revoking(
+    crate::tests::revoking_as(
         lineage.publisher(),
         lineage.domain.app,
         &[user.public_key()],
         &[],
+        mode,
+        time,
     )
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
-    let relay_path = dir.path().join("relay.db");
-    let alice = lineage
-        .open(&dir.path().join("alice.db"), &keys[0], 3, None)
-        .await
-        .unwrap();
-    let relay = lineage.open(&relay_path, &keys[1], 3, None).await.unwrap();
-    let bob = lineage
-        .open_scoped(&dir.path().join("bob.db"), &keys[2], false, &["items"])
-        .await
-        .unwrap();
-    follow_main(&lineage, &alice).await;
-    for replica in [&relay, &bob] {
-        crate::tests::exchange_graphs(&alice, replica, lineage.domain).await;
-        replica
-            .follow_bookmark(lineage.domain, "main")
+struct Relayed {
+    lineage: Lineage,
+    _dir: Scratch,
+    relay_path: std::path::PathBuf,
+    relay_key: PrivateKey,
+    relay: Replica,
+    bob: (PrivateKey, Replica),
+    alice_node: PublicKey,
+    alice_request: PlacementRequest,
+    relay_request: PlacementRequest,
+    items: PlacementRequest,
+    alice_page: PlacementPage,
+    items_page: PlacementPage,
+    alice_headers: String,
+    retained: i64,
+    before_alice_wrote: u64,
+}
+
+impl Relayed {
+    async fn new() -> Self {
+        let before_alice_wrote = now().unwrap() - 1;
+        let lineage = Lineage::new();
+        let dir = Scratch::new().await;
+        let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+        let relay_path = dir.path().join("relay.db");
+        let alice = lineage
+            .open(&dir.path().join("alice.db"), &keys[0], 3, None)
             .await
             .unwrap();
-    }
-    let tag = |replica, key: &'static str| async move {
-        identity_insert(
-            &session(replica).await,
-            &format!("INSERT INTO tags(key,label) VALUES('{key}','tag')"),
-            vec![],
-        )
-        .await
-        .unwrap();
-    };
-    insert(&alice, "a", "one").await;
-    tag(&alice, "t1").await;
-    tag(&alice, "t2").await;
-    for name in ["items", "tags"] {
-        sync_scope(&lineage, &alice, &relay, &keys[1], lineage.scope(name)).await;
-    }
-    tag(&alice, "t3").await;
-    let third_tag_reaching_the_relay_only_as_a_void = {
-        let inner = alice.inner.lock(crate::replica::Class::Background).await;
-        match crate::storage::rows(
-            &inner.conn,
-            "SELECT header FROM secure_operations ORDER BY rowid DESC LIMIT 1",
-        )
-        .await
-        .unwrap()
-        .first()
-        .map(Vec::as_slice)
-        {
-            Some([rocky_core::SqlValue::Blob(header)]) => header.clone(),
-            other => panic!("{other:?}"),
-        }
-    };
-    let void = crate::SignedVoid::sign(&keys[0], vec![third_tag_reaching_the_relay_only_as_a_void])
-        .unwrap();
-    for status in relay.receive_voids(&[void]).await {
-        status.unwrap();
-    }
-    tag(&relay, "r1").await;
-    let sealed = seal(&lineage, &relay).await.id().unwrap();
-    crate::tests::exchange_graphs(&relay, &bob, lineage.domain).await;
-    sync(&lineage, &relay, &bob, &keys[2]).await;
-    let alice_node = alice
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .node
-        .public_key();
-    let relay_node = relay
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .node
-        .public_key();
-    let requests = bob.wanted_placements().await.unwrap();
-    let (alice_author, relay_author) = (
-        crate::writer::writer(&alice_node),
-        crate::writer::writer(&relay_node),
-    );
-    let alice_request = *requests
-        .iter()
-        .find(|request| request.author == alice_author)
-        .expect("alice's positions");
-    let relay_request = *requests
-        .iter()
-        .find(|request| request.author == relay_author)
-        .expect("the relay's positions");
-    assert_eq!(alice_request.seal, sealed);
-    let credentials = chain(&bob).await;
-    let peer = keys[2].public_key();
-    let answer = |request: PlacementRequest| {
-        let (relay, credentials) = (&relay, &credentials);
-        async move {
-            relay
-                .placement_page(peer, credentials, request)
+        let relay = lineage.open(&relay_path, &keys[1], 3, None).await.unwrap();
+        let bob = lineage
+            .open_scoped(&dir.path().join("bob.db"), &keys[2], false, &["items"])
+            .await
+            .unwrap();
+        follow_main(&lineage, &alice).await;
+        for replica in [&relay, &bob] {
+            crate::tests::exchange_graphs(&alice, replica, lineage.domain).await;
+            replica
+                .follow_bookmark(lineage.domain, "main")
                 .await
-                .unwrap()
+                .unwrap();
         }
-    };
-    let headers_of = |page: &PlacementPage| (page.headers.len(), page.chains.len());
-    let alice_page = answer(alice_request).await;
-    assert_eq!(
-        headers_of(&alice_page),
-        (3, 1),
-        "before the revocation the relay places Alice's two tags and her void"
-    );
-    let items = PlacementRequest {
-        from: 0,
-        to: 0,
-        ..alice_request
-    };
-    let items_page = answer(items).await;
-    assert_eq!(
-        headers_of(&items_page).0,
-        1,
-        "before the revocation the relay places Alice's `items` position bob holds"
-    );
-    let alice_headers = format!(
-        "SELECT (SELECT count(*) FROM secure_operations WHERE author=x'{0}')+(SELECT count(*) FROM secure_voids WHERE author=x'{0}')",
-        alice_node
-            .as_bytes()
+        let tag = |replica, key: &'static str| async move {
+            identity_insert(
+                &session(replica).await,
+                &format!("INSERT INTO tags(key,label) VALUES('{key}','tag')"),
+                vec![],
+            )
+            .await
+            .unwrap();
+        };
+        insert(&alice, "a", "one").await;
+        tag(&alice, "t1").await;
+        tag(&alice, "t2").await;
+        for name in ["items", "tags"] {
+            sync_scope(&lineage, &alice, &relay, &keys[1], lineage.scope(name)).await;
+        }
+        tag(&alice, "t3").await;
+        let third_tag_reaching_the_relay_only_as_a_void = {
+            let inner = alice.inner.lock(crate::replica::Class::Background).await;
+            match crate::storage::rows(
+                &inner.conn,
+                "SELECT header FROM secure_operations ORDER BY rowid DESC LIMIT 1",
+            )
+            .await
+            .unwrap()
+            .first()
+            .map(Vec::as_slice)
+            {
+                Some([rocky_core::SqlValue::Blob(header)]) => header.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let void =
+            crate::SignedVoid::sign(&keys[0], vec![third_tag_reaching_the_relay_only_as_a_void])
+                .unwrap();
+        for status in relay.receive_voids(&[void]).await {
+            status.unwrap();
+        }
+        tag(&relay, "r1").await;
+        let sealed = seal(&lineage, &relay).await.id().unwrap();
+        crate::tests::exchange_graphs(&relay, &bob, lineage.domain).await;
+        sync(&lineage, &relay, &bob, &keys[2]).await;
+        let node = |replica: &Replica| {
+            let replica = replica.clone();
+            async move {
+                replica
+                    .inner
+                    .lock(crate::replica::Class::Background)
+                    .await
+                    .config
+                    .node
+                    .public_key()
+            }
+        };
+        let (alice_node, relay_node) = (node(&alice).await, node(&relay).await);
+        let requests = bob.wanted_placements().await.unwrap();
+        let (alice_author, relay_author) = (
+            crate::writer::writer(&alice_node),
+            crate::writer::writer(&relay_node),
+        );
+        let alice_request = *requests
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
-    let retained = scalar(&relay, &alice_headers).await;
-    assert_eq!(retained, 4);
+            .find(|request| request.author == alice_author)
+            .expect("alice's positions");
+        let relay_request = *requests
+            .iter()
+            .find(|request| request.author == relay_author)
+            .expect("the relay's positions");
+        assert_eq!(alice_request.seal, sealed);
+        let items = PlacementRequest {
+            from: 0,
+            to: 0,
+            ..alice_request
+        };
+        let mut relayed = Self {
+            lineage,
+            _dir: dir,
+            relay_path,
+            relay_key: keys[1].clone(),
+            relay,
+            bob: (keys[2].clone(), bob),
+            alice_node,
+            alice_request,
+            relay_request,
+            items,
+            alice_page: PlacementPage {
+                headers: Vec::new(),
+                chains: Vec::new(),
+            },
+            items_page: PlacementPage {
+                headers: Vec::new(),
+                chains: Vec::new(),
+            },
+            alice_headers: format!(
+                "SELECT (SELECT count(*) FROM secure_operations WHERE author=x'{0}')+(SELECT count(*) FROM secure_voids WHERE author=x'{0}')",
+                alice_node
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
+            retained: 0,
+            before_alice_wrote,
+        };
+        relayed.alice_page = relayed.answer(alice_request).await;
+        assert_eq!(
+            Self::headers_of(&relayed.alice_page),
+            (3, 1),
+            "before the revocation the relay places Alice's two tags and her void"
+        );
+        relayed.items_page = relayed.answer(items).await;
+        assert_eq!(
+            Self::headers_of(&relayed.items_page).0,
+            1,
+            "before the revocation the relay places Alice's `items` position bob holds"
+        );
+        relayed.retained = scalar(&relayed.relay, &relayed.alice_headers).await;
+        assert_eq!(relayed.retained, 4);
+        relayed
+    }
+    async fn answer(&self, request: PlacementRequest) -> PlacementPage {
+        let credentials = chain(&self.bob.1).await;
+        self.relay
+            .placement_page(self.bob.0.public_key(), &credentials, request)
+            .await
+            .unwrap()
+    }
+    fn headers_of(page: &PlacementPage) -> (usize, usize) {
+        (page.headers.len(), page.chains.len())
+    }
+    fn revoking_alice(&self, mode: rocky_credentials::RevocationMode, time: u64) -> RevocationSet {
+        revoking_node(&self.lineage, self.alice_node, mode, time)
+    }
+    async fn placed(&self) -> i64 {
+        scalar(&self.bob.1, "SELECT count(*) FROM secure_placements").await
+    }
+}
 
-    relay
-        .learn_revocations(&revoking_node(&lineage, alice_node))
-        .await
-        .unwrap();
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_relay_omits_a_compromised_authors_placements_and_still_places_others() {
+    let relayed = Relayed::new().await;
+    let (relay, bob) = (&relayed.relay, &relayed.bob.1);
+    let compromised = relayed.revoking_alice(
+        rocky_credentials::RevocationMode::Compromised,
+        now().unwrap(),
+    );
+    relay.learn_revocations(&compromised).await.unwrap();
     assert_eq!(
-        scalar(&relay, &alice_headers).await,
-        retained,
+        scalar(relay, &relayed.alice_headers).await,
+        relayed.retained,
         "revoked headers stay physically held"
     );
-    let omitted = answer(alice_request).await;
+    let omitted = relayed.answer(relayed.alice_request).await;
     assert_eq!(
-        headers_of(&omitted),
+        Relayed::headers_of(&omitted),
         (0, 0),
-        "revoked headers are no longer offered as evidence"
+        "a compromised author's headers are no longer offered as evidence"
     );
-    assert_eq!(headers_of(&answer(items).await), (0, 0));
     assert_eq!(
-        bob.receive_placements(alice_request, omitted)
+        Relayed::headers_of(&relayed.answer(relayed.items).await),
+        (0, 0)
+    );
+    assert_eq!(
+        bob.receive_placements(relayed.alice_request, omitted)
             .await
             .unwrap(),
         0
@@ -822,53 +987,127 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         bob.wanted_placements()
             .await
             .unwrap()
-            .contains(&alice_request)
+            .contains(&relayed.alice_request)
     );
-    let relay_page = answer(relay_request).await;
-    assert_eq!(headers_of(&relay_page), (1, 1));
+    let relay_page = relayed.answer(relayed.relay_request).await;
+    assert_eq!(Relayed::headers_of(&relay_page), (1, 1));
     assert_eq!(
-        bob.receive_placements(relay_request, relay_page)
+        bob.receive_placements(relayed.relay_request, relay_page)
             .await
             .unwrap(),
         1,
         "an unrevoked author's position still transfers"
     );
-    bob.learn_revocations(&revoking_node(&lineage, alice_node))
-        .await
-        .unwrap();
+    bob.learn_revocations(&compromised).await.unwrap();
     let revision = bob.stored_and_memory_revision().await;
-    let placed = scalar(&bob, "SELECT count(*) FROM secure_placements").await;
+    let placed = relayed.placed().await;
     assert!(
-        bob.receive_placements(alice_request, alice_page)
+        bob.receive_placements(relayed.alice_request, relayed.alice_page.clone())
             .await
             .is_err(),
-        "a page captured before the revocation is refused whole once bob learns it"
+        "a page captured before the compromise is refused whole once bob learns it"
     );
     assert!(
-        bob.receive_placements(items, items_page).await.is_err(),
+        bob.receive_placements(relayed.items, relayed.items_page.clone())
+            .await
+            .is_err(),
         "a captured page of a held scope is refused too"
     );
-    assert_eq!(
-        scalar(&bob, "SELECT count(*) FROM secure_placements").await,
-        placed
-    );
+    assert_eq!(relayed.placed().await, placed);
     assert_eq!(
         bob.stored_and_memory_revision().await,
         revision,
         "a refused captured page changes nothing"
     );
+    let Relayed {
+        lineage,
+        relay,
+        relay_path,
+        relay_key,
+        bob,
+        alice_request,
+        alice_headers,
+        retained,
+        ..
+    } = relayed;
     drop(relay);
-    let relay = lineage.reopen(&relay_path, &keys[1], 3, 3).await.unwrap();
+    let relay = lineage.reopen(&relay_path, &relay_key, 3, 3).await.unwrap();
     relay.audit(lineage.scope("items")).await.unwrap();
     relay.audit(lineage.scope("tags")).await.unwrap();
     let page = relay
-        .placement_page(peer, &credentials, alice_request)
+        .placement_page(bob.0.public_key(), &chain(&bob.1).await, alice_request)
         .await
         .unwrap();
     assert_eq!(
-        headers_of(&page),
+        Relayed::headers_of(&page),
         (0, 0),
-        "reopened with its keys, the relay still omits revoked headers"
+        "reopened with its keys, the relay still omits a compromised author's headers"
     );
     assert_eq!(scalar(&relay, &alice_headers).await, retained);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_departed_authors_placements_inside_the_seal_are_served_and_accepted() {
+    let relayed = Relayed::new().await;
+    let (relay, bob) = (&relayed.relay, &relayed.bob.1);
+    let departed = relayed.revoking_alice(rocky_credentials::RevocationMode::Lost, now().unwrap());
+    relay.learn_revocations(&departed).await.unwrap();
+    bob.learn_revocations(&departed).await.unwrap();
+    let served = relayed.answer(relayed.alice_request).await;
+    assert_eq!(
+        (&served.headers, &served.chains),
+        (&relayed.alice_page.headers, &relayed.alice_page.chains),
+        "what a departed author wrote before leaving is still offered as evidence"
+    );
+    assert_eq!(
+        bob.receive_placements(relayed.alice_request, served)
+            .await
+            .unwrap(),
+        3,
+        "a departed author's sealed positions are accepted"
+    );
+    let relay_page = relayed.answer(relayed.relay_request).await;
+    bob.receive_placements(relayed.relay_request, relay_page)
+        .await
+        .unwrap();
+    assert!(
+        bob.wanted_placements().await.unwrap().is_empty(),
+        "no position of the departed author is left waiting"
+    );
+    bob.finalize_path(relayed.lineage.domain).await.unwrap();
+    assert!(
+        bob.compaction_status(relayed.lineage.domain)
+            .await
+            .unwrap()
+            .finalized
+            .is_some(),
+        "the seal finalizes after its author departed"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_departed_authors_placements_written_after_the_revocation_are_refused() {
+    let relayed = Relayed::new().await;
+    let (relay, bob) = (&relayed.relay, &relayed.bob.1);
+    let departed_earlier = relayed.revoking_alice(
+        rocky_credentials::RevocationMode::Lost,
+        relayed.before_alice_wrote,
+    );
+    relay.learn_revocations(&departed_earlier).await.unwrap();
+    assert_eq!(
+        Relayed::headers_of(&relayed.answer(relayed.alice_request).await),
+        (0, 0),
+        "frames stamped after the revocation are not offered"
+    );
+    bob.learn_revocations(&departed_earlier).await.unwrap();
+    let refused = bob
+        .receive_placements(relayed.alice_request, relayed.alice_page.clone())
+        .await;
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("after its author's revocation")
+    );
+    assert_eq!(relayed.placed().await, 0, "a refused page stores nothing");
 }

@@ -85,7 +85,11 @@ pub(super) async fn seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
     let frontier = replica.seal_frontier(lineage.domain, false).await.unwrap();
     publish_seal(lineage, replica, sign_seal(lineage, tip, frontier)).await
 }
-async fn publish_seal(lineage: &Lineage, replica: &Replica, seal: SignedSeal) -> SignedSeal {
+pub(super) async fn publish_seal(
+    lineage: &Lineage,
+    replica: &Replica,
+    seal: SignedSeal,
+) -> SignedSeal {
     let tip = seal.statement.tip;
     let next = seal.successor().unwrap().unwrap();
     replica

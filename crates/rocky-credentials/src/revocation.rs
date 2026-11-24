@@ -903,6 +903,15 @@ impl RevocationSet {
     pub fn revoking(&self, chain: &CredentialChain) -> Result<Option<&SignedRevocation>, Error> {
         self.first_ending(chain, 0)
     }
+    pub fn ending(&self, chain: &CredentialChain) -> Result<Vec<&SignedRevocation>, Error> {
+        let mut ending = Vec::new();
+        for signed in self.statements.values() {
+            if Self::ends_from(signed, chain, 0)? {
+                ending.push(signed);
+            }
+        }
+        Ok(ending)
+    }
     pub fn ends_chain(&self, chain: &CredentialChain) -> Result<bool, Error> {
         for (index, link) in chain.0.iter().enumerate() {
             if self.ends_at(link, chain.protected(index)?)? {
@@ -920,13 +929,23 @@ impl RevocationSet {
         start: usize,
     ) -> Result<Option<&SignedRevocation>, Error> {
         for signed in self.statements.values() {
-            for (index, link) in chain.0.iter().enumerate().skip(start) {
-                if signed.ends_at(link, chain.protected(index)?)? {
-                    return Ok(Some(signed));
-                }
+            if Self::ends_from(signed, chain, start)? {
+                return Ok(Some(signed));
             }
         }
         Ok(None)
+    }
+    fn ends_from(
+        signed: &SignedRevocation,
+        chain: &CredentialChain,
+        start: usize,
+    ) -> Result<bool, Error> {
+        for (index, link) in chain.0.iter().enumerate().skip(start) {
+            if signed.ends_at(link, chain.protected(index)?)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)

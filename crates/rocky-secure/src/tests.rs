@@ -313,15 +313,32 @@ pub(crate) fn revoking(
     users: &[PublicKey],
     capabilities: &[Commitment],
 ) -> RevocationSet {
+    revoking_as(
+        publisher,
+        app,
+        users,
+        capabilities,
+        rocky_credentials::RevocationMode::Lost,
+        now().unwrap(),
+    )
+}
+pub(crate) fn revoking_as(
+    publisher: &PrivateKey,
+    app: rocky_core::AppId,
+    users: &[PublicKey],
+    capabilities: &[Commitment],
+    mode: rocky_credentials::RevocationMode,
+    time: u64,
+) -> RevocationSet {
     let statement = Revocation {
         app,
         issuer: publisher.public_key(),
-        time: now().unwrap(),
+        time,
         nodes: BTreeSet::new(),
         identities: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
         cut: Default::default(),
-        mode: rocky_credentials::RevocationMode::Lost,
+        mode,
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign_in(

@@ -147,7 +147,7 @@ fn ward(name: &str) -> rocky_sdk::Partition {
     rocky_sdk::Partition::new("ward", vec![SqlValue::Text(name.into())])
 }
 async fn synced(device: &Device) -> Result<(), Failure> {
-    device.sync().await.map_err(|error| error.to_string())?;
+    crate::support::peerless_ok(device.sync_now().await)?;
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 use super::change_driven::{frozen, start, targets, transport};
 use super::*;
 use crate::test_snapshot as snap;
-use crate::{AttachmentState, AttemptOperation, AttemptOutcome, LinkState, SkipReason};
+use crate::{AttachmentState, AttemptOperation, AttemptOutcome, LinkState};
 
 #[tokio::test(start_paused = true)]
 async fn status_names_the_sync_mode_and_an_empty_pass_is_not_a_skip() -> Result<(), Failure> {
@@ -24,8 +24,15 @@ async fn status_names_the_sync_mode_and_an_empty_pass_is_not_a_skip() -> Result<
             assert_eq!(disabled.network.sync, crate::SyncMode::Off);
             assert_ne!(disabled.token, live.token);
             a.detach().await;
-            let report: crate::SyncReport = a.sync_optional(None).await?.0;
-            assert_eq!(report.skip, Some(SkipReason::NetworkingDisabled));
+            let off = a
+                .sync_optional(None)
+                .await
+                .err()
+                .ok_or("an Off pass fails")?;
+            assert_eq!(
+                off.downcast_ref::<ServiceError>(),
+                Some(&ServiceError::SyncOff)
+            );
             assert_eq!(
                 a.observed_status().await?.network.attachment,
                 AttachmentState::Detached

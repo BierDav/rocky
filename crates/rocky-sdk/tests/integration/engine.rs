@@ -200,11 +200,16 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     assert_eq!(member.scope, creator.scope);
 
     let milk = creator.add(1, "Milk").await;
-    assert!(support::reconciled(&member.sync().await));
+    assert!(member.engine.sync_now().await?.complete());
     assert_eq!(titles(&member.items().await), ["Milk"]);
 
     snap::ok(member.engine.set_sync(rocky_sdk::SyncMode::Off)).await;
-    assert_eq!(member.sync().await["skip"], "networking_disabled");
+    assert_eq!(
+        member.engine.sync_now().await.map_err(|error| error.kind),
+        Err(rocky_sdk::ErrorKind::Service(
+            rocky_sdk::ServiceError::SyncOff
+        ))
+    );
     creator
         .mutate(
             2,
@@ -541,7 +546,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     .await?;
     creator.add(1, "Milk").await;
     member.add(2, "Eggs").await;
-    assert!(support::reconciled(&member.sync().await));
+    assert!(member.engine.sync_now().await?.complete());
     assert_eq!(titles(&creator.items().await), ["Eggs", "Milk"]);
     assert_eq!(creator.items().await, member.items().await);
 
@@ -550,7 +555,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     let creator = open("a", OpenMode::Resume, "a").await?;
     let member = open("b", OpenMode::Resume, "b").await?;
     creator.add(3, "Jam").await;
-    assert!(support::reconciled(&member.sync().await));
+    assert!(member.engine.sync_now().await?.complete());
     assert_eq!(
         titles(&member.items().await),
         ["Eggs", "Jam", "Milk"],

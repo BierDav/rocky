@@ -1041,7 +1041,7 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
             paused["data"]["bootstrap"]["rows_total"]
         );
     }
-    a.sync().await.expect("a pulls b's edit");
+    crate::support::peerless_ok(a.sync_now().await).expect("a pulls b's edit");
     for device in [&*b, &a] {
         let rows = snap::ok(snap::read(
             &device.database,

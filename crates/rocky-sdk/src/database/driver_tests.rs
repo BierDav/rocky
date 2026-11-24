@@ -769,7 +769,6 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     run(&writer_a, "UPDATE items SET key = 'i1', list = 'l1', title = 'Oat milk', completed = 0, note = NULL WHERE key = 'i1'").await?;
     run(&writer_b, "UPDATE items SET completed = 1 WHERE key = 'i1'").await?;
     snap::value(b.sync_now()).await?;
-    snap::value(a.sync_now()).await?;
     for writer in [&writer_a, &writer_b] {
         let rows = all(
             writer,

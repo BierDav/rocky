@@ -252,9 +252,9 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
             .is_empty()
     );
     m.add(1, "Milk").await;
-    let report = synced(&m).await?;
+    let report = m.sync_now().await?;
     assert_eq!(
-        crate::support::completed_peers(&report),
+        report.reconciled(),
         1,
         "{report}; activity: {}",
         snap::ok(m.database.activity(0_u64)).await

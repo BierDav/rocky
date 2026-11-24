@@ -350,9 +350,6 @@ pub async fn introduce(left: &Device, right: &Device) {
     right.add_peer(&left.contact().await).await.expect("peer");
 }
 
-pub fn reconciled(report: &Value) -> bool {
-    crate::support::reconciled(report)
-}
 pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
     match result {
         Err(_) => true,

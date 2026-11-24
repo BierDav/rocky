@@ -174,7 +174,12 @@ only a transport the database started. `SyncMode::Live`, the default, serves
 peers, syncs on its own and pushes each commit to connected peers at once;
 `Manual` serves peers but reaches out only on `sync_now`; `Off` neither serves
 nor reaches out. `Configuration::sync` picks the mode a database opens in and
-`set_sync` changes it. `sync_now` runs one pass and returns its `SyncReport`, and `add_peer`, `remove_peer` and `contact` manage peers. `Attachment::connected` also
+`set_sync` changes it. `sync_now` runs one pass. It fails with
+`ServiceError::SyncOff` when sync is off and with `NoPeerReached` when no peer
+reconciled; otherwise its `SyncReport` says whether the pass was `complete()`
+(every known peer reconciled or was not needed), counts the encrypted frames
+`pulled()` and `pushed()`, and prints as one line, with each peer's attempts
+in `peers`. `add_peer`, `remove_peer` and `contact` manage peers. `Attachment::connected` also
 supplies optional discovery and network-change events through `Network::Attached`.
 One attachment routes RPC and replication streams to independent database scopes.
 Endpoint diagnostics and lifecycle controls belong to the iroh attachment.

@@ -218,7 +218,7 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     creator.attach(Network::Owned(memory(&hub, "a"))).await?;
     member.attach(Network::Owned(memory(&hub, "b"))).await?;
     assert!(
-        support::reconciled(&sync(&member).await.map_err(|e| e.to_string())?),
+        member.sync_now().await?.complete(),
         "the same encrypted sync path serves databases opened locally"
     );
     assert_eq!(titles(&member).await, ["1.0", "1.1", "2.0", "2.1"]);

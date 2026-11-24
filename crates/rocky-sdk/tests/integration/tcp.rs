@@ -1,4 +1,4 @@
-use crate::common::{self, Device, Failure};
+use crate::common::{Device, Failure};
 use rocky_sdk::Network;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -37,8 +37,8 @@ async fn enroll_and_sync_both_ways(network: fn() -> Network) -> Result<(), Failu
     );
 
     a.add(1, "Milk").await;
-    let synced = b.sync().await.map_err(|error| error.to_string())?;
-    assert!(common::reconciled(&synced), "{synced}");
+    let synced = b.sync_now().await?;
+    assert!(synced.complete(), "{synced}");
     assert_eq!(b.titles().await, ["Milk"]);
 
     b.add(2, "Eggs").await;

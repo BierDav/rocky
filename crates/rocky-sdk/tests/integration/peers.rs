@@ -54,8 +54,8 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
 
     b.add(1, "Milk").await;
     c.add(2, "Eggs").await;
-    let synced = c.sync().await.map_err(|error| error.to_string())?;
-    assert!(common::reconciled(&synced));
+    let synced = c.sync_now().await?;
+    assert!(synced.reconciled() > 0, "{synced}");
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.items().await, c.items().await);
     assert!(

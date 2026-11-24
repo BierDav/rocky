@@ -95,14 +95,29 @@ impl Member {
             .ok_or("the node is not running")?
             .database)
     }
-    pub(super) async fn sync(&self) -> Result<crate::SyncReport, crate::Error> {
-        match &self.root {
+    pub(super) async fn sync(&self) -> Result<Reconciled, crate::Error> {
+        let report = match &self.root {
             Some(root) => {
                 self.database()?
                     .sync_now_with_identity(Arc::new(root.identity()))
                     .await
             }
             None => self.database()?.sync_now().await,
+        };
+        match report {
+            Ok(report) => Ok(Reconciled {
+                peers: report.reconciled(),
+                of: report.peers.len(),
+            }),
+            Err(error) => match error.kind {
+                crate::ErrorKind::Service(crate::ServiceError::NoPeerReached { known }) => {
+                    Ok(Reconciled {
+                        peers: 0,
+                        of: known,
+                    })
+                }
+                _ => Err(error),
+            },
         }
     }
     pub(super) async fn write(&self, key: &str, handle: u64) -> Result<(), Failure> {
@@ -163,4 +178,9 @@ impl Member {
     pub(super) async fn contact(&self) -> Result<String, Failure> {
         Ok(self.database()?.contact().await?.uri)
     }
+}
+
+pub(super) struct Reconciled {
+    pub(super) peers: usize,
+    pub(super) of: usize,
 }

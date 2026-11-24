@@ -492,12 +492,10 @@ impl Node {
         automatic: bool,
         retry_only: bool,
     ) -> Result<(SyncReport, super::PassOutcome), Failure> {
-        let skip = if !self.online.load(Ordering::SeqCst) {
-            Some(SkipReason::NetworkingDisabled)
-        } else {
-            None
-        };
-        if skip.is_none() && transport.is_some() {
+        if !self.online.load(Ordering::SeqCst) {
+            return Err(ServiceError::SyncOff.into());
+        }
+        if transport.is_some() {
             self.deliver_unlinks().await?;
         }
         let _syncing = self.syncing.lock().await;
@@ -511,9 +509,7 @@ impl Node {
         let started_at_epoch_millis = epoch_millis();
         let first_attempt_id = self.observations.next_id();
         let peers = std::sync::Mutex::new(Vec::new());
-        let result = if skip.is_some() {
-            Ok(super::PassOutcome::idle())
-        } else {
+        let result = {
             let transport = transport.ok_or(ServiceError::NetworkRequired("sync"))?;
             let span = tracing::info_span!(
                 "sync_pass",
@@ -570,7 +566,6 @@ impl Node {
                 .collect(),
             started_at_epoch_millis,
             ended_at_epoch_millis: epoch_millis(),
-            skip,
             peers,
         };
         {

@@ -517,7 +517,11 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a"))).await?)?;
     let b = Device::new(open(&b_dir, UNSHELVED, network("b")).open().await?)?;
     introduce(&a, &b).await;
-    b.sync().await.expect("follow the issuer's removal");
+    let reconcile_refused_by_a_stale_bootstrap_intent = b.database.sync_now().await;
+    assert!(
+        reconcile_refused_by_a_stale_bootstrap_intent.is_err(),
+        "the pass follows the issuer's removal even while its reconcile is refused"
+    );
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["waiting_for_issuer"], false);
     a.close().await;

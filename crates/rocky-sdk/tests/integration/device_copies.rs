@@ -1,4 +1,4 @@
-use crate::common::{self, Device, Failure};
+use crate::common::{Device, Failure};
 use crate::support::snapshot as snap;
 use rocky_sdk::{AlertKind, ErrorKind, Network, SqlValue, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
@@ -153,7 +153,7 @@ async fn a_restored_copy_never_authors_and_rejoins_as_a_new_device() -> Result<(
     d.sync().await.expect("join sync");
     assert_ne!(d.node().await, restored_node);
     d.add(3, "from the new device").await;
-    assert!(common::reconciled(&d.sync().await.expect("sync")));
+    assert!(d.sync_now().await.expect("sync").complete());
     assert_eq!(
         a.titles().await,
         [

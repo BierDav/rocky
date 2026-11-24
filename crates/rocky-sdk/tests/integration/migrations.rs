@@ -60,16 +60,19 @@ fn open<'a>(
     )
 }
 async fn sync(device: &Device) {
-    let report = device.sync().await.expect("sync");
+    let Some(report) = crate::support::peerless_ok(device.sync_now().await).expect("sync") else {
+        return;
+    };
     if std::env::var_os("ROCKY_TRACE_MIGRATION").is_some() {
         eprintln!("migration report: {report}");
     }
-    for peer in report["peers"].as_array().into_iter().flatten() {
-        for attempt in peer["attempts"].as_array().into_iter().flatten() {
-            if !attempt["failure"].is_null() {
-                eprintln!("migration synchronization: {}", attempt["failure"]);
-            }
-        }
+    for failure in report
+        .peers
+        .iter()
+        .flat_map(|peer| &peer.attempts)
+        .filter_map(|attempt| attempt.failure.as_ref())
+    {
+        eprintln!("migration synchronization: {failure:?}");
     }
 }
 async fn generation(device: &Device) -> Value {

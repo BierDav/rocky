@@ -254,7 +254,13 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
         .await?;
         tx.commit().await?;
     }
-    db.sync_now().await?;
+    assert_eq!(
+        db.sync_now().await.err().map(|error| error.kind),
+        Some(rocky_sdk::ErrorKind::Service(
+            rocky_sdk::ServiceError::NoPeerReached { known: 0 }
+        )),
+        "a pass that knows no peer still seals, and says it reconciled with none"
+    );
     let sealed = db.tip_status().await?;
     assert_eq!(sealed.bookmark.as_deref(), Some("main"));
     assert_ne!(

@@ -615,20 +615,8 @@ impl Simulation {
     async fn sync(&mut self, node: usize) -> Result<String, Failure> {
         let report = self.running(node)?.sync().await;
         self.synced[node] = true;
-        let report = report?;
-
-        let peers = report.peers.len();
-        let completed = report
-            .peers
-            .iter()
-            .filter(|peer| {
-                peer.attempts.iter().any(|attempt| {
-                    attempt.operation == crate::AttemptOperation::Reconcile
-                        && attempt.outcome == Some(crate::AttemptOutcome::Completed)
-                })
-            })
-            .count();
-        Ok(format!("reconciled {completed}/{peers}"))
+        let reconciled = report?;
+        Ok(format!("reconciled {}/{}", reconciled.peers, reconciled.of))
     }
     async fn crash_at(
         &mut self,

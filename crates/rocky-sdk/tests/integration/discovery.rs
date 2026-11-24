@@ -348,11 +348,7 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
     .await?;
     a.add(1, "Milk").await;
     b.add(2, "Eggs").await;
-    let pass = snap::observe(b.sync_now()).await;
-    assert_eq!(
-        crate::support::completed_peers(&pass.map_err(|error| error.to_string())?),
-        1
-    );
+    assert_eq!(b.sync_now().await?.reconciled(), 1);
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.titles().await, ["Eggs", "Milk"]);
     for router in &routers {

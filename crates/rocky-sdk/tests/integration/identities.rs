@@ -188,12 +188,7 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
         common::introduce(owner, node).await;
     }
     let key = household.person.public_key()?.to_hex();
-    let synced = async |device: &Device| {
-        device
-            .sync()
-            .await
-            .is_ok_and(|report| common::reconciled(&report))
-    };
+    let synced = async |device: &Device| device.sync_now().await.is_ok();
     for node in nodes {
         assert!(synced(node).await);
     }
@@ -239,7 +234,7 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?;
-    database.sync_now_with_identity(key).await?;
+    crate::support::peerless_ok(database.sync_now_with_identity(key).await)?;
     assert!(
         weak.upgrade().is_none(),
         "the call retained its identity provider"
@@ -343,10 +338,11 @@ async fn a_signed_call_returns_only_after_the_database_released_its_identity() -
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (database, key) = reopened_without_identity(root.path(), &hub).await?;
-    returns_only_after_release(Arc::new(key), |provider| {
+    let synced = returns_only_after_release(Arc::new(key), |provider| {
         database.sync_now_with_identity(provider)
     })
-    .await??;
+    .await?;
+    crate::support::peerless_ok(synced)?;
     database.close().await?;
     Ok(())
 }

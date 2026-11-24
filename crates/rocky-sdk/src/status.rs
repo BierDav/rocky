@@ -62,7 +62,6 @@ pub enum FailureKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    NetworkingDisabled,
     Backoff,
     InboundReconciliation,
     Covered,
@@ -472,6 +471,14 @@ pub struct PeerReconciliation {
     pub scopes: Vec<ScopeOutcome>,
     pub timeouts: Vec<TimeoutCount>,
 }
+impl PeerReconciliation {
+    pub fn reconciled(&self) -> bool {
+        self.attempts.iter().any(|attempt| {
+            attempt.operation == AttemptOperation::Reconcile
+                && attempt.outcome == Some(AttemptOutcome::Completed)
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeSyncOutcome {
@@ -496,6 +503,128 @@ pub struct SyncReport {
     pub contact_resolutions: Vec<AttemptObservation>,
     pub started_at_epoch_millis: Option<u64>,
     pub ended_at_epoch_millis: Option<u64>,
-    pub skip: Option<SkipReason>,
     pub peers: Vec<PeerReconciliation>,
+}
+impl SyncReport {
+    pub fn reconciled(&self) -> usize {
+        self.peers.iter().filter(|peer| peer.reconciled()).count()
+    }
+    pub fn complete(&self) -> bool {
+        !self.peers.is_empty()
+            && self
+                .peers
+                .iter()
+                .all(|peer| peer.reconciled() || peer.skip == Some(SkipReason::Covered))
+    }
+    pub fn pulled(&self) -> u64 {
+        self.transfers().map(|transfer| transfer.pulled).sum()
+    }
+    pub fn pushed(&self) -> u64 {
+        self.transfers().map(|transfer| transfer.pushed).sum()
+    }
+    fn transfers(&self) -> impl Iterator<Item = &ScopeReconciliationTransfer> {
+        self.peers.iter().flat_map(|peer| &peer.transfers)
+    }
+}
+impl std::fmt::Display for SyncReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let verdict = if self.complete() {
+            "complete"
+        } else {
+            "incomplete"
+        };
+        write!(
+            f,
+            "{verdict}: reconciled {} of {} peers, pulled {}, pushed {}",
+            self.reconciled(),
+            self.peers.len(),
+            self.pulled(),
+            self.pushed()
+        )
+    }
+}
+
+#[cfg(test)]
+mod sync_report_tests {
+    use super::*;
+
+    fn peer(node: &str, outcome: AttemptOutcome, skip: Option<SkipReason>) -> PeerReconciliation {
+        PeerReconciliation {
+            node: node.into(),
+            attempts: vec![AttemptObservation {
+                id: 1,
+                target: node.into(),
+                operation: AttemptOperation::Reconcile,
+                stage: AttemptStage::Reconciliation,
+                started_at_epoch_millis: None,
+                ended_at_epoch_millis: None,
+                elapsed_millis: None,
+                outcome: Some(outcome),
+                failure: None,
+            }],
+            skip,
+            transfers: vec![ScopeReconciliationTransfer {
+                scope: ScopeStatus {
+                    table: Some("items".into()),
+                    table_id: String::new(),
+                    encryption: String::new(),
+                    partition: false,
+                },
+                pulled: 3,
+                pushed: 1,
+                received_bytes: 0,
+                sent_bytes: 0,
+                checkpoint: None,
+                superseded: None,
+            }],
+            refused: vec![],
+            waiting: vec![],
+            upgrade_required: false,
+            retry_pending: false,
+            scopes: vec![],
+            timeouts: vec![],
+        }
+    }
+    fn report(peers: Vec<PeerReconciliation>) -> SyncReport {
+        SyncReport {
+            contact_resolutions: vec![],
+            started_at_epoch_millis: None,
+            ended_at_epoch_millis: None,
+            peers,
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_pass_is_complete_when_every_peer_reconciled_or_another_covered_it() {
+        let covered = PeerReconciliation {
+            attempts: vec![],
+            ..peer("c", AttemptOutcome::Completed, Some(SkipReason::Covered))
+        };
+        let complete = report(vec![peer("a", AttemptOutcome::Completed, None), covered]);
+        assert!(complete.complete());
+        assert_eq!(complete.reconciled(), 1);
+        let failed = report(vec![
+            peer("a", AttemptOutcome::Completed, None),
+            peer("b", AttemptOutcome::Failed, None),
+        ]);
+        assert!(!failed.complete());
+        assert_eq!(failed.reconciled(), 1);
+        assert!(
+            !report(vec![]).complete(),
+            "a pass that knew no peer is not complete"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_report_prints_its_verdict_and_counts_on_one_line() {
+        let failed = report(vec![
+            peer("a", AttemptOutcome::Completed, None),
+            peer("b", AttemptOutcome::Failed, None),
+        ]);
+        assert_eq!((failed.pulled(), failed.pushed()), (6, 2));
+        assert_eq!(
+            failed.to_string(),
+            "incomplete: reconciled 1 of 2 peers, pulled 6, pushed 2"
+        );
+    }
 }

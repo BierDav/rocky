@@ -159,9 +159,14 @@ impl Node {
         let attached = self.network.read().await;
         let transport = attached.as_ref().map(|link| &*link.transport);
         let work = async {
-            self.sync_optional(transport)
-                .await
-                .map(|(report, _)| report)
+            let (report, _) = self.sync_optional(transport).await?;
+            if report.reconciled() == 0 {
+                return Err(ServiceError::NoPeerReached {
+                    known: report.peers.len(),
+                }
+                .into());
+            }
+            Ok(report)
         };
         let Some(link) = attached.as_ref() else {
             return work.await;

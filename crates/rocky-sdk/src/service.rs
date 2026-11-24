@@ -34,18 +34,24 @@ pub enum ServiceError {
     TimedOut(String),
     CredentialsExpired,
     Closed(&'static str),
+    SyncOff,
+    NoPeerReached { known: usize },
 }
 impl ServiceError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NetworkRequired(_) | Self::CredentialsExpired => "network_required",
             Self::NetworkAttached | Self::NoRoute { .. } => "rejected",
-            Self::Unreachable(_) | Self::TimedOut(_) => "unreachable",
+            Self::Unreachable(_) | Self::TimedOut(_) | Self::NoPeerReached { .. } => "unreachable",
             Self::Closed(_) => "closed",
+            Self::SyncOff => "sync_off",
         }
     }
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Unreachable(_) | Self::TimedOut(_))
+        matches!(
+            self,
+            Self::Unreachable(_) | Self::TimedOut(_) | Self::NoPeerReached { .. }
+        )
     }
 }
 impl std::fmt::Display for ServiceError {
@@ -65,6 +71,11 @@ impl std::fmt::Display for ServiceError {
                 f.write_str("credentials expired; open with a network that reaches an issuer")
             }
             Self::Closed(handle) => write!(f, "{handle} closed"),
+            Self::SyncOff => f.write_str("sync is off; set the sync mode to Manual or Live"),
+            Self::NoPeerReached { known: 0 } => f.write_str("no peer is known to sync with"),
+            Self::NoPeerReached { known } => {
+                write!(f, "none of the {known} known peers reconciled")
+            }
         }
     }
 }

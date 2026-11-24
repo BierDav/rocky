@@ -52,13 +52,10 @@ async fn synced(device: &Device) -> Result<SyncReport, rocky_sdk::Error> {
     device.sync_now().await
 }
 fn reconciled_with(report: &SyncReport, node: &str) -> bool {
-    report.peers.iter().any(|peer| {
-        peer.node == node
-            && peer.attempts.iter().any(|attempt| {
-                attempt.operation == rocky_sdk::AttemptOperation::Reconcile
-                    && attempt.outcome == Some(rocky_sdk::AttemptOutcome::Completed)
-            })
-    })
+    report
+        .peers
+        .iter()
+        .any(|peer| peer.node == node && peer.reconciled())
 }
 async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     for _ in 0..4 {

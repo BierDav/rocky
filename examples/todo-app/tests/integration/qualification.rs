@@ -186,7 +186,14 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     tokens.push(token(laptop.add(list, "Bread").await?.token)?);
     let sealed = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            laptop.database().sync_now().await?;
+            let offline_phone = laptop.database().sync_now().await.err();
+            assert!(
+                offline_phone.is_some_and(|error| matches!(
+                    error.kind,
+                    rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached { .. })
+                )),
+                "a pass that reaches no peer says so while the phone is off"
+            );
             let tip = laptop.database().tip_status().await?.tip;
             if tip != opened {
                 return Ok::<_, Failure>(tip);

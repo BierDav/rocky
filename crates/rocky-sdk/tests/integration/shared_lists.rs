@@ -73,11 +73,11 @@ impl Peer {
         self
     }
 
-    async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, rocky_sdk::Error> {
-        match &self.identity {
+    async fn sync_now(&self) -> Result<Option<rocky_sdk::SyncReport>, rocky_sdk::Error> {
+        crate::support::peerless_ok(match &self.identity {
             Some(identity) => self.database.sync_now_with_identity(identity.clone()).await,
             None => self.database.sync_now().await,
-        }
+        })
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         let mut tx = self.database.transaction().await?;
@@ -161,7 +161,7 @@ async fn checkpoint_writer(
             .await?
             .database,
     )?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(
         writer.column("SELECT title FROM lists").await?,
         [json!("Base list")]
@@ -204,11 +204,11 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .await?
             .database,
     )?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     let prepared = snap::value(writer.database.next_partition("lists")).await?;
     snap::value(issuer.database.seal()).await?;
     snap::value(issuer.database.compact(0)).await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     let status = snap::value(writer.database.status()).await?;
     assert!(
         status["data"]["blockers"]
@@ -316,8 +316,8 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         list.as_str(),
         "a prepared partition survives a restart before its first row commits"
     );
-    snap::value(writer.sync_now()).await?;
-    snap::value(issuer.sync_now()).await?;
+    writer.sync_now().await?;
+    issuer.sync_now().await?;
     assert_eq!(
         issuer
             .column("SELECT title FROM lists ORDER BY title")
@@ -394,7 +394,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         )
         .await?;
 
-    snap::value(writer.sync_now()).await.map_err(|error| {
+    writer.sync_now().await.map_err(|error| {
         format!("one sync delivers the envelope and the list's checkpoint: {error}")
     })?;
     assert_eq!(
@@ -419,7 +419,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     )
     .await?;
     tx.commit().await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     for peer in [&writer, &issuer] {
         assert_eq!(
             peer.column(&format!(
@@ -478,7 +478,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .await?
             .database,
     )?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -489,7 +489,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         .await?;
     snap::value(issuer.database.seal()).await?;
     snap::value(issuer.database.compact(0)).await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     writer
         .insert(
             "items",
@@ -497,7 +497,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(
         issuer
             .column(&format!("SELECT title FROM items WHERE list = X'{list}'"))
@@ -589,7 +589,7 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             .await?
             .database,
     )?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
     snap::value(issuer.database.set_retention(
         "items",
@@ -617,7 +617,7 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     tx.execute("DELETE FROM items WHERE title='Eggs'", Vec::new())
         .await?;
     tx.commit().await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(
         writer.column(&titles).await?,
@@ -715,7 +715,7 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     writer
         .insert(
             "items",
@@ -779,12 +779,12 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             .await?
             .database,
     )?;
-    snap::value(b.sync_now()).await?;
+    b.sync_now().await?;
     assert_eq!(
         b.column("SELECT title FROM lists").await?,
         [json!("Own list")]
     );
-    snap::value(a.sync_now()).await?;
+    a.sync_now().await?;
     let activity = snap::value(a.database.activity(0)).await?;
     assert!(
         !kinds(&activity).contains(&"partition_bootstrap".to_owned()),
@@ -803,7 +803,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
 
 async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Failure> {
     for peer in peers {
-        snap::value(peer.sync_now()).await?;
+        peer.sync_now().await?;
     }
     Ok(())
 }
@@ -840,8 +840,8 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     }
     sync_each_learning_the_others_tuple(&[&a, &b]).await?;
     for (from, to) in [(&a, &b), (&b, &a)] {
-        snap::value(from.sync_now()).await?;
-        snap::value(to.sync_now()).await?;
+        from.sync_now().await?;
+        to.sync_now().await?;
     }
     for peer in [&a, &b] {
         assert_eq!(
@@ -900,7 +900,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             )
             .await?;
     }
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -919,7 +919,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     older_application
         .insert(
             "items",
@@ -927,7 +927,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -939,7 +939,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     );
     older_application.database.close().await?;
     let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
         .column(&format!(
@@ -954,7 +954,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")],
@@ -1006,7 +1006,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             )
             .await?;
     }
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -1025,7 +1025,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?.with_identity(&b);
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     older_application
         .insert(
             "items",
@@ -1033,7 +1033,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1045,7 +1045,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     );
     older_application.database.close().await?;
     let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?.with_identity(&b);
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
         .column(&format!(
@@ -1060,7 +1060,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
             &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")],
@@ -1132,7 +1132,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             )
             .await?;
     }
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     writer
         .insert(
             "items",
@@ -1140,7 +1140,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Butter')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -1148,7 +1148,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     let issuer = Peer::new(at(&a, &hub, "a", POSITIONED).open().await?)?.with_identity(&a);
 
     let older_application = Peer::new(at_without_identity(&b, &hub, "b", SCHEMA).open().await?)?;
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     older_application.database.renew().await?;
     older_application
         .insert(
@@ -1157,7 +1157,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(older_application.sync_now()).await?;
+    older_application.sync_now().await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1174,7 +1174,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             .open()
             .await?,
     )?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     writer.database.renew().await?;
     writer
         .insert(
@@ -1183,7 +1183,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             &format!("INSERT INTO items(id,list,title,position) VALUES(?,X'{list}','Eggs','9')"),
         )
         .await?;
-    snap::value(writer.sync_now()).await?;
+    writer.sync_now().await?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1244,7 +1244,7 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         }
         transaction.commit().await?;
     }
-    snap::value(member.sync_now()).await?;
+    member.sync_now().await?;
     for peer in [member, issuer] {
         peer.database.close().await?;
     }
@@ -1266,7 +1266,7 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     assert_eq!(issuer_rows.len(), total);
 
     let member = Peer::new(at_without_identity(&b, &hub, "b", ORDERED).open().await?)?;
-    snap::value(member.sync_now()).await?;
+    member.sync_now().await?;
     assert_eq!(
         member.column(&check_sql).await?,
         expected_summary,

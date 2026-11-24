@@ -1,3 +1,6 @@
+use crate::common::Failure;
+use std::path::Path;
+
 mod one_device {
     include!("../../examples/one_device.rs");
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,6 +20,43 @@ mod two_devices {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         main()
     }
+}
+
+fn repository() -> &'static Path {
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+}
+
+#[test]
+fn every_rust_block_in_the_readme_appears_verbatim_in_its_example_file() -> Result<(), Failure> {
+    let readme = std::fs::read_to_string(repository().join("README.md"))?;
+    let mut lines = readme.lines();
+    let mut checked = Vec::new();
+    while let Some(line) = lines.next() {
+        let Some(info) = line.strip_prefix("```rust") else {
+            continue;
+        };
+        let file = info.trim();
+        assert!(
+            !file.is_empty(),
+            "a Rust block in the README must name its example file after ```rust"
+        );
+        let block: String = lines
+            .by_ref()
+            .take_while(|line| *line != "```")
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let source = std::fs::read_to_string(repository().join(file))?;
+        assert!(
+            source.contains(&block),
+            "the README's block for {file} differs from the file; copy one into the other"
+        );
+        checked.push(file.to_owned());
+    }
+    assert!(
+        checked.len() >= 2,
+        "the README shows the one- and two-device examples: {checked:?}"
+    );
+    Ok(())
 }
 
 #[test]

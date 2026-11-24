@@ -11,8 +11,465 @@ plug in (iroh, TCP or WebSocket), business rules and backups. Guarantees that
 need a global authority, such as gap-free numbers or admitting a ticket once,
 come from the optional `rocky-coordinator` crate.
 
-See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests, module
-declarations and tests to navigate the implementation.
+## Install
+
+Depend on Rocky by git tag. `rocky-sdk` has no networking of its own; add
+`rocky-tcp` for plain TCP or WebSocket, or `rocky-iroh` for peer-to-peer QUIC
+with relays and discovery.
+
+```toml
+[dependencies]
+rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.2" }
+rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.2" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Copy Rocky's dev profile into your own `Cargo.toml`. Cargo applies only the
+root package's profile, and unoptimized crypto and SQLite make a debug build's
+loopback sync take seconds instead of about 100 ms.
+
+```toml
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.rocky-core]
+opt-level = 3
+
+[profile.dev.package.rocky-credentials]
+opt-level = 3
+```
+
+Rocky needs Rust 1.99 or later and edition 2024; every published crate sets
+`rust-version`, so an older toolchain fails with a clear message. On a host
+with less than 8 GB of memory, build with `cargo build -j2`.
+
+## One device
+
+Create a database, declare a table, write in a transaction and read it back.
+`Transaction::next_id` fills the `id` primary key every replayed table has.
+
+```rust crates/rocky-sdk/examples/one_device.rs
+use rocky_sdk::{Affinity, Column, Configuration, Schema, Table, params};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Schema::builder("notes", 1)
+        .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
+        .build()?;
+    let directory = std::env::temp_dir().join(format!("rocky-one-device-{}", std::process::id()));
+    let database = Configuration::new(&directory, &schema)?
+        .create()
+        .await?
+        .database;
+
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("notes", vec![]).await?;
+    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
+    transaction
+        .execute(insert, params![id, "Hello, Rocky"])
+        .await?;
+    transaction.commit().await?;
+
+    let rows = database.query("SELECT body FROM notes", params![]).await?;
+    let note: String = rows
+        .collect()
+        .await?
+        .first()
+        .ok_or("no note")?
+        .get("body")?;
+    println!("{note}");
+    database.close().await?;
+    Ok(std::fs::remove_dir_all(directory)?)
+}
+```
+
+`Configuration::open` opens the same directory again. `Database` is one handle:
+clones share it, every call is a future the caller may drop, and `close` ends
+it for every clone.
+
+## Two devices
+
+Alice creates the database and invites Bob over TCP on loopback. Bob joins,
+Alice writes, and Bob syncs and reads Alice's note.
+
+```rust crates/rocky-sdk/examples/two_devices.rs
+use rocky_sdk::{Access, Affinity, Column, Configuration, Invite, Network, Schema, Table, params};
+use std::{net::SocketAddr, sync::Arc};
+
+fn loopback() -> Network {
+    let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
+    Network::Owned(Arc::new(rocky_tcp::Options::new(any_port)))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Schema::builder("notes", 1)
+        .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
+        .build()?;
+    let directory = std::env::temp_dir().join(format!("rocky-two-devices-{}", std::process::id()));
+
+    let alice = Configuration::new(directory.join("alice"), &schema)?
+        .network(loopback())
+        .create()
+        .await?;
+    println!(
+        "Alice's person key, for the app's secure storage: {}",
+        alice.owner.phrase()
+    );
+    let invitation = alice.database.invite(Invite::new(Access::Full)).await?;
+
+    let bob = Configuration::new(directory.join("bob"), &schema)?
+        .network(loopback())
+        .join(&invitation.code)
+        .await?;
+
+    let mut transaction = alice.database.transaction().await?;
+    let id = transaction.next_id("notes", vec![]).await?;
+    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
+    transaction
+        .execute(insert, params![id, "Hello from Alice"])
+        .await?;
+    transaction.commit().await?;
+
+    let report = bob.database.sync_now().await?;
+    println!("Bob's sync: {report}");
+    let rows = bob
+        .database
+        .query("SELECT body FROM notes", params![])
+        .await?;
+    let note: String = rows
+        .collect()
+        .await?
+        .first()
+        .ok_or("Bob has no note")?
+        .get("body")?;
+    println!("Bob reads: {note}");
+
+    bob.database.close().await?;
+    alice.database.close().await?;
+    Ok(std::fs::remove_dir_all(directory)?)
+}
+```
+
+`join` returns after its first pull from the issuing device, so Bob's first
+read already sees Alice's rows. `SyncMode::Live`, the default, pushes Alice's
+commit to Bob at once; `sync_now` makes the example deterministic. Run it with
+`cargo run -p rocky-sdk --example two_devices`.
+
+## Keys
+
+| Key | What it is | Who holds it | Needed for |
+| --- | --- | --- | --- |
+| Root key and its 24-word phrase (`Created::root`, `RootKey`) | The database's offline authority | The owner, offline; Rocky never stores it | `make_admin`, `revoke_admin` and `Counters::register` only |
+| Person key (`Created::owner`, `Opened::identity`, `IdentityKey`) | One person's identity | The app, in its secure storage; `IdentityKey::phrase` and `IdentityKey::from_phrase` move it as 24 words | Every open, through `Configuration::identity`: it signs the session's invitations, links, unlinks and schema publications |
+| Device key | One device's identity | Rocky, under the database directory or in `Configuration::secrets` | Opening and renewing the device's credentials; it never leaves the device |
+
+`create` returns the root and the owner's person key once, and `join` returns
+a minted person key in `Opened::identity`; each of those sessions signs with
+its key. Later opens get the person key from `Configuration::identity`, and a
+call that needs it without one is `Denied` with `IdentityRequired`.
+`create_with_root(root, owner)` takes signers the application keeps
+elsewhere, such as passkey-backed ones, and `FileIdentityProvider` keeps a
+person key in a native file.
+
+## People, access and partitions
+
+`Database::invite(Invite::new(access))` issues an `Invitation` whose `code` a
+joiner redeems with `Configuration::join`; admin devices invite, and the joiner
+needs the issuing device online. An invite can add `partition`s, a `label` for
+the device and, on the first invitation, the person, and a validity from one
+minute to 30 days (`Invite::valid_for`, ten minutes by default). A default code
+admits whoever holds it once, as a person key Rocky mints and returns in
+`Opened::identity`. `Database::invitations` lists open and redeemed
+invitations, and `cancel_invitation` ends an unused one.
+
+`Access` is `Full`, `Read`, `Store` or a `Role` the schema declares with
+`SchemaBuilder::role`. A role reads, writes, appends to or updates named
+columns of the tables it lists. A role declared `per_partition` holds no
+partition of that group until an admin calls `grant_partition(person,
+&partition)`; until then a read is `Denied` with `PartitionNotGranted` and
+`status` lists a matching blocker. Grants reach every device of the person,
+including devices that join or link later, and `revoke_partition` takes them
+back and rotates the key. `Full` and `Read` reach every partition.
+
+A person links another device with `Configuration::link(contact)` on the new
+device, configured with their person key, where `contact` is
+`Database::contact().uri` of a device they hold. The
+person compares `PendingLink::code` with `Database::link_requests` there,
+approves with `approve_link` and finishes with `PendingLink::confirm`. A
+person who lost their only device cannot link: an admin `unlink`s the lost
+device and invites the person again with `Invite::for_identity(person)` and the
+same access, and the replacement joins with the person's key and every
+partition they were granted.
+
+`Database::me` says who the device belongs to and what it may do per table.
+Admins list members with `people`, change access with `set_access`, and end a
+member with `remove(person, Removal::Departed)`. Narrowing access revokes the
+person's credentials and rotates the keys of what they could read. The owner
+makes and ends admins with `make_admin(person, root)` and `revoke_admin(person,
+removal, root)`; an admin who should stay a member is invited again. Admin
+devices raise `TrustedNodeLinked` and `TrustedNodeUnlinked` alerts when an
+admin links or unlinks a device, and `TrustedIdentityStale` when no device of
+an admin was heard from for 30 days (`set_trusted_stale_after`).
+
+A removed or unlinked device learns of it at its next sync. From then on it
+refuses every read, commit and sync with `ErrorKind::Removed`, also after
+reopening. It drops its keys, so its rows stay in its directory, unreadable,
+until `logout(Logout::PurgeOnClose)` deletes the directory at close. A
+device that is offline cannot know yet: it keeps reading and committing
+locally until it syncs, and those commits never reach anyone else.
+
+## How merging works
+
+A transaction is recorded as SQL intents: its statements and their
+parameters. Every device replays every transaction in one global order, so a
+device's local commit may be reordered when older transactions arrive, which
+`observe` reports as a `Rebuild`. A replayed transaction that violates a
+constraint, such as a unique index, a foreign key or a `CHECK`, is dropped
+whole, on every device; `observe` reports it in `TableChange::dropped` and
+`transaction_outcome(token)` says what happened to it.
+
+Every replayed table has an `id` primary key holding a `RowIdentity`, which
+`Transaction::next_id(table, partition_values)` allocates without
+coordination; gap-free numbers come from `rocky-coordinator`. `commit` returns
+`Commit::Recorded(token)`, or `Commit::NoChanges` when the transaction changed
+nothing and nothing syncs. `flush` makes every returned commit durable.
+
+A write must replay identically everywhere, so Rocky refuses some SQL in a
+transaction with `ErrorKind::Sql { unsupported, .. }`:
+
+- a clock or random value, such as `datetime('now')` or `random()`, is
+  `Unsupported::NonDeterministic(function)`, whose message says to bind the
+  value as a parameter instead;
+- a `WITH` clause is `Unsupported::With`;
+- `IS ?` and `IS NOT` comparisons are accepted;
+- an intent over 128 KiB is `ErrorKind::TooLarge` with `Limit::Intent`.
+
+## Sync
+
+`Configuration::sync` picks the mode a database opens in and `set_sync`
+changes it:
+
+| `SyncMode` | Serves peers | Reaches out |
+| --- | --- | --- |
+| `Live` (default) | Yes | On its own, and pushes each commit to connected peers at once |
+| `Manual` | Yes | Only on `sync_now` |
+| `Off` | No | Never |
+
+`sync_now` runs one pass and fails with `ServiceError::SyncOff` when sync is
+off and with `NoPeerReached { known }` when no peer reconciled, which is also
+what an owner with no other device yet gets. Its `SyncReport` prints as one
+line; `complete()` is true when every known peer reconciled or another peer
+covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.
+`add_peer`, `remove_peer` and `contact` manage peers.
+
+`observe(&["notes"])` streams `TableChange`s for the named tables, or all
+tables for an empty list, with their `causes`: `Local`, `Sync`, `Rebuild` or
+`Authority`, when the device's access changed what it may read. `status`
+returns a `DatabaseStatus`, and `status_changes` yields one each time it
+changes. `status().data.blockers` lists data that cannot be read yet, each with
+what clears it (`ClearsBy`); a read of such data fails with `ErrorKind::Blocked
+{ table, blockers }` naming the same blockers.
+
+Copying a closed database directory is a valid backup. A restored copy that
+peers have moved past reads and syncs but refuses to write with
+`StoreSuperseded`; invite it again as a new device.
+
+## Errors
+
+Every call returns one `rocky_sdk::Error`. Match on `error.kind()`, an
+`ErrorKind`; `retryable()` follows from the kind.
+
+```rust crates/rocky-sdk/examples/refused_write.rs
+use rocky_sdk::{Affinity, Column, Configuration, ErrorKind, Schema, Table, Unsupported, params};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Schema::builder("notes", 1)
+        .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
+        .build()?;
+    let directory = std::env::temp_dir().join(format!("rocky-refused-{}", std::process::id()));
+    let database = Configuration::new(&directory, &schema)?
+        .create()
+        .await?
+        .database;
+
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("notes", vec![]).await?;
+    let stamped = "INSERT INTO notes(id, body) VALUES(?, datetime('now'))";
+    let Err(error) = transaction.execute(stamped, params![id]).await else {
+        return Err("a clock value in a replayed write was accepted".into());
+    };
+    match error.kind() {
+        ErrorKind::Sql {
+            unsupported: Some(Unsupported::NonDeterministic(function)),
+            ..
+        } => {
+            println!("{function}() differs on every device; bind its value instead: {error}");
+        }
+        ErrorKind::Denied { need, reason, .. } => println!("cannot {need}: {reason}"),
+        _ if error.retryable() => println!("retry later: {error}"),
+        _ => return Err(error.into()),
+    }
+    transaction.rollback().await?;
+    database.close().await?;
+    Ok(std::fs::remove_dir_all(directory)?)
+}
+```
+
+`Denied { table, need, reason }` names the `Right` the call needed (`Read`,
+`Write`, `Append`, `Update(column)`, `Allocate`, `Administer` or `Sign`) and
+why the device lacks it:
+
+| `DenyReason` | Cause | What clears it |
+| --- | --- | --- |
+| `NotGranted` | The person's access does not include the right | An admin's `set_access` |
+| `PartitionNotGranted { group }` | The person holds no partition with these values | An admin's `grant_partition` |
+| `PartitionNotCreated { group }` | No partition with these values exists | `create_partition` on an admin device |
+| `StoreOnly` | A store-only device holds no readable data | Nothing; it is a relay |
+| `AdminRequired` | Only an admin may do this | An admin device |
+| `OwnerRequired` | Only the root key may do this | `make_admin` or `revoke_admin` with the root |
+| `IdentityRequired` | The call signs as the person | `Configuration::identity` |
+
+Other kinds an application meets:
+
+- `Removed`: the person or device was removed; nothing clears it.
+- `Blocked { table, blockers }`: the data has not arrived; retry after the
+  named blockers clear.
+- `TooLarge { limit, size, max }`: a write exceeds a size limit.
+- `UpgradeRequired { current, declared }`: the database is at a schema version
+  that removed something this application declares; upgrade the application.
+- `MigrationFailed { version, step }`: a migration step failed and its version
+  was withdrawn; a retry does not clear it.
+- `Sql { code, message, unsupported }`: SQLite refused the statement, or
+  Rocky did for a replayed write when `unsupported` is set.
+
+`Invite`, `Join`, `Link`, `Access` and `Service` carry the typed cause of an
+invitation, link, access or network failure, and `Internal` is never
+retryable.
+
+## Schema evolution
+
+Raise the version in `Schema::builder(application, version)` with every change
+and declare the SQL that brings the data there with
+`SchemaBuilder::migration(version, steps)`. A step may read the previous
+version's rows as `parent.<table>`, but not correlated with the row it writes,
+so renaming a field takes two versions: one adds the new field and copies the
+old one into it (`UPDATE items SET label = title`), and a later one drops the
+old field once every device runs the first.
+
+An admin device publishes a new version when it opens with it. A version that
+drops tables or fields or narrows a role fails to open with
+`ErrorKind::RolloutConfirmation`, whose `RolloutImpact` lists what goes; open
+it with `Configuration::open_confirmed(&impact.digest)`. A version that drops a
+role someone holds fails with `RoleInUse`.
+
+An application that declares an older version than the database runs
+(`DeclaredSchema::Behind` in `status`) keeps working. Only when a newer version
+removed a table or field it declares does open, or a statement using it, fail
+with `UpgradeRequired`.
+
+A write made under an earlier version that a later one can no longer apply,
+such as a late write into a removed field, is dropped on every device, loudly:
+`observe` delivers a `DroppedTransaction` with `DropReason::Schema`, and the
+writer's device and every admin device raise a `WriteDropped` alert that
+survives restarts until `acknowledge_drop(token)`.
+
+A device whose data predates a version that removed a table or field starts
+from the checkpoint taken there. Until it has it, `status` and the `Blocked`
+error of a refused read name a `SealRebootstrap` blocker with `ClearsBy::Admin`,
+cleared by the next sync with an admin device. Each `Device` in `people`
+carries the version it last reported (`Device::schema`), so an admin sees when
+every device runs the version that makes a removal safe.
+
+## Relays
+
+A relay holds and forwards encrypted frames and partition-key mailboxes for
+devices that are never online together, but never receives a data key. It is
+an ordinary person invited with `Access::Store`, usually with
+`Invite::for_identity`. `Configuration::store_only(directory)` opens such a
+database without the application's schema, so one process can relay for many
+applications; see `cargo run -p rocky-sdk --example relay`.
+
+## Transports
+
+A database attaches its network at open (`Configuration::network`) or later
+with `attach`; `detach` closes only a transport the database started.
+
+- **iroh**: `Network::Owned(Arc::new(rocky_iroh::Options::default()))` uses
+  n0's public relays and lookup service, finds the database's other devices by
+  topic and on the local network, and runs in the browser through relays. An
+  application with its own iroh endpoint registers
+  `rocky_iroh::Attachment::new(endpoint)` on its router and passes
+  `attachment.transport()` as `Network::Borrowed`. On iOS, also copy the
+  `[patch.crates-io]` entries for `netdev` and `netwatch` from Rocky's root
+  `Cargo.toml`.
+- **TCP**: `rocky_tcp::Options::new(bind)` through `Network::Owned`, for
+  networks that already route and encrypt between peers, such as a WireGuard
+  mesh. `advertise("host:port")` names a route other than the bound address.
+  It is native only and has no discovery or relays.
+- **WebSocket**: the `rocky-tcp` feature `websocket` dials `ws://` and `wss://`
+  routes and accepts handshakes with `Options::websocket`. Behind an HTTPS
+  reverse proxy, `rocky_tcp::Attachment::external(url)` with
+  `admit_websocket` serves connections the application's HTTP server upgraded.
+- **Custom**: implement `rocky_sdk::transport::Transport` and pass it as
+  `Network::Borrowed`; `Network::Attached` also supplies discovery and
+  network-change events. The application keeps and closes a borrowed or
+  attached transport.
+
+Rocky's encryption and authorization apply on top of every transport.
+
+## Coordinator
+
+`rocky-coordinator` adds gap-free counters and at-most-once claims to a
+`Database`. `Counters::connect(database, &bundle, transport)` reaches the
+coordinator a `TrustBundle` names. The owner registers the database once with
+`counters.register(&root, &tenant, lifetime)`, where `tenant` is the
+coordinator account (`Tenant::generate()`, kept through `Tenant::secret`), and
+renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
+
+`counters.claim(&name, claim)` then takes a counter's next number for any
+person with write access, and the application writes that number in its own
+transaction. A keyed claim, `Claim::keyed(order_id, issued)`, returns its first
+number to every retry with the same key and the same issuance time, for seven
+days and up to 1024 claims per counter. An unreachable coordinator is
+`CoordinationError::Unavailable` and takes no number.
+
+`scripts/coordinator-local DIR` builds `rocky-voter`, starts three voters on
+loopback and prints the trust bundle that `cargo run -p rocky-coordinator
+--example counters -- BUNDLE EMPTY_DIR` claims from.
+
+## Browser (wasm)
+
+The same crates build for `wasm32-unknown-unknown`. Rocky must run in a
+dedicated Worker, where it keeps each database in the origin's private file
+system (OPFS); the directory you pass to `Configuration` names it there. In the
+browser, use `rocky-iroh` through its relays.
+
+Building compiles C (SQLite, ring), so it needs a clang that targets wasm32 and
+an `llvm-ar` that indexes wasm objects, which Apple's `ar` does not (`rustup
+component add llvm-tools`). Unoptimized builds also poll futures deeper than
+wasm's default 1 MiB stack. In your `.cargo/config.toml`, with the path naming
+your toolchain and host:
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=16777216"]
+
+[env]
+AR_wasm32_unknown_unknown = "<rustc --print sysroot>/lib/rustlib/<host>/bin/llvm-ar"
+```
+
+Rocky links its own SQLite build in the browser (`rocky-sqlite`, see
+[vendor/README.md](vendor/README.md)). An application that uses rusqlite itself
+depends on it with `default-features = false`, since rusqlite's default
+`ffi-sqlite-wasm-rs` links another SQLite and the link fails. Browser tests run
+with `WASM_BINDGEN_USE_DEDICATED_WORKER=1`.
+
+## Developing Rocky
+
+See [AGENTS.md](AGENTS.md) for contribution rules. Crates live in `crates/`,
+applications in `examples/` and performance probes in `benchmarks/`.
 
 ```sh
 ./scripts/setup
@@ -20,287 +477,16 @@ declarations and tests to navigate the implementation.
 ./scripts/check
 ```
 
-For an edit, `./scripts/check --changed` validates the affected Rust packages
-and their workspace consumers; shared or unknown inputs run the full workspace.
-Use `./scripts/check --package rocky-sdk` to select a package explicitly, or
-add `--unit` for just its unit tier. `./scripts/check --all` also runs e2e. These commands keep the workspace build and
-filter test execution to avoid additional dependency variants. Cranelift's
-separate build is opt-in with `ROCKY_CRANELIFT=1`.
+`./scripts/check --package rocky-sdk` checks one package and its workspace
+consumers, `--unit` runs just the unit tier, `--wasm` runs clippy for wasm32
+and the tests in a headless browser, and `--all` adds e2e. `--changed` scopes to
+jj's current change. `./scripts/lint --fix` formats.
 
-The Rust application SDK is the `rocky-sdk` crate in `crates/rocky-sdk`. We only
-provide the Rust-native API; developers who want to use it from Kotlin or other
-languages need to write their own Rust wrapper/bindings.
+More examples: `cargo run -p rocky-sdk --example notes -- ./local/notes
+--create` keeps a notes database, and `cargo run -p todo-desktop` runs several
+devices of a shared todo app in one window.
 
-Try it with:
-
-```sh
-cargo run -p rocky-sdk --example notes -- ./local/notes --create
-cargo run -p rocky-sdk --example notes -- ./local/notes
-```
-
-`Configuration` opens a database and `Database` is its one handle: clones
-share it, every call is a future the caller may drop, and `close` ends the
-database for every clone. `observe(&["notes"])` streams committed changes to
-the named tables (an empty list means all), `flush` makes every returned commit
-durable, and `status` with `status_changes` reports progress, blockers and the
-network. The crate root holds the types every application uses; status reports
-live in `rocky_sdk::status`, partition progress in `rocky_sdk::partitions`, and
-held changes and retention in `rocky_sdk::inspection`. A schema is built only
-with `Schema::builder`, `Table` (columns, keys, checks, indexes, foreign keys
-and partitioning) and `Role`. A float becomes a value with
-`SqlValue::try_from`, which refuses NaN.
-
-Every call, SQL included, returns one typed `rocky_sdk::Error`. Its `kind()`
-is an `ErrorKind` an application matches on, and `retryable()` follows from
-that kind. A refusal of access is `Denied { table, need, reason }`: the
-`Right` the call needed (`Read`, `Write`, `Append`, `Update(column)`,
-`Allocate` for a row id, `Administer`, `Sign`) and a `DenyReason`
-(`NotGranted`, `PartitionNotGranted { group }`, `PartitionNotCreated { group
-}`, `StoreOnly`, `AdminRequired`, `OwnerRequired`, `IdentityRequired`). A
-removed person or device gets `Removed`. A table that still waits for data is
-`Blocked { table, blockers }`, which names the scope and what clears it;
-`status` lists the same blockers until the data arrives. A statement SQLite or
-Rocky refuses is `Sql { code, message, unsupported }`, where `unsupported`
-names `NonDeterministic(function)` for a clock or random value in a replayed
-write (bind the value instead) and `With` for a `WITH` clause there. A write
-over a size limit is `TooLarge { limit, size, max }`, and a failed migration is
-`MigrationFailed { version, step }`. A schema with an invalid name is
-`Schema(SchemaError::InvalidName(..))`, whose `InvalidName { path, name, rule }`
-names, for example, a column of `tables.notes.columns` declared twice
-(`NameRule::Unique`). Other kinds keep their typed cause, such
-as `ServiceError`, `JoinError` or `RolloutConfirmationRequired`; an unknown
-internal failure is `Internal` and never retryable.
-
-A database's authority is an offline root key: `Configuration::create`
-returns it once as a 24-word phrase (`Created::root`) together with the
-owner's person key derived from it (`Created::owner`, an `IdentityKey`), or
-`create_with_root(root, owner)` takes a passkey-backed root signer and the
-owner's person signer. Rocky never stores either. The application keeps the
-person key in its own secure storage (`IdentityKey::phrase` and
-`IdentityKey::from_phrase` move it as 24 words; `FileIdentityProvider` keeps
-it in a native file) and supplies it with `Configuration::identity`; the open
-database signs with it for that session and drops it at close. With the person
-key alone, an owner or admin device publishes a new schema version, approves
-links of its person's devices, unlinks devices and invites; only `make_admin`
-and `revoke_admin` need the root. A call that needs the person key without one
-configured is `Denied` with `IdentityRequired`, and `create` refuses a
-configured identity that is not the owner's with `OwnerRequired`.
-An admin invites with `Database::invite(Invite::new(access))`,
-optionally naming `partition`s, a `label`, a validity (`Invite::valid_for`,
-ten minutes by default) or the one person it is for (`for_identity`). The
-label names the device the invitation admits (`Device::label`) and, on the
-person's first invitation, the person. The
-returned `Invitation` holds an `InvitationCode`; `Configuration::join` redeems
-it over the network with the issuing device and returns `Opened` after its
-first pull from that device, so the first read sees the issuer's rows. Joining
-needs the issuing device online; if the first pull fails after redemption, the
-database still opens, its reads report the missing data as `Incomplete`, and
-the next sync completes it. A default
-code carries a single-use secret, so whoever holds it joins once, as an
-identity Rocky mints and returns once in `Opened::identity` (an
-`IdentityKey` the application stores like the owner's); a `for_identity`
-code carries no secret and admits only that person's configured identity. A
-refused join says why with a `JoinError` (`Expired`, `Used`, `Cancelled`,
-`OtherIdentity`, `AlreadyMember`, `IssuerUnreachable`, ...).
-`Database::invitations` lists open and redeemed invitations, naming the
-`PersonId` that redeemed each (`redeemed_by`), and
-`cancel_invitation` ends an unused one. A person links another device with
-`Configuration::link`, which returns a `PendingLink` whose `code` the person
-compares with `Database::link_requests` on a device they already hold,
-approves with `approve_link`, and finishes with `PendingLink::confirm`.
-`Database::unlink` ends one device: the person's own, or as an admin a
-member's lost device, while the member keeps the others. Linking needs a
-device the person still holds, so a person who lost their only device gets a
-replacement through an admin: `unlink` the lost device and invite the person
-again with `for_identity` and the same access; the replacement joins with the
-person's identity and every partition they were granted. Opening and renewal
-use the device key alone.
-`Database::invite` takes an `Access`: `Full`,
-`Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
-A role reads, writes, appends to or updates named columns of the tables it
-lists; column lists restrict writes only. A role declared `per_partition`
-holds no partition of that group until an admin calls
-`Database::grant_partition(person, &partition)`, which delivers the group
-secret to every device of that person, including devices that join or link
-later (at an admin's next sync once it learns of them); granting a partition
-the person already holds delivers it to their devices again.
-`revoke_partition` takes it back. Before any grant, a read of a table of that
-group is `Denied` with `PartitionNotGranted { group }`, and `status` lists a
-`PartitionNotGranted` blocker for the group.
-`Full` and `Read` reach every partition. A new partition's secret reaches
-every device of every person whose access covers it through the delivery
-mailboxes, with no application call; store-only devices hold its frames but
-never its secret, and a device's replica follows its access.
-`status::DataStatus::partitions` reports whether each partition is held and complete.
-`Database::me` says who the device
-belongs to, its access and what it may do per table. Admins list people with
-`Database::people` (a `Person` per member with access, partitions and
-devices), change access with `set_access` and end a person with
-`remove(person, Removal::Departed | Removal::Compromised)`. A removed or
-unlinked device that learns of it at its next sync drops its keys, so it can
-no longer read the data, and refuses every SQL read and commit with
-`Removed`, also after reopening; its syncs fail the same way, and `logout(Logout::PurgeOnClose)` then deletes its
-directory. A device that is offline cannot know yet: it keeps
-reading and committing locally until it syncs, and those commits never reach
-anyone else. `Me::owner` comes from the root-signed owner grant, so every
-linked device of the owner knows it at once. Narrowing access
-or taking a partition back revokes the person's current credentials and
-rotates the keys of everything they could read before; the issuer records
-that revocation before it changes the access, so a crash in between still
-revokes once on restart. Widening and `make_admin` leave a rights notice in
-the mailbox of each of the person's devices, so each renews into the wider
-rights at its next sync with an admin device. A
-refused call says why with `Denied` (`AdminRequired`, `OwnerRequired`) or an
-`AccessError` (`UnknownPerson`, `TargetIsAdmin`, `PartialGroup`,
-`TooManyPartitions`, ...). The owner makes a member an admin with
-`make_admin(person, root)` and ends one with `revoke_admin(person, removal,
-root)`; both need the root key. An admin who should stay a member is invited
-again. `logout(Logout::KeepData | Logout::PurgeOnClose)` ends this device's
-session and keeps or deletes its directory at close.
-`SchemaBuilder::migration(version, steps)` declares the SQL that brings the
-data to `version`. A step may read the previous version's rows as
-`parent.<table>`, but not correlated with the row it writes, so renaming a
-field takes two versions: one adds the new field and copies the old one into
-it (`UPDATE items SET label = title`), and a later one drops the old field once
-every device runs the first. A write made under an earlier version that a
-later one can no longer apply, such as a late write into a removed field, is
-dropped with `DropReason::Schema` on every device, and loudly: `observe`
-delivers it in `TableChange::dropped` as a `DroppedTransaction { token, reason
-}`, and the writer's device and every admin device raise a `WriteDropped`
-alert in `status` that survives restarts until `acknowledge_drop(token)`.
-An application whose declared version is behind one that removed a table or
-field it declares gets `ErrorKind::UpgradeRequired { current, declared }` on
-open, and a statement failing on such a removal mid-session returns the
-same kind. A failing migration step withdraws its version
-and returns `ErrorKind::MigrationFailed { version, step }`, which a retry
-does not clear. Each `Device` in `people` carries the application schema
-version it last reported in its signed health report (`Device::schema`, a
-`ReportedSchema { version, reported }`), so an admin sees when every device
-runs the version a removal needs; a device that has not reported since this
-device opened is `None`. A device whose data predates a version that removed
-a table or field starts from the checkpoint taken there; until it has it,
-`status` and the `ErrorKind::Blocked { table, blockers }` of a refused read
-name a `SealRebootstrap { replay: FrameReplay::Never, .. }` blocker that
-`ClearsBy::Admin`, the next sync with an admin device.
-A schema version that drops tables or fields or narrows a role opens on an
-issuer only through `Configuration::open_confirmed` with the digest of the
-`RolloutImpact` its refusal carries; `narrowed_roles` names the roles that
-lose rights. The issuer records who holds a narrowed role before it stages
-the version; once the version is published it revokes their capabilities in
-one revocation and rotates the keys of what they could read, exactly once even
-across a crash and restart. A version that drops a role someone still holds
-fails with `RoleInUse`; widened roles reach their holders at their next sync
-with an admin device.
-Copying a closed database folder is a valid backup; a restored copy that
-peers have moved past reads and syncs but refuses to write
-(`StoreSuperseded`), and rejoins as a new device.
-A relay is an ordinary identity invited with store-only access
-(`Access::Store`): it holds and forwards encrypted frames and
-partition-key mailboxes for devices that are never online together, but never
-receives a data key. `Configuration::store_only` opens such a database without
-the application's schema, so one process can relay for many tenants
-(`cargo run -p rocky-sdk --example relay`).
-Every linked node of an admin can invite, renew and remove ordinary
-members, and seals: Rocky seals
-routinely and when the schema changes, never through an application call.
-Linking another node needs the person key configured on the new device and
-matching codes on both
-devices, with no root ceremony. Every node certificate carries the node's
-own signature naming its identity and database, so no identity can list
-another's node; a node key that two identities hold live certificates for
-belongs to neither. A node that once signed for two identities stays ended
-for both until one of them unlinks it; revoking either identity does not
-release it, and if neither unlinks it, the remedy is a new node key.
-Trusted observers retain `TrustedNodeLinked` and `TrustedNodeUnlinked`
-alerts, including for their own identity. Trust never expires; an identity
-raises `TrustedIdentityStale` on its trusted peers when none of its linked
-nodes has been heard from within the configured threshold. Root revocation
-keeps each linked node's seals through the latest heads the revoking node
-holds; unlink cuts that node's lane independently. Later statements raise
-`TipStatementsPastCut`.
-
-The todo app shares ordered lists between trusted, full and partial
-devices. Run several installations in one window, or one per device over
-iroh; start, join and reset them in the window:
-
-```sh
-cargo run -p todo-desktop
-cargo run -p todo-desktop -- --device --data-dir ./local/todo --lan
-```
-
-wasm32 (a browser, in a dedicated Worker) is a supported target of the same
-crates; `./scripts/check --wasm` runs clippy for it and the tests in headless
-Firefox.
-
-`rocky-sdk` starts without networking on native targets and in the browser.
-Applications select a connector explicitly: add `rocky-iroh` and supply its
-`Options` through `Network::Owned`, or attach an application's endpoint with
-`Attachment::transport` and `Network::Borrowed`. A configured network attaches
-at open; `Database::attach` and `detach` change it later, and `detach` closes
-only a transport the database started. `SyncMode::Live`, the default, serves
-peers, syncs on its own and pushes each commit to connected peers at once;
-`Manual` serves peers but reaches out only on `sync_now`; `Off` neither serves
-nor reaches out. `Configuration::sync` picks the mode a database opens in and
-`set_sync` changes it. `sync_now` runs one pass. It fails with
-`ServiceError::SyncOff` when sync is off and with `NoPeerReached` when no peer
-reconciled; otherwise its `SyncReport` says whether the pass was `complete()`
-(every known peer reconciled or was not needed), counts the encrypted frames
-`pulled()` and `pushed()`, and prints as one line, with each peer's attempts
-in `peers`. `add_peer`, `remove_peer` and `contact` manage peers. `Attachment::connected` also
-supplies optional discovery and network-change events through `Network::Attached`.
-One attachment routes RPC and replication streams to independent database scopes.
-Endpoint diagnostics and lifecycle controls belong to the iroh attachment.
-On a network that already routes and encrypts between peers, such as a
-WireGuard mesh, `rocky-tcp` is the plain-TCP connector instead (native only):
-`rocky_tcp::Options::new(bind).advertise("host:port")` through `Network::Owned`,
-or `Options::start` for an attachment the application keeps. Routes are
-`host:port`; it has no discovery or relays, and Rocky's own encryption and
-authorization apply on top as with any transport. Its `websocket` feature also
-dials `ws://` and `wss://` routes (TLS with webpki roots), accepts WebSocket
-handshakes with `Options::websocket`, and admits connections an application's
-HTTP server already upgraded through `Attachment::external(url)` and
-`Attachment::admit_websocket`, so Rocky can sit behind an HTTPS reverse proxy.
-A dialer pins the node it expects, so a route must reach one node: behind a
-load balancer give each node its own path.
-Guarantees that need a global authority, gap-free numbers and at-most-once
-admission, come from the optional `rocky-coordinator` crate, an add-on to a
-`Database`. `Counters::connect(database, &bundle, transport)` reaches the
-coordinator the trust bundle names; the database's owner registers it once with
-`counters.register(&root, &tenant, lifetime)`, where `tenant` is the
-coordinator account (`Tenant::generate()`, kept through `Tenant::secret`) and
-`lifetime` is at most the coordinator's `max_control_lifetime`, and renews it
-with `counters.renew(&tenant, &receipt, lifetime)` before it expires. Then
-`counters.claim(&name, claim)` takes the next number of a named counter for any
-person with write access, signed by the device inside the SDK, and a claim key
-such as an order or ticket id (`Claim::keyed`) keeps every retry, including one
-after a dropped or timed-out call, on its first number. The application writes
-that number in its own transaction. An unreachable coordinator is
-`CoordinationError::Unavailable` and takes no number; a refusal, such as a
-reader's or a removed person's claim, is `CoordinationError::Denied(Refusal)`.
-`with_deadline` bounds how long a call waits. The coordinator itself is
-`rocky-voter`, a three-voter Raft service: `scripts/coordinator-local DIR`
-builds it, starts three voters on loopback and prints the trust bundle that
-`cargo run -p rocky-coordinator --example counters -- BUNDLE EMPTY_DIR` claims
-from.
-
-Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
-it needs a clang that targets wasm32 and an `llvm-ar` that indexes wasm
-objects, which Apple's `ar` does not. In the application's
-`.cargo/config.toml` (`rustup component add llvm-tools`; the path names your
-host):
-
-```toml
-[env]
-AR_wasm32_unknown_unknown = "<rustc --print sysroot>/lib/rustlib/<host>/bin/llvm-ar"
-```
-
-Rocky links its own SQLite build in the browser (`rocky-sqlite`, see
-[vendor/README.md](vendor/README.md)); an application that uses rusqlite
-itself depends on it with `default-features = false`, since rusqlite's default
-`ffi-sqlite-wasm-rs` links another SQLite and the wasm32 link fails.
-
-Rust crates live in `crates/`, applications in `examples/` and performance
-probes in `benchmarks/`.
+## License
 
 Source-available under the [PolyForm Noncommercial License
 1.0.0](LICENSE): read, run, modify and share Rocky for any noncommercial

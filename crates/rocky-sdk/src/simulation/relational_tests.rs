@@ -482,4 +482,40 @@ mod regressions {
         )
         .await
     }
+
+    fn a_pair_sealed_and_compacted_in_l0() -> Vec<Action> {
+        vec![
+            Change(
+                0,
+                Change::Board {
+                    list: "l0".into(),
+                    code: 3,
+                    cap: 4,
+                },
+            ),
+            Change(
+                0,
+                Change::Pair {
+                    list: "l0".into(),
+                    code: 2,
+                    name: 0,
+                    points: 2,
+                },
+            ),
+            Seal(0),
+            Compact(0),
+        ]
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_member_granted_a_compacted_list_replays_it() -> Result<(), Failure> {
+        let mut steps = a_pair_sealed_and_compacted_in_l0();
+        steps.extend([InviteTo(0, 2, "l1".into()), Grant("l0".into(), 2), Sync(2)]);
+        holds_at(178201, soak_at(178201, Wall::Moving), steps).await
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_member_invited_to_a_compacted_list_replays_it() -> Result<(), Failure> {
+        let mut steps = a_pair_sealed_and_compacted_in_l0();
+        steps.extend([InviteTo(0, 2, "l0".into()), Sync(2)]);
+        holds_at(178201, soak_at(178201, Wall::Moving), steps).await
+    }
 }

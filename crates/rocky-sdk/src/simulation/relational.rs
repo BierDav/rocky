@@ -24,6 +24,7 @@ pub(super) const SCHEMA: &str = r#"{"application":"relational","version":1,"form
    {"columns":["list","board"],"table":"boards","on_delete":"cascade"},
    {"columns":["list","pinned"],"table":"boards","on_delete":"set_null"}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"}],
+"roles":[{"name":"list_member","tables":[{"table":"boards","access":"write"},{"table":"cards","access":"write"}],"per_partition":["list"]}],
 "assertions":[{"name":"board_cap","select_sql":"SELECT b.id FROM boards b JOIN cards c ON c.list = b.list AND c.board = b.id GROUP BY b.list, b.id HAVING SUM(c.points) > MIN(b.cap)"}]}"#;
 
 const REFERENCE_DDL: &str = "PRAGMA foreign_keys=ON;
@@ -37,6 +38,8 @@ CREATE TABLE cards(list TEXT NOT NULL, board BLOB NOT NULL, pinned BLOB, name TE
 CREATE TRIGGER cards_unpin AFTER DELETE ON boards BEGIN
   UPDATE cards SET pinned = NULL WHERE list = OLD.list AND pinned = OLD.id; END;";
 const ASSERTION: &str = "SELECT b.id FROM boards b JOIN cards c ON c.list = b.list AND c.board = b.id GROUP BY b.list, b.id HAVING SUM(c.points) > MIN(b.cap)";
+
+pub(super) const LIST_MEMBER: crate::RoleName = crate::RoleName::from_static("list_member");
 
 pub(super) const BOARDS: &str = "SELECT list, id, code, cap FROM boards WHERE list = ? ORDER BY id";
 pub(super) const CARDS: &str =

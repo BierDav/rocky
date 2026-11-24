@@ -100,6 +100,8 @@ pub(super) enum Action {
     Partition(String),
     WritePart(usize, String),
     Invite(usize, usize),
+    InviteTo(usize, usize, String),
+    Grant(String, usize),
     Revoke(usize),
     Change(usize, Change),
     Offline(usize),
@@ -137,6 +139,10 @@ impl fmt::Display for Action {
             Self::Partition(list) => write!(f, "partition {list}"),
             Self::WritePart(node, list) => write!(f, "write {} in {list}", name(node)),
             Self::Invite(by, node) => write!(f, "invite {} by {}", name(node), name(by)),
+            Self::InviteTo(by, node, list) => {
+                write!(f, "invite {} to {list} by {}", name(node), name(by))
+            }
+            Self::Grant(list, node) => write!(f, "grant {list} to {}", name(node)),
             Self::Revoke(node) => write!(f, "revoke {}", name(node)),
             Self::Change(node, change) => write!(f, "change {} {change:?}", name(node)),
             Self::Offline(node) => write!(f, "offline {}", name(node)),

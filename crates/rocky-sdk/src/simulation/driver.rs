@@ -172,6 +172,10 @@ pub(super) async fn run_steps(
     Ok(report)
 }
 
+fn list_partition(list: &str) -> crate::Partition {
+    crate::Partition::new("list", vec![crate::SqlValue::Text(list.into())])
+}
+
 fn short(message: &str) -> String {
     message.chars().take(160).collect()
 }
@@ -267,7 +271,8 @@ impl Simulation {
                 Ok(self.alerts(&alerts))
             }
             Action::Trust(node) => {
-                self.invite_as(0, *node, crate::Access::Full).await?;
+                self.invite_as(0, *node, crate::Invite::new(crate::Access::Full))
+                    .await?;
                 let identity = self.database(*node)?.status().await?.authority.principal;
                 let root = self
                     .running(0)?
@@ -449,6 +454,19 @@ impl Simulation {
                 Ok("written".into())
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
+            Action::InviteTo(by, node, list) => {
+                let member = crate::Access::Role(relational::LIST_MEMBER);
+                let invite = crate::Invite::new(member).partition(list_partition(list));
+                self.invite_as(*by, *node, invite).await
+            }
+            Action::Grant(list, node) => {
+                let person = self.running(*node)?.database()?.me().await?.person;
+                self.running(0)?
+                    .database()?
+                    .grant_partition(person, &list_partition(list))
+                    .await?;
+                Ok("granted".into())
+            }
             Action::Revoke(node) => {
                 let identity = self.running(*node)?.database()?.me().await?.person.key();
                 self.running(0)?
@@ -673,24 +691,19 @@ impl Simulation {
         }
     }
     async fn invite(&mut self, by: usize, node: usize) -> Result<String, Failure> {
-        let writer = crate::Access::Full;
-        self.invite_as(by, node, writer).await
+        self.invite_as(by, node, crate::Invite::new(crate::Access::Full))
+            .await
     }
     async fn invite_as(
         &mut self,
         by: usize,
         node: usize,
-        profile: crate::Access,
+        invite: crate::Invite,
     ) -> Result<String, Failure> {
         if self.members[node].node_key.is_some() {
             return Err("skipped: already a member".into());
         }
-        let code = self
-            .running(by)?
-            .database()?
-            .invite(crate::Invite::new(profile))
-            .await?
-            .code;
+        let code = self.running(by)?.database()?.invite(invite).await?.code;
         let hub = self.hub.clone();
         self.members[node].join(&hub, &code).await?;
         self.synced[node] = false;

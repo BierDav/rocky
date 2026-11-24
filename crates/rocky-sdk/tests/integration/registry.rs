@@ -22,15 +22,33 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::common;
 
 const REGISTRY_CAPACITY: usize = 256;
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
- "roles":[{"name":"lister","tables":[{"table":"items","access":"write"},{"table":"parts","access":"read"}],"per_partition":["parts"]}]}"#;
+fn text(name: &str) -> rocky_sdk::Column {
+    crate::common::required(name, rocky_sdk::Affinity::Text)
+}
+fn schema() -> rocky_sdk::Schema {
+    crate::common::build(
+        crate::common::shopping(1)
+            .table(crate::common::items())
+            .table(
+                rocky_sdk::Table::replayed("parts")
+                    .column(text("list"))
+                    .column(text("key"))
+                    .primary_key(["list", "key"])
+                    .partition_by(["list"]),
+            )
+            .role(
+                rocky_sdk::Role::new(rocky_sdk::RoleName::from_static("lister"))
+                    .write("items")
+                    .read("parts")
+                    .per_partition("parts"),
+            ),
+    )
+}
 
 fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(SCHEMA),
+        &schema(),
         None,
         common::prepared_identity(directory),
         network,

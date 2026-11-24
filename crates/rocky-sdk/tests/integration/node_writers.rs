@@ -18,7 +18,7 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     let open = || {
         crate::common::configuration(
             &path,
-            crate::support::snapshot::schema(common::SCHEMA),
+            common::parsed_schema(),
             None,
             common::prepared_identity(&path),
             Some(Network::Owned(hub.connector("writer"))),

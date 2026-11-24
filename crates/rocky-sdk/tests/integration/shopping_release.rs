@@ -3,21 +3,63 @@ use rocky_sdk::{Database, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SCHEMA: &str = r#"{"format":7,"application":"shopping","version":3,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
- {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},
-   {"name":"completed","type":"integer","not_null":true},{"name":"category","type":"blob"}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
-   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
-],
-"roles":[{"name":"shopper","tables":[{"table":"lists","access":"read"},{"table":"categories","access":"write"},{"table":"items","access":"write"}]}]}"#;
+fn release() -> rocky_sdk::Schema {
+    use rocky_sdk::{Affinity, Column, DeleteAction, ForeignKeyDefinition, Table};
+    let required = |name: &str, affinity| Column::new(name, affinity).required();
+    let reference = |columns: &[&str], table: &str, on_delete| ForeignKeyDefinition {
+        columns: columns.iter().map(|column| (*column).into()).collect(),
+        table: table.into(),
+        on_delete,
+        deferred: false,
+    };
+    let in_list = |table: &str| {
+        Table::replayed(table)
+            .column(required("list", Affinity::Blob))
+            .primary_key(["list", "id"])
+            .partition_by(["list"])
+            .partition_group("list")
+            .foreign_key(reference(&["list"], "lists", DeleteAction::Cascade))
+    };
+    rocky_sdk::Schema::builder("shopping", 3)
+        .table(
+            Table::replayed("lists")
+                .column(required("title", Affinity::Text))
+                .partition_by(["id"])
+                .partition_group("list"),
+        )
+        .table(in_list("categories").column(required("name", Affinity::Text)))
+        .table(
+            in_list("items")
+                .column(required("title", Affinity::Text))
+                .column(required("completed", Affinity::Integer))
+                .column(Column::new("category", Affinity::Blob))
+                .index(rocky_sdk::IndexDefinition {
+                    name: "index_items_list_title".into(),
+                    columns: ["list", "title"]
+                        .map(|name| rocky_sdk::IndexColumn {
+                            name: name.into(),
+                            descending: false,
+                        })
+                        .into(),
+                    unique: true,
+                    expressions: Vec::new(),
+                    predicate: None,
+                })
+                .foreign_key(reference(
+                    &["list", "category"],
+                    "categories",
+                    DeleteAction::SetNull,
+                )),
+        )
+        .role(
+            rocky_sdk::Role::new(rocky_sdk::RoleName::from_static("shopper"))
+                .read("lists")
+                .write("categories")
+                .write("items"),
+        )
+        .build()
+        .expect("release schema")
+}
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -144,7 +186,7 @@ fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(SCHEMA),
+        &release(),
         None,
         None,
         Some(Network::Owned(hub.connector(name))),

@@ -11,15 +11,66 @@ use std::{
 
 use crate::support;
 
-const SCHEMA: &str = r#"{"format":7,"application":"groupsecrets","version":1,"tables":[
-{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
-{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"},
-{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
-{"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"bytes","type":"blob"}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}],
-"roles":[
-{"name":"reader","tables":[{"table":"lists","access":"read"},{"table":"items","access":"read"},{"table":"attachments","access":"read"}],"per_partition":["list"]},
-{"name":"partial","tables":[{"table":"lists","access":"read"},{"table":"items","access":"read"}],"per_partition":["list"]},
-{"name":"writer","tables":[{"table":"lists","access":"write"},{"table":"items","access":"write"},{"table":"attachments","access":"write"}],"per_partition":["list"]}]}"#;
+fn in_list(table: &str, column: rocky_sdk::Column) -> rocky_sdk::Table {
+    rocky_sdk::Table::replayed(table)
+        .column(common::required("list", rocky_sdk::Affinity::Text))
+        .column(common::required("key", rocky_sdk::Affinity::Text))
+        .column(column)
+        .primary_key(["list", "key"])
+        .partition_by(["list"])
+        .partition_group("list")
+}
+fn group_role(name: &'static str, tables: &[&str], write: bool) -> rocky_sdk::Role {
+    tables
+        .iter()
+        .fold(
+            rocky_sdk::Role::new(rocky_sdk::RoleName::from_static(name)),
+            |role, table| match write {
+                true => role.write(*table),
+                false => role.read(*table),
+            },
+        )
+        .per_partition("list")
+}
+fn group_schema(version: u32, attachments: bool) -> rocky_sdk::Schema {
+    let full: &[&str] = match attachments {
+        true => &["lists", "items", "attachments"],
+        false => &["lists", "items"],
+    };
+    let mut schema = rocky_sdk::Schema::builder("groupsecrets", version)
+        .table(
+            rocky_sdk::Table::replayed("notes")
+                .column(common::required("key", rocky_sdk::Affinity::Text))
+                .primary_key(["key"]),
+        )
+        .table(
+            rocky_sdk::Table::replayed("lists")
+                .column(common::required("name", rocky_sdk::Affinity::Text))
+                .column(rocky_sdk::Column::new("title", rocky_sdk::Affinity::Text))
+                .primary_key(["name"])
+                .partition_by(["name"])
+                .partition_group("list"),
+        )
+        .table(in_list(
+            "items",
+            rocky_sdk::Column::new("title", rocky_sdk::Affinity::Text),
+        ));
+    if attachments {
+        schema = schema.table(in_list(
+            "attachments",
+            rocky_sdk::Column::new("bytes", rocky_sdk::Affinity::Blob),
+        ));
+    }
+    common::build(
+        schema
+            .role(group_role("reader", full, false))
+            .role(group_role("partial", &["lists", "items"], false))
+            .role(group_role("writer", full, true)),
+    )
+}
+fn groups() -> rocky_sdk::Schema {
+    group_schema(1, true)
+}
 const TABLES: [&str; 3] = ["lists", "items", "attachments"];
 
 #[derive(Clone, Copy)]
@@ -81,16 +132,16 @@ struct Peer {
     store: Arc<Store>,
     hub: Arc<Hub>,
 }
-fn open<'a>(
-    directory: &'a Path,
-    schema: &'a str,
+fn open(
+    directory: &Path,
+    schema: &rocky_sdk::Schema,
     store: &Arc<Store>,
     hub: &Arc<Hub>,
 ) -> rocky_sdk::Configuration {
     let name = directory.file_name().unwrap().to_str().unwrap();
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         Some(store.clone() as Arc<dyn SecretStore>),
         common::prepared_identity(directory),
         Some(Network::Owned(hub.connector(name))),
@@ -102,7 +153,7 @@ fn open_with_identity(
     hub: &Arc<Hub>,
     identity: &Arc<dyn rocky_sdk::IdentityProvider>,
 ) -> rocky_sdk::Configuration {
-    open(directory, SCHEMA, store, hub).identity(Arc::clone(identity))
+    open(directory, &groups(), store, hub).identity(Arc::clone(identity))
 }
 impl Peer {
     fn new(database: Database, store: Arc<Store>, hub: Arc<Hub>) -> Self {
@@ -114,14 +165,19 @@ impl Peer {
     }
     async fn create(directory: &Path) -> Self {
         let (store, hub) = (Arc::new(Store::default()), Arc::new(Hub::default()));
-        let database = open(directory, SCHEMA, &store, &hub)
+        let database = open(directory, &groups(), &store, &hub)
             .create()
             .await
             .unwrap()
             .database;
         Self::new(database, store, hub)
     }
-    async fn reopen(directory: &Path, schema: &str, store: Arc<Store>, hub: Arc<Hub>) -> Self {
+    async fn reopen(
+        directory: &Path,
+        schema: &rocky_sdk::Schema,
+        store: Arc<Store>,
+        hub: Arc<Hub>,
+    ) -> Self {
         let database = open(directory, schema, &store, &hub).open().await.unwrap();
         Self::new(database, store, hub)
     }
@@ -183,7 +239,7 @@ impl Peer {
             .await
             .unwrap();
         let store = Arc::new(Store::default());
-        let database = open(directory, SCHEMA, &store, &self.hub)
+        let database = open(directory, &groups(), &store, &self.hub)
             .join(&invitation.code)
             .await
             .unwrap()
@@ -316,7 +372,7 @@ async fn one_envelope_grants_a_group_and_only_a_role_reading_every_table_is_gran
     reader.database.close().await.unwrap();
     let reader = Peer::reopen(
         &root.path().join("reader"),
-        SCHEMA,
+        &groups(),
         reader.store.clone(),
         reader.hub.clone(),
     )
@@ -411,7 +467,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     issuer.database.close().await.unwrap();
     let issuer = Peer::reopen(
         &root.path().join("issuer"),
-        SCHEMA,
+        &groups(),
         issuer.store.clone(),
         issuer.hub.clone(),
     )
@@ -483,7 +539,7 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
         issuer.store.limit(None);
         let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
         issuer.database.close().await.unwrap();
-        let issuer = Peer::reopen(&directory, SCHEMA, store, hub).await;
+        let issuer = Peer::reopen(&directory, &groups(), store, hub).await;
         let (secrets, tables) = issuer.epochs("A").await;
         assert_eq!(secrets, json!([1, 2]), "budget {budget}");
         assert!(
@@ -505,14 +561,8 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
 
 #[tokio::test]
 async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() {
-    let first = SCHEMA.replace(
-            r#",
-{"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"bytes","type":"blob"}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}"#,
-            "",
-        )
-        .replace(r#",{"table":"attachments","access":"read"}"#, "")
-        .replace(r#",{"table":"attachments","access":"write"}"#, "");
-    let second = SCHEMA.replace(r#""version":1"#, r#""version":2"#);
+    let first = group_schema(1, false);
+    let second = group_schema(2, true);
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("issuer");
     let (store, hub) = (Arc::new(Store::default()), Arc::new(Hub::default()));
@@ -768,7 +818,13 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     common::write_authority(&directory, "identity", &older)
         .await
         .unwrap();
-    let reader = Peer::reopen(&directory, SCHEMA, reader.store.clone(), reader.hub.clone()).await;
+    let reader = Peer::reopen(
+        &directory,
+        &groups(),
+        reader.store.clone(),
+        reader.hub.clone(),
+    )
+    .await;
     assert_eq!(rows(&reader).await, expected);
     assert_eq!(reader.epochs("A").await.0, json!([1]));
     reader.database.close().await.unwrap();

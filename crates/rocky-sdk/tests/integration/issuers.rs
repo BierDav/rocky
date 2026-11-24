@@ -9,7 +9,7 @@ use crate::common;
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(common::SCHEMA),
+        common::parsed_schema(),
         None,
         common::prepared_identity(directory),
         Some(Network::Owned(hub.connector(name))),

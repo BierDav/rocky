@@ -152,7 +152,7 @@ async fn simulator_peer() -> Result<(), Failure> {
     let host = Device::new(
         crate::common::configuration(
             &root.join("host"),
-            crate::support::snapshot::schema(&schema),
+            &serde_json::from_str::<rocky_sdk::Schema>(&schema)?,
             None,
             None,
             Some(starter(None, true)),

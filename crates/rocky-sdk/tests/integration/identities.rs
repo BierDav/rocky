@@ -16,7 +16,7 @@ fn open(
 ) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(common::SCHEMA),
+        common::parsed_schema(),
         None,
         identity,
         Some(Network::Owned(hub.connector(name))),
@@ -268,7 +268,7 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
 {
     let root = tempfile::tempdir()?;
     let path = root.path().join("owner");
-    let config = rocky_sdk::Configuration::new(&path, snap::schema(common::SCHEMA))?;
+    let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?;
     let opened = config.create().await?;
     let key = opened.root;
     let restored = rocky_sdk::RootKey::from_phrase(&key.phrase())?;
@@ -305,7 +305,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
     )
     .await?;
     let path = root.path().join("first");
-    let config = rocky_sdk::Configuration::new(&path, snap::schema(common::SCHEMA))?
+    let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?
         .network(Network::Owned(hub.connector("first")));
     let opened = config.join(&owner.invite().await).await?;
     let phrase = opened.identity.ok_or("minted identity")?.phrase();
@@ -380,7 +380,7 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?;
     let path = root.path().join("member");
-    let config = rocky_sdk::Configuration::new(&path, snap::schema(common::SCHEMA))?
+    let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?
         .network(Network::Owned(hub.connector("member")));
     let joined = config.join(&invitation.code).await?;
     let minted = joined.identity.ok_or("minted identity")?;
@@ -411,7 +411,7 @@ async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> 
 {
     let root = tempfile::tempdir()?;
     let path = root.path().join("custom");
-    let config = rocky_sdk::Configuration::new(&path, snap::schema(common::SCHEMA))?;
+    let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?;
     let signer = Arc::new(rocky_credentials::PrivateKey::new());
     let identity = IdentityKey::generate();
     let refused = config
@@ -649,7 +649,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(&foreign_link)?)
         );
         let rejected_link = path.join("foreign_link");
-        let config = rocky_sdk::Configuration::new(&rejected_link, snap::schema(common::SCHEMA))?
+        let config = rocky_sdk::Configuration::new(&rejected_link, common::parsed_schema())?
             .network(Network::Owned(hub.connector("foreign_link")));
         let before = identity(path, "member0")?;
         let pending_before = members[0].database.link_requests().await?;
@@ -796,7 +796,7 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
         Arc::new(IdentityKey::from_phrase(&created.owner.phrase())?);
     let owner = Device::new(created)?;
     let path = directory.path().join("new");
-    let schema = snap::schema(common::SCHEMA).clone();
+    let schema = common::parsed_schema().clone();
     let config = rocky_sdk::Configuration::new(&path, &schema)?
         .network(Network::Owned(hub.connector("new")));
     let contact = owner.contact().await;

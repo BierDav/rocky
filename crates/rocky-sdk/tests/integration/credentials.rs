@@ -7,7 +7,32 @@ use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"text","type":"text","not_null":true}],"primary_key":["key"]}],"roles":[{"name":"item_reader","tables":[{"table":"items","access":"read"}]},{"name":"note_writer","tables":[{"table":"notes","access":"write"}]},{"name":"item_writer","tables":[{"table":"items","access":"write"}]}]}"#;
+fn text(name: &str) -> rocky_sdk::Column {
+    crate::common::required(name, rocky_sdk::Affinity::Text)
+}
+fn schema() -> rocky_sdk::Schema {
+    crate::common::build(
+        crate::common::shopping(1)
+            .table(crate::common::items())
+            .table(
+                rocky_sdk::Table::replayed("notes")
+                    .column(text("key"))
+                    .column(text("text"))
+                    .primary_key(["key"]),
+            )
+            .role(
+                rocky_sdk::Role::new(rocky_sdk::RoleName::from_static("item_reader")).read("items"),
+            )
+            .role(
+                rocky_sdk::Role::new(rocky_sdk::RoleName::from_static("note_writer"))
+                    .write("notes"),
+            )
+            .role(
+                rocky_sdk::Role::new(rocky_sdk::RoleName::from_static("item_writer"))
+                    .write("items"),
+            ),
+    )
+}
 const ITEM_READER: RoleName = RoleName::from_static("item_reader");
 const NOTE_WRITER: RoleName = RoleName::from_static("note_writer");
 const ITEM_WRITER: RoleName = RoleName::from_static("item_writer");
@@ -18,7 +43,7 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(SCHEMA),
+        &schema(),
         None,
         common::prepared_identity(directory),
         Some(memory(hub, name)),

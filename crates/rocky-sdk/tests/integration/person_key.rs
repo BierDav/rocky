@@ -1,31 +1,28 @@
 use crate::common::{self, Device, Failure};
-use crate::support::snapshot as snap;
 use rocky_sdk::{
     Access, Configuration, ErrorKind, IdentityKey, IdentityProvider, Invite, Network,
     status::DeclaredSchema, transport::memory::Hub,
 };
-use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-fn newer_schema() -> String {
-    let mut schema: Value = serde_json::from_str(common::SCHEMA).expect("fixture schema");
-    schema["version"] = json!(2);
-    if let Some(columns) = schema["tables"][0]["columns"].as_array_mut() {
-        columns.push(json!({"name": "note", "type": "text"}));
-    }
-    schema.to_string()
+fn newer_schema() -> rocky_sdk::Schema {
+    common::build(
+        common::shopping(2).table(
+            common::items().column(rocky_sdk::Column::new("note", rocky_sdk::Affinity::Text)),
+        ),
+    )
 }
 
 fn configured(
     directory: &Path,
-    schema: &str,
+    schema: &rocky_sdk::Schema,
     hub: &Arc<Hub>,
     person: Option<&IdentityKey>,
 ) -> Configuration {
     let name = directory.to_string_lossy().into_owned();
     common::configuration(
         directory,
-        snap::schema(schema),
+        schema,
         None,
         person.map(|key| -> Arc<dyn IdentityProvider> {
             Arc::new(IdentityKey::from_secret(key.secret()))
@@ -41,11 +38,11 @@ struct Owned {
     owner: Device,
 }
 
-async fn reopened_with_the_person_key_alone(schema: &str) -> Result<Owned, Failure> {
+async fn reopened_with_the_person_key_alone(schema: &rocky_sdk::Schema) -> Result<Owned, Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let directory = root.path().join("owner");
-    let created = configured(&directory, common::SCHEMA, &hub, None)
+    let created = configured(&directory, &common::schema(), &hub, None)
         .create()
         .await?;
     let phrase = created.owner.phrase();
@@ -69,7 +66,12 @@ async fn second_device(owned: &Owned) -> Result<Device, Failure> {
     let directory = owned._root.path().join("laptop");
     Device::new(
         common::link(
-            configured(&directory, common::SCHEMA, &owned.hub, Some(&owned.person)),
+            configured(
+                &directory,
+                &common::schema(),
+                &owned.hub,
+                Some(&owned.person),
+            ),
             Arc::new(IdentityKey::from_secret(owned.person.secret())),
             &owned.owner.contact().await,
             &owned.owner.database,
@@ -92,7 +94,7 @@ async fn the_person_key_publishes_a_new_schema_version_without_the_root() -> Res
 #[tokio::test(flavor = "multi_thread")]
 async fn the_person_key_approves_a_link_of_the_owners_second_device_without_the_root()
 -> Result<(), Failure> {
-    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     let laptop = second_device(&owned).await?;
     let me = laptop.database.me().await?;
     assert_eq!(me.person.key(), owned.person.public_key());
@@ -104,7 +106,7 @@ async fn the_person_key_approves_a_link_of_the_owners_second_device_without_the_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_freshly_linked_owner_device_is_the_owner_before_it_syncs() -> Result<(), Failure> {
-    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     let laptop = second_device(&owned).await?;
     assert!(
         laptop.database.me().await?.owner,
@@ -119,7 +121,7 @@ async fn a_freshly_linked_owner_device_is_the_owner_before_it_syncs() -> Result<
 #[tokio::test(flavor = "multi_thread")]
 async fn the_person_key_unlinks_one_of_the_owners_devices_without_the_root() -> Result<(), Failure>
 {
-    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     let laptop = second_device(&owned).await?;
     common::introduce(&owned.owner, &laptop).await;
     let device = laptop.database.me().await?.device;
@@ -137,7 +139,7 @@ async fn the_person_key_unlinks_one_of_the_owners_devices_without_the_root() -> 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_person_key_invites_without_the_root() -> Result<(), Failure> {
-    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     owned.owner.add(1, "Milk").await;
     let invitation = owned
         .owner
@@ -147,7 +149,7 @@ async fn the_person_key_invites_without_the_root() -> Result<(), Failure> {
     let member = Device::new(
         configured(
             &owned._root.path().join("member"),
-            common::SCHEMA,
+            &common::schema(),
             &owned.hub,
             None,
         )
@@ -164,12 +166,12 @@ async fn the_person_key_invites_without_the_root() -> Result<(), Failure> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn without_the_person_key_an_unlink_is_refused_as_identity_required() -> Result<(), Failure> {
-    let owned = reopened_with_the_person_key_alone(common::SCHEMA).await?;
+    let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     let laptop = second_device(&owned).await?;
     let device = laptop.database.me().await?.device;
     let directory = owned._root.path().join("owner");
     owned.owner.close().await;
-    let keyless = configured(&directory, common::SCHEMA, &owned.hub, None)
+    let keyless = configured(&directory, &common::schema(), &owned.hub, None)
         .open()
         .await?;
     let refused = keyless

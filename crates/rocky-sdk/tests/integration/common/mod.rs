@@ -21,8 +21,6 @@ pub async fn write_authority(directory: &Path, key: &str, bytes: &[u8]) -> Resul
     Ok(())
 }
 
-pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-
 pub fn external_key(directory: &Path) -> rocky_sdk::IdentityKey {
     rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
         "fixture.external-identity",

@@ -10,14 +10,41 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-pub(crate) const SCHEMA: &str = r#"{"application":"revocation","version":1,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
- {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}],
- "roles":[
-  {"name":"item_writer","tables":[{"table":"items","access":"write"},{"table":"parts","access":"read"},{"table":"labels","access":"read"}],"per_partition":["list"]},
-  {"name":"lister","tables":[{"table":"parts","access":"read"},{"table":"labels","access":"read"}],"per_partition":["list"]}]}"#;
+fn in_list(table: &str) -> rocky_sdk::Table {
+    rocky_sdk::Table::replayed(table)
+        .column(common::required("list", rocky_sdk::Affinity::Text))
+        .column(common::required("key", rocky_sdk::Affinity::Text))
+        .primary_key(["list", "key"])
+        .partition_by(["list"])
+        .partition_group("list")
+}
+fn revocation() -> rocky_sdk::Schema {
+    let role = |name| rocky_sdk::Role::new(rocky_sdk::RoleName::from_static(name));
+    common::build(
+        rocky_sdk::Schema::builder("revocation", 1)
+            .table(common::items())
+            .table(
+                rocky_sdk::Table::replayed("notes")
+                    .column(common::required("key", rocky_sdk::Affinity::Text))
+                    .primary_key(["key"]),
+            )
+            .table(in_list("parts"))
+            .table(in_list("labels"))
+            .role(
+                role("item_writer")
+                    .write("items")
+                    .read("parts")
+                    .read("labels")
+                    .per_partition("list"),
+            )
+            .role(
+                role("lister")
+                    .read("parts")
+                    .read("labels")
+                    .per_partition("list"),
+            ),
+    )
+}
 
 static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
 
@@ -31,7 +58,7 @@ pub(crate) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
 pub(crate) fn open(root: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     crate::common::configuration(
         root,
-        crate::support::snapshot::schema(SCHEMA),
+        &revocation(),
         Some(keys(root)),
         common::prepared_identity(root),
         Some(Network::Owned(hub.connector(name))),

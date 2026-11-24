@@ -1,29 +1,60 @@
 use crate::common;
 use crate::support::snapshot as snap;
-use common::{Device, Failure, introduce};
-use rocky_sdk::{Network, transport::memory::Hub};
+use common::{Device, Failure, build, introduce, items, required, shopping};
+use rocky_sdk::{
+    Affinity, Column, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition, Network,
+    Schema, Table, transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SHELVED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"blob"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const NOTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-
-fn open<'a>(
-    directory: &'a Path,
-    schema: &'a str,
-    network: Option<Network>,
-) -> rocky_sdk::Configuration {
-    crate::common::configuration(
-        directory,
-        crate::support::snapshot::schema(schema),
-        None,
-        None,
-        network,
+fn shelved() -> Schema {
+    build(
+        shopping(1)
+            .table(
+                items()
+                    .column(Column::new("category", Affinity::Text))
+                    .column(Column::new("shelf", Affinity::Blob))
+                    .index(IndexDefinition {
+                        name: "items_category".into(),
+                        columns: vec![IndexColumn {
+                            name: "category".into(),
+                            descending: false,
+                        }],
+                        unique: true,
+                        expressions: Vec::new(),
+                        predicate: None,
+                    })
+                    .foreign_key(ForeignKeyDefinition {
+                        columns: vec!["shelf".into()],
+                        table: "shelves".into(),
+                        on_delete: DeleteAction::SetNull,
+                        deferred: false,
+                    }),
+            )
+            .table(
+                Table::replayed("shelves")
+                    .column(required("key", Affinity::Text))
+                    .column(required("label", Affinity::Text))
+                    .primary_key(["key"]),
+            ),
     )
 }
-fn version(schema: &str, version: u32) -> String {
-    schema.replace(r#""version":1"#, &format!(r#""version":{version}"#))
+fn unshelved(version: u32) -> Schema {
+    build(shopping(version).table(items()))
+}
+fn noted(version: u32) -> Schema {
+    build(shopping(version).table(items().column(Column::new("note", Affinity::Text))))
+}
+fn partitioned_items() -> Table {
+    items()
+        .column(required("list", Affinity::Text))
+        .partition_by(["list"])
+        .primary_key(["list", "key"])
+}
+
+fn open(directory: &Path, schema: &Schema, network: Option<Network>) -> rocky_sdk::Configuration {
+    crate::common::configuration(directory, schema, None, None, network)
 }
 async fn rows(device: &Device, sql: &str) -> Value {
     snap::ok(snap::read(&device.database, sql, Vec::new())).await["rows"].clone()
@@ -86,9 +117,9 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, SHELVED, network("a")).create().await?)?;
+    let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
-        open(&b_dir, SHELVED, network("b"))
+        open(&b_dir, &shelved(), network("b"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -123,11 +154,11 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     b.sync().await.expect("sync");
 
     a.close().await;
-    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a"))).await?)?;
+    let a = Device::new(common::confirmed(open(&a_dir, &unshelved(2), network("a"))).await?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(a.titles().await, ["bread", "green apples"]);
     b.close().await;
-    let b = Device::new(open(&b_dir, UNSHELVED, network("b")).open().await?)?;
+    let b = Device::new(open(&b_dir, &unshelved(2), network("b")).open().await?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     for device in [&a, &b] {
@@ -178,9 +209,13 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let directory = |name: &str| root.path().join(name);
-    let a = Device::new(open(&directory("a"), NOTED, network("a")).create().await?)?;
+    let a = Device::new(
+        open(&directory("a"), &noted(1), network("a"))
+            .create()
+            .await?,
+    )?;
     let join = |name: &str, invitation: rocky_sdk::InvitationCode| {
-        let configuration = open(&directory(name), NOTED, network(name));
+        let configuration = open(&directory(name), &noted(1), network(name));
         async move { Device::new(configuration.join(&invitation).await?) }
     };
     let c = join("c", a.invite_as(rocky_sdk::Access::Full).await).await?;
@@ -212,12 +247,11 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
         snap::ok(member.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     }
     a.close().await;
-    let removed = Device::new(
-        common::confirmed(open(&directory("a"), &version(common::SCHEMA, 2), None)).await?,
-    )?;
+    let removed =
+        Device::new(common::confirmed(open(&directory("a"), &unshelved(2), None)).await?)?;
     removed.close().await;
     let a = Device::new(
-        open(&directory("a"), &version(NOTED, 3), network("a"))
+        open(&directory("a"), &noted(3), network("a"))
             .open()
             .await?,
     )?;
@@ -279,9 +313,9 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, SHELVED, network("a")).create().await?)?;
+    let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
-        open(&b_dir, SHELVED, network("b"))
+        open(&b_dir, &shelved(), network("b"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -317,9 +351,9 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     assert_eq!(b.titles().await, ["bread", "green apples"]);
 
     a.close().await;
-    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a"))).await?)?;
+    let a = Device::new(common::confirmed(open(&a_dir, &unshelved(2), network("a"))).await?)?;
     b.close().await;
-    let b = Device::new(open(&b_dir, UNSHELVED, network("b")).open().await?)?;
+    let b = Device::new(open(&b_dir, &unshelved(2), network("b")).open().await?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -398,7 +432,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
 {
     let root = crate::support::small_directory()?;
     let directory = root.path();
-    let a = Device::new(open(directory, SHELVED, None).create().await?)?;
+    let a = Device::new(open(directory, &shelved(), None).create().await?)?;
     create(&a, 1, "shelves", json!({"label": "pantry"})).await;
     create(
         &a,
@@ -413,9 +447,13 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     let before = files(directory)?;
     let network = Arc::new(NeverStarts(std::sync::atomic::AtomicBool::new(false)));
     let required = confirmation(
-        open(directory, UNSHELVED, Some(Network::Owned(network.clone())))
-            .open()
-            .await,
+        open(
+            directory,
+            &unshelved(2),
+            Some(Network::Owned(network.clone())),
+        )
+        .open()
+        .await,
     );
     assert!(!network.0.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(files(directory)?, before);
@@ -442,7 +480,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     );
     assert_eq!(common::authority_bytes(directory, "identity")?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
-    let changed = UNSHELVED.replace(r#""version":2"#, r#""version":3"#);
+    let changed = unshelved(3);
     let stale = confirmation(
         open(directory, &changed, None)
             .open_confirmed(&required.report.digest)
@@ -452,7 +490,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     assert_ne!(stale.report.digest, required.report.digest);
     assert_eq!(common::authority_bytes(directory, "identity")?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
-    let a = Device::new(open(directory, SHELVED, None).open().await?)?;
+    let a = Device::new(open(directory, &shelved(), None).open().await?)?;
     create(
         &a,
         3,
@@ -462,14 +500,14 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     .await;
     a.close().await;
     let stale = confirmation(
-        open(directory, UNSHELVED, None)
+        open(directory, &unshelved(2), None)
             .open_confirmed(&required.report.digest)
             .await,
     );
     assert!(stale.mismatch);
     assert_eq!(stale.report.fields[0].rows, 2);
     let a = Device::new(
-        open(directory, UNSHELVED, None)
+        open(directory, &unshelved(2), None)
             .open_confirmed(&stale.report.digest)
             .await?,
     )?;
@@ -487,15 +525,15 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
-    let a = Device::new(open(&a_dir, SHELVED, network("a")).create().await?)?;
+    let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
-        open(&b_dir, SHELVED, network("b"))
+        open(&b_dir, &shelved(), network("b"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
     b.close().await;
     let b = Device::new(
-        open(&b_dir, UNSHELVED, None)
+        open(&b_dir, &unshelved(2), None)
             .open_confirmed("arbitrary")
             .await?,
     )?;
@@ -514,8 +552,8 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     b.close().await;
     a.close().await;
     assert!(schema_of(&b_dir)?.1.contains(&"category".into()));
-    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a"))).await?)?;
-    let b = Device::new(open(&b_dir, UNSHELVED, network("b")).open().await?)?;
+    let a = Device::new(common::confirmed(open(&a_dir, &unshelved(2), network("a"))).await?)?;
+    let b = Device::new(open(&b_dir, &unshelved(2), network("b")).open().await?)?;
     introduce(&a, &b).await;
     b.sync().await.expect("follow the issuer's removal");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -531,10 +569,10 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let a_dir = root.path().join("unique");
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let a = Device::new(open(&a_dir, SHELVED, network("a")).create().await?)?;
+    let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let peer_dir = root.path().join("peer");
     let peer = Device::new(
-        open(&peer_dir, SHELVED, network("peer"))
+        open(&peer_dir, &shelved(), network("peer"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -557,21 +595,15 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     assert_eq!(a.titles().await.len(), 1);
     peer.close().await;
     a.close().await;
-    let report = confirmation(open(&a_dir, UNSHELVED, None).open().await).report;
+    let report = confirmation(open(&a_dir, &unshelved(2), None).open().await).report;
     assert_eq!(
         report.fields[0].rows, 1,
         "the later conflicting create dropped and left no row to count"
     );
 
     let b_dir = root.path().join("partitioned");
-    let mut schema: Value = serde_json::from_str(NOTED)?;
-    schema["tables"][0]["columns"]
-        .as_array_mut()
-        .ok_or("columns")?
-        .push(json!({"name":"list", "type":"text", "not_null":true}));
-    schema["tables"][0]["partition_by"] = json!(["list"]);
-    schema["tables"][0]["primary_key"] = json!(["list", "key"]);
-    let before = schema.to_string();
+    let before =
+        build(shopping(1).table(partitioned_items().column(Column::new("note", Affinity::Text))));
     let b = Device::new(open(&b_dir, &before, None).create().await?)?;
     for (_handle, list) in [(1, "first"), (2, "second")] {
         snap::ok(
@@ -597,12 +629,8 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
         tx.commit().await?;
     }
     b.close().await;
-    schema["version"] = json!(2);
-    schema["tables"][0]["columns"]
-        .as_array_mut()
-        .ok_or("columns")?
-        .retain(|column| column["name"] != "note");
-    let report = confirmation(open(&b_dir, &schema.to_string(), None).open().await).report;
+    let without_note = build(shopping(2).table(partitioned_items()));
+    let report = confirmation(open(&b_dir, &without_note, None).open().await).report;
     assert_eq!(
         report.fields,
         [rocky_sdk::RemovalImpact {

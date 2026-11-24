@@ -7,12 +7,27 @@ use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"counters","version":1,"format":7,"tables":[{"name":"counters","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+fn text(name: &str) -> rocky_sdk::Column {
+    crate::common::required(name, rocky_sdk::Affinity::Text)
+}
+fn integer(name: &str) -> rocky_sdk::Column {
+    crate::common::required(name, rocky_sdk::Affinity::Integer)
+}
+fn schema() -> rocky_sdk::Schema {
+    crate::common::build(
+        rocky_sdk::Schema::builder("counters", 1).table(
+            rocky_sdk::Table::replayed("counters")
+                .column(text("key"))
+                .column(integer("amount"))
+                .primary_key(["key"]),
+        ),
+    )
+}
 
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(SCHEMA),
+        &schema(),
         None,
         None,
         Some(Network::Owned(hub.connector(name))),

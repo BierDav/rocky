@@ -15,16 +15,12 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 use crate::support;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+fn schema() -> rocky_sdk::Schema {
+    crate::common::schema()
+}
 
 fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration {
-    crate::common::configuration(
-        directory,
-        crate::support::snapshot::schema(SCHEMA),
-        None,
-        None,
-        network,
-    )
+    crate::common::configuration(directory, &schema(), None, None, network)
 }
 fn service(error: &rocky_sdk::Error) -> Option<&ServiceError> {
     match &error.kind() {

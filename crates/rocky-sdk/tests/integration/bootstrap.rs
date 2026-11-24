@@ -654,12 +654,12 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    let schema = noted_shopping();
     let a_path = root.path().join("a");
     let a = Device::new(
         crate::common::configuration(
             &a_path,
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Owned(hub.connector("a"))),
@@ -698,7 +698,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     let member = Device::new(
         crate::common::configuration(
             &path,
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Borrowed(gate.clone())),
@@ -719,15 +719,9 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     );
     member.close().await;
     let member = Device::new(
-        crate::common::configuration(
-            &path,
-            crate::support::snapshot::schema(schema),
-            None,
-            None,
-            None,
-        )
-        .open()
-        .await?,
+        crate::common::configuration(&path, &schema, None, None, None)
+            .open()
+            .await?,
     )?;
     assert_eq!(
         snap::ok(member.database.status()).await["data"]["bootstrap_pending"],
@@ -765,12 +759,12 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let schema = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    let schema = noted_shopping();
     let a_path = root.path().join("a");
     let a = Device::new(
         crate::common::configuration(
             &a_path,
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Owned(hub.connector("a"))),
@@ -783,7 +777,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     let c = Device::new(
         crate::common::configuration(
             &root.path().join("unmet"),
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Owned(hub.connector("unmet"))),
@@ -801,7 +795,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     let member = Device::new(
         crate::common::configuration(
             &path,
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Owned(hub.connector("member"))),
@@ -823,7 +817,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     let member = Device::new(
         crate::common::configuration(
             &path,
-            crate::support::snapshot::schema(schema),
+            &schema,
             None,
             None,
             Some(Network::Owned(hub.connector("member"))),
@@ -1082,4 +1076,15 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
     b.close().await;
     a.close().await;
     Ok(())
+}
+
+fn noted_shopping() -> rocky_sdk::Schema {
+    common::build(
+        common::shopping(1).table(common::items()).table(
+            rocky_sdk::Table::replayed("notes")
+                .column(common::required("key", rocky_sdk::Affinity::Text))
+                .column(common::required("body", rocky_sdk::Affinity::Text))
+                .primary_key(["key"]),
+        ),
+    )
 }

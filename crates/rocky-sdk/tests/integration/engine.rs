@@ -8,7 +8,18 @@ use crate::support;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":false}],"primary_key":["key"]}]}"#;
+fn application(name: &str) -> rocky_sdk::Schema {
+    crate::common::build(
+        rocky_sdk::Schema::builder(name, 1)
+            .table(crate::common::items())
+            .table(
+                rocky_sdk::Table::replayed("notes")
+                    .column(crate::common::required("key", rocky_sdk::Affinity::Text))
+                    .column(rocky_sdk::Column::new("body", rocky_sdk::Affinity::Text))
+                    .primary_key(["key"]),
+            ),
+    )
+}
 
 fn iroh() -> rocky_iroh::Options {
     iroh_at(0)
@@ -50,7 +61,7 @@ impl Db {
         Self::start(
             directory,
             mode,
-            SCHEMA,
+            &application("shopping"),
             Network::Owned(Arc::new(transport)),
             secrets,
         )
@@ -59,17 +70,12 @@ impl Db {
     async fn start(
         directory: &Path,
         mode: OpenMode,
-        schema: &str,
+        schema: &rocky_sdk::Schema,
         network: Network,
         secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
     ) -> Result<Self, Failure> {
-        let configuration = crate::common::configuration(
-            directory,
-            crate::support::snapshot::schema(schema),
-            secrets,
-            None,
-            Some(network),
-        );
+        let configuration =
+            crate::common::configuration(directory, schema, secrets, None, Some(network));
         let engine = match mode {
             OpenMode::Create => configuration.create().await?.database,
             OpenMode::Join { invitation } => configuration.join(&invitation).await?.database,
@@ -422,7 +428,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     let creator = Db::create(&root.path().join("a"), iroh()).await?;
     let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh()).await?;
     let invitation = creator.invite().await;
-    let other = SCHEMA.replace("shopping", "other");
+    let other = application("other");
     assert!(
         Db::start(
             &root.path().join("wrong"),
@@ -536,7 +542,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     let open = |directory: &str, mode: OpenMode, name: &'static str| {
         let directory = root.path().join(directory);
         let network = Network::Owned(hub.connector(name));
-        async move { Db::start(&directory, mode, SCHEMA, network, None).await }
+        async move { Db::start(&directory, mode, &application("shopping"), network, None).await }
     };
     let creator = open("a", OpenMode::Create, "a").await?;
     assert_eq!(

@@ -24,6 +24,7 @@ mod multicast;
 #[cfg(not(any(target_vendor = "apple", target_family = "wasm")))]
 use multicast::Backend;
 
+/// The mDNS service type local discovery announces.
 pub const LOCAL_SERVICE: &str = "_rocky._udp";
 const SERVICE: &str = "_rocky._udp.local.";
 const VERSION: &str = "2";

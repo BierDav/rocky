@@ -24,9 +24,13 @@ use tokio::sync::{Mutex, mpsc, watch};
 mod local;
 pub use local::LOCAL_SERVICE;
 
+/// How often a device republishes its rendezvous record, before jitter.
 pub const RENDEZVOUS_INTERVAL: Duration = Duration::from_secs(300);
+/// Contacts one rendezvous record holds.
 pub const RENDEZVOUS_CONTACTS: usize = 6;
+/// The largest encrypted rendezvous record in bytes.
 pub const RENDEZVOUS_BYTES: usize = 560;
+/// Seconds after which a rendezvous contact counts as stale.
 pub const RENDEZVOUS_AGE: u64 = 3600;
 const RECORD_VERSION: u8 = 1;
 const RECORD_NAME: &str = "_rocky";
@@ -37,25 +41,34 @@ const FOUND: usize = 64;
 const LOCAL_RETRY: Duration = Duration::from_secs(30);
 const RENDEZVOUS_JITTER: Duration = Duration::from_secs(30);
 
+/// n0's public pkarr relay, where topic discovery publishes by default.
 pub const DEFAULT_RENDEZVOUS: &str = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD;
 
+/// Whether peers find each other through a rendezvous record on a lookup service.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Topic {
+    /// No topic discovery.
     #[default]
     Off,
+    /// Publishes and reads rendezvous records at this pkarr relay URL.
     On(String),
+    /// Topic discovery was asked for but cannot run, for the stated reason.
     Unavailable(String),
 }
 
+/// Which peer discovery an attachment runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Discover {
+    /// Discovery through the database's rendezvous record.
     pub topic: Topic,
+    /// Discovery on the local network with mDNS.
     pub local: bool,
 }
 
 fn derive(label: &str, topic: &[u8; 32]) -> [u8; 32] {
     commitment(label, topic)
 }
+/// The key that signs a topic's rendezvous record.
 pub fn rendezvous_key(topic: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(&derive("rocky.discovery-rendezvous-key.v1", topic))
 }

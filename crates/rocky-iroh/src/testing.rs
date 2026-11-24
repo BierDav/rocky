@@ -15,7 +15,9 @@ pub use iroh::test_utils::run_relay_server;
 
 type Packets = Arc<Mutex<HashMap<EndpointId, SignedPacket>>>;
 type Stored = Arc<tokio::sync::watch::Sender<u64>>;
+/// A local pkarr lookup server for tests, stopped on drop.
 pub struct LookupServer {
+    /// The pkarr URL for `Options::lookup`.
     pub url: String,
     packets: Packets,
     stored: Stored,
@@ -27,6 +29,7 @@ impl Drop for LookupServer {
     }
 }
 impl LookupServer {
+    /// Starts the server on a free loopback port.
     pub async fn start() -> Result<Self, Failure> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}/pkarr", listener.local_addr()?);
@@ -48,6 +51,7 @@ impl LookupServer {
             task,
         })
     }
+    /// Waits until a topic's rendezvous record lists at least `contacts` contacts.
     pub async fn wait_for_contacts(&self, topic: &[u8; 32], contacts: usize) {
         let mut stored = self.stored.subscribe();
         while self.contacts(topic) < contacts {
@@ -56,6 +60,7 @@ impl LookupServer {
             }
         }
     }
+    /// The keys of every published record.
     pub fn keys(&self) -> Vec<EndpointId> {
         self.packets
             .lock()
@@ -64,6 +69,7 @@ impl LookupServer {
             .copied()
             .collect()
     }
+    /// Contacts a topic's rendezvous record lists now.
     pub fn contacts(&self, topic: &[u8; 32]) -> usize {
         self.packets
             .lock()
@@ -71,6 +77,7 @@ impl LookupServer {
             .get(&rendezvous_key(topic).public())
             .map_or(0, |packet| entries(topic, packet).len())
     }
+    /// The raw bytes of every stored record, to check what the server can read.
     pub fn stored(&self) -> Vec<u8> {
         self.packets
             .lock()

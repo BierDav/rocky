@@ -1,3 +1,5 @@
+//! Rocky's iroh transport: peer-to-peer QUIC with relays and discovery, natively and in the browser.
+#![deny(missing_docs)]
 use rocky_core::net::{
     BoxFuture, Connected, Connector, Discovery, Failure, Incoming, Protocol, SessionStream, Stream,
     Transport,
@@ -27,6 +29,7 @@ use tokio::{
 };
 
 mod discovery;
+/// A local relay and lookup server for tests; never enable `test-utils` in a shipped build.
 #[cfg(feature = "test-utils")]
 pub mod testing;
 pub use discovery::{
@@ -45,6 +48,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
 
+/// The ALPN that carries one Rocky protocol over iroh.
 pub fn alpn(protocol: Protocol) -> &'static [u8] {
     match protocol {
         Protocol::Rpc => b"rocky/rpc",
@@ -52,6 +56,7 @@ pub fn alpn(protocol: Protocol) -> &'static [u8] {
         Protocol::Coordinate => b"rocky/coordinator/3",
     }
 }
+/// The Rocky protocol an ALPN names, or `None` for a foreign one.
 pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
     Protocol::ALL
         .into_iter()
@@ -59,13 +64,21 @@ pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
         .find(|protocol| alpn(*protocol) == name)
 }
 
+/// The transport kind this crate reports in peer routes and diagnostics.
 pub const KIND: &str = "iroh";
+/// How long a dial or a connection's opening handshake may take before it fails.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
+/// Incoming streams a database scope queues before new ones are refused as busy.
 pub const PENDING: usize = 32;
+/// Inbound connections, and inbound link connections, an attachment accepts at once.
 pub const CONNECTIONS: usize = 64;
+/// Outbound connections an attachment keeps open for reuse.
 pub const CACHED: usize = 64;
+/// Streams one connection carries at once.
 pub const STREAMS_PER_CONNECTION: usize = 4;
+/// Requests one attachment serves at once; more are refused as busy.
 pub const RPC_REQUESTS: usize = 32;
+/// How long an unused connection stays open.
 pub const IDLE: Duration = Duration::from_secs(30);
 const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
@@ -372,9 +385,11 @@ struct Shared {
     home: Option<rocky_platform::task::Home>,
 }
 
+/// An iroh endpoint shared by one or more databases; clones share it, and `close` stops it.
 #[derive(Clone)]
 pub struct Attachment(Arc<Shared>);
 impl Attachment {
+    /// Attaches to an endpoint the application built and routes, with no discovery.
     pub fn new(endpoint: Endpoint) -> Self {
         Self::build(
             endpoint,
@@ -384,9 +399,11 @@ impl Attachment {
             None,
         )
     }
+    /// Attaches to an application's endpoint and finds peers as `discover` says.
     pub fn discovering(endpoint: Endpoint, discover: Discover) -> Self {
         Self::build(endpoint, false, Protocol::ALL.to_vec(), discover, None)
     }
+    /// Attaches to an application's endpoint and accepts only the named protocols.
     pub fn serving(endpoint: Endpoint, protocols: Vec<Protocol>) -> Self {
         Self::build(endpoint, false, protocols, Discover::default(), None)
     }
@@ -421,26 +438,32 @@ impl Attachment {
             protocols,
         }))
     }
+    /// Every ALPN Rocky accepts, for an application's own router.
     pub fn alpns() -> impl Iterator<Item = &'static [u8]> {
         Protocol::ALL.into_iter().map(alpn)
     }
+    /// The protocol handler for an application's own iroh router.
     pub fn handler(&self) -> Handler {
         Handler(self.0.clone())
     }
+    /// Adds this attachment's protocols to an application's iroh router.
     pub fn register(&self, router: RouterBuilder) -> RouterBuilder {
         self.0.protocols.iter().fold(router, |router, protocol| {
             router.accept(alpn(*protocol), self.handler())
         })
     }
+    /// A transport for one database, passed as `Network::Borrowed`; each database takes its own.
     pub fn transport(&self) -> Arc<dyn Transport> {
         Arc::new(Port {
             attachment: self.clone(),
             route: Arc::new(Route::new()),
         })
     }
+    /// The current endpoint, which changes when the attachment rebinds after its sockets closed.
     pub fn endpoint(&self) -> Endpoint {
         self.0.endpoint.borrow().clone()
     }
+    /// Connections and streams refused so far because no database listened or the queue was full.
     pub fn refused(&self) -> u64 {
         self.0.refused.load(Ordering::Relaxed)
     }
@@ -506,6 +529,7 @@ async fn closed_stand_in(secret: &[u8; 32]) -> Result<Endpoint, Failure> {
     Ok(stand_in)
 }
 
+/// Accepts Rocky's protocols on an application's iroh router.
 pub struct Handler(Arc<Shared>);
 impl std::fmt::Debug for Handler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -632,6 +656,7 @@ impl ProtocolHandler for Handler {
 }
 
 impl Attachment {
+    /// Fires when the endpoint's addresses or home relay change.
     pub fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
         let mut endpoints = self.0.endpoint.subscribe();
@@ -667,9 +692,11 @@ impl Attachment {
         Some(receiver)
     }
 
+    /// The relay setting the attachment started with, or `None` for an application's own endpoint.
     pub fn initial_relay_configuration(&self) -> Option<String> {
         self.0.initial_relay_configuration.clone()
     }
+    /// The state of each home relay connection.
     pub fn relays(&self) -> Option<Vec<RelayStatus>> {
         Some(
             self.endpoint()
@@ -685,10 +712,12 @@ impl Attachment {
                 .collect(),
         )
     }
+    /// The peer finder, or `None` when discovery is off.
     pub fn discovery(&self) -> Option<Arc<dyn Discovery>> {
         let finder = self.0.finder.clone()?;
         Some(Arc::new(finder))
     }
+    /// This attachment as a started connector with its discovery, for `Network::Attached`.
     pub fn connected(&self) -> Connected {
         let finder = (self.0.discover != Discover::default())
             .then(|| discovery::Finder::new(self.0.endpoint.subscribe(), self.0.discover.clone()));
@@ -844,6 +873,7 @@ impl Attachment {
             route: self.0.default_route.clone(),
         }
     }
+    /// The network paths to a peer at a route Rocky printed, with their statistics.
     pub async fn paths(&self, address: &str) -> Result<Vec<NetworkPath>, Failure> {
         let address: EndpointAddr = serde_json::from_str(address)?;
         let connections: Vec<_> = self
@@ -1108,6 +1138,7 @@ impl Attachment {
             connections.remove(&(address.id, protocol));
         }
     }
+    /// Closes every connection to the peer at a route, so the next dial starts afresh.
     pub fn forget(&self, address: &str) {
         let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
             return;
@@ -1134,6 +1165,7 @@ impl Attachment {
             });
         }
     }
+    /// Closes the endpoint's sockets as the system does to a backgrounded app, for fault tests.
     #[cfg(feature = "qualification")]
     pub fn fault_close_sockets(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
@@ -1141,6 +1173,8 @@ impl Attachment {
             Ok(())
         })
     }
+    /// Revives the endpoint after an app returns to the foreground, rebinding sockets the system
+    /// closed.
     pub fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
             if self.endpoint().is_closed() {
@@ -1155,6 +1189,7 @@ impl Attachment {
             Ok(())
         })
     }
+    /// Stops the endpoint, its router and every database's route on it.
     pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _restart = self.0.restart.lock().await;
@@ -1204,17 +1239,25 @@ impl Attachment {
     }
 }
 
+/// How a started endpoint reaches peers; pass it to `Network::Owned`, and the default uses n0's
+/// public relays and lookup.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
+    /// `None` or `"default"` for n0's relays, `"staging"`, `"disabled"`, or a relay URL.
     #[serde(default)]
     pub relay: Option<String>,
+    /// `None` or `"default"` for n0's lookup service, `"disabled"`, or a pkarr relay URL.
     #[serde(default)]
     pub lookup: Option<String>,
+    /// Finds the database's other devices through a rendezvous record on the lookup service; on by
+    /// default.
     #[serde(default = "enabled")]
     pub topic: bool,
+    /// Finds peers on the local network with mDNS; on by default.
     #[serde(default = "enabled")]
     pub local: bool,
+    /// A socket address to bind instead of every interface; a browser binds none.
     #[serde(default)]
     pub bind: Option<String>,
 }
@@ -1233,6 +1276,7 @@ impl Default for Options {
     }
 }
 impl Options {
+    /// Binds only `bind`, with no relay, lookup or discovery, for tests and closed networks.
     pub fn isolated(bind: &str) -> Self {
         Self {
             relay: Some("disabled".into()),
@@ -1242,6 +1286,7 @@ impl Options {
             bind: Some(bind.into()),
         }
     }
+    /// The discovery these options turn on.
     pub fn discover(&self) -> Discover {
         let topic = match (self.topic, self.lookup.as_deref().unwrap_or("default")) {
             (false, _) => Topic::Off,
@@ -1262,6 +1307,7 @@ impl Options {
     fn allows_multicast(&self) -> bool {
         self.local && !cfg!(target_os = "ios")
     }
+    /// Binds an endpoint whose iroh key is derived from the database's route secret.
     pub async fn bind(&self, route_secret: [u8; 32]) -> Result<Endpoint, Failure> {
         let relay_mode = match self.relay.as_deref().unwrap_or("default") {
             "default" => RelayMode::Default,
@@ -1318,10 +1364,12 @@ impl Options {
         }
         Ok(builder.bind().await?)
     }
+    /// Binds and serves every Rocky protocol, returning an attachment the application keeps.
     pub async fn start(&self, route_secret: [u8; 32]) -> Result<Attachment, Failure> {
         self.start_serving(route_secret, Protocol::ALL.to_vec())
             .await
     }
+    /// Binds and serves only the named protocols.
     pub async fn start_serving(
         &self,
         route_secret: [u8; 32],

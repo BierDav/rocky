@@ -31,8 +31,8 @@ impl Node {
                     .await,
                 );
             }
-            Request::TrustedStaleAfter(a, reply) => {
-                let _ = reply.send(self.set_trusted_stale_after(a).await);
+            Request::AdminStaleAfter(a, reply) => {
+                let _ = reply.send(self.set_admin_stale_after(a).await);
             }
             #[cfg(any(test, feature = "test-support"))]
             Request::Activity(a, reply) => {

@@ -439,11 +439,11 @@ async fn trusted_staleness_is_set_between_a_minute_and_ten_years() -> Result<(),
     let ten_years = 10 * 366 * 24 * 60 * 60;
     for refused in [0, 59, ten_years + 1] {
         assert!(
-            database.set_trusted_stale_after(refused).await.is_err(),
+            database.set_admin_stale_after(refused).await.is_err(),
             "a staleness threshold of {refused} s is refused"
         );
     }
-    database.set_trusted_stale_after(60).await?;
-    database.set_trusted_stale_after(ten_years).await?;
+    database.set_admin_stale_after(60).await?;
+    database.set_admin_stale_after(ten_years).await?;
     Ok(database.close().await?)
 }

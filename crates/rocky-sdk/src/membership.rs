@@ -164,7 +164,7 @@ impl TrustedObservation {
         let node = node.to_hex();
         (!self.acknowledged)
             .then_some(crate::Alert {
-                kind: crate::AlertKind::TrustedNodeLinked {
+                kind: crate::AlertKind::AdminDeviceLinked {
                     identity: identity.clone(),
                     node: node.clone(),
                     linked: self.linked,
@@ -173,7 +173,7 @@ impl TrustedObservation {
             })
             .into_iter()
             .chain(self.unlinked.map(|unlinked| crate::Alert {
-                kind: crate::AlertKind::TrustedNodeUnlinked {
+                kind: crate::AlertKind::AdminDeviceUnlinked {
                     identity,
                     node,
                     unlinked,

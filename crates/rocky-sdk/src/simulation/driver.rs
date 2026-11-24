@@ -295,7 +295,7 @@ impl Simulation {
             Action::StaleAfter(node, after) => {
                 self.running(*node)?
                     .database()?
-                    .set_trusted_stale_after(after.as_secs())
+                    .set_admin_stale_after(after.as_secs())
                     .await?;
                 Ok("set".into())
             }
@@ -615,16 +615,16 @@ impl Simulation {
                 crate::AlertKind::PeerStoreRegressed { node, .. } => {
                     format!("{} regressed", name(node))
                 }
-                crate::AlertKind::TrustedNodeLinked { node, .. } => {
+                crate::AlertKind::AdminDeviceLinked { node, .. } => {
                     format!("{} linked", name(node))
                 }
-                crate::AlertKind::TrustedNodeUnlinked { node, .. } => {
+                crate::AlertKind::AdminDeviceUnlinked { node, .. } => {
                     format!("{} unlinked", name(node))
                 }
                 crate::AlertKind::WriteDropped { node, reason, .. } => {
                     format!("{} write dropped ({reason:?})", name(node))
                 }
-                crate::AlertKind::TrustedIdentityStale { identity, .. } => format!(
+                crate::AlertKind::AdminStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)
                 ),

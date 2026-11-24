@@ -208,10 +208,10 @@ member with `remove(person)`. Narrowing access revokes the person's credentials
 and rotates the keys of what they could read. The owner makes and ends admins
 with `make_admin(person, root)` and `revoke_admin(person, removal, root)`, where
 `Removal::Compromised` also removes the people the admin admitted and ends the
-credentials they issued; an admin who should stay a member is invited again. Admin
-devices raise `TrustedNodeLinked` and `TrustedNodeUnlinked` alerts when an
-admin links or unlinks a device, and `TrustedIdentityStale` when no device of
-an admin was heard from for 30 days (`set_trusted_stale_after`).
+credentials they issued; an admin who should stay a member is invited again.
+Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
+an admin links or unlinks a device, and `AdminStale` when no device of an admin
+was heard from for 30 days (`set_admin_stale_after`).
 
 A removed or unlinked device learns of it at its next sync. From then on it
 refuses every read, commit and sync with `ErrorKind::Removed`, also after

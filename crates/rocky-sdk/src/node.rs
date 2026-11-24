@@ -1676,7 +1676,7 @@ impl Node {
             }) {
                 crate::PeerChoice::SelectedHolding
             } else if settings.issuers.contains(node) || meta.is_some_and(|meta| meta.trusted) {
-                crate::PeerChoice::SelectedTrusted
+                crate::PeerChoice::SelectedAdmin
             } else {
                 crate::PeerChoice::SelectedProbe
             };

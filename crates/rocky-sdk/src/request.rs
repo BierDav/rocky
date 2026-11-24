@@ -39,7 +39,7 @@ pub(crate) enum Request {
         Option<crate::RetentionLimits>,
         Reply<crate::RetentionLimits>,
     ),
-    TrustedStaleAfter(u64, Reply<()>),
+    AdminStaleAfter(u64, Reply<()>),
     #[cfg(any(test, feature = "test-support"))]
     Activity(u64, Reply<crate::activity::ActivityPage>),
     #[cfg(any(test, feature = "test-support"))]
@@ -105,7 +105,7 @@ impl Request {
             Self::RetentionLimits(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::TrustedStaleAfter(_, reply) => {
+            Self::AdminStaleAfter(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             #[cfg(any(test, feature = "test-support"))]

@@ -1,6 +1,6 @@
 use super::*;
 use crate::status::{
-    Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER, TRUSTED_STALE_AFTER,
+    ADMIN_STALE_AFTER, Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER,
 };
 use live_links::io::Writer;
 use rocky_credentials::Signature;
@@ -10,7 +10,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 #[derive(Default)]
 pub(super) struct TrustedWatch {
@@ -20,7 +20,7 @@ pub(super) struct TrustedWatch {
     stale_after: u64,
     membership_alerts: Vec<Alert>,
 }
-const TRUSTED_STALE_AFTER_SECONDS: std::ops::RangeInclusive<u64> = 60..=10 * 366 * 24 * 60 * 60;
+const ADMIN_STALE_AFTER_SECONDS: std::ops::RangeInclusive<u64> = 60..=10 * 366 * 24 * 60 * 60;
 const HEARD_SAVE: u64 = 3600;
 impl TrustedWatch {
     fn hear(&mut self, node: &PublicKey, at: u64) {
@@ -46,7 +46,7 @@ impl TrustedWatch {
         self.last()
             .filter(move |(_, last)| time.saturating_sub(*last) >= self.stale_after)
             .map(|(identity, last)| Alert {
-                kind: AlertKind::TrustedIdentityStale {
+                kind: AlertKind::AdminStale {
                     identity: identity.to_hex(),
                     last_heard_epoch_seconds: last,
                 },
@@ -292,7 +292,7 @@ impl Node {
                 .trusted_watch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            watch.stale_after = saved.1.unwrap_or(TRUSTED_STALE_AFTER.as_secs());
+            watch.stale_after = saved.1.unwrap_or(ADMIN_STALE_AFTER.as_secs());
             for (node, at) in &saved.0 {
                 let heard = watch.heard.entry(*node).or_default();
                 *heard = (*heard).max(*at);
@@ -379,8 +379,8 @@ impl Node {
             self.observations.touch();
         }
     }
-    pub(super) async fn set_trusted_stale_after(&self, seconds: u64) -> Result<(), Failure> {
-        if !TRUSTED_STALE_AFTER_SECONDS.contains(&seconds) {
+    pub(super) async fn set_admin_stale_after(&self, seconds: u64) -> Result<(), Failure> {
+        if !ADMIN_STALE_AFTER_SECONDS.contains(&seconds) {
             return Err(Box::new(crate::node::Refused(
                 "stale_after must be a minute to ten years".into(),
             )));
@@ -869,7 +869,7 @@ mod tests {
         watch.nodes.remove(&nodes[1]);
         assert!(matches!(
             watch.alerts(210).next().map(|alert| alert.kind),
-            Some(AlertKind::TrustedIdentityStale {
+            Some(AlertKind::AdminStale {
                 last_heard_epoch_seconds: 150,
                 ..
             })

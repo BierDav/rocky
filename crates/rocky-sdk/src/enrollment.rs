@@ -699,7 +699,7 @@ impl Settings {
                 && revoked.identities.contains(origin)
         }) {
             crate::RevocationReason::Cascade {
-                trusted: origin.to_hex(),
+                admin: origin.to_hex(),
             }
         } else {
             crate::RevocationReason::Capability

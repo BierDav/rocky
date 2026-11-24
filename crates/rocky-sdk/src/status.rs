@@ -176,7 +176,7 @@ pub enum RevocationReason {
     /// An admin whose credentials this device's chain depends on was revoked.
     Cascade {
         /// The revoked admin's key.
-        trusted: String,
+        admin: String,
     },
     /// This device's credential was revoked, as when access narrows.
     Capability,
@@ -464,7 +464,7 @@ pub enum PeerChoice {
     /// Chosen because it held data this device needs.
     SelectedHolding,
     /// Chosen because it is an admin device.
-    SelectedTrusted,
+    SelectedAdmin,
     /// Chosen to probe what it holds.
     SelectedProbe,
     /// Skipped because another peer covered it.
@@ -612,7 +612,7 @@ pub enum AlertKind {
         seconds: u64,
     },
     /// An admin linked a device.
-    TrustedNodeLinked {
+    AdminDeviceLinked {
         /// The admin.
         identity: String,
         /// The device.
@@ -621,7 +621,7 @@ pub enum AlertKind {
         linked: u64,
     },
     /// An admin unlinked a device.
-    TrustedNodeUnlinked {
+    AdminDeviceUnlinked {
         /// The admin.
         identity: String,
         /// The device.
@@ -629,8 +629,8 @@ pub enum AlertKind {
         /// When, in Unix seconds.
         unlinked: u64,
     },
-    /// No device of an admin has been heard from within `TRUSTED_STALE_AFTER`.
-    TrustedIdentityStale {
+    /// No device of an admin has been heard from within `ADMIN_STALE_AFTER`.
+    AdminStale {
         /// The admin.
         identity: String,
         /// When one of its devices was last heard from.
@@ -691,9 +691,9 @@ pub enum AlertKind {
         reason: crate::DropReason,
     },
 }
-/// How long an admin may stay unheard before `TrustedIdentityStale`; 30 days unless
-/// `Database::set_trusted_stale_after` changes it.
-pub const TRUSTED_STALE_AFTER: std::time::Duration =
+/// How long an admin may stay unheard before `AdminStale`; 30 days unless
+/// `Database::set_admin_stale_after` changes it.
+pub const ADMIN_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);
 /// A device's signed health summary, shared with admin devices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

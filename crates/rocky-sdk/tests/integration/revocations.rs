@@ -360,7 +360,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
             .verified_revocation
             .as_ref()
             .map(|notice| &notice.reason),
-        Some(&RevocationReason::Cascade { trusted: creator }),
+        Some(&RevocationReason::Cascade { admin: creator }),
         "{status:?}"
     );
     for device in [&b, &c, &early] {

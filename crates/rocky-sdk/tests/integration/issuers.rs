@@ -231,7 +231,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .as_ref()
                 .map(|notice| &notice.reason),
             Some(&rocky_sdk::status::RevocationReason::Cascade {
-                trusted: a_identity.clone()
+                admin: a_identity.clone()
             }),
             "{status:?}"
         );
@@ -248,9 +248,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
-            Some(&rocky_sdk::status::RevocationReason::Cascade {
-                trusted: a_identity
-            }),
+            Some(&rocky_sdk::status::RevocationReason::Cascade { admin: a_identity }),
             "{status:?}"
         );
         assert!(early.database.renew().await.is_err());
@@ -458,9 +456,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
             .verified_revocation
             .as_ref()
             .map(|revoked| &revoked.reason),
-        Some(&rocky_sdk::status::RevocationReason::Cascade {
-            trusted: t_identity
-        }),
+        Some(&rocky_sdk::status::RevocationReason::Cascade { admin: t_identity }),
         "the cut-off device learns the revoked trusted node is why: {status:?}"
     );
     assert!(enrolled_by_t.database.renew().await.is_err());

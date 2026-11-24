@@ -75,7 +75,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..68).chain([69]) {
+    for version in (0..69).chain([70]) {
         let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
         rocky_platform::fs::copy(&source, &path).unwrap();

@@ -101,6 +101,7 @@ pub const MAX_OUTCOME_MEMBERS: usize = 64;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeRecord {
     pub transaction: crate::Commitment,
+    pub after_seal: Option<crate::Commitment>,
     pub replayed: Vec<(u16, Vec<BaseMark>)>,
     pub linked: Option<crate::Commitment>,
     pub dropped: Option<DropReason>,

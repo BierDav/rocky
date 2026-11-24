@@ -26,24 +26,77 @@ fn engine() -> String {
     )
 }
 
+struct ReplayPosition {
+    order: Order,
+    after_seal: Option<Commitment>,
+}
+
 impl<A: RowApplication> Inner<A> {
-    async fn prefix(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
-        let prefix = self.prefix_unbounded(scope, hash).await?;
+    async fn replay_position(
+        &self,
+        held: &[(&EncryptedFrame, u16)],
+    ) -> Result<ReplayPosition, Error> {
+        let corrupt = || Error::Corrupt("replayed position".into());
+        let mut least: Option<(Order, rocky_core::Scope)> = None;
+        for (frame, _) in held {
+            let operation = frame.operation_ref()?;
+            let rows = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT era,clock,author,sequence FROM secure_replayed WHERE hash=?",
+                        [operation.hash.as_bytes().to_vec()],
+                    )
+                    .await?,
+            )
+            .await?;
+            let order = order_of(rows.first().ok_or_else(corrupt)?)?;
+            if least.as_ref().is_none_or(|(known, _)| order < *known) {
+                least = Some((order, operation.header.extensions.scope.domain));
+            }
+        }
+        let (order, domain) = least.ok_or_else(corrupt)?;
+        let after_seal = match collect_rows(
+            self.conn
+                .query(
+                    "SELECT seal FROM secure_finalized WHERE domain=? AND depth=?",
+                    bindings(vec![
+                        SqlValue::Blob(encode(&domain)?),
+                        SqlValue::Integer(order.0),
+                    ]),
+                )
+                .await?,
+        )
+        .await?
+        .first()
+        .map(Vec::as_slice)
+        {
+            Some([SqlValue::Blob(seal)]) => {
+                Some(Commitment::try_from(seal.as_slice()).map_err(|_| corrupt())?)
+            }
+            None if order.0 == 0 => None,
+            _ => return Err(corrupt()),
+        };
+        Ok(ReplayPosition { order, after_seal })
+    }
+
+    async fn prefix(&self, scope: i64, position: &ReplayPosition) -> Result<Vec<BaseMark>, Error> {
+        let prefix = self.prefix_unbounded(scope, position).await?;
         if prefix.len() > rocky_core::replay::MAX_OUTCOME_MEMBERS {
             return Err(denied("outcome prefix quota"));
         }
         Ok(prefix)
     }
 
-    async fn prefix_unbounded(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
+    async fn prefix_unbounded(
+        &self,
+        scope: i64,
+        position: &ReplayPosition,
+    ) -> Result<Vec<BaseMark>, Error> {
         let rows = collect_rows(
             self.conn
                 .query(
-                    "SELECT author,MAX(sequence) FROM secure_replayed WHERE scope=? AND (era,clock,author,sequence)<(SELECT era,clock,author,sequence FROM secure_replayed WHERE hash=?) GROUP BY author ORDER BY author",
-                    bindings(vec![
-                        SqlValue::Integer(scope),
-                        SqlValue::Blob(hash.as_bytes().to_vec()),
-                    ]),
+                    "SELECT author,MAX(sequence) FROM secure_replayed WHERE scope=?1 AND era=?2 AND (era,clock,author,sequence)<(?2,?3,?4,?5) GROUP BY author ORDER BY author",
+                    bindings(order_bindings(scope, &position.order)?),
                 )
                 .await?,
         )
@@ -62,10 +115,8 @@ impl<A: RowApplication> Inner<A> {
     async fn linked_prefixes(
         &self,
         held: &[(&EncryptedFrame, u16)],
+        position: &ReplayPosition,
     ) -> Result<Option<Commitment>, Error> {
-        let Some((first, _)) = held.first() else {
-            return Ok(None);
-        };
         let mut own = BTreeSet::new();
         let mut linked = BTreeSet::new();
         for (frame, _) in held {
@@ -75,7 +126,6 @@ impl<A: RowApplication> Inner<A> {
             own.insert(id);
             linked.extend(self.linked_scopes(id).await?);
         }
-        let hash = first.operation_ref()?.hash;
         let mut prefixes = Vec::with_capacity(linked.len());
         for id in linked.difference(&own) {
             let rows = collect_rows(
@@ -87,7 +137,7 @@ impl<A: RowApplication> Inner<A> {
             let Some([SqlValue::Blob(scope)]) = rows.first().map(Vec::as_slice) else {
                 return Err(Error::Corrupt("replayed scope".into()));
             };
-            prefixes.push((scope.clone(), self.prefix_unbounded(*id, hash).await?));
+            prefixes.push((scope.clone(), self.prefix_unbounded(*id, position).await?));
         }
         if prefixes.is_empty() {
             return Ok(None);
@@ -197,13 +247,13 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let grants = self.local_grants(time)?;
-        let mut replayed = Vec::with_capacity(held.len());
+        let mut members = Vec::with_capacity(held.len());
         let mut logs = Vec::new();
         for (frame, member) in held {
             let operation = frame.operation_ref()?;
             let scope = operation.header.extensions.scope;
             let id = self.scope_id(scope).await?;
-            replayed.push((*member, self.prefix(id, operation.hash).await?));
+            members.push((*member, id));
             let writes = grants.iter().any(|grant| {
                 grant.scope == scope
                     && [Right::Insert, Right::Update, Right::Delete]
@@ -216,6 +266,11 @@ impl<A: RowApplication> Inner<A> {
         }
         if logs.is_empty() {
             return Ok(());
+        }
+        let position = self.replay_position(held).await?;
+        let mut replayed = Vec::with_capacity(members.len());
+        for (member, id) in members {
+            replayed.push((member, self.prefix(id, &position).await?));
         }
         replayed.sort_by_key(|(member, _)| *member);
         let unchanged =
@@ -234,9 +289,10 @@ impl<A: RowApplication> Inner<A> {
         if unchanged {
             return Ok(());
         }
-        let linked = self.linked_prefixes(held).await?;
+        let linked = self.linked_prefixes(held, &position).await?;
         let record = OutcomeRecord {
             transaction,
+            after_seal: position.after_seal,
             replayed,
             linked,
             dropped,
@@ -293,6 +349,7 @@ impl<A: RowApplication> Inner<A> {
         }
         if let Some((.., other)) = stored.iter().find(|(stored, _, other)| {
             stored.as_slice() != publisher.as_bytes()
+                && other.after_seal == record.after_seal
                 && other.replayed == record.replayed
                 && other.linked == record.linked
                 && other.dropped != record.dropped
@@ -366,13 +423,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn forge_outcome_for_test(
         &self,
         transaction: Commitment,
-        dropped: Option<DropReason>,
-        engine: &str,
         scopes: &[ResourceScope],
+        forge: impl Fn(&mut OutcomeRecord),
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         let time = now()?;
-        let engine = engine.to_owned();
         let scopes = scopes.to_vec();
         transaction!(inner, |inner| {
             let node = inner.config.node.public_key();
@@ -382,8 +437,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .into_iter()
                 .find(|(publisher, ..)| publisher.as_slice() == node.as_bytes())
                 .ok_or(Error::Closed)?;
-            record.dropped = dropped;
-            record.engine = engine.clone();
+            forge(&mut record);
             let mut logs = Vec::new();
             for scope in &scopes {
                 logs.push((*scope, inner.scope_id(*scope).await?));

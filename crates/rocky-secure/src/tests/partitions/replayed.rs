@@ -354,12 +354,10 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
         .unwrap();
     let txn = transaction(member, [1; 32], &f);
     forger
-        .forge_outcome_for_test(
-            txn,
-            Some(DropReason::Constraint),
-            "forged engine",
-            &[f.scope("A"), f.scope("B")],
-        )
+        .forge_outcome_for_test(txn, &[f.scope("A"), f.scope("B")], |record| {
+            record.dropped = Some(DropReason::Constraint);
+            record.engine = "forged engine".into();
+        })
         .await
         .unwrap();
     let [honest, forged] = records(&f, &forger, &x, "A").await.try_into().unwrap();
@@ -397,4 +395,66 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
         "a refused forged record changes nothing"
     );
     assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 2);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_record_replayed_after_another_seal_is_not_compared_for_divergence() {
+    let root = rocky_platform::fs::Scratch::new().await;
+    let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
+    let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let open = |name: &'static str, node: &PrivateKey| {
+        let (f, root, node) = (&f, &root, node.clone());
+        async move {
+            let replica = f
+                .open(&root.path().join(name), node.clone(), f.grant(None, &all()))
+                .await;
+            f.key(&replica, "A", [1; 32]).await;
+            f.key(&replica, "B", [2; 32]).await;
+            replica
+        }
+    };
+    let (writer, joiner, reader) = (
+        open("w.sqlite", &w).await,
+        open("x.sqlite", &x).await,
+        open("r.sqlite", &r).await,
+    );
+    let both = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "b", 1)], 1).await;
+    for status in joiner.receive_all(both.clone()).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::Applied);
+    }
+    let member = both
+        .iter()
+        .find(|frame| frame.scope().unwrap() == f.scope("A"))
+        .unwrap();
+    let txn = transaction(member, [1; 32], &f);
+    let later_seal = [7; 32];
+    joiner
+        .forge_outcome_for_test(txn, &[f.scope("A"), f.scope("B")], |record| {
+            record.after_seal = Some(later_seal);
+            record.dropped = Some(DropReason::Constraint);
+        })
+        .await
+        .unwrap();
+    let [honest, after_seal] = records(&f, &joiner, &x, "A").await.try_into().unwrap();
+    let [authored] = records(&f, &writer, &w, "A").await.try_into().unwrap();
+
+    for status in reader.receive_all(both).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::Applied);
+    }
+    for record in [authored, honest] {
+        assert_eq!(
+            reader.receive(record).await.unwrap(),
+            ReceiveStatus::Applied
+        );
+    }
+    assert_eq!(
+        reader.receive(after_seal).await.unwrap(),
+        ReceiveStatus::Applied,
+        "a record replayed on a later seal's base is a different position, not a disagreement"
+    );
+    assert!(reader.outcome_divergences().await.unwrap().is_empty());
+    assert_eq!(
+        reader.transaction_outcome(txn).await.unwrap(),
+        Some(TransactionOutcome::Applied { sealed: false })
+    );
 }

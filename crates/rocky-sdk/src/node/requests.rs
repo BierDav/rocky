@@ -91,8 +91,8 @@ impl Node {
             Request::RevokePartition(person, partition, reply) => {
                 let _ = reply.send(self.revoke_partition(person, &partition).await);
             }
-            Request::Remove(person, removal, root, reply) => {
-                let _ = reply.send(self.remove(person, removal, &root).await);
+            Request::Remove(person, reply) => {
+                let _ = reply.send(self.remove(person).await);
             }
             Request::MakeAdmin(person, root, reply) => {
                 let _ = reply.send(self.make_admin(person, &root).await);

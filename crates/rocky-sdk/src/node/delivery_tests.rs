@@ -313,10 +313,10 @@ async fn a_creation_and_a_rotation_reach_an_offline_recipient_through_custody_al
     mesh.hub.record("third");
     let node = b.node().await?;
     b.online(false).await?;
-    snap::value(a.database.remove(
-        crate::PersonId::new(removed.identity().await?.parse()?),
-        crate::Removal::Departed,
-    ))
+    snap::value(
+        a.database
+            .remove(crate::PersonId::new(removed.identity().await?.parse()?)),
+    )
     .await?;
     assert_eq!(a.state(&node).await?, "pending");
     relay(a, b).await?;
@@ -442,10 +442,10 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         })
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
-    snap::value(a.database.remove(
-        crate::PersonId::new(removed.identity().await?.parse()?),
-        crate::Removal::Departed,
-    ))
+    snap::value(
+        a.database
+            .remove(crate::PersonId::new(removed.identity().await?.parse()?)),
+    )
     .await?;
     relay(&a, &b).await?;
     snap::value(a.database.sync_now()).await?;
@@ -535,11 +535,7 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         1,
         "a restarted mailbox keeps the deposit"
     );
-    snap::value(a.database.remove(
-        crate::PersonId::new(identity.parse()?),
-        crate::Removal::Departed,
-    ))
-    .await?;
+    snap::value(a.database.remove(crate::PersonId::new(identity.parse()?))).await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     snap::value(a.database.sync_now()).await?;
     assert_eq!(
@@ -772,7 +768,7 @@ async fn revoke_while_paused(
             .reached
             .await
             .map_err(|_| "the sender never reached the hand-off")?;
-        snap::value(a.database.remove(identity, crate::Removal::Departed)).await?;
+        snap::value(a.database.remove(identity)).await?;
         paused
             .release
             .send(())

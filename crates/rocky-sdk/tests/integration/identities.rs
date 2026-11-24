@@ -192,10 +192,11 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     for node in nodes {
         assert!(synced(node).await);
     }
-    snap::ok(owner.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(key))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        owner
+            .database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(key)))),
+    )
     .await;
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
@@ -206,10 +207,11 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     }
     let own = snap::ok(snap::device(&owner.database)).await["principal"].clone();
     assert!(
-        snap::observe(owner.database.remove(
-            rocky_sdk::PersonId::new(snap::public_key(&(own))),
-            rocky_sdk::Removal::Departed
-        ))
+        snap::observe(
+            owner
+                .database
+                .remove(rocky_sdk::PersonId::new(snap::public_key(&(own))))
+        )
         .await
         .is_err(),
         "the owner's own identity is never revoked"
@@ -705,10 +707,11 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             Ok(record)
         };
         if revoked_b {
-            snap::ok(owners[1].database.remove(
-                rocky_sdk::PersonId::new(snap::public_key(&(person_key_1))),
-                rocky_sdk::Removal::Departed,
-            ))
+            snap::ok(
+                owners[1]
+                    .database
+                    .remove(rocky_sdk::PersonId::new(snap::public_key(&(person_key_1)))),
+            )
             .await;
             for device in [&members[1], &siblings[1]] {
                 assert!(device.sync().await.is_err());

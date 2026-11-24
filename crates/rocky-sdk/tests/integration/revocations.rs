@@ -157,16 +157,10 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     assert_eq!(empty.statements, 0);
 
     a.database
-        .remove(
-            rocky_sdk::PersonId::new(x.identity().await.parse()?),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(x.identity().await.parse()?))
         .await?;
     b.database
-        .remove(
-            rocky_sdk::PersonId::new(y.identity().await.parse()?),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(y.identity().await.parse()?))
         .await?;
     let by_a = revocations(&a).await;
     let by_b = revocations(&b).await;

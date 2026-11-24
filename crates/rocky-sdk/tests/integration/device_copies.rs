@@ -139,10 +139,7 @@ async fn a_restored_copy_never_authors_and_rejoins_as_a_new_device() -> Result<(
     drop(restored);
 
     a.database
-        .remove(
-            rocky_sdk::PersonId::new(snap::public_key(&old_identity)),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(snap::public_key(&old_identity)))
         .await?;
     let d = Device::join(&root.path().join("d"), &a.invite().await, memory(&hub, "d")).await?;
     d.sync().await.expect("join sync");

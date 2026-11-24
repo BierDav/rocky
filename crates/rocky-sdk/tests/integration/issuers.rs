@@ -173,10 +173,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 
     let error = b
         .database
-        .remove(
-            rocky_sdk::PersonId::new(b_identity.parse()?),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(b_identity.parse()?))
         .await
         .err()
         .ok_or("revoked itself")?;
@@ -187,10 +184,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     );
     let error = b
         .database
-        .remove(
-            rocky_sdk::PersonId::new(a_identity.parse()?),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(a_identity.parse()?))
         .await
         .err()
         .ok_or("revoked a trusted node without the root")?;
@@ -438,10 +432,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
 
     let error = a
         .database
-        .remove(
-            rocky_sdk::PersonId::new(t_identity.parse()?),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(t_identity.parse()?))
         .await
         .err()
         .ok_or("revoked a trusted identity without the root")?;
@@ -505,10 +496,7 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
     let identity = member.database.me().await?.person.key();
     owner
         .database
-        .remove(
-            rocky_sdk::PersonId::new(identity),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(identity))
         .await?;
     let _ = member.sync().await;
     let _ = member.database.renew().await;

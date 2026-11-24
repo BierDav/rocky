@@ -112,9 +112,7 @@ impl Todos {
         }
         let node_key = node.parse()?;
         let person = self.person_of(node_key).await?;
-        self.database
-            .remove(person, rocky_sdk::Removal::Departed)
-            .await?;
+        self.database.remove(person).await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])

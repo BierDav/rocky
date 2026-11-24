@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Access, Affinity, Column, DenyReason, ErrorKind, Network, PersonId, Removal, Right, Role,
-    RoleName, Schema, SqlValue, Table, TableRights, transport::memory::Hub,
+    Access, Affinity, Column, DenyReason, ErrorKind, Network, PersonId, Right, Role, RoleName,
+    Schema, SqlValue, Table, TableRights, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -318,10 +318,7 @@ async fn a_removed_clinician_reads_no_chart_written_after_removal() -> Result<()
         rows(&clinician, "SELECT note FROM charts").await?,
         ["before removal"]
     );
-    admin
-        .database
-        .remove(person(&clinician).await?, Removal::Departed)
-        .await?;
+    admin.database.remove(person(&clinician).await?).await?;
     insert(&admin, "charts", ["A", "after removal"]).await?;
     synced(&admin).await?;
     let _ = clinician.sync().await;

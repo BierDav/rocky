@@ -383,10 +383,9 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         synced(device).await?;
         assert_eq!(items(device).await?, ["Before"]);
     }
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(c.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(c.identity().await),
+    ))))
     .await;
     let revoked = snap::ok(snap::device(&a.database)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);

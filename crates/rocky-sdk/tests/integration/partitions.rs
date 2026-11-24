@@ -146,10 +146,9 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     );
     tx.rollback().await.unwrap();
     snap::ok(db.create_partition(&rocky_sdk::Partition::new("items", (values("C")).clone()))).await;
-    snap::ok(db.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(reader_identity.to_string()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(db.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(reader_identity.to_string()),
+    ))))
     .await;
     let revoked = snap::ok(snap::device(&db)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);

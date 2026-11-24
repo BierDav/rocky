@@ -9,8 +9,8 @@ use rocky_coordinator::{
     tenancy::{SignedTenantAdmission, Tenant, TenantAdmission},
 };
 use rocky_sdk::{
-    Access, Affinity, Column, Configuration, Database, Network, PersonId, Removal, RootKey, Schema,
-    Table, transport::memory::Hub,
+    Access, Affinity, Column, Configuration, Database, Network, PersonId, RootKey, Schema, Table,
+    transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -220,7 +220,7 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
     let removed = writer.device_credential().await.unwrap().identity;
     office
         .publisher
-        .remove(PersonId::new(removed), Removal::Departed)
+        .remove(PersonId::new(removed))
         .await
         .unwrap();
     publisher.share_revocations().await.unwrap();

@@ -797,34 +797,20 @@ impl Node {
         self.complete_rights_change().await
     }
 
-    pub(super) async fn remove(
-        &self,
-        person: PersonId,
-        removal: Removal,
-        root: &Root,
-    ) -> Result<(), crate::Failure> {
+    pub(super) async fn remove(&self, person: PersonId) -> Result<(), crate::Failure> {
         let (settings, registry) = self.administered().await?;
         let identity = person.key();
-        if settings.revoked_identity(&identity, &registry) && removal == Removal::Departed {
+        if settings.revoked_identity(&identity, &registry) {
             return Err(Box::new(crate::Error::removed()));
         }
-        if registry.trusted.contains_key(&identity) && root.signer().is_none() {
+        if registry.trusted.contains_key(&identity) {
             return Err(Box::new(crate::Error::refused(
                 crate::Right::Administer,
                 crate::DenyReason::OwnerRequired,
             )));
         }
-        let mode = match removal {
-            Removal::Departed => RevocationMode::Lost,
-            Removal::Compromised => RevocationMode::Compromised,
-        };
-        let target = if registry.trusted.contains_key(&identity) || removal == Removal::Compromised
-        {
-            Revoke::TrustedIdentity(identity, mode)
-        } else {
-            Revoke::Identity(identity)
-        };
-        self.revoke_with(target, root).await?;
+        self.revoke_with(Revoke::Identity(identity), &Root::default())
+            .await?;
         self.activity
             .record(crate::activity::ActivityKind::IdentityRevoked { identity });
         Ok(())
@@ -858,17 +844,29 @@ impl Node {
         removal: Removal,
         root: &Root,
     ) -> Result<(), crate::Failure> {
-        let (_, registry) = self.administered().await?;
+        let (settings, registry) = self.administered().await?;
         if root.signer().is_none() {
             return Err(Box::new(crate::Error::refused(
                 crate::Right::Administer,
                 crate::DenyReason::OwnerRequired,
             )));
         }
-        if !registry.trusted.contains_key(&person.key()) {
+        let identity = person.key();
+        if settings.revoked_identity(&identity, &registry) && removal == Removal::Departed {
+            return Err(Box::new(crate::Error::removed()));
+        }
+        if !registry.trusted.contains_key(&identity) {
             return Err(Box::new(AccessError::NotAdmin));
         }
-        self.remove(person, removal, root).await
+        let mode = match removal {
+            Removal::Departed => RevocationMode::Lost,
+            Removal::Compromised => RevocationMode::Compromised,
+        };
+        self.revoke_with(Revoke::TrustedIdentity(identity, mode), root)
+            .await?;
+        self.activity
+            .record(crate::activity::ActivityKind::IdentityRevoked { identity });
+        Ok(())
     }
 
     pub(super) async fn create_named_partition(

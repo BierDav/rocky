@@ -37,10 +37,10 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
-    snap::ok(b.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(member))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        b.database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(member)))),
+    )
     .await;
     let state = identity(root, "b")?;
     assert_eq!(
@@ -105,19 +105,19 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         "a removed person is no longer listed"
     );
     assert!(
-        snap::observe(b.database.remove(
-            rocky_sdk::PersonId::new(snap::public_key(&(node))),
-            rocky_sdk::Removal::Departed
-        ))
+        snap::observe(
+            b.database
+                .remove(rocky_sdk::PersonId::new(snap::public_key(&(node))))
+        )
         .await
         .is_err(),
         "an issuer never revokes a node"
     );
     assert!(
-        snap::observe(b.database.remove(
-            rocky_sdk::PersonId::new(snap::public_key(&(member))),
-            rocky_sdk::Removal::Departed
-        ))
+        snap::observe(
+            b.database
+                .remove(rocky_sdk::PersonId::new(snap::public_key(&(member))))
+        )
         .await
         .is_err(),
         "an issuer never revokes an identity twice"
@@ -172,10 +172,10 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     sync(&b).await?;
     a.close().await;
     let before = identity(root, "b")?["keys"].clone();
-    snap::ok(b.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(keys.clone()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        b.database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(keys.clone())))),
+    )
     .await;
     assert_eq!(identity(root, "b")?["keys"], before);
     assert_eq!(epoch(&b, "L").await, json!([1, 2]));
@@ -203,10 +203,9 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     .await;
     snap::ok(b.database.renew()).await;
     sync(&b).await?;
-    let refused = snap::observe(b.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(a.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    let refused = snap::observe(b.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(a.identity().await),
+    ))))
     .await
     .expect_err("revoking the creating device's trusted node needs the root");
     assert_eq!(refused["code"], "owner_required", "{refused}");
@@ -252,16 +251,16 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     sync(&b).await?;
     let before_a = identity(root, "a")?["keys"].clone();
     let before_b = identity(root, "b")?["keys"].clone();
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(keys.clone()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        a.database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(keys.clone())))),
+    )
     .await;
     let by_a = snap::ok(snap::device(&a.database)).await;
-    snap::ok(b.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(keys.clone()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        b.database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(keys.clone())))),
+    )
     .await;
     let by_b = snap::ok(snap::device(&b.database)).await;
     assert_ne!(by_a["revocations"]["digest"], by_b["revocations"]["digest"]);

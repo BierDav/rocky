@@ -221,12 +221,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
             .is_err()
     );
     tx.rollback().await?;
-    snap::ok(
-        owner
-            .database
-            .remove(members[0].1, crate::Removal::Departed),
-    )
-    .await;
+    snap::ok(owner.database.remove(members[0].1)).await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
     assert_epochs(&members[0].0, count, &[1]).await;

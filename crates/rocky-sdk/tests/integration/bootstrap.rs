@@ -222,10 +222,9 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     )
     .await?;
     revoked.sync().await.expect("initial bootstrap");
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(revoked.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(revoked.identity().await),
+    ))))
     .await;
     a.seal_and_compact().await;
     let member_path = root.path().join("member");
@@ -542,10 +541,9 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone())).await?;
     c.close().await;
     gate.close().await;
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&d.identity().await)),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &d.identity().await,
+    ))))
     .await;
     a.add(2, "after enrolment").await;
     b.sync().await.expect("b learns the revocation from a");
@@ -608,10 +606,9 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         )
         .await?;
         revoked.sync().await.expect("join");
-        snap::ok(a.database.remove(
-            rocky_sdk::PersonId::new(snap::public_key(&(revoked.identity().await))),
-            rocky_sdk::Removal::Departed,
-        ))
+        snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+            &(revoked.identity().await),
+        ))))
         .await;
         a.add(handle, title).await;
         revoked.close().await;
@@ -839,10 +836,10 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         "an intent naming an inviter the node has not met keeps the bootstrap pending"
     );
 
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&unmet_identity)),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        a.database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&unmet_identity))),
+    )
     .await;
     snap::ok(async {
         member.database.renew().await?;

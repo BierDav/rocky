@@ -466,10 +466,11 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         "the creator's, Alice's and Bob's identities"
     );
     let bob_identity = snap::ok(snap::device(&bob.engine)).await["principal"].clone();
-    snap::ok(creator.engine.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(bob_identity))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        creator
+            .engine
+            .remove(rocky_sdk::PersonId::new(snap::public_key(&(bob_identity)))),
+    )
     .await;
     assert_eq!(
         snap::ok(snap::device(&creator.engine)).await["revocations"]["statements"],

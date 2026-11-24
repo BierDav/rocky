@@ -1,5 +1,5 @@
 use crate::common::{self, Device, Failure};
-use rocky_sdk::{Network, PersonId, Removal, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Network, PersonId, SqlValue, transport::memory::Hub};
 use std::sync::Arc;
 
 async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
@@ -74,7 +74,7 @@ async fn remove(household: &Household) -> Result<(), Failure> {
     household
         .owner
         .database
-        .remove(PersonId::new(person.key()), Removal::Departed)
+        .remove(PersonId::new(person.key()))
         .await?;
     Ok(())
 }

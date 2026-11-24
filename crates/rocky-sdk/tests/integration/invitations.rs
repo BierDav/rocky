@@ -292,10 +292,7 @@ async fn removing_the_identity_ends_its_unused_invitation() -> Result<(), Failur
         .await?;
     owner
         .database
-        .remove(
-            rocky_sdk::PersonId::new(identity),
-            rocky_sdk::Removal::Departed,
-        )
+        .remove(rocky_sdk::PersonId::new(identity))
         .await?;
     assert_eq!(
         refusal(

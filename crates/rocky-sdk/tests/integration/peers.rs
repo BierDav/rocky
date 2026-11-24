@@ -195,10 +195,9 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.add_peer(&c.contact().await)
         .await
         .map_err(|e| e.to_string())?;
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(c.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(c.identity().await),
+    ))))
     .await;
     assert_eq!(
         a.peer(&c.node().await).await,

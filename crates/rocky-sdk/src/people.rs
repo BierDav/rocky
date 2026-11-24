@@ -299,13 +299,13 @@ pub struct Person {
     pub devices: Vec<Device>,
 }
 
-/// Why a person or admin is removed.
+/// Why `revoke_admin` ends an admin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Removal {
-    /// They left or lost their devices; what they did before stays valid.
+    /// They left or lost their devices; what they issued before stays valid.
     Departed,
-    /// An admin's keys may be in other hands, so the root's revocation also ends what they issued;
-    /// only `revoke_admin` accepts it.
+    /// Their keys may be in other hands, so the revocation also removes the people they admitted
+    /// and ends every credential they issued.
     Compromised,
 }
 
@@ -454,13 +454,10 @@ impl Database {
         self.send(|reply| Request::CreatePartition(partition, reply))
             .await
     }
-    /// Removes a member; their devices stop reading and writing at their next sync, and an admin is
-    /// removed with `revoke_admin`.
-    pub async fn remove(&self, person: PersonId, removal: Removal) -> Result<(), crate::Error> {
-        self.send_rooted(None, |root, reply| {
-            Request::Remove(person, removal, root, reply)
-        })
-        .await
+    /// Removes a member; their devices stop reading and writing at their next sync, and what they
+    /// wrote before stays valid. An admin is `OwnerRequired`: end them with `revoke_admin`.
+    pub async fn remove(&self, person: PersonId) -> Result<(), crate::Error> {
+        self.send(|reply| Request::Remove(person, reply)).await
     }
     /// Makes a member an admin; needs the root key.
     pub async fn make_admin(

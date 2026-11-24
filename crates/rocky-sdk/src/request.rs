@@ -60,12 +60,7 @@ pub(crate) enum Request {
     GrantPartition(crate::PersonId, crate::Partition, Reply<()>),
     RevokePartition(crate::PersonId, crate::Partition, Reply<()>),
     CreatePartition(crate::Partition, Reply<crate::Partition>),
-    Remove(
-        crate::PersonId,
-        crate::Removal,
-        crate::node::Root,
-        Reply<()>,
-    ),
+    Remove(crate::PersonId, Reply<()>),
     MakeAdmin(crate::PersonId, crate::node::Root, Reply<()>),
     RevokeAdmin(
         crate::PersonId,
@@ -163,12 +158,14 @@ impl Request {
             Self::SetAccess(_, _, reply)
             | Self::GrantPartition(_, _, reply)
             | Self::RevokePartition(_, _, reply)
-            | Self::Remove(_, _, _, reply)
             | Self::MakeAdmin(_, _, reply)
             | Self::RevokeAdmin(_, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::CreatePartition(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Remove(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             #[cfg(any(test, feature = "test-support"))]

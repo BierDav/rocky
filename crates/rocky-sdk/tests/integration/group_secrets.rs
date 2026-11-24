@@ -403,10 +403,13 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         peer.fetch(&issuer).await.unwrap();
     }
 
-    snap::ok(issuer.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(removed_device.identity.to_string()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        issuer
+            .database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(
+                &(removed_device.identity.to_string()),
+            ))),
+    )
     .await;
     let revoked = snap::ok(snap::device(&issuer.database)).await;
     assert_eq!(
@@ -492,10 +495,13 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
     }
     let (device_peer, device) = issuer.enroll(&root.path().join("device"), "reader").await;
     issuer.grant(device.identity, "A").await.unwrap();
-    snap::ok(issuer.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(device.identity.to_string()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        issuer
+            .database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(
+                &(device.identity.to_string()),
+            ))),
+    )
     .await;
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");
@@ -531,10 +537,9 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
         issuer.grant(device.identity, "A").await.unwrap();
         device_peer.database.close().await.unwrap();
         issuer.store.limit(Some(budget));
-        let revoked = snap::string(issuer.database.remove(
-            rocky_sdk::PersonId::new(snap::public_key(&(device.identity.to_string()))),
-            rocky_sdk::Removal::Departed,
-        ))
+        let revoked = snap::string(issuer.database.remove(rocky_sdk::PersonId::new(
+            snap::public_key(&(device.identity.to_string())),
+        )))
         .await;
         issuer.store.limit(None);
         let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
@@ -751,10 +756,13 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
 
     let (removed, removed_device) = &readers[0];
     let (remaining, _) = &readers[1];
-    snap::ok(issuer.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(removed_device.identity.to_string()))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(
+        issuer
+            .database
+            .remove(rocky_sdk::PersonId::new(snap::public_key(
+                &(removed_device.identity.to_string()),
+            ))),
+    )
     .await;
     for table in TABLES {
         write(&issuer, table, "after").await;
@@ -1157,11 +1165,7 @@ async fn a_removed_persons_devices_get_nothing_created_after_the_removal() {
         laptop.database.me().await.unwrap().device.key().to_hex(),
         phone.database.me().await.unwrap().device.key().to_hex(),
     ];
-    snap::ok(issuer.database.remove(
-        rocky_sdk::PersonId::new(identity),
-        rocky_sdk::Removal::Departed,
-    ))
-    .await;
+    snap::ok(issuer.database.remove(rocky_sdk::PersonId::new(identity))).await;
     snap::ok(
         issuer
             .database

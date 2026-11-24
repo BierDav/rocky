@@ -218,10 +218,11 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     .await?;
     offline.close().await;
     for device in [&a, &b] {
-        snap::ok(device.database.remove(
-            rocky_sdk::PersonId::new(PrivateKey::new().public_key()),
-            rocky_sdk::Removal::Departed,
-        ))
+        snap::ok(
+            device
+                .database
+                .remove(rocky_sdk::PersonId::new(PrivateKey::new().public_key())),
+        )
         .await;
     }
     let before_a = winner(root, "a", "items");
@@ -288,10 +289,11 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     }
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     for device in [&a, &b] {
-        snap::ok(device.database.remove(
-            rocky_sdk::PersonId::new(PrivateKey::new().public_key()),
-            rocky_sdk::Removal::Departed,
-        ))
+        snap::ok(
+            device
+                .database
+                .remove(rocky_sdk::PersonId::new(PrivateKey::new().public_key())),
+        )
         .await;
     }
     assert_ne!(winner(root, "a", "items"), winner(root, "b", "items"));
@@ -392,15 +394,13 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         )
         .await;
     }
-    snap::ok(a.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(carol.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(a.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(carol.identity().await),
+    ))))
     .await;
-    snap::ok(b.database.remove(
-        rocky_sdk::PersonId::new(snap::public_key(&(dave.identity().await))),
-        rocky_sdk::Removal::Departed,
-    ))
+    snap::ok(b.database.remove(rocky_sdk::PersonId::new(snap::public_key(
+        &(dave.identity().await),
+    ))))
     .await;
     write(&a, "a").await;
     write(&b, "b").await;

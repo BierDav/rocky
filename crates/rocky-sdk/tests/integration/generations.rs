@@ -1,35 +1,87 @@
 use crate::common;
 use crate::support::snapshot as snap;
-use common::{Device, Failure, SCHEMA, introduce};
-use rocky_sdk::{Network, transport::memory::Hub};
+use common::{Device, Failure, build, introduce, items, required, shopping};
+use rocky_sdk::{
+    Affinity, Column, IndexColumn, IndexDefinition, Network, Schema, Table, transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SECOND: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const GRANTED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const REQUIRED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
-const NULLABLE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const BARE: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}]}"#;
-const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
-const THIRD: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+fn note() -> Column {
+    Column::new("note", Affinity::Text)
+}
+fn position() -> Column {
+    Column::new("position", Affinity::Text)
+        .required()
+        .default("")
+}
+fn tags() -> Table {
+    Table::replayed("tags")
+        .column(required("key", Affinity::Text))
+        .column(required("label", Affinity::Text))
+        .primary_key(["key"])
+}
+fn second() -> Schema {
+    build(shopping(2).table(items().column(note())).table(tags()))
+}
+fn required_position() -> Schema {
+    build(shopping(2).table(items().column(position())).migration(
+        2,
+        ["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"],
+    ))
+}
+fn nullable_position() -> Schema {
+    build(shopping(1).table(items().column(Column::new("position", Affinity::Text))))
+}
+fn bare_position() -> Schema {
+    build(shopping(2).table(items().column(position())))
+}
+fn unique_titles() -> IndexDefinition {
+    IndexDefinition {
+        name: "items_title".into(),
+        columns: vec![IndexColumn {
+            name: "title".into(),
+            descending: false,
+        }],
+        unique: true,
+        expressions: Vec::new(),
+        predicate: None,
+    }
+}
+fn unique() -> Schema {
+    build(shopping(1).table(items().index(unique_titles())))
+}
+fn unique_required() -> Schema {
+    build(
+        shopping(2)
+            .table(items().column(position()).index(unique_titles()))
+            .migration(2, ["UPDATE items SET position = upper(title)"]),
+    )
+}
+fn third() -> Schema {
+    build(
+        shopping(3)
+            .table(
+                items()
+                    .column(note())
+                    .column(Column::new("rank", Affinity::Integer)),
+            )
+            .table(tags()),
+    )
+}
 
 async fn reopen(
     directory: &Path,
-    schema: &str,
+    schema: &Schema,
     network: Option<Network>,
 ) -> Result<Device, Failure> {
     Device::new(open(directory, schema, network).open().await?)
 }
 
-fn open<'a>(
-    directory: &'a Path,
-    schema: &'a str,
-    network: Option<Network>,
-) -> rocky_sdk::Configuration {
+fn open(directory: &Path, schema: &Schema, network: Option<Network>) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         None,
         Some(common::external_identity(directory)),
         network,
@@ -93,7 +145,7 @@ async fn an_old_member_follows_main_to_a_published_schema_and_reports_behind() -
     b.sync().await.expect("initial idle sync");
     let before = tip(&b).await;
     a.close().await;
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     let published = tip(&a).await;
     assert_ne!(
@@ -145,7 +197,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     b.add(2, unsent_when_issuer_publishes).await;
     a.close().await;
 
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"], json!({"schema": 2}));
     assert_eq!(status["application"], "current");
@@ -159,7 +211,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     tag(&a, 4, "fruit").await;
 
     b.close().await;
-    let ahead = reopen(&b_dir, SECOND, None).await?;
+    let ahead = reopen(&b_dir, &second(), None).await?;
     let status = generation(&ahead).await;
     assert_eq!(
         status["current"]["schema"], 1,
@@ -176,7 +228,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     );
     ahead.close().await;
 
-    let b = reopen(&b_dir, SECOND, network("b")).await?;
+    let b = reopen(&b_dir, &second(), network("b")).await?;
     b.sync().await.expect("sync");
     let status = generation(&b).await;
     assert_eq!(
@@ -198,7 +250,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
         json!([[snap::cell(text("fresh"))]])
     );
     b.close().await;
-    let b = reopen(&b_dir, SECOND, network("b")).await?;
+    let b = reopen(&b_dir, &second(), network("b")).await?;
     assert_eq!(generation(&b).await["application"], "current");
     assert_eq!(
         rows(&b, "SELECT label FROM tags").await,
@@ -208,11 +260,10 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     b.close().await;
 
     a.close().await;
-    let retyped = RETYPED.replace(r#""version":2"#, r#""version":3"#);
-    let refused = open(&a_dir, &retyped, network("a")).open().await;
+    let refused = open(&a_dir, &retyped(3), network("a")).open().await;
     let error = refused.err().expect("refused").to_string();
     assert!(error.contains("changed type"), "{error}");
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     assert_eq!(
         generation(&a).await["current"]["schema"],
         2,
@@ -235,8 +286,8 @@ async fn a_table_added_later_reaches_existing_full_members() -> Result<(), Failu
     b.close().await;
     a.close().await;
 
-    let a = reopen(&a_dir, GRANTED, network("a")).await?;
-    let b = reopen(&b_dir, GRANTED, network("b")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
+    let b = reopen(&b_dir, &second(), network("b")).await?;
     b.sync().await.expect("sync");
     assert!(
         common::authority_json(&b_dir, "identity")?["keys"]["tags"].is_array(),
@@ -261,7 +312,7 @@ async fn a_table_added_later_reaches_existing_full_members() -> Result<(), Failu
     b.close().await;
     a.close().await;
 
-    let a = reopen(&a_dir, GRANTED, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     a.close().await;
     Ok(())
@@ -297,7 +348,7 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     b.close().await;
     a.close().await;
 
-    let a = reopen(&dirs("a"), REQUIRED, network("a")).await?;
+    let a = reopen(&dirs("a"), &required_position(), network("a")).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "current");
@@ -332,7 +383,7 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     );
     c.close().await;
 
-    let b = reopen(&dirs("b"), REQUIRED, network("b")).await?;
+    let b = reopen(&dirs("b"), &required_position(), network("b")).await?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["application"], "current");
     snap::ok(snap::mutate(
@@ -375,18 +426,18 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     let dirs = |name: &str| root.path().join(name);
     let a = Device::new(
         common::create_as(
-            open(&dirs("a"), NULLABLE, network("a")),
+            open(&dirs("a"), &nullable_position(), network("a")),
             common::external_key(&dirs("a")),
         )
         .await?,
     )?;
     let b = Device::new(
-        open(&dirs("b"), NULLABLE, network("b"))
+        open(&dirs("b"), &nullable_position(), network("b"))
             .join(&a.invite().await)
             .await?,
     )?;
     let c = Device::new(
-        open(&dirs("c"), NULLABLE, network("c"))
+        open(&dirs("c"), &nullable_position(), network("c"))
             .join(&a.invite().await)
             .await?,
     )?;
@@ -400,7 +451,7 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     c.sync().await.expect("sync");
     a.close().await;
 
-    let a = reopen(&dirs("a"), BARE, network("a")).await?;
+    let a = reopen(&dirs("a"), &bare_position(), network("a")).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY title").await,
@@ -417,8 +468,8 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     );
     b.close().await;
     c.close().await;
-    let b = reopen(&dirs("b"), BARE, network("b")).await?;
-    let c = reopen(&dirs("c"), BARE, network("c")).await?;
+    let b = reopen(&dirs("b"), &bare_position(), network("b")).await?;
+    let c = reopen(&dirs("c"), &bare_position(), network("c")).await?;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
     for device in [&a, &b, &c] {
@@ -443,7 +494,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
     let root = tempfile::tempdir()?;
     let a = Device::new(
         common::create_as(
-            open(root.path(), UNIQUE, None),
+            open(root.path(), &unique(), None),
             common::external_key(root.path()),
         )
         .await?,
@@ -451,7 +502,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     a.close().await;
-    let a = reopen(root.path(), UNIQUE_REQUIRED, None).await?;
+    let a = reopen(root.path(), &unique_required(), None).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
@@ -508,9 +559,8 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
-    let bumped = SCHEMA.replace(r#""version":1"#, r#""version":7"#);
-    let bumped: &'static str = Box::leak(bumped.into_boxed_str());
-    let a = reopen(root.path(), bumped, None).await?;
+    let bumped = build(shopping(7).table(items()));
+    let a = reopen(root.path(), &bumped, None).await?;
     let status = generation(&a).await;
     assert_eq!(
         status["current"],
@@ -522,8 +572,18 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     Ok(())
 }
 
-const RETYPED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
-const RENAMED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+fn untitled_items() -> Table {
+    Table::replayed("items")
+        .column(required("key", Affinity::Text))
+        .column(required("completed", Affinity::Integer))
+        .primary_key(["key"])
+}
+fn retyped(version: u32) -> Schema {
+    build(shopping(version).table(untitled_items().column(required("title", Affinity::Integer))))
+}
+fn renamed() -> Schema {
+    build(shopping(2).table(untitled_items().column(required("label", Affinity::Text))))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Failure> {
@@ -531,8 +591,8 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
     let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
-    for (schema, refusal) in [(RETYPED, "changed type"), (RENAMED, "needs a default")] {
-        let error = open(root.path(), schema, None)
+    for (schema, refusal) in [(retyped(2), "changed type"), (renamed(), "needs a default")] {
+        let error = open(root.path(), &schema, None)
             .open()
             .await
             .err()
@@ -543,7 +603,7 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
             "a retyped name is refused, and a rename adds a required field that needs a default: {error}"
         );
     }
-    let a = reopen(root.path(), SCHEMA, None).await?;
+    let a = reopen(root.path(), &common::schema(), None).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 1);
     assert_eq!(a.titles().await, ["apples"]);
     a.close().await;
@@ -568,8 +628,8 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     let apples = b.add(1, "apples").await;
     b.sync().await.expect("sync");
     a.close().await;
-    reopen(&a_dir, SECOND, None).await?.close().await;
-    let a = reopen(&a_dir, THIRD, network("a")).await?;
+    reopen(&a_dir, &second(), None).await?.close().await;
+    let a = reopen(&a_dir, &third(), network("a")).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 3);
     a.set(2, &apples, "rank", json!(7)).await;
     let written_offline_before_both_seals = "bread";
@@ -597,7 +657,7 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
         json!([[{"type": "integer", "value": "7"}]])
     );
     b.close().await;
-    let b = reopen(&b_dir, SCHEMA, network("b")).await?;
+    let b = reopen(&b_dir, &common::schema(), network("b")).await?;
     assert_eq!(generation(&b).await["current"]["schema"], 3);
     assert_eq!(b.titles().await, ["apples", "bread"]);
     b.close().await;
@@ -605,7 +665,9 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     Ok(())
 }
 
-const NOTED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+fn noted() -> Schema {
+    build(shopping(2).table(items().column(note())))
+}
 fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
     for name in ["rocky.sqlite", "rocky.sqlite-wal", "rocky.sqlite-shm"] {
         let _ = std::fs::remove_file(to.join(name));
@@ -658,13 +720,13 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     b.sync().await.expect("sync");
     b.close().await;
     a.close().await;
-    let a = reopen(&a_dir, NOTED, network("a")).await?;
+    let a = reopen(&a_dir, &noted(), network("a")).await?;
     let target = (tip(&a).await, generation(&a).await["manifest"].clone());
     let before_meeting_published_schema = root.path().join("saved");
     std::fs::create_dir(&before_meeting_published_schema)?;
     copy_replica(&b_dir, &before_meeting_published_schema)?;
     let identity = common::authority_bytes(&b_dir, "identity")?.ok_or("identity")?;
-    let b = reopen(&b_dir, NOTED, network("b")).await?;
+    let b = reopen(&b_dir, &noted(), network("b")).await?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.close().await;
@@ -673,7 +735,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     copy_replica(&b_dir, &switched)?;
 
     stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
-    let b = reopen(&b_dir, SCHEMA, None).await?;
+    let b = reopen(&b_dir, &common::schema(), None).await?;
     let status = generation(&b).await;
     assert_eq!(
         status["current"]["schema"], 2,
@@ -689,7 +751,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
 
     copy_replica(&before_meeting_published_schema, &b_dir)?;
     stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
-    let b = reopen(&b_dir, SCHEMA, network("b")).await?;
+    let b = reopen(&b_dir, &common::schema(), network("b")).await?;
     assert_eq!(
         generation(&b).await["current"]["schema"],
         1,
@@ -733,10 +795,10 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     b.sync().await.expect("sync");
     b.close().await;
     a.close().await;
-    let a = reopen(&a_dir, NOTED, network("a")).await?;
+    let a = reopen(&a_dir, &noted(), network("a")).await?;
     let target = (tip(&a).await, generation(&a).await["manifest"].clone());
     let identity = common::authority_bytes(&b_dir, "identity")?.ok_or("identity")?;
-    let b = reopen(&b_dir, NOTED, network("b")).await?;
+    let b = reopen(&b_dir, &noted(), network("b")).await?;
     b.sync().await.expect("sync");
     assert_eq!(tip(&b).await, target.0);
     snap::ok(a.database.seal()).await;
@@ -751,7 +813,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     b.close().await;
 
     stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
-    let b = reopen(&b_dir, SCHEMA, None).await?;
+    let b = reopen(&b_dir, &common::schema(), None).await?;
     let status = generation(&b).await;
     assert_eq!(
         status["current"]["schema"], 2,
@@ -777,10 +839,10 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     let a = Device::create(&a_dir, network("a")).await?;
     let apples = a.add(1, "apples").await;
     a.close().await;
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     a.set(2, &apples, "note", json!("fresh")).await;
     let b = Device::new(
-        open(&b_dir, SCHEMA, network("b"))
+        open(&b_dir, &common::schema(), network("b"))
             .join(&a.invite().await)
             .await?,
     )?;
@@ -800,7 +862,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     b.sync().await.expect("sync");
     assert_eq!(a.titles().await, ["apples", "bread"]);
     b.close().await;
-    let b = reopen(&b_dir, SCHEMA, network("b")).await?;
+    let b = reopen(&b_dir, &common::schema(), network("b")).await?;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.close().await;
     a.close().await;
@@ -846,7 +908,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     c.sync().await.expect("sync");
     b.sync().await.expect("sync");
     a.close().await;
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     a.set(2, &apples, "note", json!("fresh")).await;
     b.sync().await.expect("sync");
     assert_eq!(
@@ -869,7 +931,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     assert_eq!(status["application"], "behind");
 
     c.close().await;
-    let c = reopen(&c_dir, SECOND, network("c")).await?;
+    let c = reopen(&c_dir, &second(), network("c")).await?;
     assert_eq!(generation(&c).await["application"], "current");
     let bread = c.add(3, "bread").await;
     c.sync().await.expect("sync");
@@ -896,9 +958,13 @@ async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it(
     let invitation = a.invite().await;
     a.add(1, "apples").await;
     a.close().await;
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
-    let b = Device::new(open(&b_dir, SECOND, network("b")).join(&invitation).await?)?;
+    let b = Device::new(
+        open(&b_dir, &second(), network("b"))
+            .join(&invitation)
+            .await?,
+    )?;
     introduce(&a, &b).await;
     b.sync().await.expect("sync");
     let status = generation(&b).await;
@@ -928,7 +994,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a")).await?;
     let b = Device::new(
-        open(&b_dir, SCHEMA, network("b"))
+        open(&b_dir, &common::schema(), network("b"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -938,8 +1004,8 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     b.sync().await.expect("sync");
     a.close().await;
     b.close().await;
-    let a = reopen(&a_dir, SECOND, None).await?;
-    let b = reopen(&b_dir, SECOND, None).await?;
+    let a = reopen(&a_dir, &second(), None).await?;
+    let b = reopen(&b_dir, &second(), None).await?;
     let (left, right) = (generation(&a).await, generation(&b).await);
     assert_eq!(left["manifest"], right["manifest"]);
     assert_ne!(
@@ -959,8 +1025,8 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
         "both issuers derive the first reader key of `tags` from the publisher key"
     );
     assert_eq!(tags(&a_dir)?.as_array().map(Vec::len), Some(1));
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
-    let b = reopen(&b_dir, SECOND, network("b")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
+    let b = reopen(&b_dir, &second(), network("b")).await?;
     a.add(2, "bread").await;
     tag(&a, 5, "fruit").await;
     tag(&b, 5, "dairy").await;
@@ -1039,7 +1105,7 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     a.add(2, "apples").await;
     b.sync().await.expect("sync");
     a.close().await;
-    let a = reopen(&a_dir, REQUIRED, None).await?;
+    let a = reopen(&a_dir, &required_position(), None).await?;
     assert_eq!(
         generation(&a).await["current"]["schema"],
         2,
@@ -1048,7 +1114,7 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     let written_past_the_closing_frontier = "bread";
     b.add(3, written_past_the_closing_frontier).await;
     a.close().await;
-    let a = reopen(&a_dir, REQUIRED, network("a")).await?;
+    let a = reopen(&a_dir, &required_position(), network("a")).await?;
     introduce(&a, &b).await;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
@@ -1093,7 +1159,7 @@ async fn a_compacted_node_publishes_a_migration_adding_a_field() -> Result<(), F
     snap::ok(a.database.seal()).await;
     snap::ok(a.database.compact(0)).await;
     a.close().await;
-    let a = reopen(&directory, REQUIRED, None).await?;
+    let a = reopen(&directory, &required_position(), None).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
@@ -1106,7 +1172,9 @@ async fn a_compacted_node_publishes_a_migration_adding_a_field() -> Result<(), F
     Ok(())
 }
 
-const RIVAL: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+fn rival() -> Schema {
+    build(shopping(2).table(items().column(Column::new("rank", Affinity::Integer))))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Result<(), Failure> {
@@ -1116,7 +1184,7 @@ async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Res
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a")).await?;
     let b = Device::new(
-        open(&b_dir, SCHEMA, network("b"))
+        open(&b_dir, &common::schema(), network("b"))
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -1126,8 +1194,8 @@ async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Res
     b.sync().await.expect("sync");
     a.close().await;
     b.close().await;
-    let a = reopen(&a_dir, SECOND, None).await?;
-    let b = reopen(&b_dir, RIVAL, None).await?;
+    let a = reopen(&a_dir, &second(), None).await?;
+    let b = reopen(&b_dir, &rival(), None).await?;
     let published = [
         generation(&a).await["manifest"].clone(),
         generation(&b).await["manifest"].clone(),
@@ -1135,8 +1203,8 @@ async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Res
     assert_ne!(published[0], published[1]);
     a.close().await;
     b.close().await;
-    let a = reopen(&a_dir, SECOND, network("a")).await?;
-    let b = reopen(&b_dir, RIVAL, network("b")).await?;
+    let a = reopen(&a_dir, &second(), network("a")).await?;
+    let b = reopen(&b_dir, &rival(), network("b")).await?;
     introduce(&a, &b).await;
     for _ in 0..4 {
         b.sync().await.expect("sync");
@@ -1163,21 +1231,43 @@ async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Res
     Ok(())
 }
 
-const LINKABLE: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-const LINKED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+fn linking(version: u32, items: Table) -> Schema {
+    build(
+        shopping(version)
+            .table(items)
+            .table(Table::replayed("lists").column(required("name", Affinity::Text))),
+    )
+}
+fn list_items() -> Table {
+    items().column(Column::new("list", Affinity::Blob))
+}
+fn linkable() -> Schema {
+    linking(1, list_items())
+}
+fn linked() -> Schema {
+    linking(
+        2,
+        list_items().foreign_key(rocky_sdk::ForeignKeyDefinition {
+            columns: vec!["list".into()],
+            table: "lists".into(),
+            on_delete: rocky_sdk::DeleteAction::SetNull,
+            deferred: false,
+        }),
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::new(
         common::create_as(
-            open(root.path(), LINKABLE, None),
+            open(root.path(), &linkable(), None),
             common::external_key(root.path()),
         )
         .await?,
     )?;
     a.close().await;
-    let error = open(root.path(), LINKED, None)
+    let error = open(root.path(), &linked(), None)
         .open()
         .await
         .err()
@@ -1189,7 +1279,7 @@ async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Resu
         ),
         "{error}"
     );
-    let a = reopen(root.path(), LINKABLE, None).await?;
+    let a = reopen(root.path(), &linkable(), None).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 1);
     a.close().await;
     Ok(())

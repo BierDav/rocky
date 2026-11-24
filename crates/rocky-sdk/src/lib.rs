@@ -83,7 +83,7 @@ pub use rocky_credentials::{
     FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
 };
 pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
-pub use schema::{Column, Migration, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table};
+pub use schema::{Column, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
 pub use sql::{

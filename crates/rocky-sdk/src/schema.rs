@@ -22,15 +22,33 @@ pub struct Schema {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Migration {
-    pub version: u32,
-    pub statements: Vec<MigrationStep>,
+pub(crate) struct Migration {
+    pub(crate) version: u32,
+    pub(crate) statements: Vec<MigrationStep>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum MigrationStep {
     Sql(String),
     Insert { insert: String, select: String },
+}
+impl MigrationStep {
+    pub fn insert(table: impl Into<String>, select: impl Into<String>) -> Self {
+        Self::Insert {
+            insert: table.into(),
+            select: select.into(),
+        }
+    }
+}
+impl From<&str> for MigrationStep {
+    fn from(sql: &str) -> Self {
+        Self::Sql(sql.to_owned())
+    }
+}
+impl From<String> for MigrationStep {
+    fn from(sql: String) -> Self {
+        Self::Sql(sql)
+    }
 }
 fn invalid(reason: impl Into<String>) -> SchemaError {
     SchemaError::Invalid(reason.into())
@@ -188,6 +206,18 @@ impl SchemaBuilder {
         self.0.roles.push(role.0);
         self
     }
+    #[must_use]
+    pub fn migration(
+        mut self,
+        version: u32,
+        steps: impl IntoIterator<Item = impl Into<MigrationStep>>,
+    ) -> Self {
+        self.0.migrations.push(Migration {
+            version,
+            statements: steps.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
     pub fn build(self) -> Result<Schema, crate::Error> {
         Ok(self.0.validated()?)
     }
@@ -318,13 +348,13 @@ impl Table {
         self
     }
     #[must_use]
-    pub fn check(mut self, expression: impl Into<String>) -> Self {
-        self.0.checks.push(expression.into());
+    pub fn foreign_key(mut self, foreign_key: rocky_core::ForeignKeyDefinition) -> Self {
+        self.0.foreign_keys.push(foreign_key);
         self
     }
     #[must_use]
-    pub fn foreign_key(mut self, foreign_key: rocky_core::ForeignKeyDefinition) -> Self {
-        self.0.foreign_keys.push(foreign_key);
+    pub fn check(mut self, expression: impl Into<String>) -> Self {
+        self.0.checks.push(expression.into());
         self
     }
 }

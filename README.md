@@ -157,6 +157,12 @@ refused call says why with `Denied` (`AdminRequired`, `OwnerRequired`) or an
 root)`; both need the root key. An admin who should stay a member is invited
 again. `logout(Logout::KeepData | Logout::PurgeOnClose)` ends this device's
 session and keeps or deletes its directory at close.
+`SchemaBuilder::migration(version, steps)` declares the SQL that brings the
+data to `version`. A step may read the previous version's rows as
+`parent.<table>`, but not correlated with the row it writes, so renaming a
+field takes two versions: one adds the new field and copies the old one into
+it (`UPDATE items SET label = title`), and a later one drops the old field once
+every device runs the first.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that

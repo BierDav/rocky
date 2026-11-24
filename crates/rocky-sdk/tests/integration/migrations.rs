@@ -2,29 +2,52 @@ use crate::common;
 mod prepared_pull;
 mod replayed;
 use crate::support::snapshot as snap;
-use common::{Device, Failure, introduce};
-use rocky_sdk::{Network, transport::memory::Hub};
+use common::{Device, Failure, build, introduce, items, required, shopping};
+use rocky_sdk::{
+    Affinity, Column, DeleteAction, ForeignKeyDefinition, MigrationStep, Network, Schema,
+    SchemaBuilder, Table, transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
-  {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
-const ASKS_FOR_IDS: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET position = rocky_next_id('items')"]}]}"#;
-const FIXED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
-  {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
+fn position() -> Column {
+    Column::new("position", Affinity::Text)
+        .required()
+        .default("")
+}
+fn tags() -> Table {
+    Table::replayed("tags")
+        .column(required("key", Affinity::Text))
+        .column(required("label", Affinity::Text))
+        .primary_key(["key"])
+}
+fn tagged_items(version: u32) -> SchemaBuilder {
+    shopping(version)
+        .table(items().column(position()))
+        .table(tags())
+}
+fn positioning(tag_key: &str) -> [MigrationStep; 2] {
+    [
+        "UPDATE items SET position = position || title".into(),
+        MigrationStep::insert(
+            "tags",
+            format!("SELECT {tag_key} AS key, title AS label FROM items"),
+        ),
+    ]
+}
+fn positioned() -> Schema {
+    build(tagged_items(2).migration(2, positioning("'tag-' || key")))
+}
+fn asks_for_ids() -> Schema {
+    build(tagged_items(2).migration(2, ["UPDATE items SET position = rocky_next_id('items')"]))
+}
+fn fixed() -> Schema {
+    build(tagged_items(3).migration(2, positioning("'tag-' || key")))
+}
 
 async fn reopen(
     directory: &Path,
-    schema: &str,
+    schema: &Schema,
     network: Option<Network>,
 ) -> Result<Device, Failure> {
     reopen_as(
@@ -38,7 +61,7 @@ async fn reopen(
 
 async fn reopen_as(
     directory: &Path,
-    schema: &str,
+    schema: &Schema,
     network: Option<Network>,
     signer: Arc<dyn rocky_sdk::IdentityProvider>,
 ) -> Result<Device, Failure> {
@@ -46,14 +69,10 @@ async fn reopen_as(
     Device::new(configuration.open().await?)
 }
 
-fn open<'a>(
-    directory: &'a Path,
-    schema: &'a str,
-    network: Option<Network>,
-) -> rocky_sdk::Configuration {
+fn open(directory: &Path, schema: &Schema, network: Option<Network>) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         None,
         Some(common::external_identity(directory)),
         network,
@@ -94,11 +113,9 @@ fn text(value: &str) -> rocky_sdk::SqlValue {
 const POSITIONS: &str = "SELECT title, position FROM items ORDER BY title";
 const TAGS: &str = "SELECT key, label FROM tags ORDER BY key";
 
-const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
-  {"insert":"tags","select":"SELECT 'same' AS key, title AS label FROM items"}]}]}"#;
+fn duplicates() -> Schema {
+    build(tagged_items(2).migration(2, positioning("'same'")))
+}
 
 async fn graph(device: &Device) -> (Value, usize) {
     let tip = snap::ok(device.database.tip_status()).await["tip"].clone();
@@ -117,7 +134,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     let before = graph(&a).await;
     a.close().await;
 
-    let refused = open(root.path(), ASKS_FOR_IDS, None)
+    let refused = open(root.path(), &asks_for_ids(), None)
         .open()
         .await
         .err()
@@ -126,13 +143,13 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
         refused.to_string().contains("rocky_next_id"),
         "a migration asking for an id is refused before anything is signed: {refused}"
     );
-    let failed = open(root.path(), DUPLICATES, None)
+    let failed = open(root.path(), &duplicates(), None)
         .open()
         .await
         .err()
         .ok_or("a failing migration opened")?;
     assert!(failed_at(&failed, 2, 2), "{failed}");
-    let a = reopen(root.path(), common::SCHEMA, None).await?;
+    let a = reopen(root.path(), &common::schema(), None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -148,7 +165,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     );
     a.close().await;
 
-    let a = reopen(root.path(), FIXED, None).await?;
+    let a = reopen(root.path(), &fixed(), None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 3, "{status}");
     assert_eq!(
@@ -168,7 +185,7 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     assert_eq!(tags.as_array().map(Vec::len), Some(2));
     a.close().await;
 
-    let a = reopen(root.path(), FIXED, None).await?;
+    let a = reopen(root.path(), &fixed(), None).await?;
     assert_eq!(rows(&a, POSITIONS).await, positions);
     assert_eq!(
         rows(&a, TAGS).await,
@@ -190,7 +207,7 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a")).await?;
-    let b_opened = open(&b_dir, common::SCHEMA, network("b"))
+    let b_opened = open(&b_dir, &common::schema(), network("b"))
         .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
     let b_identity = common::external_identity(&b_dir);
@@ -205,8 +222,8 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
 
     for (directory, id) in [(&a_dir, None), (&b_dir, Some(b_identity.clone()))] {
         let device = match id {
-            Some(id) => reopen_as(directory, POSITIONED, None, id).await?,
-            None => reopen(directory, POSITIONED, None).await?,
+            Some(id) => reopen_as(directory, &positioned(), None, id).await?,
+            None => reopen(directory, &positioned(), None).await?,
         };
         assert_eq!(
             generation(&device).await["current"]["schema"],
@@ -215,8 +232,8 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
         );
         device.close().await;
     }
-    let a = reopen(&a_dir, POSITIONED, network("a")).await?;
-    let b = reopen_as(&b_dir, POSITIONED, network("b"), b_identity).await?;
+    let a = reopen(&a_dir, &positioned(), network("a")).await?;
+    let b = reopen_as(&b_dir, &positioned(), network("b"), b_identity).await?;
     sync(&b).await;
     sync(&a).await;
     sync(&b).await;
@@ -253,13 +270,22 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     Ok(())
 }
 
-const LISTS: &str = r#"{"format":7,"application":"lists","version":1,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}]}"#;
-const POSITIONED_LISTS: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true},{"name":"position","type":"text","not_null":true,"default":""}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}],
- "migrations":[{"version":2,"statements":["UPDATE lists SET position = title"]}]}"#;
+fn lists_table() -> Table {
+    Table::replayed("lists")
+        .column(required("title", Affinity::Text))
+        .partition_by(["id"])
+        .partition_group("list")
+}
+fn lists() -> Schema {
+    build(Schema::builder("lists", 1).table(lists_table()))
+}
+fn positioned_lists() -> Schema {
+    build(
+        Schema::builder("lists", 2)
+            .table(lists_table().column(position()))
+            .migration(2, ["UPDATE lists SET position = title"]),
+    )
+}
 
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
     snap::ok(device.database.next_partition("lists")).await;
@@ -283,12 +309,12 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(
         common::create_as(
-            open(&a_dir, LISTS, network("a")),
+            open(&a_dir, &lists(), network("a")),
             common::external_key(&a_dir),
         )
         .await?,
     )?;
-    let b_opened = open(&b_dir, LISTS, network("b"))
+    let b_opened = open(&b_dir, &lists(), network("b"))
         .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
     let b_identity = common::external_identity(&b_dir);
@@ -302,13 +328,13 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
         sync(&a).await;
     }
     a.close().await;
-    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
+    let a = reopen(&a_dir, &positioned_lists(), network("a")).await?;
     for _ in 0..2 {
         sync(&b).await;
         sync(&a).await;
     }
     a.close().await;
-    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
+    let a = reopen(&a_dir, &positioned_lists(), network("a")).await?;
     assert_eq!(
         generation(&a).await["current"]["schema"],
         2,
@@ -322,7 +348,7 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
         ])
     );
     b.close().await;
-    let b = reopen_as(&b_dir, POSITIONED_LISTS, network("b"), b_identity).await?;
+    let b = reopen_as(&b_dir, &positioned_lists(), network("b"), b_identity).await?;
     sync(&b).await;
     sync(&b).await;
     assert_eq!(
@@ -337,16 +363,41 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
     Ok(())
 }
 
-const SEEDED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-const TAGGED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-const FILLED: &str = r#"{"application":"shopping","version":4,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]},
-  {"version":4,"statements":["UPDATE items SET position = title"]}]}"#;
+fn noted_items() -> Table {
+    items().column(Column::new("note", Affinity::Text))
+}
+fn tagged_noted_items() -> Table {
+    noted_items().column(Column::new("tag", Affinity::Text))
+}
+fn seed(rows: usize) -> [MigrationStep; 1] {
+    [MigrationStep::insert(
+        "items",
+        format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows}) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"
+        ),
+    )]
+}
+fn seeded(rows: usize) -> Schema {
+    build(shopping(2).table(noted_items()).migration(2, seed(rows)))
+}
+fn tagged(rows: usize) -> Schema {
+    build(
+        shopping(3)
+            .table(tagged_noted_items())
+            .migration(2, seed(rows)),
+    )
+}
+fn filling(version: u32, rows: usize, table: Table) -> Schema {
+    build(
+        shopping(version)
+            .table(table)
+            .migration(2, seed(rows))
+            .migration(4, ["UPDATE items SET position = title"]),
+    )
+}
+fn filled(rows: usize) -> Schema {
+    filling(4, rows, tagged_noted_items().column(position()))
+}
 const FILLED_COUNT: &str =
     "SELECT count(*), count(CASE WHEN position = title THEN 1 END) FROM items";
 
@@ -366,7 +417,7 @@ struct MemberFixture {
     root: crate::support::Directory,
     large: usize,
     multi_step: bool,
-    fill: String,
+    fill: Schema,
     hub: Arc<Hub>,
     a: Device,
 }
@@ -410,9 +461,9 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let c_dir = root.path().join("publication-peer");
     let before = size(&a_dir)?;
     let clock = std::time::Instant::now();
-    let seed = SEEDED.replace("100000", &large.to_string());
+    let seed = seeded(large);
     let fill = if multi_step {
-        FILLED.replace("100000", &large.to_string())
+        filled(large)
     } else {
         seed.clone()
     };
@@ -422,8 +473,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     a.close().await;
     let between = size(&a_dir)?;
     if multi_step {
-        let tagged_schema = TAGGED.replace("100000", &large.to_string());
-        let a = reopen(&a_dir, &tagged_schema, None).await?;
+        let a = reopen(&a_dir, &tagged(large), None).await?;
         assert_eq!(generation(&a).await["current"]["schema"], 3);
         a.close().await;
     }
@@ -625,13 +675,13 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     b.close().await;
     a.close().await;
     if large == 8 {
-        let mut later: Value = serde_json::from_str(&fill)?;
-        later["version"] = json!(5);
-        later["tables"][0]["columns"]
-            .as_array_mut()
-            .ok_or("columns")?
-            .push(json!({"name":"later", "type":"text"}));
-        let later = later.to_string();
+        let later = filling(
+            5,
+            large,
+            tagged_noted_items()
+                .column(position())
+                .column(Column::new("later", Affinity::Text)),
+        );
         let a = reopen(&a_dir, &later, None).await?;
         assert_eq!(
             generation(&a).await["migration"],
@@ -651,13 +701,13 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(
         common::create_as(
-            open(&a_dir, LISTS, network("a")),
+            open(&a_dir, &lists(), network("a")),
             common::external_key(&a_dir),
         )
         .await?,
     )?;
     let b = Device::new(
-        open(&b_dir, LISTS, network("b"))
+        open(&b_dir, &lists(), network("b"))
             .join(&a.invite().await)
             .await?,
     )?;
@@ -665,10 +715,10 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     let id = list(&a, "Weekly").await?;
     sync(&b).await;
     a.close().await;
-    let a = reopen(&a_dir, POSITIONED_LISTS, network("a")).await?;
+    let a = reopen(&a_dir, &positioned_lists(), network("a")).await?;
     b.close().await;
-    let member_on_the_first_version = LISTS;
-    let b = reopen(&b_dir, member_on_the_first_version, network("b")).await?;
+    let member_on_the_first_version = lists();
+    let b = reopen(&b_dir, &member_on_the_first_version, network("b")).await?;
     introduce(&a, &b).await;
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -723,17 +773,17 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
         provider: rocky_sdk::FileIdentityProvider::open(root.path().join("identity"))?,
         attempts: Default::default(),
     });
-    let options = |schema| {
+    let options = |schema: &Schema| {
         crate::common::configuration(
             &directory,
-            crate::support::snapshot::schema(schema),
+            schema,
             None,
             Some(identity.clone() as Arc<dyn rocky_sdk::IdentityProvider>),
             None,
         )
     };
     let a = Device::new(
-        options(common::SCHEMA)
+        options(&common::schema())
             .create_with_root(
                 Arc::new(rocky_sdk::RootKey::generate()),
                 identity.clone() as Arc<dyn rocky_sdk::IdentityProvider>,
@@ -742,13 +792,13 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
     )?;
     a.add(1, "once").await;
     a.close().await;
-    let a = Device::new(options(POSITIONED).open().await?)?;
+    let a = Device::new(options(&positioned()).open().await?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
         json!([[snap::cell(text("once")), snap::cell(text("once"))]])
     );
     a.close().await;
-    let a = Device::new(options(POSITIONED).open().await?)?;
+    let a = Device::new(options(&positioned()).open().await?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
         json!([[snap::cell(text("once")), snap::cell(text("once"))]])
@@ -767,10 +817,10 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     let a = Device::create(&source, network("a")).await?;
     a.add(1, "inherited").await;
     a.close().await;
-    let a = reopen(&source, POSITIONED, network("a")).await?;
+    let a = reopen(&source, &positioned(), network("a")).await?;
     let invitation = a.invite().await;
     let b = Device::new(
-        open(&root.path().join("member"), POSITIONED, network("b"))
+        open(&root.path().join("member"), &positioned(), network("b"))
             .join(&invitation)
             .await?,
     )?;
@@ -810,7 +860,7 @@ async fn a_migration_open_drives_maintenance_before_the_first_request() -> Resul
         )
     };
     let before = finalized()?;
-    let database = open(root.path(), POSITIONED, None).open().await?;
+    let database = open(root.path(), &positioned(), None).open().await?;
     assert!(
         finalized()? > before,
         "open left its migration seal for a later request"
@@ -831,13 +881,13 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     let source = root.path().join("source");
     let a = Device::create(&source, None).await?;
     a.close().await;
-    let a = reopen(&source, &SEEDED.replace("100000", "8"), None).await?;
+    let a = reopen(&source, &seeded(8), None).await?;
     a.close().await;
-    let a = reopen(&source, &TAGGED.replace("100000", "8"), None).await?;
+    let a = reopen(&source, &tagged(8), None).await?;
     snap::ok(a.database.compact(0)).await;
     a.close().await;
     let hub = Arc::new(Hub::default());
-    let schema = FILLED.replace("100000", "8");
+    let schema = filled(8);
     let a = reopen(&source, &schema, Some(Network::Owned(hub.connector("a")))).await?;
     let c = Device::new(
         open(
@@ -858,13 +908,38 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     Ok(())
 }
 
-const LISTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},
- {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}]}"#;
-const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET title = NULL"]}]}"#;
+fn set_null(column: &str, table: &str) -> ForeignKeyDefinition {
+    ForeignKeyDefinition {
+        columns: vec![column.into()],
+        table: table.into(),
+        on_delete: DeleteAction::SetNull,
+        deferred: false,
+    }
+}
+fn listed_items() -> Table {
+    items().column(Column::new("list", Affinity::Blob))
+}
+fn first_items() -> Table {
+    Table::replayed("lists")
+        .column(required("name", Affinity::Text))
+        .column(Column::new("first", Affinity::Blob))
+        .foreign_key(set_null("first", "items"))
+}
+fn listed() -> Schema {
+    build(
+        shopping(1)
+            .table(listed_items().foreign_key(set_null("list", "lists")))
+            .table(first_items()),
+    )
+}
+fn unlisted_failing() -> Schema {
+    build(
+        shopping(2)
+            .table(listed_items())
+            .table(first_items())
+            .migration(2, ["UPDATE items SET title = NULL"]),
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holding_it()
@@ -872,7 +947,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     let root = crate::support::small_directory()?;
     let a = Device::new(
         common::create_as(
-            open(root.path(), LISTED, None),
+            open(root.path(), &listed(), None),
             common::external_key(root.path()),
         )
         .await?,
@@ -880,7 +955,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     a.add(1, "apples").await;
     a.close().await;
 
-    let failed = open(root.path(), UNLISTED_FAILING, None)
+    let failed = open(root.path(), &unlisted_failing(), None)
         .open()
         .await
         .err()
@@ -889,7 +964,7 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
         failed_at(&failed, 2, 1),
         "withdrawing the stage returns to the schema whose reference its rows satisfy: {failed}"
     );
-    let a = reopen(root.path(), LISTED, None).await?;
+    let a = reopen(root.path(), &listed(), None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -898,9 +973,19 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     Ok(())
 }
 
-const UNTITLED_FAILING: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET completed = NULL"]}]}"#;
+fn untitled_items() -> Table {
+    Table::replayed("items")
+        .column(required("key", Affinity::Text))
+        .column(required("completed", Affinity::Integer))
+        .primary_key(["key"])
+}
+fn untitled_failing() -> Schema {
+    build(
+        shopping(2)
+            .table(untitled_items())
+            .migration(2, ["UPDATE items SET completed = NULL"]),
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_schema()
@@ -910,7 +995,7 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
     a.add(1, "apples").await;
     a.close().await;
 
-    let failed = common::confirmed(open(root.path(), UNTITLED_FAILING, None))
+    let failed = common::confirmed(open(root.path(), &untitled_failing(), None))
         .await
         .err()
         .ok_or("a failing migration opened")?;
@@ -918,7 +1003,7 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
         failed_at(&*failed, 2, 1),
         "the withdrawal restores the dropped field from history instead of refusing: {failed}"
     );
-    let a = reopen(root.path(), common::SCHEMA, None).await?;
+    let a = reopen(root.path(), &common::schema(), None).await?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
@@ -928,12 +1013,24 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
     Ok(())
 }
 
-const MEMO: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"memo","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET memo = title"]}]}"#;
-const UNTITLED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"memo","type":"text","not_null":true,"default":""}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET memo = title"]}]}"#;
+fn memo() -> Column {
+    Column::new("memo", Affinity::Text).required().default("")
+}
+const MEMO_FROM_TITLE: [&str; 1] = ["UPDATE items SET memo = title"];
+fn memoed() -> Schema {
+    build(
+        shopping(2)
+            .table(items().column(memo()))
+            .migration(2, MEMO_FROM_TITLE),
+    )
+}
+fn untitled() -> Schema {
+    build(
+        shopping(3)
+            .table(untitled_items().column(memo()))
+            .migration(2, MEMO_FROM_TITLE),
+    )
+}
 const MEMOS: &str = "SELECT key, memo FROM items ORDER BY key";
 
 async fn skipping_versions_converges(late_write: bool) -> Result<(), Failure> {
@@ -963,18 +1060,18 @@ async fn skipping_versions_converges(late_write: bool) -> Result<(), Failure> {
     bob.close().await;
     owner.close().await;
 
-    let owner = reopen(&dirs("owner"), MEMO, network("owner")).await?;
+    let owner = reopen(&dirs("owner"), &memoed(), network("owner")).await?;
     sync(&carol).await;
     assert_eq!(generation(&carol).await["current"]["schema"], 2);
     owner.close().await;
     let owner =
-        Device::new(common::confirmed(open(&dirs("owner"), UNTITLED, network("owner"))).await?)?;
+        Device::new(common::confirmed(open(&dirs("owner"), &untitled(), network("owner"))).await?)?;
     assert_eq!(generation(&owner).await["current"]["schema"], 3);
     sync(&carol).await;
     let migrated = json!([[snap::cell(text(&coffee)), snap::cell(text("Coffee"))]]);
     assert_eq!(rows(&owner, MEMOS).await, migrated);
 
-    let bob = reopen(&dirs("bob"), common::SCHEMA, network("bob")).await?;
+    let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
     if late_write {
         bob.add(2, "Tea").await;
     }
@@ -997,7 +1094,7 @@ async fn skipping_versions_converges(late_write: bool) -> Result<(), Failure> {
     assert_eq!(rows(&carol, MEMOS).await, expected);
     bob.close().await;
 
-    let bob = reopen(&dirs("bob"), UNTITLED, network("bob")).await?;
+    let bob = reopen(&dirs("bob"), &untitled(), network("bob")).await?;
     sync(&bob).await;
     assert_eq!(generation(&bob).await["application"], "current");
     assert_eq!(rows(&bob, MEMOS).await, expected);
@@ -1019,11 +1116,12 @@ async fn a_late_write_from_a_follower_skipping_versions_lands_alike_on_every_dev
     skipping_versions_converges(true).await
 }
 
-const UNMEMOED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+fn unmemoed() -> Schema {
+    build(shopping(2).table(untitled_items()))
+}
 const KEPT: &str = "SELECT key, completed FROM items ORDER BY key";
 
-async fn a_member_joining_after(rollouts: &[&str], read: &str) -> Result<(), Failure> {
+async fn a_member_joining_after(rollouts: &[Schema], read: &str) -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -1041,12 +1139,12 @@ async fn a_member_joining_after(rollouts: &[&str], read: &str) -> Result<(), Fai
         };
         Device::new(opened)?.close().await;
     }
-    let last = rollouts.last().copied().unwrap_or(common::SCHEMA);
-    let owner = reopen(&dirs("owner"), last, network("owner")).await?;
+    let last = rollouts.last().cloned().unwrap_or_else(common::schema);
+    let owner = reopen(&dirs("owner"), &last, network("owner")).await?;
     let held = rows(&owner, read).await;
     assert_eq!(held.as_array().map(Vec::len), Some(3), "{held}");
     let member = Device::new(
-        open(&dirs("member"), last, network("member"))
+        open(&dirs("member"), &last, network("member"))
             .join(&owner.invite().await)
             .await?,
     )?;
@@ -1066,13 +1164,13 @@ async fn a_member_joining_after(rollouts: &[&str], read: &str) -> Result<(), Fai
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_joining_after_a_removal_holds_every_row_the_owner_holds() -> Result<(), Failure> {
-    a_member_joining_after(&[UNMEMOED], KEPT).await
+    a_member_joining_after(&[unmemoed()], KEPT).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_joining_after_a_migration_and_a_removal_holds_every_migrated_row()
 -> Result<(), Failure> {
-    a_member_joining_after(&[MEMO, UNTITLED], MEMOS).await
+    a_member_joining_after(&[memoed(), untitled()], MEMOS).await
 }
 
 fn failed_at(error: &(dyn std::error::Error + 'static), version: u32, step: usize) -> bool {

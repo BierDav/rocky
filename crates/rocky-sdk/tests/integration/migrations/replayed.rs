@@ -1,12 +1,18 @@
 use super::*;
 use crate::support::snapshot as snap;
 
-const ITEMS: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
- "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
-  {"insert":"items","select":"SELECT 'copy-' || key AS key, 1 AS completed, title FROM items"}]}]}"#;
+fn positioned_items() -> Schema {
+    build(shopping(2).table(items().column(position())).migration(
+        2,
+        [
+            "UPDATE items SET position = position || title".into(),
+            MigrationStep::insert(
+                "items",
+                "SELECT 'copy-' || key AS key, 1 AS completed, title FROM items",
+            ),
+        ],
+    ))
+}
 
 async fn insert(device: &Device, key: &str, title: &str) {
     let mut tx = device.database.transaction().await.expect("begin");
@@ -30,13 +36,13 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(
         common::create_as(
-            open(&a_dir, ITEMS, network("a")),
+            open(&a_dir, &common::schema(), network("a")),
             common::external_key(&a_dir),
         )
         .await?,
     )?;
     let b = Device::new(
-        open(&b_dir, ITEMS, network("b"))
+        open(&b_dir, &common::schema(), network("b"))
             .join(&a.invite().await)
             .await?,
     )?;
@@ -47,9 +53,17 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     a.close().await;
     b.close().await;
 
-    let a = Device::new(open(&a_dir, POSITIONED_ITEMS, network("a")).open().await?)?;
+    let a = Device::new(
+        open(&a_dir, &positioned_items(), network("a"))
+            .open()
+            .await?,
+    )?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
-    let b = Device::new(open(&b_dir, POSITIONED_ITEMS, network("b")).open().await?)?;
+    let b = Device::new(
+        open(&b_dir, &positioned_items(), network("b"))
+            .open()
+            .await?,
+    )?;
     introduce(&a, &b).await;
     for device in [&b, &a, &b] {
         sync(device).await;
@@ -87,24 +101,40 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
 
 const LISTS: usize = 128;
 const FEW_LISTS: usize = 17;
-const LISTED: &str = r#"{"application":"shopping","version":1,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
-const LISTED_SEED: &str = r#"{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('l%03d', i % LISTS) AS list, printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}"#;
-const LISTED_SEEDED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
- "migrations":[SEED]}"#;
-const LISTED_TAGGED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
- "migrations":[SEED]}"#;
-const LISTED_FILLED: &str = r#"{"application":"shopping","version":4,"format":7,"tables":[
- {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
- "migrations":[SEED,{"version":4,"statements":["UPDATE items SET position = title"]}]}"#;
-
-fn listed(schema: &str, rows: usize, lists: usize) -> String {
-    schema
-        .replace("SEED", LISTED_SEED)
-        .replace("100000", &rows.to_string())
-        .replace("LISTS", &lists.to_string())
+fn partitioned_items() -> Table {
+    Table::replayed("items")
+        .column(required("list", Affinity::Text))
+        .column(required("key", Affinity::Text))
+        .column(required("completed", Affinity::Integer))
+        .column(Column::new("note", Affinity::Text))
+        .column(required("title", Affinity::Text))
+        .primary_key(["list", "key"])
+        .partition_by(["list"])
+}
+fn partitioned(version: u32, rows: usize, lists: usize) -> Schema {
+    let mut table = partitioned_items();
+    if version >= 3 {
+        table = table.column(Column::new("tag", Affinity::Text));
+    }
+    if version >= 4 {
+        table = table.column(position());
+    }
+    let mut schema = shopping(version).table(table);
+    if version >= 2 {
+        schema = schema.migration(
+            2,
+            [MigrationStep::insert(
+                "items",
+                format!(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows}) SELECT printf('l%03d', i % {lists}) AS list, printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"
+                ),
+            )],
+        );
+    }
+    if version >= 4 {
+        schema = schema.migration(4, ["UPDATE items SET position = title"]);
+    }
+    build(schema)
 }
 fn list(index: usize) -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(format!("l{index:03}"))]
@@ -119,7 +149,7 @@ impl Listed {
     fn path(&self, device: &str) -> std::path::PathBuf {
         self.root.path().join(device)
     }
-    async fn open(&self, device: &str, schema: &str) -> Result<Device, Failure> {
+    async fn open(&self, device: &str, schema: &Schema) -> Result<Device, Failure> {
         Device::new(
             open(
                 &self.path(device),
@@ -139,13 +169,13 @@ impl Listed {
         let network = |name: &str| Some(Network::Owned(listed.hub.connector(name)));
         let a = Device::new(
             common::create_as(
-                open(&listed.path("a"), LISTED, network("a")),
+                open(&listed.path("a"), &partitioned(1, 0, 0), network("a")),
                 common::external_key(&listed.path("a")),
             )
             .await?,
         )?;
         let b = Device::new(
-            open(&listed.path("b"), LISTED, network("b"))
+            open(&listed.path("b"), &partitioned(1, 0, 0), network("b"))
                 .join(&a.invite().await)
                 .await?,
         )?;
@@ -163,11 +193,15 @@ impl Listed {
         Ok(listed)
     }
     async fn seed(&self, rows: usize) -> Result<(), Failure> {
-        for schema in [LISTED_SEEDED, LISTED_TAGGED] {
+        for version in [2, 3] {
             let a = Device::new(
-                open(&self.path("a"), &listed(schema, rows, self.lists), None)
-                    .open()
-                    .await?,
+                open(
+                    &self.path("a"),
+                    &partitioned(version, rows, self.lists),
+                    None,
+                )
+                .open()
+                .await?,
             )?;
             a.close().await;
         }
@@ -179,16 +213,14 @@ impl Listed {
     }
     async fn fill(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         let clock = std::time::Instant::now();
-        let a = self
-            .open("a", &listed(LISTED_FILLED, rows, self.lists))
-            .await?;
+        let a = self.open("a", &partitioned(4, rows, self.lists)).await?;
         let filled = clock.elapsed();
         assert_eq!(generation(&a).await["current"]["schema"], 4);
         a.close().await;
         Ok(filled)
     }
     async fn pull(&self, rows: usize) -> Result<std::time::Duration, Failure> {
-        let schema = listed(LISTED_FILLED, rows, self.lists);
+        let schema = partitioned(4, rows, self.lists);
         let a = self.open("a", &schema).await?;
         let clock = std::time::Instant::now();
         let b = self.open("b", &schema).await?;
@@ -327,7 +359,7 @@ async fn crash_fill_child() -> Result<(), Failure> {
     let a = Device::new(
         open(
             Path::new(&directory),
-            &listed(LISTED_FILLED, CRASH_ROWS, FEW_LISTS),
+            &partitioned(4, CRASH_ROWS, FEW_LISTS),
             None,
         )
         .open()

@@ -7,7 +7,7 @@ use std::fs;
 struct Manifest {
     version: u32,
     rows: usize,
-    schema: String,
+    schema: Schema,
 }
 
 fn copy_directory(source: &Path, target: &Path) -> Result<(), Failure> {
@@ -78,10 +78,7 @@ fn write_manifest(destination: &Path, manifest: &Manifest) -> Result<(), Failure
 
 async fn restore(source: &Path) -> Result<MemberFixture, Failure> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(source.join("fixture.json"))?)?;
-    if manifest.version != 1
-        || manifest.rows != 8
-        || manifest.schema != FILLED.replace("100000", &manifest.rows.to_string())
-    {
+    if manifest.version != 1 || manifest.rows != 8 || manifest.schema != filled(manifest.rows) {
         return Err("unsupported prepared member-pull fixture".into());
     }
     let root = crate::support::small_directory()?;

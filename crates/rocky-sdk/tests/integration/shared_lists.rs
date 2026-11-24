@@ -1,46 +1,110 @@
 use crate::support;
-use rocky_sdk::{Database, Network, transport::memory::Hub};
+use rocky_sdk::{
+    Affinity, Column, Database, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition,
+    MigrationStep, Network, Schema, SchemaBuilder, Table, transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::secrets;
 use support::snapshot as snap;
 
-const SCHEMA: &str = r#"{"format":7,"application":"lists","version":1,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
- {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
-   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
-]}"#;
-const ORDERED: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
- {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"},
-   {"name":"position","type":"text","not_null":true,"default":""}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
-   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]},
- {"name":"item_categories","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"item","type":"blob","not_null":true},{"name":"category","type":"blob","not_null":true}],
-  "primary_key":["list","item","category"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"},
-   {"columns":["list","category"],"table":"categories","on_delete":"cascade"}]}
-],
-"migrations":[{"version":2,"statements":[
-  "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))",
-  {"insert":"item_categories","select":"SELECT list, id AS item, category FROM items WHERE category IS NOT NULL"},
-  "UPDATE items SET category = NULL WHERE category IS NOT NULL"]}]}"#;
+fn reference(columns: &[&str], table: &str, on_delete: DeleteAction) -> ForeignKeyDefinition {
+    ForeignKeyDefinition {
+        columns: columns.iter().map(|column| (*column).into()).collect(),
+        table: table.into(),
+        on_delete,
+        deferred: false,
+    }
+}
+fn required(name: &str, affinity: Affinity) -> Column {
+    Column::new(name, affinity).required()
+}
+fn in_list(table: &str) -> Table {
+    Table::replayed(table)
+        .column(required("list", Affinity::Blob))
+        .primary_key(["list", "id"])
+        .partition_by(["list"])
+        .partition_group("list")
+}
+fn items() -> Table {
+    in_list("items")
+        .column(required("title", Affinity::Text))
+        .column(Column::new("category", Affinity::Blob))
+        .index(IndexDefinition {
+            name: "index_items_list_title".into(),
+            columns: ["list", "title"]
+                .map(|name| IndexColumn {
+                    name: name.into(),
+                    descending: false,
+                })
+                .into(),
+            unique: true,
+            expressions: Vec::new(),
+            predicate: None,
+        })
+}
+fn referencing_items() -> Table {
+    items()
+        .foreign_key(reference(&["list"], "lists", DeleteAction::Cascade))
+        .foreign_key(reference(
+            &["list", "category"],
+            "categories",
+            DeleteAction::SetNull,
+        ))
+}
+fn lists(version: u32, items: Table) -> SchemaBuilder {
+    Schema::builder("lists", version)
+        .table(
+            Table::replayed("lists")
+                .column(required("title", Affinity::Text))
+                .partition_by(["id"])
+                .partition_group("list"),
+        )
+        .table(
+            in_list("categories")
+                .column(required("name", Affinity::Text))
+                .foreign_key(reference(&["list"], "lists", DeleteAction::Cascade)),
+        )
+        .table(items)
+}
+fn position() -> Column {
+    required("position", Affinity::Text).default("")
+}
+const POSITION_BY_ID: &str = "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))";
+fn build(schema: SchemaBuilder) -> Schema {
+    schema.build().expect("lists schema")
+}
+fn first() -> Schema {
+    build(lists(1, referencing_items()))
+}
+fn ordered() -> Schema {
+    build(
+        lists(2, referencing_items().column(position()))
+            .table(
+                in_list("item_categories")
+                    .column(required("item", Affinity::Blob))
+                    .column(required("category", Affinity::Blob))
+                    .primary_key(["list", "item", "category"])
+                    .foreign_key(reference(&["list", "item"], "items", DeleteAction::Cascade))
+                    .foreign_key(reference(
+                        &["list", "category"],
+                        "categories",
+                        DeleteAction::Cascade,
+                    )),
+            )
+            .migration(
+                2,
+                [
+                    POSITION_BY_ID.into(),
+                    MigrationStep::insert(
+                        "item_categories",
+                        "SELECT list, id AS item, category FROM items WHERE category IS NOT NULL",
+                    ),
+                    "UPDATE items SET category = NULL WHERE category IS NOT NULL".into(),
+                ],
+            ),
+    )
+}
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -94,12 +158,12 @@ fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![snap::row_id(&(list))]
 }
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuration {
-    at(directory, hub, name, SCHEMA)
+    at(directory, hub, name, &first())
 }
-fn at(directory: &Path, hub: &Arc<Hub>, name: &str, schema: &str) -> rocky_sdk::Configuration {
+fn at(directory: &Path, hub: &Arc<Hub>, name: &str, schema: &Schema) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         Some(secrets::keys(directory)),
         Some(identity(directory)),
         Some(Network::Owned(hub.connector(name))),
@@ -109,11 +173,11 @@ fn at_without_identity(
     directory: &Path,
     hub: &Arc<Hub>,
     name: &str,
-    schema: &str,
+    schema: &Schema,
 ) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         Some(secrets::keys(directory)),
         None,
         Some(Network::Owned(hub.connector(name))),
@@ -123,7 +187,7 @@ fn at_without_identity(
 async fn checkpoint_writer(
     root: &Path,
     hub: &Arc<Hub>,
-    schema: &str,
+    schema: &Schema,
 ) -> Result<(Peer, Peer), Failure> {
     let issuer_path = root.join("issuer");
     let issuer = Peer::new(
@@ -173,7 +237,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
     let hub = Arc::new(Hub::default());
     let issuer = Peer::new(
         crate::common::create_as(
-            at(&root.path().join("issuer"), &hub, "issuer", ORDERED),
+            at(&root.path().join("issuer"), &hub, "issuer", &ordered()),
             key(&root.path().join("issuer")),
         )
         .await?
@@ -192,7 +256,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?;
     let writer = Peer::new(
-        at(&root.path().join("writer"), &hub, "writer", ORDERED)
+        at(&root.path().join("writer"), &hub, "writer", &ordered())
             .join(&invite.code)
             .await?
             .database,
@@ -231,9 +295,8 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
 {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let mut schema: Value = serde_json::from_str(SCHEMA)?;
-    schema["tables"][2]["foreign_keys"] = json!([]);
-    let (issuer, writer) = checkpoint_writer(root.path(), &hub, &schema.to_string()).await?;
+    let unreferenced = build(lists(1, items()));
+    let (issuer, writer) = checkpoint_writer(root.path(), &hub, &unreferenced).await?;
     snap::value(writer.database.next_partition("lists")).await?;
     let list = writer
         .insert(
@@ -281,7 +344,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
 {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let (issuer, writer) = checkpoint_writer(root.path(), &hub, ORDERED).await?;
+    let (issuer, writer) = checkpoint_writer(root.path(), &hub, &ordered()).await?;
     assert!(
         snap::value(writer.database.create_partition(&rocky_sdk::Partition::new(
             "list",
@@ -672,7 +735,7 @@ async fn an_issuer_migrates_its_lists_after_compacting() -> Result<(), Failure> 
     snap::value(issuer.database.compact(0)).await?;
     issuer.database.close().await?;
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
+    let issuer = Peer::new(at(&a, &hub, "a", &ordered()).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -922,7 +985,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
+    let issuer = Peer::new(at(&a, &hub, "a", &ordered()).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -935,7 +998,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?;
+    let older_application = Peer::new(at(&b, &hub, "b", &first()).open().await?)?;
     older_application.sync_now().await?;
     older_application
         .insert(
@@ -955,7 +1018,7 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?;
+    let writer = Peer::new(at(&b, &hub, "b", &ordered()).open().await?)?;
     writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
@@ -1031,7 +1094,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
+    let issuer = Peer::new(at(&a, &hub, "a", &ordered()).open().await?)?;
     assert_eq!(
         issuer
             .column(&format!(
@@ -1044,7 +1107,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    let older_application = Peer::new(at(&b, &hub, "b", SCHEMA).open().await?)?;
+    let older_application = Peer::new(at(&b, &hub, "b", &first()).open().await?)?;
     older_application.sync_now().await?;
     older_application
         .insert(
@@ -1064,7 +1127,7 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "an older application follows the migration and its item reaches the issuer"
     );
     older_application.database.close().await?;
-    let writer = Peer::new(at(&b, &hub, "b", ORDERED).open().await?)?;
+    let writer = Peer::new(at(&b, &hub, "b", &ordered()).open().await?)?;
     writer.sync_now().await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     let bread = writer
@@ -1094,22 +1157,8 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
 
 #[tokio::test]
 async fn an_invited_writer_without_identity_writes_after_the_migration() -> Result<(), Failure> {
-    const POSITIONED: &str = r#"{"format":7,"application":"lists","version":2,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
- {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"},
-   {"name":"position","type":"text","not_null":true,"default":""}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
-  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
-   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
-],
-"migrations":[{"version":2,"statements":[
-  "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))"]}]}"#;
+    let positioned =
+        build(lists(2, referencing_items().column(position())).migration(2, [POSITION_BY_ID]));
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = (root.path().join("a"), root.path().join("b"));
@@ -1124,7 +1173,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
         .await?
         .code;
     let writer = Peer::new(
-        at_without_identity(&b, &hub, "b", SCHEMA)
+        at_without_identity(&b, &hub, "b", &first())
             .join(&invitation)
             .await?
             .database,
@@ -1169,9 +1218,9 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", POSITIONED).open().await?)?;
+    let issuer = Peer::new(at(&a, &hub, "a", &positioned).open().await?)?;
 
-    let older_application = Peer::new(at_without_identity(&b, &hub, "b", SCHEMA).open().await?)?;
+    let older_application = Peer::new(at_without_identity(&b, &hub, "b", &first()).open().await?)?;
     older_application.sync_now().await?;
     older_application.database.renew().await?;
     older_application
@@ -1194,7 +1243,7 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
     older_application.database.close().await?;
 
     let writer = Peer::new(
-        at_without_identity(&b, &hub, "b", POSITIONED)
+        at_without_identity(&b, &hub, "b", &positioned)
             .open()
             .await?,
     )?;
@@ -1277,7 +1326,7 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         peer.database.close().await?;
     }
 
-    let issuer = Peer::new(at(&a, &hub, "a", ORDERED).open().await?)?;
+    let issuer = Peer::new(at(&a, &hub, "a", &ordered()).open().await?)?;
     let check_sql = format!(
         "SELECT COUNT(*) || ':' || COUNT(DISTINCT position) FROM items WHERE list = X'{list}' AND position > ''"
     );
@@ -1293,7 +1342,11 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let issuer_rows = issuer.column(&all_rows_sql).await?;
     assert_eq!(issuer_rows.len(), total);
 
-    let member = Peer::new(at_without_identity(&b, &hub, "b", ORDERED).open().await?)?;
+    let member = Peer::new(
+        at_without_identity(&b, &hub, "b", &ordered())
+            .open()
+            .await?,
+    )?;
     member.sync_now().await?;
     assert_eq!(
         member.column(&check_sql).await?,

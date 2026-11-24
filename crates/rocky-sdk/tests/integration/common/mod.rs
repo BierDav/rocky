@@ -86,9 +86,27 @@ pub struct Device {
     root: Option<String>,
 }
 pub fn parsed_schema() -> &'static rocky_sdk::Schema {
-    static PARSED: std::sync::LazyLock<rocky_sdk::Schema> =
-        std::sync::LazyLock::new(|| serde_json::from_str(SCHEMA).unwrap());
+    static PARSED: std::sync::LazyLock<rocky_sdk::Schema> = std::sync::LazyLock::new(schema);
     &PARSED
+}
+pub fn shopping(version: u32) -> rocky_sdk::SchemaBuilder {
+    rocky_sdk::Schema::builder("shopping", version)
+}
+pub fn required(name: &str, affinity: rocky_sdk::Affinity) -> rocky_sdk::Column {
+    rocky_sdk::Column::new(name, affinity).required()
+}
+pub fn items() -> rocky_sdk::Table {
+    rocky_sdk::Table::replayed("items")
+        .column(required("key", rocky_sdk::Affinity::Text))
+        .column(required("completed", rocky_sdk::Affinity::Integer))
+        .column(required("title", rocky_sdk::Affinity::Text))
+        .primary_key(["key"])
+}
+pub fn build(schema: rocky_sdk::SchemaBuilder) -> rocky_sdk::Schema {
+    schema.build().expect("fixture schema")
+}
+pub fn schema() -> rocky_sdk::Schema {
+    build(shopping(1).table(items()))
 }
 pub fn configuration(
     directory: &Path,

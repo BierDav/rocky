@@ -1,23 +1,22 @@
 use super::*;
 use crate::support::snapshot as snap;
+use rocky_sdk::{Affinity, Column, Schema, SchemaBuilder};
 use std::path::Path;
 
-fn schema(version: u32, migration: bool) -> String {
-    let mut schema: Value = serde_json::from_str(common::SCHEMA).unwrap();
-    schema["version"] = json!(version);
-    schema["tables"][0]["columns"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"note", "type":"text"}));
-    if migration {
-        schema["migrations"] = json!([{"version":version,"statements":["UPDATE items SET note=title || '-migrated'"]}]);
-    }
-    schema.to_string()
+fn noted(version: u32) -> SchemaBuilder {
+    common::shopping(version).table(common::items().column(Column::new("note", Affinity::Text)))
 }
-fn open<'a>(directory: &'a Path, schema: &'a str) -> rocky_sdk::Configuration {
+fn schema(version: u32, migration: bool) -> Schema {
+    let schema = noted(version);
+    common::build(match migration {
+        true => schema.migration(version, ["UPDATE items SET note=title || '-migrated'"]),
+        false => schema,
+    })
+}
+fn open(directory: &Path, schema: &Schema) -> rocky_sdk::Configuration {
     crate::common::configuration(
         directory,
-        crate::support::snapshot::schema(schema),
+        schema,
         None,
         Some(common::external_identity(directory)),
         None,
@@ -99,14 +98,15 @@ async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> R
     let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
-    let mut declared: Value = serde_json::from_str(&schema(2, true))?;
     let parent_read_the_author_evaluates_once_for_replicas =
         "UPDATE items SET note=(SELECT max(p.title) FROM parent.items p)";
-    declared["migrations"][0]["statements"] = json!([
-        "UPDATE items SET title=title || '-live'",
-        parent_read_the_author_evaluates_once_for_replicas
-    ]);
-    let declared = declared.to_string();
+    let declared = common::build(noted(2).migration(
+        2,
+        [
+            "UPDATE items SET title=title || '-live'",
+            parent_read_the_author_evaluates_once_for_replicas,
+        ],
+    ));
     let a = Device::new(open(root.path(), &declared).open().await?)?;
     let rows = snap::ok(snap::read(
         &a.database,

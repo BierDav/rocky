@@ -57,7 +57,7 @@ impl Member {
             node: hosted.node,
         });
         if self.node_key.is_none() {
-            self.node_key = Some(self.database()?.info().await?.node.to_hex());
+            self.node_key = Some(self.database()?.me().await?.device.key().to_hex());
         }
         Ok(())
     }

@@ -450,7 +450,7 @@ impl Simulation {
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
             Action::Revoke(node) => {
-                let identity = self.running(*node)?.database()?.info().await?.principal;
+                let identity = self.running(*node)?.database()?.me().await?.person.key();
                 self.running(0)?
                     .database()?
                     .remove(crate::PersonId::new(identity), crate::Removal::Departed)

@@ -117,7 +117,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(titles(&database).await, ["Milk"]);
     snap::ok(async {
         database.renew().await?;
-        database.info().await
+        snap::device(&database).await
     })
     .await;
     let error = sync(&database).await.err().ok_or("needs a network")?;

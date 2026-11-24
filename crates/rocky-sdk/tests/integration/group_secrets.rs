@@ -352,7 +352,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         rocky_sdk::Removal::Departed,
     ))
     .await;
-    let revoked = snap::ok(issuer.database.info()).await;
+    let revoked = snap::ok(snap::device(&issuer.database)).await;
     assert_eq!(
         revoked["revocations"]["statements"], 1,
         "the issuer revokes a device it knows only through its partition grant"
@@ -863,7 +863,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     );
     let keys = NodeKeys {
         identity: person.public_key().unwrap(),
-        node: first.database.info().await.unwrap().node,
+        node: first.database.me().await.unwrap().device.key(),
     };
     introduce(&issuer, &first).await;
     snap::ok(first.database.sync_now()).await;
@@ -898,7 +898,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         vec![vec!["before".to_owned()]; 3],
         "a node the identity links from the first reads without an issuer acting"
     );
-    let info = snap::ok(second.database.info()).await;
+    let info = snap::ok(snap::device(&second.database)).await;
     assert_eq!(info["principal"], json!(keys.identity));
     assert_ne!(info["node"], json!(keys.node));
 
@@ -1091,8 +1091,8 @@ async fn a_removed_persons_devices_get_nothing_created_after_the_removal() {
     let issuer = Peer::create(&root.path().join("issuer")).await;
     let (laptop, phone, identity) = full_person(&issuer, root.path(), "member").await;
     let nodes = [
-        laptop.database.info().await.unwrap().node.to_hex(),
-        phone.database.info().await.unwrap().node.to_hex(),
+        laptop.database.me().await.unwrap().device.key().to_hex(),
+        phone.database.me().await.unwrap().device.key().to_hex(),
     ];
     snap::ok(issuer.database.remove(
         rocky_sdk::PersonId::new(identity),

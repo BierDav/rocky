@@ -275,6 +275,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .private_schema()
             .await
     }
+    pub async fn schema_stage_recorded(&self, publication: Commitment) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        Ok(!collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT 1 FROM secure_staged_schema WHERE publication=?",
+                    [publication.to_vec()],
+                )
+                .await?,
+        )
+        .await?
+        .is_empty())
+    }
     pub async fn staged_schema(&self) -> Result<Option<(SchemaStage, bool)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = rows(

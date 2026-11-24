@@ -212,7 +212,7 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     assert_eq!(refused["code"], "owner_required", "{refused}");
     snap::ok(b.database.revoke_admin(
         rocky_sdk::PersonId::new(snap::public_key(&(a.identity().await))),
-        rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+        rocky_sdk::Removal::Compromised,
         (a.root()).clone(),
     ))
     .await;
@@ -257,19 +257,19 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
         rocky_sdk::Removal::Departed,
     ))
     .await;
-    let by_a = snap::ok(a.database.info()).await;
+    let by_a = snap::ok(snap::device(&a.database)).await;
     snap::ok(b.database.remove(
         rocky_sdk::PersonId::new(snap::public_key(&(keys.clone()))),
         rocky_sdk::Removal::Departed,
     ))
     .await;
-    let by_b = snap::ok(b.database.info()).await;
+    let by_b = snap::ok(snap::device(&b.database)).await;
     assert_ne!(by_a["revocations"]["digest"], by_b["revocations"]["digest"]);
     assert_eq!(identity(root, "a")?["keys"], before_a);
     assert_eq!(identity(root, "b")?["keys"], before_b);
     sync(&a).await?;
     assert_eq!(
-        snap::ok(a.database.info()).await["revocations"]["statements"],
+        snap::ok(snap::device(&a.database)).await["revocations"]["statements"],
         2,
         "the handshake gives each issuer the other's statement"
     );
@@ -277,7 +277,7 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     sync(&a).await?;
     for (name, device) in [("a", &a), ("b", &b)] {
         assert_eq!(
-            snap::ok(device.database.info()).await["revocations"]["statements"],
+            snap::ok(snap::device(&device.database)).await["revocations"]["statements"],
             2
         );
         assert_eq!(

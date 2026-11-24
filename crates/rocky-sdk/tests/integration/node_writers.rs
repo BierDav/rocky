@@ -25,7 +25,7 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
         )
     };
     let writer = Device::new(open().join(&issuer.invite().await).await?)?;
-    let before = snap::ok(writer.database.info()).await;
+    let before = snap::ok(snap::device(&writer.database)).await;
     let own = before["node"].as_str().ok_or("node missing")?.to_owned();
     writer.add(1, "first").await;
     let mut tx = writer.database.transaction().await?;
@@ -38,10 +38,10 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     tx.rollback().await?;
     writer.close().await;
     let writer = Device::new(open().open().await?)?;
-    assert_eq!(snap::ok(writer.database.info()).await["node"], own);
+    assert_eq!(snap::ok(snap::device(&writer.database)).await["node"], own);
     common::introduce(&issuer, &writer).await;
     writer.database.renew().await?;
-    assert_eq!(snap::ok(writer.database.info()).await["node"], own);
+    assert_eq!(snap::ok(snap::device(&writer.database)).await["node"], own);
     writer.add(2, "after reopen").await;
     writer.close().await;
     issuer.close().await;

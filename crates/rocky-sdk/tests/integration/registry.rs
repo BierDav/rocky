@@ -228,15 +228,15 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
 
     snap::ok(async {
         m.database.renew().await?;
-        m.database.info().await
+        snap::device(&m.database).await
     })
     .await;
-    let after = snap::ok(m.database.info()).await;
+    let after = snap::ok(snap::device(&m.database)).await;
     let expiry = |info: &Value| -> Result<u64, Failure> {
         Ok(info["expires"].as_str().ok_or("expiry")?.parse()?)
     };
     assert!(
-        expiry(&after)? <= expiry(&snap::ok(b.database.info()).await)?,
+        expiry(&after)? <= expiry(&snap::ok(snap::device(&b.database)).await)?,
         "a renewal through B's chain expires no later than B does"
     );
     let record = identities(&b).await[&m_identity].clone();
@@ -392,7 +392,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let mut writers = std::collections::BTreeSet::new();
     for device in [&a, &b, &x, &y] {
         writers.insert(
-            snap::ok(device.database.info()).await["node"]
+            snap::ok(snap::device(&device.database)).await["node"]
                 .clone()
                 .to_string(),
         );
@@ -423,14 +423,14 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let m_identity = m.identity().await;
     snap::ok(async {
         m.database.renew().await?;
-        m.database.info().await
+        snap::device(&m.database).await
     })
     .await;
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     online(&b, true).await;
     snap::ok(async {
         m.database.renew().await?;
-        m.database.info().await
+        snap::device(&m.database).await
     })
     .await;
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
@@ -714,7 +714,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         assert!(
             snap::observe(async {
                 device.database.renew().await?;
-                device.database.info().await
+                snap::device(&device.database).await
             })
             .await
             .is_err()
@@ -726,7 +726,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
         snap::ok(async {
             device.database.renew().await?;
-            device.database.info().await
+            snap::device(&device.database).await
         })
         .await;
         assert!(identities(&a).await.contains_key(identity));

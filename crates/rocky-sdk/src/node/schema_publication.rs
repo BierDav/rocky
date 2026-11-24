@@ -17,8 +17,10 @@ impl Node {
     ) -> Result<(), Failure> {
         if self.replica.staged_schema().await?.is_some() {
             self.follow_schema().await?;
-            return self.run_staged_migration().await;
+            self.run_staged_migration().await?;
+            return self.complete_rights_change().await;
         }
+        self.complete_rights_change().await?;
         let Some((scope, bookmark)) = self.replica.followed_bookmark().await else {
             return Ok(());
         };
@@ -105,6 +107,14 @@ impl Node {
             }
         }
         let publication = rocky_core::commitment("rocky.sdk.migration.v3", &target.0);
+        self.change_rights_after(
+            Some(publication),
+            self.declared.version,
+            &narrowed,
+            super::people::Reach::Narrower,
+        )
+        .await?;
+        self.check_fault(crate::database::fault::Stage::RightsChangeRecorded)?;
         self.replica
             .stage_schema(SchemaStage {
                 publication,
@@ -133,7 +143,8 @@ impl Node {
             .await?;
         self.follow_schema().await?;
         self.run_staged_migration().await?;
-        self.narrow(&narrowed).await
+        self.check_fault(crate::database::fault::Stage::RightsChangeCommitted)?;
+        self.complete_rights_change().await
     }
 
     async fn role_changes(&self, settings: &Settings) -> Result<Vec<crate::PersonId>, Failure> {

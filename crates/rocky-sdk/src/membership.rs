@@ -19,6 +19,15 @@ pub struct Seen {
     pub identity: PublicKey,
     pub linked: u64,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceRevocationReceipt {
+    pub node: rocky_credentials::PeerId,
+    pub statement: rocky_core::Commitment,
+    pub local: bool,
+    pub delivered: std::collections::BTreeSet<rocky_credentials::PeerId>,
+    pub pending: std::collections::BTreeSet<rocky_credentials::PeerId>,
+}
 pub fn see(seen: &mut BTreeMap<PublicKey, Seen>, identity: PublicKey, node: PublicKey, time: u64) {
     if let Some(held) = seen.get_mut(&node) {
         held.identity = identity;

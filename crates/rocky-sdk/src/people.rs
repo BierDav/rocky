@@ -204,15 +204,6 @@ impl std::fmt::Debug for PendingLink {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceRevocationReceipt {
-    pub node: crate::PeerId,
-    pub statement: rocky_core::Commitment,
-    pub local: bool,
-    pub delivered: std::collections::BTreeSet<crate::PeerId>,
-    pub pending: std::collections::BTreeSet<crate::PeerId>,
-}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TableRights {
     pub read: bool,
@@ -260,9 +251,9 @@ pub enum Removal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdminRevocation {
-    KeepAsFull,
-    Remove(Removal),
+pub enum Logout {
+    KeepData,
+    PurgeOnClose,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,7 +276,6 @@ pub enum AccessError {
         limit: usize,
     },
     Removed,
-    KeepAsFullUnsupported,
 }
 impl AccessError {
     pub fn code(&self) -> &'static str {
@@ -301,7 +291,6 @@ impl AccessError {
             Self::PartialGroup { .. } => "role_reads_part_of_group",
             Self::TooManyPartitions { .. } => "too_many_partitions",
             Self::Removed => "removed",
-            Self::KeepAsFullUnsupported => "keep_as_full_unsupported",
         }
     }
     pub(crate) fn of(
@@ -344,31 +333,12 @@ impl std::fmt::Display for AccessError {
                 write!(f, "a person holds at most {limit} partitions")
             }
             Self::Removed => f.write_str("the person was removed"),
-            Self::KeepAsFullUnsupported => {
-                f.write_str("keeping a revoked admin as a full member is not supported yet")
-            }
         }
     }
 }
 impl std::error::Error for AccessError {}
 
-#[derive(Clone, Debug)]
-pub struct DeviceInfo {
-    pub principal: rocky_credentials::PublicKey,
-    pub node: rocky_credentials::PublicKey,
-    pub revocations: crate::RevocationStatus,
-    pub expires: u64,
-    pub issuer: bool,
-    pub access: Access,
-    pub transport: String,
-    pub readable: usize,
-    pub writable: usize,
-}
-
 impl Database {
-    pub async fn info(&self) -> Result<DeviceInfo, crate::Error> {
-        self.send(Request::Info).await
-    }
     #[cfg(any(test, feature = "test-support"))]
     pub async fn renew(&self) -> Result<(), crate::Error> {
         self.send(Request::Renew).await
@@ -428,11 +398,11 @@ impl Database {
     pub async fn revoke_admin(
         &self,
         person: PersonId,
-        revocation: AdminRevocation,
+        removal: Removal,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), crate::Error> {
         self.send_rooted(Some(root), |root, reply| {
-            Request::RevokeAdmin(person, revocation, root, reply)
+            Request::RevokeAdmin(person, removal, root, reply)
         })
         .await
     }
@@ -464,21 +434,13 @@ impl Database {
         })
         .await
     }
-    pub async fn device_revocation_receipt(
-        &self,
-        node: crate::PeerId,
-    ) -> Result<Option<DeviceRevocationReceipt>, crate::Error> {
-        self.send(|reply| Request::DeviceRevocationReceipt(node, reply))
-            .await
-    }
     pub async fn sync_now_with_identity(
         &self,
         identity: Arc<dyn crate::IdentityProvider>,
     ) -> Result<crate::SyncReport, crate::Error> {
         self.send_signed(Some(identity), Request::Sync).await
     }
-    pub async fn logout(&self, purge_on_close: bool) -> Result<(), crate::Error> {
-        self.send(|reply| Request::Logout(purge_on_close, reply))
-            .await
+    pub async fn logout(&self, logout: Logout) -> Result<(), crate::Error> {
+        self.send(|reply| Request::Logout(logout, reply)).await
     }
 }

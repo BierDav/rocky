@@ -25,6 +25,12 @@ serialized!(
     sdk::NetworkStatus,
     sdk::RetentionLimits
 );
+pub async fn device(database: &sdk::Database) -> Result<Value, sdk::Error> {
+    let authority = database.status().await?.authority;
+    Ok(
+        json!({"principal":authority.principal,"node":authority.node,"revocations":authority.revocations,"expires":authority.expires_at_epoch_seconds.to_string(),"issuer":authority.is_issuer,"access":authority.access}),
+    )
+}
 pub async fn observe<T: Snapshot, E: Into<sdk::Failure>>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Result<Value, Value> {
@@ -81,11 +87,6 @@ pub async fn read(
 impl Snapshot for rocky_core::RowIdentity {
     fn snapshot(self) -> Value {
         json!({"id":self.to_string()})
-    }
-}
-impl Snapshot for sdk::DeviceInfo {
-    fn snapshot(self) -> Value {
-        json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"access":self.access,"transport":self.transport,"readable":self.readable,"writable":self.writable})
     }
 }
 impl Snapshot for sdk::Invitation {
@@ -425,6 +426,7 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::MemberSealFailed { error } => json!({"kind":"member_seal_failed","error":error}),
                 sdk::ActivityKind::ReplayedAwaitingOutcomes { transactions } => json!({"kind":"replayed_awaiting_outcomes","transactions":transactions}),
                 sdk::ActivityKind::RoutineSealFailed { error } => json!({"kind":"routine_seal_failed","error":error}),
+                sdk::ActivityKind::RightsChangeFailed { error } => json!({"kind":"rights_change_failed","error":error}),
                 sdk::ActivityKind::LocalRecoveryFailed { error } => json!({"kind":"local_recovery_failed","error":error}),
                 sdk::ActivityKind::RoleChanged { partial } => json!({"kind":"role_changed","partial":partial}),
                 sdk::ActivityKind::PartitionCreated { partition: created, id } => json!({"kind":"partition_created","partition":partition(created),"id":id}),
@@ -465,7 +467,7 @@ pub async fn mutation_handle(
 ) -> Result<rocky_core::Commitment, sdk::Failure> {
     let author = match author {
         Some(author) => author.to_owned(),
-        None => database.info().await?.node.to_hex(),
+        None => database.me().await?.device.to_string(),
     };
     let mut identity = author.into_bytes();
     identity.extend(serde_json::to_vec(bytes)?);

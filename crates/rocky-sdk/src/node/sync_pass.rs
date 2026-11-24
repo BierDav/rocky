@@ -222,6 +222,7 @@ impl Node {
         let members = self.publish_for_members().await;
         self.seal_skipped(routine.or(members));
         self.close_migrations().await?;
+        self.settle_rights_change().await;
         Box::pin(self.resolve_saved_contacts(transport)).await;
         Ok(())
     }
@@ -403,7 +404,10 @@ impl Node {
         self.reconcile_batches(pass, targets, &mut progress).await?;
         self.ensure_not_revoked().await?;
         if pass.settings.renews_from_issuer()
-            && let Some(rerun) = self.renew_after_failures(pass, &progress).await?
+            && let Some(rerun) = match self.renew_after_failures(pass, &progress).await? {
+                Some(rerun) => Some(rerun),
+                None => self.renew_for_rights_notice(pass).await?,
+            }
         {
             let admitted: BTreeSet<_> = self
                 .settings
@@ -442,6 +446,38 @@ impl Node {
             Ok(Some(Rerun::Learned))
         } else {
             Ok(None)
+        }
+    }
+    async fn renew_for_rights_notice(&self, pass: &Pass<'_>) -> Result<Option<Rerun>, Failure> {
+        let notice = self
+            .rights_notice
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(issuer) = notice else {
+            return Ok(None);
+        };
+        let renewed = self
+            .renew(Some(pass.transport), true, Some(issuer), false)
+            .await;
+        self.ensure_not_revoked().await?;
+        match renewed {
+            Ok(_) => {
+                self.activity.record(crate::ActivityKind::RightsChanged {
+                    person: crate::PersonId::new(pass.settings.identity),
+                });
+                Ok(Some(Rerun::Renewed))
+            }
+            Err(error) => {
+                self.rights_notice
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(issuer);
+                self.activity.record(crate::ActivityKind::RenewalFailed {
+                    error: error.to_string(),
+                });
+                Ok(None)
+            }
         }
     }
     async fn reconcile_batches(

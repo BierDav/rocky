@@ -56,16 +56,18 @@ impl Device {
     }
 
     async fn node(&self) -> Result<String, Failure> {
-        Ok(snap::value(self.database.info()).await?["node"]
+        Ok(snap::value(snap::device(&self.database)).await?["node"]
             .as_str()
             .ok_or("node")?
             .to_owned())
     }
     async fn identity(&self) -> Result<String, Failure> {
-        Ok(snap::value(self.database.info()).await?["principal"]
-            .as_str()
-            .ok_or("principal")?
-            .to_owned())
+        Ok(
+            snap::value(snap::device(&self.database)).await?["principal"]
+                .as_str()
+                .ok_or("principal")?
+                .to_owned(),
+        )
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
         snap::value(self.database.set_sync(if online {

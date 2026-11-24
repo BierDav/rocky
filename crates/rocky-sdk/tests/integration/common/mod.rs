@@ -156,11 +156,11 @@ impl Device {
     async fn handle(&self, handle: u8) -> rocky_core::Commitment {
         let mut bytes = self
             .database
-            .info()
+            .me()
             .await
             .expect("session")
-            .node
-            .to_hex()
+            .device
+            .to_string()
             .into_bytes();
         bytes.extend(serde_json::to_vec(&vec![handle; 32]).expect("handle"));
         rocky_core::commitment("fixture.sql.handle", &bytes)
@@ -275,7 +275,7 @@ impl Device {
             .code
     }
     pub async fn admit(&self, admin: &Device) {
-        let identity = admin.database.info().await.expect("session").principal;
+        let identity = admin.database.me().await.expect("session").person.key();
         self.database
             .make_admin(rocky_sdk::PersonId::new(identity), self.root())
             .await
@@ -286,7 +286,14 @@ impl Device {
                 .renew()
                 .await
                 .expect("renew into the admin grant");
-            if admin.database.info().await.expect("session").issuer {
+            if admin
+                .database
+                .status()
+                .await
+                .expect("status")
+                .authority
+                .is_issuer
+            {
                 return;
             }
             let _ = self.database.sync_now().await;

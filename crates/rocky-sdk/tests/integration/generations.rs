@@ -825,7 +825,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     introduce(&a, &b).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let principal = snap::ok(b.database.info()).await["principal"].clone();
+    let principal = snap::ok(snap::device(&b.database)).await["principal"].clone();
     snap::ok(a.database.make_admin(
         rocky_sdk::PersonId::new(snap::public_key(&(principal))),
         (a.root()).clone(),

@@ -695,7 +695,7 @@ async fn a_deferred_transaction_opens_on_the_session_renewed_after_its_begin() -
     run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
     snap::value(async {
         database.renew().await?;
-        database.info().await
+        snap::device(&database).await
     })
     .await?;
     let first_real_statement = count(&writer, "items")

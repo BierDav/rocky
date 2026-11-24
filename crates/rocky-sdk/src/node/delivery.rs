@@ -241,7 +241,7 @@ impl Node {
             if delivery.recipient() != node.public_key() {
                 continue;
             }
-            match self.accept_delivery(&node, &delivery).await {
+            match self.accept_delivery(peer, &node, &delivery).await {
                 Ok(()) => receipts.push(DeliveryReceipt::sign(&node, delivery.digest()?)?),
                 Err(error) => {
                     self.activity.record(crate::ActivityKind::EnvelopeRefused {
@@ -258,10 +258,21 @@ impl Node {
     }
     async fn accept_delivery(
         &self,
+        peer: PublicKey,
         node: &PrivateKey,
         delivery: &SealedDelivery,
     ) -> Result<(), Failure> {
         let contents = Contents::open(delivery, node)?;
+        if contents.reason == Reason::Rights {
+            if !self.settings.lock().await.issuer() {
+                *self
+                    .rights_notice
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(peer);
+                self.wake_sync();
+            }
+            return Ok(());
+        }
         let values = contents
             .values
             .iter()

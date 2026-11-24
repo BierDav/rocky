@@ -45,11 +45,21 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     Ok(identity)
 }
 async fn revocations(device: &Device) -> RevocationStatus {
+    for _ in 0..3 {
+        match device.database.status().await {
+            Ok(status) => return status.authority.revocations,
+            Err(error) if error.kind == rocky_sdk::ErrorKind::Blocked => {
+                let _ = device.sync_now().await;
+            }
+            Err(error) => panic!("status: {error}"),
+        }
+    }
     device
         .database
-        .info()
+        .status()
         .await
-        .expect("device info")
+        .expect("status once the blocked scope settles")
+        .authority
         .revocations
 }
 const INSERT_ITEM: &str = "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)";
@@ -138,8 +148,8 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
             rocky_sdk::Removal::Departed,
         )
         .await?;
-    let by_a = a.database.info().await?.revocations;
-    let by_b = b.database.info().await?.revocations;
+    let by_a = revocations(&a).await;
+    let by_b = revocations(&b).await;
     assert_eq!(by_a.statements, 1);
     assert_eq!(by_b.statements, 1);
     assert_ne!(by_a.digest, by_b.digest);
@@ -297,19 +307,19 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     b.database
         .revoke_admin(
             rocky_sdk::PersonId::new(creator.parse()?),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Departed),
+            rocky_sdk::Removal::Departed,
             root_signer.clone(),
         )
         .await?;
     c.database
         .revoke_admin(
             rocky_sdk::PersonId::new(creator.parse()?),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             root_signer,
         )
         .await?;
-    let lost = b.database.info().await?.revocations;
-    let compromised = c.database.info().await?.revocations;
+    let lost = revocations(&b).await;
+    let compromised = revocations(&c).await;
     assert_eq!(lost.statements, 1);
     assert_eq!(compromised.statements, 1);
     assert_ne!(lost.digest, compromised.digest);
@@ -317,8 +327,8 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     let (first, second) = if b_first { (&b, &c) } else { (&c, &b) };
     let _ = first.sync_now().await;
     let _ = second.sync_now().await;
-    let left = b.database.info().await?.revocations;
-    let right = c.database.info().await?.revocations;
+    let left = revocations(&b).await;
+    let right = revocations(&c).await;
     assert_eq!(left.statements, 2);
     assert_eq!(left.digest, right.digest);
     assert_eq!(right.statements, 2);

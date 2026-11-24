@@ -135,7 +135,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
                 .database,
         );
         device.add_peer(&contact).await.map_err(|e| e.to_string())?;
-        let provisioned = device.database.info().await?;
+        let provisioned = device.database.me().await?.person;
         metric(&format!("{label} {kind}"), &settings(&dir).credentials);
         assert_eq!(
             grant_count(&settings(&dir).credentials),
@@ -229,10 +229,11 @@ async fn exercise(count: usize) -> Result<(), Failure> {
             .is_err()
     );
     tx.rollback().await?;
-    snap::ok(owner.database.remove(
-        crate::PersonId::new(members[0].1.principal),
-        crate::Removal::Departed,
-    ))
+    snap::ok(
+        owner
+            .database
+            .remove(members[0].1, crate::Removal::Departed),
+    )
     .await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;

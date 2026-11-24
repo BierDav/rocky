@@ -434,12 +434,12 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
             format!("a refused schema does not prevent installing the bundle: {error}")
         })?;
 
-    let status = snap::ok(alice.engine.info()).await;
+    let status = snap::ok(snap::device(&alice.engine)).await;
     assert_eq!(status["revocations"]["statements"], 0);
     assert_ne!(status["principal"], status["node"]);
     let renewed = snap::ok(async {
         alice.engine.renew().await?;
-        alice.engine.info().await
+        snap::device(&alice.engine).await
     })
     .await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
@@ -450,20 +450,20 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         Some(3),
         "the creator's, Alice's and Bob's identities"
     );
-    let bob_identity = snap::ok(bob.engine.info()).await["principal"].clone();
+    let bob_identity = snap::ok(snap::device(&bob.engine)).await["principal"].clone();
     snap::ok(creator.engine.remove(
         rocky_sdk::PersonId::new(snap::public_key(&(bob_identity))),
         rocky_sdk::Removal::Departed,
     ))
     .await;
     assert_eq!(
-        snap::ok(creator.engine.info()).await["revocations"]["statements"],
+        snap::ok(snap::device(&creator.engine)).await["revocations"]["statements"],
         1
     );
     creator.add(1, "After revocation").await;
     alice.sync().await;
     assert_eq!(
-        snap::ok(alice.engine.info()).await["revocations"]["statements"],
+        snap::ok(snap::device(&alice.engine)).await["revocations"]["statements"],
         1,
         "Alice learns of Bob's revocation on her next sync"
     );
@@ -471,7 +471,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     assert!(
         snap::observe(async {
             bob.engine.renew().await?;
-            bob.engine.info().await
+            snap::device(&bob.engine).await
         })
         .await
         .is_err(),
@@ -487,10 +487,12 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     );
 
     assert!(
-        snap::observe(creator.engine.logout(false)).await.is_err(),
+        snap::observe(creator.engine.logout(rocky_sdk::Logout::KeepData))
+            .await
+            .is_err(),
         "the creator cannot log out"
     );
-    snap::ok(alice.engine.logout(true)).await;
+    snap::ok(alice.engine.logout(rocky_sdk::Logout::PurgeOnClose)).await;
     assert!(
         snap::observe(snap::read(&alice.engine, "SELECT 1", Vec::new()))
             .await
@@ -507,7 +509,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         "purging removes the member's secrets"
     );
     assert!(Db::resume(&root.path().join("b"), iroh()).await.is_err());
-    snap::ok(bob.engine.logout(false)).await;
+    snap::ok(bob.engine.logout(rocky_sdk::Logout::KeepData)).await;
     bob.close().await;
     assert!(Db::resume(&root.path().join("c"), iroh()).await.is_err());
     creator.close().await;

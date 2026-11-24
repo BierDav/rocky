@@ -149,7 +149,7 @@ async fn items(device: &Device) -> Result<Vec<String>, Failure> {
     texts(device, "SELECT title FROM items ORDER BY title").await
 }
 async fn device_info(device: &Device) -> Value {
-    snap::ok(device.database.info()).await
+    snap::ok(snap::device(&device.database)).await
 }
 async fn manual(devices: &[&Device]) {
     for device in devices {
@@ -227,15 +227,11 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
     };
     check(false).await?;
     for device in [&r, &w] {
-        let before = device_info(device).await;
-        let renewed = snap::ok(async {
-            device.database.renew().await?;
-            device.database.info().await
-        })
-        .await;
-        assert_eq!(renewed["readable"], before["readable"]);
-        assert_eq!(renewed["writable"], before["writable"]);
-        assert_eq!(renewed["principal"], before["principal"]);
+        let before = device.database.me().await?;
+        device.database.renew().await?;
+        let renewed = device.database.me().await?;
+        assert_eq!(renewed.tables, before.tables);
+        assert_eq!(renewed.person, before.person);
     }
     check(true).await?;
     note(&w, 3, "From writer").await?;
@@ -310,7 +306,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     synced(&m).await?;
     snap::ok(async {
         m.database.renew().await?;
-        m.database.info().await
+        snap::device(&m.database).await
     })
     .await;
     assert_eq!(i.titles().await, ["Eggs", "Milk"]);
@@ -367,7 +363,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         rocky_sdk::Removal::Departed,
     ))
     .await;
-    let revoked = snap::ok(a.database.info()).await;
+    let revoked = snap::ok(snap::device(&a.database)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     assert_eq!(
         identity(root, "a")?["keys"],
@@ -404,7 +400,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert!(
         snap::observe(async {
             c.database.renew().await?;
-            c.database.info().await
+            snap::device(&c.database).await
         })
         .await
         .is_err()

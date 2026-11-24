@@ -124,7 +124,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     );
     snap::ok(async {
         reader.renew().await?;
-        reader.info().await
+        snap::device(&reader).await
     })
     .await;
     reader.close().await.unwrap();
@@ -151,7 +151,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         rocky_sdk::Removal::Departed,
     ))
     .await;
-    let revoked = snap::ok(db.info()).await;
+    let revoked = snap::ok(snap::device(&db)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();

@@ -107,7 +107,7 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
     let key = household.person.public_key()?.to_hex();
     let mut nodes = Vec::new();
     for (device, name) in household.nodes.iter().zip(["m1", "m2", "m3"]) {
-        let info = snap::ok(device.database.info()).await;
+        let info = snap::ok(snap::device(&device.database)).await;
         assert_eq!(
             info["principal"],
             json!(key),
@@ -209,7 +209,7 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
             "revoking an identity revokes every node of it, unrecorded ones too: {refused}"
         );
     }
-    let own = snap::ok(owner.database.info()).await["principal"].clone();
+    let own = snap::ok(snap::device(&owner.database)).await["principal"].clone();
     assert!(
         snap::observe(owner.database.remove(
             rocky_sdk::PersonId::new(snap::public_key(&(own))),
@@ -368,7 +368,7 @@ async fn a_refused_signed_call_returns_only_after_its_identity_was_dropped() -> 
     )
     .await?;
     let member_database = member.database.clone();
-    member_database.logout(false).await?;
+    member_database.logout(rocky_sdk::Logout::KeepData).await?;
     let refused = returns_only_after_release(Arc::new(IdentityKey::generate()), |provider| {
         member_database.sync_now_with_identity(provider)
     })
@@ -480,7 +480,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
         assert_eq!(
             outcome(async {
                 database.renew().await?;
-                database.info().await
+                snap::device(database).await
             })
             .await?
             .0,
@@ -511,14 +511,17 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         .network(Network::Owned(hub.connector("member")));
     let joined = config.join(&invitation.code).await?;
     let minted = joined.identity.ok_or("minted identity")?;
-    assert_eq!(joined.database.info().await?.principal, minted.public_key());
+    assert_eq!(
+        joined.database.me().await?.person.key(),
+        minted.public_key()
+    );
     no_identity_secret(&path, &[minted.secret()])?;
     joined.database.close().await?;
     let opened = config.open().await?;
     assert_eq!(
         outcome(async {
             opened.renew().await?;
-            opened.info().await
+            snap::device(&opened).await
         })
         .await?
         .0,
@@ -644,7 +647,7 @@ async fn the_last_node_publishes_its_unlink_and_the_identity_links_again() -> Re
         .map_err(|error| error.to_string())?;
     replacement.add(100, "linked again").await;
     assert_eq!(
-        snap::ok(replacement.database.info()).await["principal"],
+        snap::ok(snap::device(&replacement.database)).await["principal"],
         household.person.public_key()?.to_hex()
     );
     replacement.close().await;
@@ -864,7 +867,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             .database
             .revoke_admin(
                 rocky_sdk::PersonId::new(person_key_0.parse()?),
-                rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+                rocky_sdk::Removal::Compromised,
                 root_a.clone(),
             )
             .await?;
@@ -1103,7 +1106,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
         .database
         .revoke_admin(
             rocky_sdk::PersonId::new(person.parse()?),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             root,
         )
         .await?;

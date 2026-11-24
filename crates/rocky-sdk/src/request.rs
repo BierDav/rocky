@@ -48,7 +48,7 @@ pub(crate) enum Request {
     StatusAfter(String, Reply<crate::DatabaseStatus>),
     Sync(Reply<crate::SyncReport>),
     SetSync(crate::SyncMode, Reply<()>),
-    Logout(bool, Reply<()>),
+    Logout(crate::Logout, Reply<()>),
     #[cfg(any(test, feature = "test-support"))]
     Tips(crate::testing::Probe),
     Invite(Box<crate::Invite>, Reply<crate::Invitation>),
@@ -67,7 +67,7 @@ pub(crate) enum Request {
     MakeAdmin(crate::PersonId, crate::node::Root, Reply<()>),
     RevokeAdmin(
         crate::PersonId,
-        crate::AdminRevocation,
+        crate::Removal,
         crate::node::Root,
         Reply<()>,
     ),
@@ -80,12 +80,7 @@ pub(crate) enum Request {
     Contact(Reply<crate::ContactInfo>),
     AddPeer(String, Reply<PublicKey>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
-    DeviceRevocationReceipt(
-        rocky_credentials::PeerId,
-        Reply<Option<crate::DeviceRevocationReceipt>>,
-    ),
     Unlink(rocky_credentials::PeerId, Reply<()>),
-    Info(Reply<crate::DeviceInfo>),
     NextPartition(String, Reply<crate::CreatedPartition>),
     DeviceCredential(Reply<crate::DeviceCredential>),
     SignExtension(Vec<u8>, Reply<rocky_credentials::Signature>),
@@ -96,7 +91,6 @@ impl Request {
             Self::WithIdentity(_, request) => request.allowed_after_logout(),
             Self::Status(..)
             | Self::StatusAfter(..)
-            | Self::DeviceRevocationReceipt(..)
             | Self::Activity(..)
             | Self::ActivityNext(..) => true,
             _ => false,
@@ -192,13 +186,7 @@ impl Request {
             Self::RemovePeer(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::DeviceRevocationReceipt(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::Unlink(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Info(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::NextPartition(_, reply) => {

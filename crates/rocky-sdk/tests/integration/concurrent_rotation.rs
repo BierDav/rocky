@@ -112,7 +112,7 @@ async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> R
     snap::ok(revoking.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     snap::ok(async {
         reader.database.renew().await?;
-        reader.database.info().await
+        snap::device(&reader.database).await
     })
     .await;
     snap::ok(
@@ -236,7 +236,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     let offline = Device::new(options.open().await?)?;
     snap::ok(async {
         offline.database.renew().await?;
-        offline.database.info().await
+        snap::device(&offline.database).await
     })
     .await;
     assert_eq!(winner(root, "offline", "items"), current);
@@ -283,7 +283,7 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     b.add(3, "b after its seal").await;
     snap::ok(async {
         writer.database.renew().await?;
-        writer.database.info().await
+        snap::device(&writer.database).await
     })
     .await;
     writer.sync().await.map_err(|e| e.to_string())?;
@@ -311,7 +311,7 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     }
     snap::ok(async {
         writer.database.renew().await?;
-        writer.database.info().await
+        snap::device(&writer.database).await
     })
     .await;
     let current = winner(root, "a", "items");

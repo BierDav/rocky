@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
-mod fault;
+pub(crate) mod fault;
 pub(crate) mod incarnation;
 mod residence;
 

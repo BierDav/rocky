@@ -69,8 +69,8 @@ pub use invitation::{
 };
 pub use partitions::*;
 pub use people::{
-    AccessError, AdminRevocation, Device, DeviceId, DeviceInfo, DeviceRevocationReceipt, LinkCode,
-    LinkError, LinkRequest, Me, Opened, PendingLink, Person, PersonId, Removal, TableRights,
+    AccessError, Device, DeviceId, LinkCode, LinkError, LinkRequest, Logout, Me, Opened,
+    PendingLink, Person, PersonId, Removal, TableRights,
 };
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};

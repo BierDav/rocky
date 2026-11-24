@@ -274,6 +274,7 @@ pub(crate) struct Node {
     #[cfg(test)]
     pub(crate) verified_under_settings: AtomicU64,
     learned: AtomicBool,
+    rights_notice: std::sync::Mutex<Option<PublicKey>>,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     import_sources: std::sync::Mutex<
         BTreeMap<
@@ -383,6 +384,7 @@ impl Node {
             met: std::sync::Mutex::new(BTreeMap::new()),
             clocks: std::sync::Mutex::new(BTreeMap::new()),
             learned: AtomicBool::new(false),
+            rights_notice: std::sync::Mutex::new(None),
             handover: std::sync::Mutex::new(Default::default()),
             import_sources: std::sync::Mutex::new(Default::default()),
             sync_failures: Default::default(),
@@ -805,11 +807,6 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-    fn kind(&self) -> String {
-        self.current()
-            .map(|link| link.transport.kind().to_owned())
-            .unwrap_or_default()
-    }
     async fn retention(
         &self,
         collection: &str,
@@ -833,25 +830,6 @@ impl Node {
         Ok(crate::RetentionStatus {
             policy: self.replica.retention_policy(scope).await?,
             checkpoint: status,
-        })
-    }
-    async fn device_info(&self) -> Result<crate::DeviceInfo, Failure> {
-        let session = self
-            .replica
-            .session(self.app_scopes().into_iter().collect())
-            .await?;
-        let status = session.status().await?;
-        let settings = self.settings.published();
-        Ok(crate::DeviceInfo {
-            principal: status.principal,
-            node: status.node,
-            revocations: settings.revocation_status()?,
-            expires: status.expires,
-            issuer: settings.issuer(),
-            access: settings.access.clone(),
-            transport: self.kind(),
-            readable: status.readable.len(),
-            writable: status.writable.len(),
         })
     }
     async fn bootstrap_progress(&self) -> Result<Option<crate::BootstrapProgress>, Failure> {
@@ -964,11 +942,11 @@ impl Node {
     }
     async fn revocation_cut(
         &self,
-        target: crate::enrollment::Revoke,
+        target: &crate::enrollment::Revoke,
         membership: &crate::membership::Membership,
     ) -> Result<RevocationCut, Failure> {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
-        let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match target {
+        let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match *target {
             crate::enrollment::Revoke::Identity(identity)
             | crate::enrollment::Revoke::TrustedIdentity(identity, _) => (
                 identity,
@@ -978,7 +956,7 @@ impl Node {
                     .collect(),
             ),
             crate::enrollment::Revoke::Node { owner, node } => (owner, [node].into()),
-            crate::enrollment::Revoke::Rights(owner) => (owner, Default::default()),
+            crate::enrollment::Revoke::Rights { .. } => return Ok(Default::default()),
         };
         let (mut cut, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
         for lane in lanes {
@@ -997,7 +975,7 @@ impl Node {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let (cut, dropped) = if root.signer().is_some() {
-            self.revocation_cut(target, &membership).await?
+            self.revocation_cut(&target, &membership).await?
         } else {
             Default::default()
         };
@@ -1008,20 +986,36 @@ impl Node {
                     count: dropped.len(),
                 });
         }
+        self.rotate_revoked(|draft| {
+            draft.begin_revocation_cut(target, (&registry, &membership), root.signer(), cut)?;
+            Ok(true)
+        })
+        .await
+        .map(drop)
+    }
+    pub(super) async fn rotate_revoked(
+        &self,
+        begin: impl FnOnce(&mut Settings) -> Result<bool, Failure>,
+    ) -> Result<bool, Failure> {
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
-        draft
-            .begin_revocation_cut(target, (&registry, &membership), root.signer(), cut)
-            .map_err(|error| -> Failure {
-                if error.is::<crate::enrollment::RevocationSetFull>()
-                    || error.is::<crate::enrollment::PublisherRequired>()
-                {
-                    error
-                } else {
-                    refused(error)
-                }
-            })?;
+        let begun = begin(&mut draft).map_err(|error| -> Failure {
+            if error.is::<crate::enrollment::RevocationSetFull>()
+                || error.is::<crate::enrollment::PublisherRequired>()
+            {
+                error
+            } else {
+                refused(error)
+            }
+        })?;
+        if !begun {
+            if !draft.persisted_eq(&settings) {
+                settings.commit(draft, &self.replica).await?;
+            }
+            return Ok(false);
+        }
         settings.commit(draft.clone(), &self.replica).await?;
+        self.check_fault(crate::database::fault::Stage::RevocationBegun)?;
         let rotation = draft
             .authority
             .as_ref()
@@ -1051,7 +1045,7 @@ impl Node {
                     error: (error.to_string()).to_owned(),
                 });
         }
-        Ok(())
+        Ok(true)
     }
     pub(super) async fn apply(
         &self,
@@ -1222,7 +1216,7 @@ impl Node {
         self.wake_sync();
         Ok(true)
     }
-    async fn logout(&self, purge: bool) -> Result<(), Failure> {
+    async fn logout(&self, logout: crate::Logout) -> Result<(), Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
@@ -1235,7 +1229,7 @@ impl Node {
         settings.logged_out = true;
         settings.save(&self.replica).await?;
         *self.lifecycle.lock().await = Lifecycle::LoggedOut {
-            purge_on_close: purge,
+            purge_on_close: logout == crate::Logout::PurgeOnClose,
         };
         self.automatic.store(false, Ordering::SeqCst);
         self.wake_sync();
@@ -2371,6 +2365,8 @@ mod delivery_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod revocation_tests;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod rights_change_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod sync_tests;
 #[cfg(all(test, not(target_family = "wasm")))]

@@ -198,7 +198,7 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
     assert_eq!(rows(&admin, "SELECT gate FROM check_ins").await?, ["north"]);
     assert!(holds_reader_key(&scanner_dir, "tickets")?);
     assert_eq!(
-        scanner.database.info().await?.access,
+        scanner.database.me().await?.access,
         Access::Role(SCANNER),
         "the role survives into the installed settings"
     );
@@ -427,7 +427,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
             .await?,
     )?;
     synced(&clinician).await?;
-    let clinician_identity = clinician.database.info().await?.principal;
+    let clinician_identity = clinician.database.me().await?.person.key();
     assert_eq!(rows(&clinician, "SELECT name FROM wards").await?, ["A"]);
     assert!(
         rows(&clinician, "SELECT note FROM charts").await.is_err(),
@@ -461,7 +461,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
         admin
             .database
             .grant_partition(
-                rocky_sdk::PersonId::new(admin.database.info().await?.principal),
+                rocky_sdk::PersonId::new(admin.database.me().await?.person.key()),
                 &ward("B")
             )
             .await
@@ -579,7 +579,8 @@ async fn a_rollout_that_removes_a_held_role_fails_with_role_in_use() -> Result<(
 }
 
 #[tokio::test]
-async fn a_rollout_that_widens_a_role_reaches_its_holders_at_renewal() -> Result<(), Failure> {
+async fn a_rollout_that_widens_a_role_reaches_its_holders_at_their_next_sync() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (admin, scanner) = venue_with_scanner(root.path(), &hub).await?;
@@ -601,7 +602,6 @@ async fn a_rollout_that_widens_a_role_reaches_its_holders_at_renewal() -> Result
             .await?,
     )?;
     synced(&scanner).await?;
-    scanner.database.renew().await?;
     assert_eq!(
         check_in_rights(&scanner).await?.map(|rights| (
             rights.insert,

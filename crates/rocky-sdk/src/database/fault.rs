@@ -2,14 +2,17 @@ use crate::Failure;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Stage {
+pub(crate) enum Stage {
     Started,
+    RightsChangeRecorded,
+    RightsChangeCommitted,
+    RevocationBegun,
 }
 #[cfg(test)]
-pub(super) static STOPS: std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>> =
+pub(crate) static STOPS: std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>> =
     std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
-pub(super) fn check(directory: &Path, stage: Stage) -> Result<(), Failure> {
+pub(crate) fn check(directory: &Path, stage: Stage) -> Result<(), Failure> {
     let mut stops = STOPS.lock().map_err(|_| "poisoned fault")?;
     match stops
         .iter()
@@ -23,6 +26,6 @@ pub(super) fn check(directory: &Path, stage: Stage) -> Result<(), Failure> {
     }
 }
 #[cfg(not(test))]
-pub(super) fn check(_: &Path, _: Stage) -> Result<(), Failure> {
+pub(crate) fn check(_: &Path, _: Stage) -> Result<(), Failure> {
     Ok(())
 }

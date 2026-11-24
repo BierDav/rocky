@@ -22,7 +22,7 @@ pub(crate) const DEPOSIT_LIFETIME: u64 = 30 * 24 * 60 * 60;
 pub(crate) const MAX_DEPOSIT_PAYLOAD: usize = rocky_credentials::MAX_DELIVERY_PAYLOAD;
 pub(crate) const MAX_OUTBOX: usize = 16_384;
 pub const MAILBOX_FULL: &str = "mailbox_full";
-const CONTENTS_VERSION: u32 = 1;
+const CONTENTS_VERSION: u32 = 2;
 const MAILBOX_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,7 @@ const MAILBOX_VERSION: u32 = 1;
 pub(crate) enum Reason {
     Share,
     Rotation,
+    Rights,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,6 +69,20 @@ impl Contents {
         }
         Ok(SealedDelivery::seal(recipient, &payload)?)
     }
+    pub fn rights(recipient: PublicKey) -> Result<SealedDelivery, Failure> {
+        let contents = Self {
+            version: CONTENTS_VERSION,
+            reason: Reason::Rights,
+            sender: None,
+            group: String::new(),
+            values: Vec::new(),
+            envelope: Vec::new(),
+        };
+        Ok(SealedDelivery::seal(
+            recipient,
+            &rocky_credentials::encode(&contents)?,
+        )?)
+    }
     pub fn open(delivery: &SealedDelivery, node: &PrivateKey) -> Result<Self, Failure> {
         let contents: Self = rocky_credentials::decode_bounded(
             &delivery.open(node)?,
@@ -84,11 +99,16 @@ impl Contents {
 #[serde(deny_unknown_fields)]
 pub struct Pending {
     pub recipient: rocky_credentials::PeerId,
-    pub address: String,
-    pub epoch: KeyEpoch,
+    pub carries: Carries,
     pub delivery: Option<String>,
     pub targets: Vec<rocky_credentials::PeerId>,
     pub mailboxes: Vec<rocky_credentials::PeerId>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Carries {
+    Secret { address: String, epoch: KeyEpoch },
+    Rights,
 }
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,13 +151,37 @@ impl Settings {
         delivery: &SealedDelivery,
         again: bool,
     ) -> Result<(), Failure> {
+        let carries = Carries::Secret {
+            address: record_key(&record.address),
+            epoch,
+        };
+        self.enqueue(recipient, carries, delivery, again)
+    }
+    pub(crate) fn queue_rights_notices(
+        &mut self,
+        vault: &crate::secrets::Vault,
+        nodes: &[PublicKey],
+    ) -> Result<(), Failure> {
+        let own = Self::node_key(vault)?.public_key();
+        for node in nodes.iter().filter(|node| **node != own) {
+            self.enqueue(*node, Carries::Rights, &Contents::rights(*node)?, true)?;
+        }
+        Ok(())
+    }
+    fn enqueue(
+        &mut self,
+        recipient: PublicKey,
+        carries: Carries,
+        delivery: &SealedDelivery,
+        again: bool,
+    ) -> Result<(), Failure> {
         let reference = rocky_credentials::PeerId::of(recipient);
         self.delivery_nodes.insert(reference, recipient);
         let recipient = reference;
-        let address = record_key(&record.address);
-        let held = self.deliveries.iter().find(|(_, pending)| {
-            pending.recipient == recipient && pending.address == address && pending.epoch == epoch
-        });
+        let held = self
+            .deliveries
+            .iter()
+            .find(|(_, pending)| pending.recipient == recipient && pending.carries == carries);
         match held {
             Some((_, pending)) if pending.delivery.is_some() || !again => return Ok(()),
             Some((digest, _)) => {
@@ -159,8 +203,7 @@ impl Settings {
             digest_key(&delivery.digest()?),
             Pending {
                 recipient,
-                address,
-                epoch,
+                carries,
                 delivery: Some(encode(delivery)?),
                 targets: Vec::new(),
                 mailboxes: Vec::new(),
@@ -180,10 +223,13 @@ impl Settings {
     }
     fn queued(&self, recipient: PublicKey, record: &GroupRecord, epoch: KeyEpoch) -> bool {
         let recipient = rocky_credentials::PeerId::of(recipient);
-        let address = record_key(&record.address);
-        self.deliveries.values().any(|pending| {
-            pending.recipient == recipient && pending.address == address && pending.epoch == epoch
-        })
+        let carries = Carries::Secret {
+            address: record_key(&record.address),
+            epoch,
+        };
+        self.deliveries
+            .values()
+            .any(|pending| pending.recipient == recipient && pending.carries == carries)
     }
     pub(crate) fn queue_group(
         &mut self,
@@ -298,7 +344,7 @@ impl Settings {
     pub(crate) fn check_deliveries(&self) -> Result<(), Failure> {
         if self.deliveries.len() > MAX_OUTBOX
             || self.deliveries.values().any(|pending| {
-                !pending.epoch.valid()
+                matches!(&pending.carries, Carries::Secret { epoch, .. } if !epoch.valid())
                     || pending.mailboxes.len() > MAX_MAILBOXES
                     || pending.targets.len() > MAX_MAILBOXES
             })

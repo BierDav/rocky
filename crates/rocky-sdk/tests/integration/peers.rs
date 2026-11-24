@@ -66,7 +66,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .any(|attempt| attempt["outcome"] == "completed"),
         "the network reports each peer on its own"
     );
-    let creator = snap::ok(c.database.info()).await;
+    let creator = snap::ok(snap::device(&c.database)).await;
     let creators: Vec<Value> = snap::ok(async {
         let network = c.database.status().await?.network;
         Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
@@ -211,7 +211,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     );
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
-        snap::ok(b.database.info()).await["revocations"]["statements"],
+        snap::ok(snap::device(&b.database)).await["revocations"]["statements"],
         1,
         "the other member learns the revocation from the creator"
     );
@@ -242,7 +242,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     a.add(1, "Milk").await;
     b.sync().await.map_err(|error| error.to_string())?;
     let identity = async |device: &Device| {
-        let info = snap::ok(device.database.info()).await;
+        let info = snap::ok(snap::device(&device.database)).await;
         (info["node"].clone(), info["principal"].clone())
     };
     let (before_a, before_b) = (identity(a).await, identity(b).await);
@@ -404,8 +404,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 44);
-    for version in (0..44).chain([45, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 45);
+    for version in (0..45).chain([46, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

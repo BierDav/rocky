@@ -122,6 +122,9 @@ pub enum ActivityKind {
     RoutineSealFailed {
         error: String,
     },
+    RightsChangeFailed {
+        error: String,
+    },
     LocalRecoveryFailed {
         error: String,
     },

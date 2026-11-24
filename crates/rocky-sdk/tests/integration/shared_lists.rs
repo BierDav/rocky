@@ -827,7 +827,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     )?;
     a.database
         .make_admin(
-            rocky_sdk::PersonId::new(b.database.info().await?.principal),
+            rocky_sdk::PersonId::new(b.database.me().await?.person.key()),
             owner,
         )
         .await?;

@@ -238,7 +238,7 @@ mod trusted {
         })
     }
     async fn identity(device: &Device) -> String {
-        snap::ok(device.database.info()).await["principal"]
+        snap::ok(snap::device(&device.database)).await["principal"]
             .as_str()
             .unwrap_or_default()
             .to_owned()
@@ -280,7 +280,7 @@ mod trusted {
         );
         snap::ok(owner.database.revoke_admin(
             rocky_sdk::PersonId::new(snap::public_key(&snap::text(&granted))),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             (owner.root()).clone(),
         ))
         .await;
@@ -438,11 +438,11 @@ mod races {
         let titles = ["before", "sealed by the creator"];
         settle_on(&house.all(), &sealed, &titles).await;
 
-        let creator = snap::ok(owner.database.info()).await["principal"].clone();
+        let creator = snap::ok(snap::device(&owner.database)).await["principal"].clone();
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
         snap::ok(t0.database.revoke_admin(
             rocky_sdk::PersonId::new(snap::public_key(&(creator))),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             (owner.root()).clone(),
         ))
         .await;
@@ -489,10 +489,10 @@ mod races {
         let late = snap::ok(owner.database.seal()).await["tip"].clone();
         settle(&[owner, t1, member]).await;
         assert!(!seal_by_id(&snap::ok(t1.database.inspect_tips()).await, &late).is_null());
-        let creator = snap::ok(owner.database.info()).await["principal"].clone();
+        let creator = snap::ok(snap::device(&owner.database)).await["principal"].clone();
         snap::ok(t0.database.revoke_admin(
             rocky_sdk::PersonId::new(snap::public_key(&(creator))),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             (owner.root()).clone(),
         ))
         .await;

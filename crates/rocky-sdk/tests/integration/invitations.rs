@@ -89,9 +89,9 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
         .ok_or("a joiner without an identity gets one")?;
     let member = Device::new(opened.database)?
         .with_identity(Arc::new(IdentityKey::from_secret(minted.secret())));
-    let info = member.database.info().await?;
-    assert_eq!(info.principal, minted.public_key());
-    assert_eq!(info.access, writer());
+    let me = member.database.me().await?;
+    assert_eq!(me.person.key(), minted.public_key());
+    assert_eq!(me.access, writer());
     common::introduce(&owner, &member).await;
     member.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(member.titles().await, ["Milk"]);
@@ -186,7 +186,7 @@ async fn an_identity_code_carries_no_secret_and_admits_only_that_identity() -> R
         opened.identity.is_none(),
         "a configured identity is never returned"
     );
-    assert_eq!(opened.database.info().await?.principal, identity);
+    assert_eq!(opened.database.me().await?.person.key(), identity);
     assert_eq!(
         owner.database.invitations().await?[0].redeemed_by,
         Some(PersonId::new(identity))
@@ -236,7 +236,7 @@ async fn a_cancelled_invitation_admits_no_one_and_leaves_no_record() -> Result<(
     let again = owner.database.invite(Invite::new(writer())).await?;
     let opened = join(&root.path().join("member"), &hub, None, &again.code).await?;
     assert_eq!(
-        Some(opened.database.info().await?.principal),
+        Some(opened.database.me().await?.person.key()),
         opened.identity.as_ref().map(IdentityKey::public_key),
         "the refused join resumes in the same directory with a newer invitation"
     );
@@ -388,7 +388,7 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
     )?
     .with_identity(person.clone());
     assert_eq!(
-        laptop.database.info().await?.principal,
+        laptop.database.me().await?.person.key(),
         person.public_key()?,
         "the phrase links a second device of the same person"
     );
@@ -399,12 +399,12 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
     }
     assert_eq!(laptop.titles().await, ["Milk"]);
 
-    let lost = phone.database.info().await?.node;
+    let lost = phone.database.me().await?.device.key();
     owner.database.unlink(DeviceId::new(lost)).await?;
     assert!(
         laptop
             .database
-            .unlink(DeviceId::new(owner.database.info().await?.node))
+            .unlink(DeviceId::new(owner.database.me().await?.device.key()))
             .await
             .is_err(),
         "a member unlinks no other person's device"
@@ -426,6 +426,93 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
     );
     phone.close().await;
     laptop.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+async fn writes_an_item(device: &Device, title: &str) -> Result<(), Failure> {
+    let mut tx = device.database.transaction().await?;
+    let id = tx.next_id("items", Vec::new()).await?;
+    tx.execute(
+        "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+        vec![
+            rocky_sdk::SqlValue::Text(title.to_owned()),
+            id.sql(),
+            rocky_sdk::SqlValue::Text(title.to_owned()),
+        ],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = issuer(&root.path().join("issuer"), &hub).await?;
+    owner.add(1, "Milk").await;
+    let invitation = owner
+        .database
+        .invite(Invite::new(rocky_sdk::Access::Read))
+        .await?;
+    let opened = join(&root.path().join("phone"), &hub, None, &invitation.code).await?;
+    let phrase = opened.identity.ok_or("minted identity")?.phrase();
+    let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&phrase)?);
+    let phone = Device::new(opened.database)?.with_identity(person.clone());
+    common::introduce(&owner, &phone).await;
+    phone.sync().await.map_err(|error| error.to_string())?;
+    let laptop = Device::new(
+        common::link(
+            joining(&root.path().join("laptop"), &hub, None)?,
+            person.clone(),
+            &phone.contact().await,
+            &phone.database,
+        )
+        .await?,
+    )?
+    .with_identity(person.clone());
+    common::introduce(&owner, &laptop).await;
+    common::introduce(&phone, &laptop).await;
+    for device in [&laptop, &phone, &owner, &laptop] {
+        device.sync().await.map_err(|error| error.to_string())?;
+    }
+    let devices = [&phone, &laptop];
+    for device in devices {
+        assert_eq!(device.database.me().await?.access, rocky_sdk::Access::Read);
+        assert!(writes_an_item(device, "refused").await.is_err());
+    }
+    let id = phone.database.me().await?.person;
+
+    owner
+        .database
+        .set_access(id, rocky_sdk::Access::Full)
+        .await?;
+    for (device, title) in devices
+        .into_iter()
+        .zip(["from the phone", "from the laptop"])
+    {
+        device.sync().await.map_err(|error| error.to_string())?;
+        assert_eq!(
+            device.database.me().await?.access,
+            rocky_sdk::Access::Full,
+            "one sync with the issuer brings the wider access"
+        );
+        writes_an_item(device, title).await?;
+    }
+
+    owner.database.make_admin(id, owner.root()).await?;
+    for device in devices {
+        assert!(!device.database.me().await?.admin);
+        device.sync().await.map_err(|error| error.to_string())?;
+        assert!(
+            device.database.me().await?.admin,
+            "one sync with the issuer makes the device an admin's"
+        );
+    }
+    assert!(laptop.database.people().await.is_ok());
+    laptop.close().await;
+    phone.close().await;
     owner.close().await;
     Ok(())
 }

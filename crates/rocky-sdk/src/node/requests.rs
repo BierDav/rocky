@@ -61,8 +61,8 @@ impl Node {
             Request::SetSync(mode, reply) => {
                 let _ = reply.send(self.set_sync(mode).await);
             }
-            Request::Logout(purge, reply) => {
-                let _ = reply.send(self.logout(purge).await);
+            Request::Logout(logout, reply) => {
+                let _ = reply.send(self.logout(logout).await);
             }
             #[cfg(any(test, feature = "test-support"))]
             Request::Tips(probe) => self.probe_tips(probe).await,
@@ -87,8 +87,8 @@ impl Node {
             Request::MakeAdmin(person, root, reply) => {
                 let _ = reply.send(self.make_admin(person, &root).await);
             }
-            Request::RevokeAdmin(person, revocation, root, reply) => {
-                let _ = reply.send(self.revoke_admin(person, revocation, &root).await);
+            Request::RevokeAdmin(person, removal, root, reply) => {
+                let _ = reply.send(self.revoke_admin(person, removal, &root).await);
             }
             Request::Invite(invite, reply) => {
                 let _ = reply.send(self.invite(&invite).await);
@@ -118,20 +118,8 @@ impl Node {
             Request::RemovePeer(node, reply) => {
                 let _ = reply.send(self.remove_peer(node).await);
             }
-            Request::DeviceRevocationReceipt(node, reply) => {
-                let _ = reply.send(Ok(self
-                    .settings
-                    .lock()
-                    .await
-                    .device_revocations
-                    .get(&node)
-                    .cloned()));
-            }
             Request::Unlink(node, reply) => {
                 let _ = reply.send(self.unlink(node).await.map(drop));
-            }
-            Request::Info(reply) => {
-                let _ = reply.send(self.device_info().await);
             }
             Request::NextPartition(table, reply) => {
                 let _ = reply.send(self.next_partition(&table).await);

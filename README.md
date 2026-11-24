@@ -85,19 +85,27 @@ belongs to, its access and what it may do per table. Admins list people with
 devices), change access with `set_access` and end a person with
 `remove(person, Removal::Departed | Removal::Compromised)`. Narrowing access
 or taking a partition back revokes the person's current credentials and
-rotates the keys they held; widening reaches the person at their next
-renewal. A refused call says why with an `AccessError` (`AdminRequired`,
+rotates the keys of everything they could read before; the issuer records
+that revocation before it changes the access, so a crash in between still
+revokes once on restart. Widening and `make_admin` leave a rights notice in
+the mailbox of each of the person's devices, so each renews into the wider
+rights at its next sync with an admin device. A
+refused call says why with an `AccessError` (`AdminRequired`,
 `OwnerRequired`, `UnknownPerson`, `TargetIsAdmin`, `PartialGroup`,
 `TooManyPartitions`, `Removed`, ...). The owner makes a member an admin with
-`make_admin(person, root)` and ends one with `revoke_admin(person,
-AdminRevocation::Remove(removal), root)`; both need the root key.
+`make_admin(person, root)` and ends one with `revoke_admin(person, removal,
+root)`; both need the root key. An admin who should stay a member is invited
+again. `logout(Logout::KeepData | Logout::PurgeOnClose)` ends this device's
+session and keeps or deletes its directory at close.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that
-lose rights. Once the version is published, the issuer revokes the
-capabilities of everyone holding a narrowed role and rotates their keys. A
-version that drops a role someone still holds fails with `RoleInUse`;
-widened roles reach their holders at the next renewal.
+lose rights. The issuer records who holds a narrowed role before it stages
+the version; once the version is published it revokes their capabilities in
+one revocation and rotates the keys of what they could read, exactly once even
+across a crash and restart. A version that drops a role someone still holds
+fails with `RoleInUse`; widened roles reach their holders at their next sync
+with an admin device.
 Copying a closed database folder is a valid backup; a restored copy that
 peers have moved past reads and syncs but refuses to write
 (`StoreSuperseded`), and rejoins as a new device.

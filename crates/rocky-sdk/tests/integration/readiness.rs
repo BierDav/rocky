@@ -42,7 +42,7 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     )
     .await?;
     let database = &member.database;
-    database.logout(false).await?;
+    database.logout(rocky_sdk::Logout::KeepData).await?;
     let logged_out = database.status().await?;
     assert!(logged_out.authority.logged_out);
     assert_eq!(logged_out.network.connected_peer_count, 0);
@@ -55,7 +55,12 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     ] {
         assert!(database.set_sync(mode).await.is_err(), "{mode:?}");
     }
-    assert!(database.logout(true).await.is_err());
+    assert!(
+        database
+            .logout(rocky_sdk::Logout::PurgeOnClose)
+            .await
+            .is_err()
+    );
     member.close().await;
     issuer.close().await;
     Ok(())

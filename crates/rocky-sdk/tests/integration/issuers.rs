@@ -74,8 +74,8 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     }
     Err("the rows never became readable".into())
 }
-async fn device_info(device: &Device) -> rocky_sdk::DeviceInfo {
-    device.database.info().await.expect("device info")
+async fn device_info(device: &Device) -> rocky_sdk::AuthorityStatus {
+    device.database.status().await.expect("status").authority
 }
 async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
     device.close().await;
@@ -113,7 +113,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             .code,
     )
     .await?;
-    let principal = device_info(&b).await.principal.to_hex();
+    let principal = device_info(&b).await.principal;
     a.database
         .make_admin(
             rocky_sdk::PersonId::new(principal.parse()?),
@@ -205,15 +205,15 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     b.database
         .revoke_admin(
             rocky_sdk::PersonId::new(a_identity.parse()?),
-            rocky_sdk::AdminRevocation::Remove(match mode {
+            match mode {
                 RevocationMode::Lost => rocky_sdk::Removal::Departed,
                 RevocationMode::Compromised => rocky_sdk::Removal::Compromised,
-            }),
+            },
             root_key,
         )
         .await?;
     assert_eq!(
-        b.database.info().await?.revocations.statements,
+        b.database.status().await?.authority.revocations.statements,
         1,
         "with the root, a trusted node revokes the lost one"
     );
@@ -287,12 +287,13 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "a device the creator enrolled renews through the second issuer"
     );
     assert_eq!(
-        device_info(&b).await.expires,
+        device_info(&b).await.expires_at_epoch_seconds,
         u64::MAX,
         "a trusted grant never expires"
     );
     assert!(
-        before.expires <= after.expires && after.expires < u64::MAX,
+        before.expires_at_epoch_seconds <= after.expires_at_epoch_seconds
+            && after.expires_at_epoch_seconds < u64::MAX,
         "a device chain below a trusted grant keeps its own lifetime"
     );
     assert_issuers(root, "early", &[&b_node])?;
@@ -379,11 +380,11 @@ async fn a_credential_renews_through_the_second_issuer_once_the_first_is_gone()
             .code,
     )
     .await?;
-    let granted = device_info(&g).await.expires;
+    let granted = device_info(&g).await.expires_at_epoch_seconds;
     destroy(root, "a", a).await?;
 
     g.database.renew().await?;
-    let renewed = device_info(&g).await.expires;
+    let renewed = device_info(&g).await.expires_at_epoch_seconds;
     assert!(
         renewed >= granted,
         "the second issuer renews for the domain's lifetime: {granted} {renewed}"
@@ -413,7 +414,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
             .code,
     )
     .await?;
-    let t_identity = device_info(&t).await.principal.to_hex();
+    let t_identity = device_info(&t).await.principal;
     a.database
         .make_admin(
             rocky_sdk::PersonId::new(t_identity.parse()?),
@@ -455,7 +456,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     a.database
         .revoke_admin(
             rocky_sdk::PersonId::new(t_identity.parse()?),
-            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            rocky_sdk::Removal::Compromised,
             a.root_signer()?,
         )
         .await?;
@@ -504,7 +505,7 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
     let hub = Arc::new(Hub::default());
     let owner = create(directory.path(), &hub, "owner").await?;
     let member = join(directory.path(), &hub, "member", &owner.invite().await).await?;
-    let identity = member.database.info().await?.principal;
+    let identity = member.database.me().await?.person.key();
     owner
         .database
         .remove(

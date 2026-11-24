@@ -1,8 +1,8 @@
 use super::{Node, Root};
 use crate::{
-    AccessError, AdminRevocation, Device, DeviceId, Me, Partition, Person, PersonId, Removal,
-    TableRights, Timestamp,
-    enrollment::{Revoke, now},
+    AccessError, Device, DeviceId, Me, Partition, Person, PersonId, Removal, TableRights,
+    Timestamp,
+    enrollment::{Revoke, RightsChange, now},
     partitions::StoredPartition,
     registry::{Changes, MAX_PARTITIONS, Registry},
 };
@@ -27,6 +27,12 @@ fn includes_partitions(
                 && grant.rights.is_subset(&held.rights)
         })
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reach {
+    Wider,
+    Narrower,
 }
 
 fn seconds(time: u64) -> Timestamp {
@@ -215,13 +221,12 @@ impl Node {
             &crate::registry::Admitted { access, ..admitted },
             true,
         )?;
-        if widens {
-            self.commit(changes).await?;
-            self.activity
-                .record(crate::ActivityKind::RightsChanged { person });
-            return Ok(());
-        }
-        self.change_rights(identity, changes).await
+        let reach = if widens {
+            Reach::Wider
+        } else {
+            Reach::Narrower
+        };
+        self.change_rights(identity, changes, reach).await
     }
 
     pub(super) async fn grant_partition(
@@ -294,7 +299,7 @@ impl Node {
         }
         let mut changes = Changes::default();
         changes.ungrant(&identity, &stored)?;
-        self.change_rights(identity, changes).await
+        self.change_rights(identity, changes, Reach::Narrower).await
     }
 
     pub(super) fn role_holders(
@@ -317,32 +322,103 @@ impl Node {
             .collect()
     }
 
-    pub(super) async fn narrow(&self, people: &[PersonId]) -> Result<(), crate::Failure> {
-        for person in people {
-            self.revoke_with(Revoke::Rights(person.key()), &Root::default())
-                .await?;
-            self.activity
-                .record(crate::ActivityKind::RightsChanged { person: *person });
+    pub(super) async fn change_rights_after(
+        &self,
+        publication: Option<rocky_core::Commitment>,
+        version: u32,
+        people: &[PersonId],
+        reach: Reach,
+    ) -> Result<(), crate::Failure> {
+        if people.is_empty() {
+            return Ok(());
         }
-        if !people.is_empty() {
+        self.complete_rights_change().await?;
+        let people = people.iter().map(PersonId::key).collect();
+        let exposed = match reach {
+            Reach::Wider => None,
+            Reach::Narrower => {
+                let settings = self.settings_snapshot().await;
+                Some(settings.exposure(&self.registry(&settings).await?, &people)?)
+            }
+        };
+        let change = RightsChange {
+            publication,
+            version,
+            people,
+            exposed,
+        };
+        self.configure(|settings| settings.change_rights_after(change))
+            .await
+    }
+
+    pub(super) async fn complete_rights_change(&self) -> Result<(), crate::Failure> {
+        let settings = self.settings_snapshot().await;
+        let Some(change) = settings
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.rights_change.clone())
+        else {
+            return Ok(());
+        };
+        let published = match change.publication {
+            Some(publication) => self.replica.schema_stage_recorded(publication).await?,
+            None => true,
+        };
+        if published && settings.schema.version < change.version {
+            return Ok(());
+        }
+        let registry = self.registry(&settings).await?;
+        let membership = self.membership().await?;
+        let begun = self
+            .rotate_revoked(|draft| {
+                draft.begin_rights_change(
+                    &self.vault,
+                    change.publication,
+                    published,
+                    (&registry, &membership),
+                )
+            })
+            .await?;
+        if begun || (published && change.exposed.is_none()) {
+            for person in &change.people {
+                self.activity.record(crate::ActivityKind::RightsChanged {
+                    person: PersonId::new(*person),
+                });
+            }
             self.wake_sync();
         }
         Ok(())
+    }
+
+    pub(super) fn check_fault(
+        &self,
+        stage: crate::database::fault::Stage,
+    ) -> Result<(), crate::Failure> {
+        crate::database::fault::check(self.path.parent().unwrap_or(&self.path), stage)
+    }
+
+    pub(super) async fn settle_rights_change(&self) {
+        if let Err(error) = self.complete_rights_change().await {
+            self.activity
+                .record(crate::ActivityKind::RightsChangeFailed {
+                    error: error.to_string(),
+                });
+        }
     }
 
     async fn change_rights(
         &self,
         identity: PublicKey,
         changes: Changes,
+        reach: Reach,
     ) -> Result<(), crate::Failure> {
-        self.commit(changes).await?;
-        self.revoke_with(Revoke::Rights(identity), &Root::default())
+        let version = self.settings_snapshot().await.schema.version;
+        self.change_rights_after(None, version, &[PersonId::new(identity)], reach)
             .await?;
-        self.activity.record(crate::ActivityKind::RightsChanged {
-            person: PersonId::new(identity),
-        });
-        self.wake_sync();
-        Ok(())
+        self.check_fault(crate::database::fault::Stage::RightsChangeRecorded)?;
+        self.commit(changes).await?;
+        self.check_fault(crate::database::fault::Stage::RightsChangeCommitted)?;
+        self.complete_rights_change().await
     }
 
     pub(super) async fn remove(
@@ -385,18 +461,19 @@ impl Node {
         if root.signer().is_none() {
             return Err(Box::new(AccessError::OwnerRequired));
         }
-        let identity = person.key();
-        self.trust_identity(identity, root).await?;
-        self.activity
-            .record(crate::ActivityKind::RightsChanged { person });
-        self.wake_sync();
-        Ok(())
+        let version = self.settings_snapshot().await.schema.version;
+        self.change_rights_after(None, version, &[person], Reach::Wider)
+            .await?;
+        self.check_fault(crate::database::fault::Stage::RightsChangeRecorded)?;
+        self.trust_identity(person.key(), root).await?;
+        self.check_fault(crate::database::fault::Stage::RightsChangeCommitted)?;
+        self.complete_rights_change().await
     }
 
     pub(super) async fn revoke_admin(
         &self,
         person: PersonId,
-        revocation: AdminRevocation,
+        removal: Removal,
         root: &Root,
     ) -> Result<(), crate::Failure> {
         let (_, registry) = self.administered().await?;
@@ -406,10 +483,7 @@ impl Node {
         if !registry.trusted.contains_key(&person.key()) {
             return Err(Box::new(AccessError::NotAdmin));
         }
-        match revocation {
-            AdminRevocation::Remove(removal) => self.remove(person, removal, root).await,
-            AdminRevocation::KeepAsFull => Err(Box::new(AccessError::KeepAsFullUnsupported)),
-        }
+        self.remove(person, removal, root).await
     }
 
     pub(super) async fn create_named_partition(

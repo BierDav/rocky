@@ -434,8 +434,14 @@ impl Node {
             let recipients = settings
                 .deliveries
                 .values()
-                .filter(|pending| pending.address == address)
-                .map(|pending| crate::PartitionDelivery {
+                .filter_map(|pending| match &pending.carries {
+                    crate::delivery::Carries::Secret {
+                        address: carried,
+                        epoch,
+                    } if *carried == address => Some((pending, *epoch)),
+                    _ => None,
+                })
+                .map(|(pending, epoch)| crate::PartitionDelivery {
                     node: settings
                         .delivery_nodes
                         .values()
@@ -446,7 +452,7 @@ impl Node {
                         .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
                         .copied(),
                     reference: pending.recipient,
-                    epoch: pending.epoch,
+                    epoch,
                     state: pending.state(),
                 })
                 .collect();

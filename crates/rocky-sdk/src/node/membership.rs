@@ -42,7 +42,7 @@ impl Node {
     pub(super) async fn unlink_own(
         &self,
         target: rocky_credentials::PeerId,
-    ) -> Result<crate::DeviceRevocationReceipt, Failure> {
+    ) -> Result<crate::membership::DeviceRevocationReceipt, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
@@ -131,16 +131,15 @@ impl Node {
             .chain([target])
             .filter(|peer| *peer != own_peer)
             .collect();
-        draft
-            .device_revocations
-            .entry(target)
-            .or_insert(crate::DeviceRevocationReceipt {
+        draft.device_revocations.entry(target).or_insert(
+            crate::membership::DeviceRevocationReceipt {
                 node: target,
                 statement: id,
                 local: false,
                 delivered: Default::default(),
                 pending: peers,
-            });
+            },
+        );
         if !own {
             draft.begin_exposure_rotation(&registry)?;
         }

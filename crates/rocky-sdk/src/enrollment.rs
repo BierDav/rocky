@@ -31,7 +31,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 44;
+pub const VERSION: u32 = 45;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -255,7 +255,8 @@ pub struct Settings {
     pub groups: BTreeMap<String, GroupRecord>,
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     pub authority: Option<Issuing>,
-    pub device_revocations: BTreeMap<rocky_credentials::PeerId, crate::DeviceRevocationReceipt>,
+    pub device_revocations:
+        BTreeMap<rocky_credentials::PeerId, crate::membership::DeviceRevocationReceipt>,
     #[serde(skip)]
     pub issuers: Vec<PublicKey>,
     #[serde(skip)]
@@ -276,6 +277,15 @@ pub struct Issuing {
     pub stale_after: Option<u64>,
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
     pub promoted: bool,
+    pub rights_change: Option<RightsChange>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RightsChange {
+    pub publication: Option<Commitment>,
+    pub version: u32,
+    pub people: BTreeSet<PublicKey>,
+    pub exposed: Option<Exposure>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,12 +298,24 @@ pub struct Rotation {
     pub keys: BTreeMap<String, RotationEpoch>,
     pub groups: BTreeMap<String, RotationEpoch>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Revoke {
     Identity(PublicKey),
     TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
-    Node { owner: PublicKey, node: PublicKey },
-    Rights(PublicKey),
+    Node {
+        owner: PublicKey,
+        node: PublicKey,
+    },
+    Rights {
+        people: BTreeSet<PublicKey>,
+        exposed: Exposure,
+    },
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exposure {
+    pub keys: BTreeSet<String>,
+    pub groups: BTreeSet<String>,
 }
 pub(crate) fn changes_rights_only(statement: &Revocation) -> bool {
     statement.identities.is_empty()
@@ -2531,6 +2553,107 @@ impl Settings {
     ) -> Result<(), Failure> {
         self.begin_revocation_cut(target, (registry, membership), root, Vec::new())
     }
+    fn reads_group(domain: &Domain, record: &Revoking, partition: &GroupPartition) -> bool {
+        record.selects(partition)
+            || partition
+                .members
+                .iter()
+                .any(|member| record.reads(domain, &member.table))
+    }
+    pub(crate) fn exposure(
+        &self,
+        registry: &Registry,
+        people: &BTreeSet<PublicKey>,
+    ) -> Result<Exposure, Failure> {
+        let domain = self.domain()?;
+        let records: Vec<Revoking> = people
+            .iter()
+            .filter_map(|person| Revoking::of(registry, &domain, person))
+            .collect();
+        Ok(Exposure {
+            keys: self
+                .keys
+                .keys()
+                .filter(|name| records.iter().any(|record| record.reads(&domain, name)))
+                .cloned()
+                .collect(),
+            groups: self
+                .partitions(&domain)?
+                .into_iter()
+                .filter(|partition| {
+                    records
+                        .iter()
+                        .any(|record| Self::reads_group(&domain, record, partition))
+                })
+                .map(|partition| crate::groups::record_key(&partition.record.address))
+                .collect(),
+        })
+    }
+    pub(crate) fn change_rights_after(&mut self, change: RightsChange) -> Result<(), Failure> {
+        let issuing = self.issuing("changes rights")?;
+        if issuing.rights_change.is_some() {
+            return Err("an earlier rights change is unfinished".into());
+        }
+        issuing.rights_change = Some(change);
+        Ok(())
+    }
+    pub(crate) fn begin_rights_change(
+        &mut self,
+        vault: &Vault,
+        publication: Option<Commitment>,
+        published: bool,
+        (registry, membership): (&Registry, &Membership),
+    ) -> Result<bool, Failure> {
+        let issuing = self.issuing("changes rights")?;
+        if issuing
+            .rights_change
+            .as_ref()
+            .is_none_or(|change| change.publication != publication)
+        {
+            return Ok(false);
+        }
+        let Some(change) = issuing.rights_change.take() else {
+            return Ok(false);
+        };
+        if !published {
+            return Ok(false);
+        }
+        let people = change
+            .people
+            .into_iter()
+            .filter(|person| !self.revoked_identity(person, registry));
+        let Some(exposed) = change.exposed else {
+            let nodes: Vec<PublicKey> = people
+                .flat_map(|person| {
+                    membership
+                        .nodes(&person)
+                        .map(|linked| linked.node)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|node| !self.tombstoned(node))
+                .collect();
+            self.queue_rights_notices(vault, &nodes)?;
+            return Ok(false);
+        };
+        let people: BTreeSet<PublicKey> = people
+            .filter(|person| {
+                !registry.trusted.contains_key(person)
+                    && registry
+                        .get(person)
+                        .is_some_and(|record| !record.capabilities.is_empty())
+            })
+            .collect();
+        if people.is_empty() {
+            return Ok(false);
+        }
+        self.begin_revocation_cut(
+            Revoke::Rights { people, exposed },
+            (registry, membership),
+            None,
+            Vec::new(),
+        )?;
+        Ok(true)
+    }
     pub fn begin_revocation_cut(
         &mut self,
         target: Revoke,
@@ -2539,20 +2662,26 @@ impl Settings {
         cut: Vec<rocky_credentials::Cut>,
     ) -> Result<(), Failure> {
         let own = self.identity;
-        let trusted = match target {
+        let trusted = match &target {
             Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
-                registry.trusted.contains_key(&identity)
+                registry.trusted.contains_key(identity)
             }
             Revoke::Node { owner, .. } => {
-                if owner == own || owner == self.publisher || registry.trusted.contains_key(&owner)
+                if *owner == own || *owner == self.publisher || registry.trusted.contains_key(owner)
                 {
                     return Err("an admin's own devices are unlinked with its identity".into());
                 }
                 false
             }
-            Revoke::Rights(owner) => {
-                if owner == own || owner == self.publisher || registry.trusted.contains_key(&owner)
-                {
+            Revoke::Rights { people: owners, .. } => {
+                if owners.is_empty() {
+                    return Err("a rights change names no person".into());
+                }
+                if owners.iter().any(|owner| {
+                    *owner == own
+                        || *owner == self.publisher
+                        || registry.trusted.contains_key(owner)
+                }) {
                     return Err("an admin's rights change only through the root".into());
                 }
                 false
@@ -2567,16 +2696,16 @@ impl Settings {
         } else {
             None
         };
-        let mode = match target {
-            Revoke::TrustedIdentity(_, mode) if trusted => mode,
+        let mode = match &target {
+            Revoke::TrustedIdentity(_, mode) if trusted => *mode,
             Revoke::TrustedIdentity(_, _) => return Err("identity is not trusted".into()),
             Revoke::Identity(_) if trusted => {
                 return Err("revoking a trusted identity requires a revocation mode".into());
             }
             _ => rocky_credentials::RevocationMode::Lost,
         };
-        let identities: Vec<PublicKey> = match target {
-            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
+        let identities: Vec<PublicKey> = match &target {
+            &(Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _)) => {
                 if identity == own {
                     return Err("an issuer cannot revoke its own identity".into());
                 }
@@ -2597,21 +2726,24 @@ impl Settings {
                 identities.into_iter().collect()
             }
             Revoke::Node { node, .. } => {
-                if self.tombstoned(&node) {
+                if self.tombstoned(node) {
                     return Err("the device is already unlinked".into());
                 }
                 Vec::new()
             }
-            Revoke::Rights(owner) => {
-                if self.revoked_identity(&owner, registry) {
+            Revoke::Rights { people: owners, .. } => {
+                if owners
+                    .iter()
+                    .any(|owner| self.revoked_identity(owner, registry))
+                {
                     return Err("the person was removed".into());
                 }
                 Vec::new()
             }
         };
-        let nodes: Vec<PublicKey> = match target {
-            Revoke::Node { node, .. } => vec![node],
-            Revoke::Rights(_) => Vec::new(),
+        let nodes: Vec<PublicKey> = match &target {
+            Revoke::Node { node, .. } => vec![*node],
+            Revoke::Rights { .. } => Vec::new(),
             _ => identities
                 .iter()
                 .flat_map(|identity| membership.nodes(identity))
@@ -2626,20 +2758,22 @@ impl Settings {
             return Err(Box::new(RevocationSetFull));
         }
         let domain = self.domain()?;
-        let records: Vec<Revoking> = match target {
-            Revoke::Node { owner, .. } | Revoke::Rights(owner) => {
-                Revoking::of(registry, &domain, &owner)
-                    .into_iter()
-                    .collect()
+        let records: Vec<Revoking> = match &target {
+            Revoke::Node { owner, .. } => {
+                Revoking::of(registry, &domain, owner).into_iter().collect()
             }
+            Revoke::Rights { people: owners, .. } => owners
+                .iter()
+                .filter_map(|owner| Revoking::of(registry, &domain, owner))
+                .collect(),
             _ => identities
                 .iter()
                 .filter_map(|identity| Revoking::of(registry, &domain, identity))
                 .collect(),
         };
         let issuer = if root.is_some() { self.publisher } else { own };
-        let statement = match target {
-            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => Revocation {
+        let statement = match &target {
+            &(Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _)) => Revocation {
                 app: domain.manifest().app,
                 issuer,
                 time,
@@ -2663,33 +2797,40 @@ impl Settings {
                 issuer,
                 time,
                 mode,
-                nodes: [rocky_credentials::PeerId::of(node)].into(),
+                nodes: [rocky_credentials::PeerId::of(*node)].into(),
                 identities: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
                 cut: Vec::new(),
             },
-            Revoke::Rights(owner) => Revocation {
+            Revoke::Rights { people: owners, .. } => Revocation {
                 app: domain.manifest().app,
                 issuer,
                 time,
                 mode,
                 nodes: BTreeSet::new(),
                 identities: BTreeSet::new(),
-                capabilities: registry
-                    .get(&owner)
-                    .into_iter()
+                capabilities: owners
+                    .iter()
+                    .filter_map(|owner| registry.get(owner))
                     .flat_map(|record| record.capabilities.iter().map(|capability| capability.id))
                     .collect(),
                 cut: Vec::new(),
             },
         };
-        if statement.capabilities.is_empty() && matches!(target, Revoke::Rights(_)) {
+        let exposed = match &target {
+            Revoke::Rights { exposed, .. } => exposed.clone(),
+            _ => Exposure::default(),
+        };
+        if statement.capabilities.is_empty() && matches!(target, Revoke::Rights { .. }) {
             return Err("the person holds no recorded capability".into());
         }
         let bounded_by_records = !records.is_empty();
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
-            if bounded_by_records && !records.iter().any(|record| record.reads(&domain, name)) {
+            if bounded_by_records
+                && !exposed.keys.contains(name)
+                && !records.iter().any(|record| record.reads(&domain, name))
+            {
                 continue;
             }
             if epochs.len() >= MAX_EPOCHS {
@@ -2700,7 +2841,7 @@ impl Settings {
                 RotationEpoch::after(epochs.iter().max().copied()).ok_or("key epoch overflow")?,
             );
         }
-        let groups = self.next_group_epochs(&domain, &records)?;
+        let groups = self.next_group_epochs(&domain, &records, &exposed)?;
         let links = match root {
             Some(_) => CredentialChain::default(),
             None => self.issuer_links(),
@@ -2735,18 +2876,18 @@ impl Settings {
         &self,
         domain: &Domain,
         records: &[Revoking],
+        exposed: &Exposure,
     ) -> Result<BTreeMap<String, RotationEpoch>, Failure> {
         let bounded_by_records = !records.is_empty();
         let mut groups = BTreeMap::new();
         for partition in self.partitions(domain)? {
             let read = !bounded_by_records
-                || records.iter().any(|record| {
-                    record.selects(&partition)
-                        || partition
-                            .members
-                            .iter()
-                            .any(|member| record.reads(domain, &member.table))
-                });
+                || exposed
+                    .groups
+                    .contains(&crate::groups::record_key(&partition.record.address))
+                || records
+                    .iter()
+                    .any(|record| Self::reads_group(domain, record, &partition));
             if let (true, Some(held)) = (read, partition.record.current()) {
                 let target =
                     RotationEpoch::after(Some(held)).ok_or("group secret epoch overflow")?;

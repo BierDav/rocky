@@ -214,7 +214,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
     assert_eq!(rows[0].get::<String>("body")?, "from issuer");
     let contact = member.contact().await?.uri;
     let peer = issuer.add_peer(&contact).await?;
-    assert_eq!(peer, member.info().await?.node);
+    assert_eq!(peer, member.me().await?.device.key());
     member.close().await?;
     let reopened = member_configuration.open().await?;
     assert_eq!(

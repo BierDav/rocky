@@ -265,7 +265,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     );
     snap::ok(async {
         member.database.renew().await?;
-        member.database.info().await
+        snap::device(&member.database).await
     })
     .await;
     let renewed = common::authority_json(&member_path, "identity")?;
@@ -556,7 +556,7 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     c.add_peer(&b.contact().await).await.expect("c knows b");
     let _ = c.sync().await;
     assert_eq!(
-        c.database.info().await?.revocations.statements,
+        c.database.status().await?.authority.revocations.statements,
         1,
         "c learns the revocation from b before it meets its inviter"
     );
@@ -619,7 +619,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     a.seal_and_compact().await;
     snap::ok(async {
         b.database.renew().await?;
-        b.database.info().await
+        snap::device(&b.database).await
     })
     .await;
     assert_eq!(
@@ -852,7 +852,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     .await;
     snap::ok(async {
         member.database.renew().await?;
-        member.database.info().await
+        snap::device(&member.database).await
     })
     .await;
     retry_after_restoring_authority(&member).await;

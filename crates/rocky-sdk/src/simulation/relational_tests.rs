@@ -682,4 +682,45 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_seal_leaves_out_a_revoked_members_position_past_an_unsent_one() -> Result<(), Failure>
+    {
+        holds_at(
+            20138,
+            soak_at(20138, Wall::Moving),
+            vec![
+                Seal(0),
+                Compact(0),
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l0".into(),
+                        code: 3,
+                        name: 1,
+                        points: 3,
+                    },
+                ),
+                Invite(0, 2),
+                Change(
+                    1,
+                    Change::DropCard {
+                        list: "l1".into(),
+                        card: 4,
+                    },
+                ),
+                Seal(0),
+                Change(
+                    1,
+                    Change::Raise {
+                        list: "l1".into(),
+                        card: 3,
+                        by: 0,
+                    },
+                ),
+                Revoke(2),
+            ],
+        )
+        .await
+    }
 }

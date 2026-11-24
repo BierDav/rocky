@@ -144,7 +144,20 @@ impl Node {
         self.follow_schema().await?;
         self.run_staged_migration().await?;
         self.check_fault(crate::database::fault::Stage::RightsChangeCommitted)?;
-        self.complete_rights_change().await
+        self.complete_rights_change().await?;
+        self.base_removal().await
+    }
+
+    pub(super) async fn base_removal(&self) -> Result<(), Failure> {
+        let scope = self.domain().scope;
+        if !self.replica.removal_unbased(scope).await? || self.tip_signer(scope).await.is_err() {
+            return Ok(());
+        }
+        self.replica.finalize_path(scope).await?;
+        self.replica.compact(scope, 0).await?;
+        self.list_checkpoints(scope).await?;
+        self.observations.touch();
+        Ok(())
     }
 
     async fn role_changes(&self, settings: &Settings) -> Result<Vec<crate::PersonId>, Failure> {

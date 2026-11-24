@@ -65,6 +65,7 @@ pub enum BlockerKind {
 pub enum FrameReplay {
     Local,
     Peers,
+    Never,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

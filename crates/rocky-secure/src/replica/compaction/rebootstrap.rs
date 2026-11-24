@@ -79,6 +79,44 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(listed)
     }
+    async fn base_precedes(
+        &self,
+        id: Option<i64>,
+        path: &[Commitment],
+        seal: usize,
+    ) -> Result<bool, Error> {
+        let base = match id {
+            Some(id) => self.base_seal(id).await?,
+            None => None,
+        };
+        Ok(base
+            .and_then(|base| path.iter().position(|known| *known == base))
+            .is_none_or(|at| at < seal))
+    }
+    pub(in crate::replica) fn last_removing_seal(
+        &self,
+        domain: Scope,
+    ) -> Result<Option<usize>, Error> {
+        let graph = self.graph_for(domain)?;
+        let path = self.path_seals(domain)?;
+        let mut removing = None;
+        for (index, seal) in path.iter().enumerate() {
+            let successor = match path.get(index + 1) {
+                Some(next) => next.statement.tip,
+                None if seal.statement.tip == self.workspace.tip => continue,
+                None => self.workspace.tip,
+            };
+            let before = graph.schema_any(seal.statement.tip).map_err(credential)?;
+            let after = graph.schema_any(successor).map_err(credential)?;
+            if let (Some(before), Some(after)) =
+                (self.definition_at(&before), self.definition_at(&after))
+                && super::super::schemas::PathFields::of(after).strips(before)
+            {
+                removing = Some(index);
+            }
+        }
+        Ok(removing)
+    }
     pub(in crate::replica) async fn seal_rebootstraps(
         &self,
         domain: Scope,
@@ -112,6 +150,7 @@ impl<A: RowApplication> Inner<A> {
             .collect();
         Ok(Some(RebootstrapPlan {
             domain,
+            removing: self.last_removing_seal(domain)?,
             path,
             unverified,
             scopes: self.readiness_scopes(domain).await?,
@@ -125,6 +164,18 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Option<SealRebootstrap>, Error> {
         let (domain, path) = (plan.domain, &plan.path);
         let graph = self.graph_for(domain)?;
+        if let Some(removing) = plan.removing
+            && self.base_precedes(id, path, removing).await?
+        {
+            let listed = self.listed_at(graph, scope, path[removing..].iter().rev())?;
+            if !listed.is_empty() {
+                return Ok(Some(SealRebootstrap {
+                    scope,
+                    listed,
+                    replay: FrameReplay::Never,
+                }));
+            }
+        }
         let unknown = plan.unverified.contains(&scope);
         let pruned = self.has_pruned_prefix(scope).await?;
         let base = match id {
@@ -315,6 +366,7 @@ impl<A: RowApplication> Inner<A> {
 pub(in crate::replica) struct RebootstrapPlan {
     domain: Scope,
     path: Vec<Commitment>,
+    removing: Option<usize>,
     unverified: BTreeSet<ResourceScope>,
     scopes: Vec<(ResourceScope, Option<i64>)>,
 }
@@ -355,6 +407,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.seal_rebootstraps(domain).await
     }
+    pub async fn removal_unbased(&self, domain: Scope) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        inner.graph_for(domain)?;
+        let Some(removing) = inner.last_removing_seal(domain)? else {
+            return Ok(false);
+        };
+        let path = inner
+            .path_seals(domain)?
+            .iter()
+            .map(|seal| seal.id().map_err(credential))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (_, id) in inner.domain_scopes(domain).await? {
+            if inner.base_precedes(Some(id), &path, removing).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub async fn replay_at_seals(&self, scope: ResourceScope, reset: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut need = None;
@@ -365,8 +435,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let need =
             need.ok_or_else(|| denied("the scope's base sits at a seal of the followed path"))?;
-        if need.replay == FrameReplay::Peers && !reset {
-            return Err(denied("pruned frames must come again from a peer"));
+        match need.replay {
+            FrameReplay::Never => {
+                return Err(denied(
+                    "only a checkpoint listed at a removing seal restores this scope",
+                ));
+            }
+            FrameReplay::Peers if !reset => {
+                return Err(denied("pruned frames must come again from a peer"));
+            }
+            FrameReplay::Local | FrameReplay::Peers => {}
         }
         let id = inner.scope_id(scope).await?;
         transaction!(inner, |inner| {

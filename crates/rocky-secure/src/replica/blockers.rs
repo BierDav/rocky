@@ -216,7 +216,7 @@ impl<A: RowApplication> Inner<A> {
                     },
                     match need.replay {
                         FrameReplay::Local => ClearsBy::LocalWork,
-                        FrameReplay::Peers => ClearsBy::AnyPeer,
+                        FrameReplay::Peers | FrameReplay::Never => ClearsBy::AnyPeer,
                     },
                 ),
             );

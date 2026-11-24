@@ -167,6 +167,7 @@ impl Node {
         let schema_changed = self.follow_schema().await?;
         self.finalize_seals().await;
         self.close_migrations().await?;
+        self.base_removal().await?;
         Ok(self.settle_attempts(
             progress.attempts,
             || *imports.borrow() != imports_at_start,

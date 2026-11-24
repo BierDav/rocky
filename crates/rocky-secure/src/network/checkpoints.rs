@@ -313,7 +313,7 @@ impl NativeSession {
             FrameReplay::Peers if shared && self.retains_history(replica, scope).await? => {
                 replica.replay_at_seals(scope, true).await?
             }
-            FrameReplay::Peers => {}
+            FrameReplay::Peers | FrameReplay::Never => {}
         }
         Ok(true)
     }

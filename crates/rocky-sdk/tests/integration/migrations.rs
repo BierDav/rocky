@@ -909,3 +909,151 @@ async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_sc
     a.close().await;
     Ok(())
 }
+
+const MEMO: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"memo","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET memo = title"]}]}"#;
+const UNTITLED: &str = r#"{"application":"shopping","version":3,"format":7,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"memo","type":"text","not_null":true,"default":""}],"primary_key":["key"]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET memo = title"]}]}"#;
+const MEMOS: &str = "SELECT key, memo FROM items ORDER BY key";
+
+async fn skipping_versions_converges(late_write: bool) -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let owner = Device::create(&dirs("owner"), network("owner")).await?;
+    let bob = Device::join(
+        &dirs("bob"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("bob")),
+    )
+    .await?;
+    let carol = Device::join(
+        &dirs("carol"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("carol")),
+    )
+    .await?;
+    introduce(&owner, &bob).await;
+    introduce(&owner, &carol).await;
+    let coffee = owner.add(1, "Coffee").await;
+    sync(&bob).await;
+    sync(&carol).await;
+    assert_eq!(bob.titles().await, ["Coffee"]);
+    bob.close().await;
+    owner.close().await;
+
+    let owner = reopen(&dirs("owner"), MEMO, network("owner")).await?;
+    sync(&carol).await;
+    assert_eq!(generation(&carol).await["current"]["schema"], 2);
+    owner.close().await;
+    let owner =
+        Device::new(common::confirmed(open(&dirs("owner"), UNTITLED, network("owner"))).await?)?
+            .with_identity(common::external_identity(&dirs("owner")));
+    assert_eq!(generation(&owner).await["current"]["schema"], 3);
+    sync(&carol).await;
+    let migrated = json!([[snap::cell(text(&coffee)), snap::cell(text("Coffee"))]]);
+    assert_eq!(rows(&owner, MEMOS).await, migrated);
+
+    let bob = reopen(&dirs("bob"), common::SCHEMA, network("bob")).await?;
+    if late_write {
+        bob.add(2, "Tea").await;
+    }
+    introduce(&owner, &bob).await;
+    for _ in 0..3 {
+        sync(&bob).await;
+        sync(&carol).await;
+        sync(&owner).await;
+    }
+    assert_eq!(generation(&bob).await["current"]["schema"], 3);
+    let expected = rows(&owner, MEMOS).await;
+    if !late_write {
+        assert_eq!(expected, migrated);
+    }
+    assert_eq!(
+        rows(&bob, MEMOS).await,
+        expected,
+        "a follower skipping a version replays the skipped migration's writes"
+    );
+    assert_eq!(rows(&carol, MEMOS).await, expected);
+    bob.close().await;
+
+    let bob = reopen(&dirs("bob"), UNTITLED, network("bob")).await?;
+    sync(&bob).await;
+    assert_eq!(generation(&bob).await["application"], "current");
+    assert_eq!(rows(&bob, MEMOS).await, expected);
+    bob.close().await;
+    carol.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follower_skipping_versions_replays_every_intermediate_migration() -> Result<(), Failure>
+{
+    skipping_versions_converges(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_write_from_a_follower_skipping_versions_lands_alike_on_every_device()
+-> Result<(), Failure> {
+    skipping_versions_converges(true).await
+}
+
+const UNMEMOED: &str = r#"{"application":"shopping","version":2,"format":7,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const KEPT: &str = "SELECT key, completed FROM items ORDER BY key";
+
+async fn a_member_joining_after(rollouts: &[&str], read: &str) -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let owner = Device::create(&dirs("owner"), network("owner")).await?;
+    owner.add(1, "Coffee").await;
+    owner.add(2, "Tea").await;
+    owner.add(3, "Water").await;
+    owner.close().await;
+    for (index, schema) in rollouts.iter().enumerate() {
+        let configuration = open(&dirs("owner"), schema, None);
+        let opened = match index + 1 == rollouts.len() {
+            true => common::confirmed(configuration).await?,
+            false => configuration.open().await?,
+        };
+        Device::new(opened)?.close().await;
+    }
+    let last = rollouts.last().copied().unwrap_or(common::SCHEMA);
+    let owner = reopen(&dirs("owner"), last, network("owner")).await?;
+    let held = rows(&owner, read).await;
+    assert_eq!(held.as_array().map(Vec::len), Some(3), "{held}");
+    let member = Device::new(
+        open(&dirs("member"), last, network("member"))
+            .join(&owner.invite().await)
+            .await?,
+    )?;
+    introduce(&owner, &member).await;
+    for _ in 0..3 {
+        sync(&member).await;
+    }
+    assert_eq!(
+        rows(&member, read).await,
+        held,
+        "a member joining after a removal starts from the removing seal's checkpoint"
+    );
+    member.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_joining_after_a_removal_holds_every_row_the_owner_holds() -> Result<(), Failure> {
+    a_member_joining_after(&[UNMEMOED], KEPT).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_joining_after_a_migration_and_a_removal_holds_every_migrated_row()
+-> Result<(), Failure> {
+    a_member_joining_after(&[MEMO, UNTITLED], MEMOS).await
+}

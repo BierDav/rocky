@@ -149,7 +149,7 @@ impl PathFields {
             fields: BTreeSet::new(),
         }
     }
-    fn of(definition: &ApplicationManifest) -> Self {
+    pub(super) fn of(definition: &ApplicationManifest) -> Self {
         Self {
             tables: definition.entities.iter().map(|item| item.id).collect(),
             fields: definition.fields.iter().map(|item| item.id).collect(),

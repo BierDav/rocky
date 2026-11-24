@@ -759,11 +759,18 @@ impl Node {
     }
 
     async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
+        let registry = match self.registry(&*self.settings_snapshot().await).await {
+            Ok(registry) => Some(registry),
+            Err(error) if waits_on_blockers(error.as_ref()) => None,
+            Err(error) => return Err(error),
+        };
         let node = self
             .configure(|settings| {
                 let node = settings.add_peer(&self.vault, contact)?;
-                if registry.revoked(&node) {
+                if registry
+                    .as_ref()
+                    .is_some_and(|registry| registry.revoked(&node))
+                {
                     return Err("the contact names a revoked device".into());
                 }
                 Ok(node)
@@ -2297,6 +2304,9 @@ fn typed_cause(
         Kind::Internal
     };
     crate::Error::new(kind, detail)
+}
+pub(crate) fn waits_on_blockers(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(error.downcast_ref::<Error>(), Some(Error::Blocked(_)))
 }
 fn storage_error(error: &Error, detail: String) -> crate::Error {
     use crate::ErrorKind as Kind;

@@ -204,7 +204,11 @@ impl Node {
     }
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
-            Some(self.registry(&*self.settings_snapshot().await).await?)
+            match self.registry(&*self.settings_snapshot().await).await {
+                Ok(registry) => Some(registry),
+                Err(error) if super::waits_on_blockers(error.as_ref()) => return Ok(()),
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };

@@ -192,6 +192,65 @@ async fn only_trusted_devices_and_issuers_seal() -> Result<(), Failure> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_the_rebootstrap_a_member_promoted_after_a_seal_waits_on()
+-> Result<(), Failure> {
+    use rocky_sdk::status::{BlockerKind, ClearsBy};
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )
+    .await?;
+    let member = Device::join(
+        &root.path().join("member"),
+        &a.invite().await,
+        Network::Owned(hub.connector("member")),
+    )
+    .await?;
+    introduce(&a, &member).await;
+    snap::ok(a.database.seal()).await;
+    member.sync().await.expect("sync");
+    let promoted = Device::join(
+        &root.path().join("promoted"),
+        &a.invite_as(rocky_sdk::Access::Full).await,
+        Network::Owned(hub.connector("promoted")),
+    )
+    .await?;
+    let person = promoted.database.me().await?.person.key();
+    a.database
+        .make_admin(rocky_sdk::PersonId::new(person), a.root())
+        .await?;
+    promoted.database.renew().await?;
+    let waiting = promoted
+        .database
+        .status()
+        .await
+        .expect("a blocker is reported inside the status, never as its error");
+    assert!(waiting.authority.is_issuer);
+    let rebootstrap = waiting
+        .data
+        .blockers
+        .iter()
+        .find(|blocker| matches!(blocker.kind, BlockerKind::SealRebootstrap { .. }))
+        .expect("the newly readable registry history waits on a peer");
+    assert_eq!(rebootstrap.clears_by, ClearsBy::AnyPeer);
+    introduce(&a, &promoted).await;
+    promoted.sync().await.expect("sync");
+    let cleared = promoted.database.status().await?;
+    assert!(
+        !cleared
+            .data
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker.kind, BlockerKind::SealRebootstrap { .. })),
+        "a sync with any peer clears it: {:?}",
+        cleared.data.blockers
+    );
+    Ok(())
+}
+
 mod trusted {
     use super::*;
 

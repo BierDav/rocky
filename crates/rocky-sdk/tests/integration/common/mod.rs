@@ -305,8 +305,6 @@ impl Device {
                 .renew()
                 .await
                 .expect("renew into the admin grant");
-            let follows_main_after_its_promotion = admin.sync_now().await;
-            drop(follows_main_after_its_promotion);
             if admin
                 .database
                 .status()

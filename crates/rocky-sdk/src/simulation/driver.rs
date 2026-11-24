@@ -17,6 +17,7 @@ const MAX_STATUS_WAKES: usize = 1000;
 const ALERT_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const MESH_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 const RECOVERY_DRIVER_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+const STALLED_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 pub(super) struct Report {
     pub(super) seed: u64,
@@ -138,7 +139,11 @@ pub(super) async fn run_steps(
         if std::env::var_os("ROCKY_SIM_TRACE").is_some() {
             eprintln!("    > {action}");
         }
-        let outcome = match simulation.step(index, &action).await {
+        let Ok(stepped) = stalling(simulation.step(index, &action)).await else {
+            report.steps.push(format!("{index:3} {action} -> stalled"));
+            return Ok(report.stalled(format!("step {index} never finished")));
+        };
+        let outcome = match stepped {
             Ok(outcome) => outcome,
             Err(error) => format!("refused: {}", short(&error.to_string())),
         };
@@ -148,28 +153,48 @@ pub(super) async fn run_steps(
         if std::env::var_os("ROCKY_SIM_TRACE").is_some() {
             eprintln!("{} [{:?}]", report.steps[index], started.elapsed());
         }
-        if let Err(violation) = simulation.safety().await {
+        let Ok(safe) = stalling(simulation.safety()).await else {
+            return Ok(report.stalled(format!("the checks after step {index} never finished")));
+        };
+        if let Err(violation) = safe {
             report.safety = Some(format!("after step {index}: {violation}"));
             report.coverage = std::mem::take(&mut simulation.coverage);
             simulation.stop().await;
             return Ok(report);
         }
     }
-    match simulation.heal(scenario.rounds).await {
-        Ok(None) if fixture == Fixture::Relational => {
-            match simulation.quiesce(scenario.rounds).await {
-                Ok(stuck) => report.liveness = stuck,
-                Err(violation) => report.safety = Some(format!("at quiescence: {violation}")),
+    let closing = async {
+        match simulation.heal(scenario.rounds).await {
+            Ok(None) if fixture == Fixture::Relational => {
+                match simulation.quiesce(scenario.rounds).await {
+                    Ok(stuck) => report.liveness = stuck,
+                    Err(violation) => report.safety = Some(format!("at quiescence: {violation}")),
+                }
             }
+            Ok(stuck) => report.liveness = stuck,
+            Err(violation) => report.safety = Some(format!("while healing: {violation}")),
         }
-        Ok(stuck) => report.liveness = stuck,
-        Err(violation) => report.safety = Some(format!("while healing: {violation}")),
+    };
+    if stalling(closing).await.is_err() {
+        return Ok(report.stalled("healing never finished".into()));
     }
     report.scope_local = simulation.scope_local;
     report.coverage = std::mem::take(&mut simulation.coverage);
     report.states = simulation.states().await;
     simulation.stop().await;
     Ok(report)
+}
+
+async fn stalling<T>(work: impl Future<Output = T>) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(STALLED_AFTER, work).await
+}
+impl Report {
+    fn stalled(mut self, described: String) -> Self {
+        let mut stuck = Stuck::default();
+        stuck.add("stalled", described);
+        self.liveness = Some(stuck);
+        self
+    }
 }
 
 fn list_partition(list: &str) -> crate::Partition {

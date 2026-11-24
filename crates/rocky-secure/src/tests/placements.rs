@@ -1,4 +1,6 @@
-use super::compaction::{Replica, follow_main, insert, scalar, seal, sync};
+use super::compaction::{
+    Replica, follow_main, import_checkpoint, insert, list_checkpoints, open, scalar, seal, sync,
+};
 use super::generations::{Lineage, identity_insert, session};
 use super::*;
 use crate::{PlacementPage, PlacementRequest};
@@ -103,6 +105,70 @@ async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
         stored += target.1.receive_placements(request, page).await.unwrap();
     }
     stored
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_joiner_places_a_frame_its_newer_base_covers_to_finalize_an_older_base() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "one", "one").await;
+    let first = seal(&lineage, &a).await.id().unwrap();
+    a.compact(lineage.domain, 0).await.unwrap();
+    identity_insert(
+        &session(&a).await,
+        "INSERT INTO tags(key,label) VALUES('t1','tag')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let second = seal(&lineage, &a).await.id().unwrap();
+    a.compact(lineage.domain, 0).await.unwrap();
+    list_checkpoints(&lineage, &a).await;
+    let joiner = (keys[1].clone(), open(&lineage, &dir, "b", &keys[1]).await);
+    let b = &joiner.1;
+    crate::tests::exchange_graphs(&a, b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    let mut bases = Vec::new();
+    for scope in [lineage.scope("items"), lineage.scope("tags")] {
+        let offered = a
+            .checkpoint_offer(keys[1].public_key(), &credentials, scope)
+            .await
+            .unwrap()
+            .unwrap();
+        bases.push(offered.statement.seal);
+    }
+    assert_eq!(
+        bases,
+        [Some(first), Some(second)],
+        "items keeps its base at the seal before the tags frame"
+    );
+    import_checkpoint(&lineage, &a, b, &keys[1], lineage.scope("items")).await;
+    import_checkpoint(&lineage, &a, b, &keys[1], lineage.scope("tags")).await;
+    b.finalize_path(lineage.domain).await.unwrap();
+    let waiting = b
+        .compaction_status(lineage.domain)
+        .await
+        .unwrap()
+        .waiting
+        .unwrap_or_default();
+    assert!(waiting.contains("missing frames"), "{waiting}");
+    assert_eq!(
+        place(&a, &joiner).await,
+        1,
+        "the tags frame between the seals is placed although tags is held, since its base covers it"
+    );
+    b.finalize_path(lineage.domain).await.unwrap();
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!((status.finalized, status.waiting), (Some(second), None));
+    b.audit(lineage.scope("items")).await.unwrap();
+    b.audit(lineage.scope("tags")).await.unwrap();
 }
 
 async fn pair() -> Pair {

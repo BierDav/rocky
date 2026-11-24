@@ -287,6 +287,7 @@ impl<A: RowApplication> Inner<A> {
         let mut held = BTreeMap::<WriterId, BTreeSet<u64>>::new();
         let mut last = BTreeMap::<(ResourceScope, WriterId), u64>::new();
         let ready: BTreeSet<ResourceScope> = scopes.iter().map(|(scope, _)| *scope).collect();
+        let based = self.base_frontiers(domain, scopes, held_scopes).await?;
         for record in rows(
             &self.conn,
             "SELECT header,status='pending',0 FROM secure_operations UNION ALL SELECT header,0,0 FROM secure_voids UNION ALL SELECT header,0,1 FROM secure_placements",
@@ -301,11 +302,19 @@ impl<A: RowApplication> Inner<A> {
             let e = self.oracle_header(bytes)?;
             if e.scope.domain != domain
                 || (*pending != 0 && ready.contains(&e.scope) && self.has_scope_key(e.scope))
-                || (*placed != 0 && held_scopes.contains(&e.scope) && ready.contains(&e.scope))
             {
                 continue;
             }
             let Some(author) = e.author else { continue };
+            if *placed != 0
+                && held_scopes.contains(&e.scope)
+                && ready.contains(&e.scope)
+                && based
+                    .get(&(e.scope, author))
+                    .is_none_or(|covered| e.author_sequence > *covered)
+            {
+                continue;
+            }
             held.entry(author).or_default().insert(e.author_sequence);
             if *placed != 0 {
                 continue;

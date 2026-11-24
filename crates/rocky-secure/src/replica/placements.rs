@@ -291,7 +291,11 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("placement not inside the seal's state"));
             }
             self.placement_authority(&header, chain.credentials(), time)?;
-            let needs_frame_itself = custody.contains(&e.scope) && self.holds(e.scope).await?;
+            let needs_frame_itself = custody.contains(&e.scope)
+                && self.holds(e.scope).await?
+                && !self
+                    .base_covers(e.scope, request.author, e.author_sequence)
+                    .await?;
             if needs_frame_itself {
                 continue;
             }

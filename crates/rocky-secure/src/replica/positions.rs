@@ -241,6 +241,7 @@ impl<A: RowApplication> Inner<A> {
         held_scopes: &BTreeSet<ResourceScope>,
     ) -> Result<Positions, Error> {
         let ready: BTreeSet<_> = scopes.iter().map(|(scope, _)| *scope).collect();
+        let based = self.base_frontiers(domain, scopes, held_scopes).await?;
         let mut held = BTreeMap::<WriterId, Runs>::new();
         let mut last = BTreeMap::<(ResourceScope, WriterId), u64>::new();
         for row in rows(
@@ -263,12 +264,17 @@ impl<A: RowApplication> Inner<A> {
             let scope: ResourceScope = decode(scope)?;
             if scope.domain != domain
                 || (*pending != 0 && ready.contains(&scope) && self.has_scope_key(scope))
-                || (*kind == 2 && held_scopes.contains(&scope) && ready.contains(&scope))
             {
                 continue;
             }
             let author = stored_writer(author)?;
-            let (start, end) = interval(*start, *end)?;
+            let (start, mut end) = interval(*start, *end)?;
+            if *kind == 2 && held_scopes.contains(&scope) && ready.contains(&scope) {
+                match based.get(&(scope, author)) {
+                    Some(covered) if *covered >= start => end = end.min(*covered),
+                    _ => continue,
+                }
+            }
             held.entry(author).or_default().insert(start, end);
             if *kind != 2 && ready.contains(&scope) {
                 last.entry((scope, author))

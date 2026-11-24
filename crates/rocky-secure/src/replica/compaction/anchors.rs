@@ -125,6 +125,53 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(!blocking_gaps(seal, &starts, &[(scope, Some(id))], &held, &last, 1).is_empty())
     }
+    pub(in crate::replica) async fn base_frontiers(
+        &self,
+        domain: Scope,
+        scopes: &[(ResourceScope, Option<i64>)],
+        held_scopes: &BTreeSet<ResourceScope>,
+    ) -> Result<BTreeMap<(ResourceScope, WriterId), u64>, Error> {
+        let mut frontiers = BTreeMap::new();
+        for (scope, id) in scopes {
+            let Some(id) = id.filter(|_| held_scopes.contains(scope)) else {
+                continue;
+            };
+            for mark in self.base_frontier(domain, id).await? {
+                frontiers.insert((*scope, mark.author), mark.sequence);
+            }
+        }
+        Ok(frontiers)
+    }
+    pub(in crate::replica) async fn base_covers(
+        &self,
+        scope: ResourceScope,
+        author: WriterId,
+        sequence: u64,
+    ) -> Result<bool, Error> {
+        let Some(id) = self.find_scope_id(scope).await? else {
+            return Ok(false);
+        };
+        Ok(self
+            .base_frontier(scope.domain, id)
+            .await?
+            .iter()
+            .any(|mark| mark.author == author && sequence <= mark.sequence))
+    }
+    async fn base_frontier(&self, domain: Scope, id: i64) -> Result<Vec<AuthorMark>, Error> {
+        let Some(base) = self.base_seal(id).await? else {
+            return Ok(Vec::new());
+        };
+        if self.path_index(domain, base)?.is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .graph_for(domain)?
+            .seal_by_id(base)
+            .map_err(credential)?
+            .statement
+            .frontier
+            .clone())
+    }
     pub(in crate::replica) async fn seal_starts(
         &self,
         id: Option<i64>,

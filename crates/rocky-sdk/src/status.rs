@@ -4,162 +4,271 @@ use serde::{Deserialize, Serialize};
 mod attempts;
 pub(crate) use attempts::{Attempt, Observations, epoch_millis, failure};
 
+/// Whether a network is attached to the database.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentState {
+    /// No network; the database works offline.
     Detached,
+    /// A network is attached and serving.
     Attached,
+    /// A network is detaching and finishing open exchanges.
     Draining,
 }
+/// The state of the replication link to one peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkState {
+    /// The link is open.
     Open,
+    /// The link is being opened.
     Opening,
+    /// The link is closing.
     Closing,
+    /// No link.
     Closed,
 }
+/// Whether one discovery path runs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryPathState {
+    /// It runs.
     On,
+    /// It is turned off.
     Off,
+    /// It was asked for but cannot run; `DiscoveryPath::reason` says why.
     Unavailable,
 }
+/// What a network attempt tried to do.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOperation {
+    /// Resolve a contact to routes.
     ResolveContact,
+    /// Open a replication link.
     OpenLink,
+    /// Reconcile data with a peer.
     Reconcile,
 }
+/// How far a network attempt got.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptStage {
+    /// Finding a route.
     ResolveRoute,
+    /// Dialing the route.
     Dial,
+    /// Being admitted by the peer.
     Admission,
+    /// Exchanging data.
     Reconciliation,
 }
+/// How a network attempt ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
+    /// It finished.
     Completed,
+    /// It ended without an answer.
     NoResult,
+    /// It was cancelled.
     Cancelled,
+    /// It failed; `AttemptObservation::failure` says why.
     Failed,
 }
+/// The class of a failed network attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
+    /// It timed out.
     Timeout,
+    /// The transport failed.
     Transport,
+    /// The peer refused.
     RemoteRefusal,
+    /// This device lacked the credentials.
     LocalAuthorization,
+    /// The peer broke the protocol.
     Protocol,
+    /// Any other failure.
     Other,
 }
+/// Why a sync pass skipped a peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
+    /// The peer failed recently and waits out a backoff.
     Backoff,
+    /// The peer is already reconciling with this device.
     InboundReconciliation,
+    /// Another peer in the pass already supplied what this one would.
     Covered,
+    /// Nothing needs exchanging with the peer.
     NoPendingWork,
 }
 
+/// Why a network attempt failed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptFailure {
+    /// The class of failure.
     pub kind: FailureKind,
+    /// A stable error code, when the failure has one.
     pub code: Option<String>,
+    /// A human-readable explanation.
     pub detail: String,
 }
+/// One network attempt and how it went.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptObservation {
+    /// Orders attempts within a status.
     pub id: u64,
+    /// The peer or contact it targeted.
     pub target: String,
+    /// What it tried.
     pub operation: AttemptOperation,
+    /// How far it got.
     pub stage: AttemptStage,
+    /// When it started, if known.
     pub started_at_epoch_millis: Option<u64>,
+    /// When it ended, or `None` while it runs.
     pub ended_at_epoch_millis: Option<u64>,
+    /// How long it took.
     pub elapsed_millis: Option<u64>,
+    /// How it ended, or `None` while it runs.
     pub outcome: Option<AttemptOutcome>,
+    /// Why it failed, if it did.
     pub failure: Option<AttemptFailure>,
 }
+/// A way to reach a peer on one transport.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
+    /// The transport kind, such as `iroh` or `tcp`.
     pub transport: String,
+    /// The address on that transport.
     pub address: String,
 }
+/// The revocations this device holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationStatus {
+    /// A digest of the set, equal on devices that hold the same revocations.
     pub digest: String,
+    /// Revocation statements held.
     pub statements: u64,
 }
+/// The revocation that ended this device's access.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedRevocation {
+    /// The revocation's id.
     pub id: String,
+    /// The signed statement.
     pub statement: Vec<u8>,
+    /// What it revoked.
     pub reason: RevocationReason,
 }
+/// What a revocation revoked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RevocationReason {
+    /// This device was unlinked.
     Node,
+    /// This device's person was removed.
     Identity,
-    Cascade { trusted: String },
+    /// An admin whose credentials this device's chain depends on was revoked.
+    Cascade {
+        /// The revoked admin's key.
+        trusted: String,
+    },
+    /// This device's credential was revoked, as when access narrows.
     Capability,
 }
+/// Where this device can renew its credentials.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewalRoute {
+    /// An admin device.
     pub target: String,
+    /// Its routes.
     pub routes: Vec<Route>,
 }
+/// Who this device is and how long its credentials last.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityStatus {
+    /// The person's key.
     pub principal: String,
+    /// The device's key.
     pub node: String,
+    /// Whether this is an admin device that issues credentials.
     pub is_issuer: bool,
+    /// When the current credentials expire; syncing with an admin device renews them.
     pub expires_at_epoch_seconds: u64,
+    /// Whether they have expired.
     pub expired: bool,
+    /// Whether the device logged out.
     pub logged_out: bool,
+    /// The revocation that removed this device, or `None` while it holds access.
     pub verified_revocation: Option<VerifiedRevocation>,
+    /// The revocations held.
     pub revocations: RevocationStatus,
+    /// The person's access.
     pub access: crate::Access,
+    /// Admin devices that can renew the credentials.
     pub renewal_routes: Vec<RenewalRoute>,
 }
+/// The schema version the data is at.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Generation {
+    /// The version number.
     pub schema: u32,
 }
+/// A rebuild of tables after a schema change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebuildProgress {
+    /// The digest of the schema being built.
     pub schema: String,
+    /// Tables to rebuild.
     pub tables: u64,
 }
+/// A published schema version this device has not switched to yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingGeneration {
+    /// The statement that published it.
     pub tip: String,
+    /// Its manifest digest.
     pub manifest: String,
 }
+/// Where the database's schema stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationStatus {
+    /// Whether the device has not yet followed an admin's schema publications and needs a sync with
+    /// one.
     pub follow_required: bool,
+    /// Changes held back because they do not apply yet; see `Database::held_changes`.
     pub held: usize,
+    /// The installed manifest digest.
     pub manifest: String,
+    /// The installed version.
     pub current: Generation,
+    /// A published version not yet switched to.
     pub pending: Option<PendingGeneration>,
+    /// A rebuild in progress.
     pub rebuilding: Option<RebuildProgress>,
+    /// How the application's declared version compares with the installed one.
     pub application: DeclaredSchema,
+    /// The state of a migration to the declared version.
     pub migration: Option<MigrationStatus>,
+    /// Whether a newer declared version waits for an admin device to publish it.
     pub waiting_for_issuer: bool,
+    /// Whether this build of Rocky can run the installed version.
     pub engine: EngineStatus,
 }
+/// Whether this build of Rocky can run the database's schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineStatus {
+    /// It can.
     Current,
+    /// A pending schema needs a newer Rocky; upgrade the application.
     UpgradeRequired,
+    /// The engine changed and waits for the owner to publish the matching schema.
     AwaitingOwner,
 }
 impl From<rocky_secure::EngineStatus> for EngineStatus {
@@ -171,93 +280,159 @@ impl From<rocky_secure::EngineStatus> for EngineStatus {
         }
     }
 }
+/// The state of a migration to the declared schema version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MigrationStatus {
+    /// Migrating needs a device with full access, so this one waits for an admin.
     FullAccessRequired,
-    Publishing { bundles: u64, published: u64 },
+    /// The migrated data is being published.
+    Publishing {
+        /// Bundles to publish.
+        bundles: u64,
+        /// Bundles published so far.
+        published: u64,
+    },
 }
+/// How the application's declared schema version compares with the installed one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredSchema {
+    /// They match.
     Current,
+    /// The installed version is newer; the application keeps working unless the newer one removed
+    /// what it uses.
     Behind,
+    /// The application declares a newer version, which an admin device publishes.
     Ahead,
 }
+/// Progress of the first download of the data.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapProgress {
+    /// Rows imported.
     pub rows_done: u64,
+    /// Rows to import.
     pub rows_total: u64,
+    /// Tables or partitions imported.
     pub scopes_done: u64,
+    /// Tables or partitions to import.
     pub scopes_total: u64,
 }
+/// One synced unit: a table, or one partition of a table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeStatus {
+    /// The table name, or `None` for internal data.
     pub table: Option<String>,
+    /// The table's internal id.
     pub table_id: String,
+    /// The id of the key that encrypts it.
     pub encryption: String,
+    /// Whether it is one partition of a table.
     pub partition: bool,
 }
+/// An import of one scope from a checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeImportStatus {
+    /// The scope.
     pub scope: ScopeStatus,
+    /// The checkpoint being imported.
     pub checkpoint: Option<String>,
+    /// How far the import got.
     pub cursor: Option<String>,
+    /// Whether every page arrived.
     pub pages_complete: Option<bool>,
 }
+/// One key of a collection's key history.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptionEpoch {
+    /// Rises with each rotation.
     pub generation: u64,
+    /// Identifies the key without revealing it.
     pub secret_hash: String,
 }
+/// The keys this device holds for one collection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyEpochStatus {
+    /// The table or partition group.
     pub collection: String,
+    /// Every key held.
     pub epochs: Vec<EncryptionEpoch>,
+    /// The key new writes use.
     pub current: Option<EncryptionEpoch>,
 }
+/// Where the local data stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataStatus {
+    /// Rises with every local change.
     pub revision: u64,
+    /// The schema.
     pub generation: GenerationStatus,
+    /// Why some data cannot be read yet and what clears each; empty when everything is readable.
     pub blockers: Vec<Blocker>,
+    /// Whether the first download has not finished.
     pub bootstrap_pending: bool,
+    /// Progress of the first download.
     pub bootstrap: Option<BootstrapProgress>,
+    /// Checkpoint imports in progress.
     pub imports: Vec<ScopeImportStatus>,
+    /// Keys held per collection.
     pub key_epochs: Vec<KeyEpochStatus>,
+    /// Whether each partition the device should hold is held and complete.
     pub partitions: Vec<crate::PartitionProgress>,
 }
+/// One discovery path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPath {
+    /// Whether it runs.
     pub state: DiscoveryPathState,
+    /// Why it is unavailable.
     pub reason: Option<String>,
 }
+/// How this device finds peers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryStatus {
+    /// Whether it announces itself.
     pub announcing: bool,
+    /// Local-network discovery.
     pub local: DiscoveryPath,
+    /// Discovery through the database's rendezvous record.
     pub topic: DiscoveryPath,
 }
+/// The replication link to one peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerLink {
+    /// Its state.
     pub state: LinkState,
+    /// When it opened.
     pub opened_at_epoch_seconds: Option<u64>,
 }
+/// When a failed peer is tried again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryStatus {
+    /// Whether a retry is scheduled.
     pub pending: bool,
+    /// When reconciliation is retried.
     pub reconciliation_retry_at_epoch_millis: Option<u64>,
+    /// When the link is reopened.
     pub link_retry_at_epoch_millis: Option<u64>,
 }
+/// How this device learned of a peer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerSource {
+    /// The application added it with `add_peer`.
     Application,
+    /// It took part in this device's join or link.
     Enrollment,
+    /// It connected to this device.
     Session,
+    /// It linked as another device of a person.
     Link,
+    /// Discovery found it.
     Discovery,
+    /// Another peer handed it over.
     Handover,
+    /// It asked this device for something.
     Request,
 }
 impl PeerSource {
@@ -274,74 +449,125 @@ impl PeerSource {
         }
     }
 }
+/// Whether the last sync pass dialed a peer and why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerChoice {
+    /// The pass did not consider it.
     NotConsidered,
+    /// It waits out a backoff.
     Backoff,
+    /// The pass reached its peer limit first.
     PassLimit,
+    /// Chosen because it is on the local network.
     SelectedLocal,
+    /// Chosen because it held data this device needs.
     SelectedHolding,
+    /// Chosen because it is an admin device.
     SelectedTrusted,
+    /// Chosen to probe what it holds.
     SelectedProbe,
+    /// Skipped because another peer covered it.
     Covered,
 }
+/// One known peer device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
+    /// Its device key.
     pub node: String,
+    /// Whether it is an admin device.
     pub is_issuer: bool,
+    /// Whether the application added it.
     pub is_configured: bool,
+    /// How this device learned of it.
     pub source: PeerSource,
+    /// Whether the last pass dialed it.
     pub choice: PeerChoice,
+    /// Its routes.
     pub routes: Vec<Route>,
+    /// Whether it is on the local network.
     pub is_local: bool,
+    /// The replication link to it.
     pub link: PeerLink,
+    /// Recent network attempts.
     pub attempts: Vec<AttemptObservation>,
+    /// When it last proved its identity in an exchange.
     pub last_authenticated_exchange_at_epoch_seconds: Option<u64>,
+    /// When it is tried again.
     pub retry: Option<RetryStatus>,
+    /// The last reconciliation with it.
     pub last_sync: Option<PeerReconciliation>,
 }
+/// Who owns the attached transport.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkOwnership {
+    /// Rocky started it from `Network::Owned` and closes it.
     Rocky,
+    /// The application lent it and closes it.
     Application,
 }
+/// Connections other devices opened to this one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundStatus {
+    /// Open now.
     pub active: u64,
+    /// The most open at once.
     pub limit: u64,
+    /// Served since open.
     pub served: u64,
+    /// Refused since open.
     pub refused: u64,
 }
+/// The network side of the database.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkStatus {
+    /// Whether a network is attached.
     pub attachment: AttachmentState,
+    /// The transport kind, such as `iroh` or `tcp`.
     pub kind: Option<String>,
+    /// Who owns the transport.
     pub ownership: Option<NetworkOwnership>,
+    /// The sync mode.
     pub sync: crate::SyncMode,
+    /// Whether the background sync worker runs.
     pub worker_running: bool,
+    /// Whether a sync pass runs now.
     pub reconciling: bool,
+    /// Inbound connections.
     pub inbound: Option<InboundStatus>,
+    /// Known peers.
     pub peers: Vec<Peer>,
+    /// Peers with an open link.
     pub connected_peer_count: u64,
+    /// Recent contact resolutions.
     pub contact_resolutions: Vec<AttemptObservation>,
+    /// Peer discovery.
     pub discovery: DiscoveryStatus,
+    /// The last sync pass.
     pub last_reconciliation: Option<SyncReport>,
 }
+/// A condition that needs attention; alerts persist until their cause clears.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Alert {
+    /// What happened.
     pub kind: AlertKind,
+    /// When it was raised, in Unix seconds.
     pub since: Option<u64>,
 }
+/// Why a routine seal was skipped.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "code", content = "detail", rename_all = "snake_case")]
 pub enum SealSkip {
+    /// The device follows no admin's history yet.
     NoFollowedBookmark,
+    /// The device may not seal.
     NoTipAuthority(String),
+    /// Sealing failed.
     Failed(String),
 }
 impl SealSkip {
+    /// A stable snake-case label.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoFollowedBookmark => "no_followed_bookmark",
@@ -360,124 +586,215 @@ impl std::fmt::Display for SealSkip {
         }
     }
 }
+/// What an alert reports.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertKind {
+    /// An admin signed two conflicting membership changes at the same position.
     MembershipFork {
+        /// The admin.
         identity: String,
+        /// The position.
         sequence: u64,
     },
+    /// This device's clock runs ahead of a peer's.
     ClockAheadOfPeer {
+        /// The peer.
         node: String,
+        /// By how much.
         seconds: u64,
     },
+    /// A peer's clock runs ahead of this device's.
     PeerClockAhead {
+        /// The peer.
         node: String,
+        /// By how much.
         seconds: u64,
     },
+    /// An admin linked a device.
     TrustedNodeLinked {
+        /// The admin.
         identity: String,
+        /// The device.
         node: String,
+        /// When, in Unix seconds.
         linked: u64,
     },
+    /// An admin unlinked a device.
     TrustedNodeUnlinked {
+        /// The admin.
         identity: String,
+        /// The device.
         node: String,
+        /// When, in Unix seconds.
         unlinked: u64,
     },
+    /// No device of an admin has been heard from within `TRUSTED_STALE_AFTER`.
     TrustedIdentityStale {
+        /// The admin.
         identity: String,
+        /// When one of its devices was last heard from.
         last_heard_epoch_seconds: u64,
     },
+    /// A routine seal was skipped.
     SealSkipped {
+        /// Why.
         reason: SealSkip,
     },
+    /// A revoked admin device kept signing after its revocation's cut; those statements are
+    /// ignored.
     TipStatementsPastCut {
+        /// The admin.
         signer: String,
+        /// The device.
         node: String,
+        /// Statements ignored.
         statements: u64,
     },
+    /// An admin device signed two histories at the same position.
     TipChainEquivocation {
+        /// The admin.
         signer: String,
+        /// The device.
         node: String,
+        /// The position.
         sequence: u64,
     },
+    /// This device's data is older than peers have seen from it, as after restoring a backup, so it
+    /// refuses to write.
     StoreSuperseded {
+        /// The peer that reported it.
         node: String,
+        /// The position this device holds.
         held: u64,
+        /// The position the peer saw.
         reported: u64,
     },
+    /// A peer's data went back to an older position.
     PeerStoreRegressed {
+        /// The peer.
         node: String,
+        /// The scope.
         scope: String,
+        /// The position the peer holds now.
         held: u64,
+        /// The position it reported before.
         reported: u64,
     },
+    /// A committed transaction was dropped on replay; cleared by `Database::acknowledge_drop`.
     WriteDropped {
+        /// The dropped transaction.
         token: crate::TransactionToken,
+        /// The device that wrote it.
         node: String,
+        /// Why it was dropped.
         reason: crate::DropReason,
     },
 }
+/// How long an admin may stay unheard before `TrustedIdentityStale`; 30 days unless
+/// `Database::set_trusted_stale_after` changes it.
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);
+/// A device's signed health summary, shared with admin devices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReport {
+    /// When it was produced.
     pub produced_at_epoch_seconds: u64,
+    /// The application schema version the device runs.
     pub schema: u32,
+    /// Its alerts.
     pub alerts: Vec<Alert>,
+    /// Its blockers by kind.
     pub blockers: Vec<BlockerCount>,
 }
+/// How many blockers of one kind a device has.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockerCount {
+    /// The blocker kind.
     pub kind: String,
+    /// How many.
     pub count: u64,
 }
+/// The latest health report of one device, as an admin device sees it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshDevice {
+    /// The device.
     pub node: String,
+    /// Its report.
     pub report: HealthReport,
+    /// When the report arrived.
     pub received_at_epoch_seconds: u64,
+    /// The device that relayed it, or `None` when it came directly.
     pub via: Option<String>,
+    /// Whether no report arrived within `SILENT_AFTER`.
     pub silent: bool,
 }
+/// How long a device may go without a health report before it counts as silent.
 pub const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+/// A snapshot of the database: who this device is, the data and the network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseStatus {
+    /// Identifies this snapshot for `StatusChanges`.
     pub token: String,
+    /// When it was taken.
     pub observed_at_epoch_millis: Option<u64>,
+    /// This device's credentials.
     pub authority: AuthorityStatus,
+    /// The local data and its blockers.
     pub data: DataStatus,
+    /// The network and peers.
     pub network: NetworkStatus,
+    /// Conditions that need attention.
     pub alerts: Vec<Alert>,
+    /// Every device's health report, or `None` on a device that is not an admin's.
     pub mesh: Option<Vec<MeshDevice>>,
 }
+/// What one scope exchanged with a peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {
+    /// The scope.
     pub scope: ScopeStatus,
+    /// Encrypted frames received, not rows.
     pub pulled: u64,
+    /// Encrypted frames sent, not rows.
     pub pushed: u64,
+    /// Bytes received.
     pub received_bytes: u64,
+    /// Bytes sent.
     pub sent_bytes: u64,
+    /// A checkpoint the scope started from, if one was imported.
     pub checkpoint: Option<String>,
+    /// Frames skipped because a checkpoint covers them.
     pub superseded: Option<u64>,
 }
+/// One peer's part of a sync pass.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerReconciliation {
+    /// The peer.
     pub node: String,
+    /// The attempts made.
     pub attempts: Vec<AttemptObservation>,
+    /// Why the pass skipped the peer, if it did.
     pub skip: Option<SkipReason>,
+    /// What each scope exchanged.
     pub transfers: Vec<ScopeReconciliationTransfer>,
+    /// Scopes the peer refused.
     pub refused: Vec<ScopeStatus>,
+    /// Scopes that wait for something before they sync.
     pub waiting: Vec<ScopeStatus>,
+    /// Whether the peer needs a newer Rocky.
     pub upgrade_required: bool,
+    /// Whether a retry is scheduled.
     pub retry_pending: bool,
+    /// The outcome per scope.
     pub scopes: Vec<ScopeOutcome>,
+    /// Timeouts by kind.
     pub timeouts: Vec<TimeoutCount>,
 }
 impl PeerReconciliation {
+    /// Whether a reconciliation with the peer completed.
     pub fn reconciled(&self) -> bool {
         self.attempts.iter().any(|attempt| {
             attempt.operation == AttemptOperation::Reconcile
@@ -485,36 +802,56 @@ impl PeerReconciliation {
         })
     }
 }
+/// How one scope's sync ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeSyncOutcome {
+    /// It synced.
     Synced,
+    /// The peer refused it.
     Refused,
+    /// The peer is still importing it.
     PeerImporting,
+    /// It failed.
     Failed,
+    /// It was interrupted.
     Interrupted,
 }
+/// One scope's sync outcome.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeOutcome {
+    /// The scope.
     pub scope: ScopeStatus,
+    /// How it ended.
     pub outcome: ScopeSyncOutcome,
 }
+/// How many timeouts of one kind occurred.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeoutCount {
+    /// The kind.
     pub kind: String,
+    /// How many.
     pub count: u64,
 }
+/// What one `Database::sync_now` pass did; it prints as one line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncReport {
+    /// Contact resolutions in the pass.
     pub contact_resolutions: Vec<AttemptObservation>,
+    /// When the pass started.
     pub started_at_epoch_millis: Option<u64>,
+    /// When it ended.
     pub ended_at_epoch_millis: Option<u64>,
+    /// Each peer the pass knew.
     pub peers: Vec<PeerReconciliation>,
 }
 impl SyncReport {
+    /// Peers that reconciled.
     pub fn reconciled(&self) -> usize {
         self.peers.iter().filter(|peer| peer.reconciled()).count()
     }
+    /// Whether every known peer reconciled or was covered by another; a pass that knew no peer is
+    /// not complete.
     pub fn complete(&self) -> bool {
         !self.peers.is_empty()
             && self
@@ -522,9 +859,11 @@ impl SyncReport {
                 .iter()
                 .all(|peer| peer.reconciled() || peer.skip == Some(SkipReason::Covered))
     }
+    /// Encrypted frames received from all peers, not rows.
     pub fn pulled(&self) -> u64 {
         self.transfers().map(|transfer| transfer.pulled).sum()
     }
+    /// Encrypted frames sent to all peers, not rows.
     pub fn pushed(&self) -> u64 {
         self.transfers().map(|transfer| transfer.pushed).sum()
     }

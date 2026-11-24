@@ -199,6 +199,13 @@ macro_rules! local { () => {}; }
         self.assertEqual(list(comments(root, documented_crate=True)), [1, 3])
         self.assertEqual(list(comments('//! One. Two. Three.\n', True, True)), [1])
 
+    def test_app_facing_crates_deny_missing_docs(self):
+        lint = runpy.run_path(str(SCRIPTS / 'lint-rust'))
+        for crate in lint['DOCUMENTED_CRATES']:
+            with self.subTest(crate=crate):
+                root = (SCRIPTS.parent / 'crates' / crate / 'src/lib.rs').read_text()
+                self.assertIn('#![deny(missing_docs)]', root)
+
     def test_docs_are_allowed_only_in_the_sources_of_app_facing_crates(self):
         documented = '/// A public item.\npub fn item() {}\n'
         result = self.run_workspace({'crates/rocky-sdk': '//! The SDK.\n' + documented,

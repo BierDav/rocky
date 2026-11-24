@@ -998,12 +998,17 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
     reply.map_err(crate::Error::failed)
 }
 
+/// Why observed tables changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum ChangeCause {
+    /// A transaction on this device committed.
     Local,
+    /// Rows arrived from a peer.
     Sync,
+    /// Tables were rebuilt, as after a schema change or a reordered replay.
     Rebuild,
+    /// This device's access changed what it may read.
     Authority,
 }
 impl From<rocky_storage::observe::Cause> for ChangeCause {
@@ -1017,20 +1022,32 @@ impl From<rocky_storage::observe::Cause> for ChangeCause {
     }
 }
 
+/// Changes to observed tables, from `Database::observe`.
 pub struct TableEvents {
     observer: Mutex<TableObserver>,
 }
+/// One or more coalesced changes; read the tables again to see them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableChange {
+    /// The changed tables.
     pub tables: Vec<String>,
+    /// Why they changed.
     pub causes: Vec<ChangeCause>,
+    /// Committed transactions that replay dropped, such as by a constraint violation or a schema
+    /// that can no longer apply them.
     pub dropped: Vec<DroppedTransaction>,
+    /// Transactions whose outcome became final.
     pub sealed: Vec<crate::TransactionToken>,
+    /// Set when more than 4096 outcomes coalesced, so `dropped` and `sealed` are empty; ask
+    /// `transaction_outcome` for the tokens you track.
     pub reconcile: bool,
 }
+/// A committed transaction replay dropped on every device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DroppedTransaction {
+    /// The transaction.
     pub token: crate::TransactionToken,
+    /// Why it was dropped.
     pub reason: rocky_core::replay::DropReason,
 }
 impl TableEvents {
@@ -1039,6 +1056,7 @@ impl TableEvents {
             observer: Mutex::new(observer),
         }
     }
+    /// Waits for the next change.
     pub async fn next(&self) -> Result<TableChange, crate::Error> {
         let change = self
             .observer

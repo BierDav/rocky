@@ -1,6 +1,10 @@
+/// What a store-only configuration cannot do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreOnlyRefusal {
+    /// Create or install a database, which needs the application's schema.
     NeedsSchema,
+    /// Join with an invitation that grants readable access; a relay is invited with
+    /// `Access::Store`.
     ReadableAccess,
 }
 impl std::fmt::Display for StoreOnlyRefusal {

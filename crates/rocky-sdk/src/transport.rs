@@ -3,4 +3,5 @@ pub use rocky_core::net::{
     Protocol, SessionStream, Stream, TOPIC_PATH, Transport,
 };
 
+/// An in-process network for running several devices in one process.
 pub mod memory;

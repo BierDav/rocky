@@ -11,24 +11,38 @@ use std::{
     path::Path,
 };
 
+/// A table or field a schema version removes and the rows it holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalImpact {
+    /// The table or field.
     pub name: String,
+    /// Rows that hold data in it.
     pub rows: u64,
 }
+/// What a schema version removes, reported before an admin device publishes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolloutImpact {
+    /// The database.
     pub domain: String,
+    /// The installed manifest digest.
     pub installed_manifest: String,
+    /// The new schema's digest.
     pub target_schema: String,
+    /// Tables removed.
     pub tables: Vec<RemovalImpact>,
+    /// Fields removed.
     pub fields: Vec<RemovalImpact>,
+    /// Roles that lose rights.
     pub narrowed_roles: Vec<RoleName>,
+    /// Pass it to `Configuration::open_confirmed` to publish.
     pub digest: String,
 }
+/// Opening would publish a schema that removes data or narrows a role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RolloutConfirmationRequired {
+    /// What it removes.
     pub report: RolloutImpact,
+    /// Whether a confirmation was given for a different report.
     pub mismatch: bool,
 }
 impl std::fmt::Display for RolloutConfirmationRequired {
@@ -42,9 +56,12 @@ impl std::fmt::Display for RolloutConfirmationRequired {
 }
 impl std::error::Error for RolloutConfirmationRequired {}
 
+/// A schema version drops a role people still hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleInUse {
+    /// The role.
     pub role: RoleName,
+    /// Who holds it; change their access first.
     pub people: Vec<PersonId>,
 }
 impl std::fmt::Display for RoleInUse {

@@ -110,11 +110,15 @@ pub enum Carries {
     Secret { address: String, epoch: KeyEpoch },
     Rights,
 }
+/// How far a key delivery to a device got.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    /// The device has the key.
     Delivered,
+    /// The key waits in a mailbox for the device.
     Deposited,
+    /// The key has not left this device.
     Pending,
 }
 impl Pending {

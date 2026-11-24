@@ -2,6 +2,7 @@ use rocky_core::{InvalidName, NameRule, RoleDefinition, RoleTable, SchemaError, 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+/// An application's tables and roles at one version; build it with `Schema::builder`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {
@@ -26,13 +27,23 @@ pub(crate) struct Migration {
     pub(crate) version: u32,
     pub(crate) statements: Vec<MigrationStep>,
 }
+/// One step of a migration to a schema version.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum MigrationStep {
+    /// A SQL statement run against the new version; it may read the previous version's rows as
+    /// `parent.<table>`.
     Sql(String),
-    Insert { insert: String, select: String },
+    /// Copies the rows a `SELECT` over the previous version returns into a table.
+    Insert {
+        /// The table to fill.
+        insert: String,
+        /// The `SELECT` that produces the rows.
+        select: String,
+    },
 }
 impl MigrationStep {
+    /// An `Insert` step.
     pub fn insert(table: impl Into<String>, select: impl Into<String>) -> Self {
         Self::Insert {
             insert: table.into(),
@@ -165,6 +176,7 @@ impl Schema {
         }
     }
 
+    /// The engine's form of this schema, as published under `publisher`.
     pub fn definition(&self, publisher: [u8; 32]) -> rocky_core::SchemaDefinition {
         rocky_core::SchemaDefinition {
             format: self.format,
@@ -179,8 +191,10 @@ impl Schema {
     }
 }
 
+/// Collects tables, roles and migrations; `build` validates them.
 pub struct SchemaBuilder(Schema);
 impl Schema {
+    /// Starts the schema of `application` at `version`; raise the version with every change.
     pub fn builder(application: impl Into<String>, version: u32) -> SchemaBuilder {
         SchemaBuilder(Self {
             format: rocky_core::DEFINITION_FORMAT,
@@ -196,16 +210,20 @@ impl Schema {
     }
 }
 impl SchemaBuilder {
+    /// Adds a table.
     #[must_use]
     pub fn table(mut self, table: Table) -> Self {
         self.0.tables.push(table.0);
         self
     }
+    /// Adds a role that `Access::Role` can grant.
     #[must_use]
     pub fn role(mut self, role: Role) -> Self {
         self.0.roles.push(role.0);
         self
     }
+    /// Declares the steps that bring the data to `version`; a step may read the previous version's
+    /// rows as `parent.<table>`.
     #[must_use]
     pub fn migration(
         mut self,
@@ -218,17 +236,22 @@ impl SchemaBuilder {
         });
         self
     }
+    /// Validates the schema; an invalid name is `ErrorKind::Schema` with
+    /// `SchemaError::InvalidName`.
     pub fn build(self) -> Result<Schema, crate::Error> {
         Ok(self.0.validated()?)
     }
 }
 
+/// The name of a role the schema declares.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleName(Cow<'static, str>);
 impl RoleName {
+    /// A role name known at compile time; `Schema::build` checks it.
     pub const fn from_static(name: &'static str) -> Self {
         Self(Cow::Borrowed(name))
     }
+    /// Checks the name is an identifier that is not reserved.
     pub fn new(name: impl Into<String>) -> Result<Self, InvalidName> {
         let name = name.into();
         if !rocky_core::role_name_is_valid(&name) {
@@ -239,6 +262,7 @@ impl RoleName {
         }
         Ok(Self(Cow::Owned(name)))
     }
+    /// The name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -259,8 +283,10 @@ impl<'de> Deserialize<'de> for RoleName {
     }
 }
 
+/// Rights to named tables that a person gets through `Access::Role`.
 pub struct Role(RoleDefinition);
 impl Role {
+    /// An empty role.
     pub fn new(name: RoleName) -> Self {
         Self(RoleDefinition {
             name: name.as_str().to_owned(),
@@ -275,18 +301,22 @@ impl Role {
         });
         self
     }
+    /// Lets the role read a table.
     #[must_use]
     pub fn read(self, table: impl Into<String>) -> Self {
         self.grant(table, TableAccess::Read)
     }
+    /// Lets the role read and write a table.
     #[must_use]
     pub fn write(self, table: impl Into<String>) -> Self {
         self.grant(table, TableAccess::Write)
     }
+    /// Lets the role read a table and insert rows, but not change or delete them.
     #[must_use]
     pub fn append(self, table: impl Into<String>) -> Self {
         self.grant(table, TableAccess::Append)
     }
+    /// Lets the role read a table and update only the listed columns.
     #[must_use]
     pub fn update_columns(
         self,
@@ -296,6 +326,7 @@ impl Role {
         let columns = columns.into_iter().map(Into::into).collect();
         self.grant(table, TableAccess::UpdateColumns(columns))
     }
+    /// Gives the role no partition of `group` until an admin calls `Database::grant_partition`.
     #[must_use]
     pub fn per_partition(mut self, group: impl Into<String>) -> Self {
         self.0.per_partition.push(group.into());
@@ -303,8 +334,10 @@ impl Role {
     }
 }
 
+/// A table whose writes are replayed on every device; its primary key is `id` unless set.
 pub struct Table(rocky_core::TableDefinition);
 impl Table {
+    /// A table named `name` with an `id` primary key, which `Transaction::next_id` fills.
     pub fn replayed(name: impl Into<String>) -> Self {
         Self::of(name, rocky_core::TableClass::Replayed)
     }
@@ -322,36 +355,43 @@ impl Table {
             foreign_keys: Vec::new(),
         })
     }
+    /// Adds a column.
     #[must_use]
     pub fn column(mut self, column: Column) -> Self {
         self.0.columns.push(column.0);
         self
     }
+    /// Replaces the `id` primary key.
     #[must_use]
     pub fn primary_key(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.0.primary_key = columns.into_iter().map(Into::into).collect();
         self
     }
+    /// Splits the table into partitions by these columns' values, each encrypted under its own key.
     #[must_use]
     pub fn partition_by(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.0.partition_by = columns.into_iter().map(Into::into).collect();
         self
     }
+    /// Shares one partition key with the other tables of `group`, so a grant covers them together.
     #[must_use]
     pub fn partition_group(mut self, group: impl Into<String>) -> Self {
         self.0.partition_group = Some(group.into());
         self
     }
+    /// Adds an index.
     #[must_use]
     pub fn index(mut self, index: rocky_core::IndexDefinition) -> Self {
         self.0.indexes.push(index);
         self
     }
+    /// Adds a foreign key, checked when writes replay.
     #[must_use]
     pub fn foreign_key(mut self, foreign_key: rocky_core::ForeignKeyDefinition) -> Self {
         self.0.foreign_keys.push(foreign_key);
         self
     }
+    /// Adds a `CHECK` constraint, checked when writes replay.
     #[must_use]
     pub fn check(mut self, expression: impl Into<String>) -> Self {
         self.0.checks.push(expression.into());
@@ -359,8 +399,10 @@ impl Table {
     }
 }
 
+/// A table column.
 pub struct Column(rocky_core::ColumnDefinition);
 impl Column {
+    /// A nullable column with no default.
     pub fn new(name: impl Into<String>, affinity: rocky_core::Affinity) -> Self {
         Self(rocky_core::ColumnDefinition {
             name: name.into(),
@@ -372,11 +414,13 @@ impl Column {
             local_only: false,
         })
     }
+    /// Makes the column `NOT NULL`.
     #[must_use]
     pub fn required(mut self) -> Self {
         self.0.not_null = true;
         self
     }
+    /// Sets the value an insert that omits the column gets.
     #[must_use]
     pub fn default(mut self, value: impl crate::IntoSqlValue) -> Self {
         self.0.default = Some(match value.into_sql_value() {

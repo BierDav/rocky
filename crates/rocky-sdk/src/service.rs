@@ -5,10 +5,16 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// How a database reaches peers.
 #[derive(Clone)]
 pub enum Network {
+    /// A connector Rocky starts at open and closes at close, such as `rocky_tcp::Options` or
+    /// `rocky_iroh::Options`.
     Owned(Arc<dyn Connector>),
+    /// A transport the application owns and closes, such as one from `Attachment::transport`.
     Borrowed(Arc<dyn Transport>),
+    /// A started transport with optional discovery and network-change events, which the application
+    /// owns.
     Attached(Connected),
 }
 impl Network {
@@ -25,19 +31,40 @@ impl Network {
     }
 }
 
+/// Why the network refused or failed a call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceError {
+    /// The call needs an attached network.
     NetworkRequired(&'static str),
+    /// A network is already attached.
     NetworkAttached,
-    NoRoute { peer: &'static str, network: String },
+    /// No route to the peer on the attached transport; attach its transport or add a current
+    /// contact.
+    NoRoute {
+        /// The kind of peer.
+        peer: &'static str,
+        /// The attached transport kind.
+        network: String,
+    },
+    /// The peer did not answer; retry.
     Unreachable(String),
+    /// The dial timed out; retry.
     TimedOut(String),
+    /// This device's credentials expired and it needs a network to renew them with an admin device.
     CredentialsExpired,
+    /// The database or network is closed.
     Closed(&'static str),
+    /// Sync is `Off`.
     SyncOff,
-    NoPeerReached { known: usize },
+    /// A sync pass reconciled with no peer, as when every peer is offline or an owner has no other
+    /// device yet.
+    NoPeerReached {
+        /// Peers the pass knew.
+        known: usize,
+    },
 }
 impl ServiceError {
+    /// A stable snake-case code.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NetworkRequired(_) | Self::CredentialsExpired => "network_required",
@@ -47,6 +74,7 @@ impl ServiceError {
             Self::SyncOff => "sync_off",
         }
     }
+    /// Whether a retry may succeed.
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -81,26 +109,37 @@ impl std::fmt::Display for ServiceError {
 }
 impl std::error::Error for ServiceError {}
 
+/// How a database syncs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
+    /// Neither serves peers nor reaches out.
     Off,
+    /// Serves peers but reaches out only on `sync_now`.
     Manual,
+    /// The default: serves peers, syncs on its own and pushes each commit to connected peers at
+    /// once.
     Live,
 }
 
+/// How other devices reach this one.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContactInfo {
+    /// The contact to pass to `add_peer` or `Configuration::link` on another device.
     pub uri: String,
+    /// This device's key.
     pub node: PublicKey,
+    /// Its routes.
     pub routes: Vec<Route>,
 }
 
+/// Status snapshots, each returned once the status changed since the last.
 pub struct StatusChanges {
     database: Database,
     seen: Option<String>,
 }
 impl StatusChanges {
+    /// Waits for the status to change and returns it; the first call returns at once.
     pub async fn next(&mut self) -> Result<DatabaseStatus, crate::Error> {
         let status = match self.seen.clone() {
             None => self.database.status().await?,
@@ -116,25 +155,33 @@ impl StatusChanges {
 }
 
 impl Database {
+    /// How other devices reach this one.
     pub async fn contact(&self) -> Result<ContactInfo, crate::Error> {
         self.send(Request::Contact).await
     }
+    /// Adds a peer from its contact and returns its device key.
     pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, crate::Error> {
         self.send(|reply| Request::AddPeer(contact.into(), reply))
             .await
     }
+    /// Forgets a peer the application added.
     pub async fn remove_peer(&self, node: PublicKey) -> Result<(), crate::Error> {
         self.send(|reply| Request::RemovePeer(node, reply)).await
     }
+    /// Runs one sync pass; fails with `NoPeerReached` when no peer reconciled and with `SyncOff`
+    /// when sync is off.
     pub async fn sync_now(&self) -> Result<SyncReport, crate::Error> {
         self.send(Request::Sync).await
     }
+    /// Changes the sync mode.
     pub async fn set_sync(&self, mode: SyncMode) -> Result<(), crate::Error> {
         self.send(|reply| Request::SetSync(mode, reply)).await
     }
+    /// Who this device is, where its data stands and what the network does.
     pub async fn status(&self) -> Result<DatabaseStatus, crate::Error> {
         self.send(Request::Status).await
     }
+    /// A stream of status snapshots as the status changes.
     pub fn status_changes(&self) -> StatusChanges {
         StatusChanges {
             database: self.clone(),

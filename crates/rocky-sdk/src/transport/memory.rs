@@ -24,6 +24,7 @@ use tokio::{
     sync::mpsc,
 };
 
+/// Incoming streams a node queues before new ones are refused.
 pub const PENDING: usize = 8;
 
 type Inbound = Incoming;
@@ -37,10 +38,14 @@ struct Listener {
     closed: tokio::sync::watch::Sender<bool>,
 }
 const RPC_INBOUND: usize = 32;
+/// How many requests a node serves and has refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RpcAdmission {
+    /// Requests served now.
     pub active: usize,
+    /// The most served at once.
     pub limit: usize,
+    /// Requests refused so far.
     pub refused: usize,
 }
 struct RpcSlot {
@@ -53,13 +58,20 @@ impl Drop for RpcSlot {
         self.changed.send_replace(());
     }
 }
+/// An in-process network for running several devices in one process, as tests and the todo desktop
+/// demo do.
 pub struct Hub {
     listeners: Mutex<HashMap<String, Listener>>,
+    /// Transports started.
     pub starts: AtomicUsize,
+    /// Dials made.
     pub dials: AtomicUsize,
+    /// Transports closed.
     pub closes: AtomicUsize,
+    /// Holds every dial while set.
     #[cfg(any(test, feature = "test-support"))]
     pub stalled: AtomicBool,
+    /// The buffer of each in-process stream in bytes; 64 KiB by default.
     pub capacity: AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     cut: Mutex<CutGate>,
@@ -71,11 +83,13 @@ pub struct Hub {
     links: Mutex<Vec<OpenPipe>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
+    /// Makes a cut stream wait instead of failing while set.
     #[cfg(any(test, feature = "test-support"))]
     pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
     admissions: tokio::sync::watch::Sender<()>,
     transcripts: Mutex<HashMap<String, Tap>>,
+    /// Whether nodes find each other by topic.
     pub discovery: AtomicBool,
     announced: Mutex<BTreeMap<String, Announcement>>,
     announcements: tokio::sync::watch::Sender<()>,
@@ -150,6 +164,7 @@ fn pair(a: &str, b: &str) -> [String; 2] {
     pair
 }
 impl Hub {
+    /// A hub whose injected faults draw from `seed`, so a run repeats.
     #[cfg(any(test, feature = "test-support"))]
     pub fn seeded(seed: u64) -> Self {
         Self {
@@ -157,6 +172,7 @@ impl Hub {
             ..Self::default()
         }
     }
+    /// Injects faults on the link between two nodes.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_faults(&self, a: &str, b: &str, faults: LinkFaults) {
         self.faults
@@ -164,6 +180,7 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(pair(a, b), faults);
     }
+    /// Takes the link between two nodes down or back up; taking it down severs open streams.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_down(&self, a: &str, b: &str, down: bool) {
         let link = pair(a, b);
@@ -187,6 +204,7 @@ impl Hub {
             self.sever(|nodes, _| *nodes == link);
         }
     }
+    /// Whether the link between two nodes is down.
     #[cfg(any(test, feature = "test-support"))]
     pub fn is_down(&self, a: &str, b: &str) -> bool {
         self.down
@@ -194,6 +212,7 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&pair(a, b))
     }
+    /// Every link up and down event so far.
     #[cfg(any(test, feature = "test-support"))]
     pub fn events(&self) -> Vec<String> {
         self.events
@@ -221,6 +240,7 @@ impl Hub {
             true
         });
     }
+    /// Link messages a node sent.
     pub fn link_messages(&self, node: &str) -> usize {
         self.link_messages
             .lock()
@@ -230,12 +250,14 @@ impl Hub {
             .unwrap_or_default()
     }
 
+    /// A connector for a node of this name, for `Network::Owned`.
     pub fn connector(self: &Arc<Self>, name: &str) -> Arc<Memory> {
         Arc::new(Memory {
             hub: self.clone(),
             name: name.into(),
         })
     }
+    /// Routes another transport through the hub so its traffic is counted and recorded.
     pub fn wrap(self: &Arc<Self>, name: &str, transport: Connected) -> Connected {
         Connected {
             discovery: transport.discovery,
@@ -247,6 +269,7 @@ impl Hub {
             }),
         }
     }
+    /// Starts recording the bytes a node sends and receives.
     pub fn record(&self, name: &str) {
         self.transcripts
             .lock()
@@ -254,6 +277,7 @@ impl Hub {
             .entry(name.into())
             .or_default();
     }
+    /// The bytes recorded for a node.
     pub fn transcript(&self, name: &str) -> Vec<u8> {
         self.transcripts
             .lock()
@@ -271,6 +295,7 @@ impl Hub {
             .filter_map(|end| transcripts.get(*end).cloned())
             .collect()
     }
+    /// The discovery topics a node announces.
     pub fn topics(&self, name: &str) -> Vec<[u8; 32]> {
         self.announced
             .lock()
@@ -279,6 +304,7 @@ impl Hub {
             .map(|announcement| announcement.topics.clone())
             .unwrap_or_default()
     }
+    /// Waits until `ready` holds for the announced topics.
     pub async fn wait_announced(&self, ready: impl Fn(&Self) -> bool) {
         let mut announcements = self.announcements.subscribe();
         while !ready(self) {
@@ -287,6 +313,7 @@ impl Hub {
             }
         }
     }
+    /// The nodes that share a topic with `name`.
     pub fn discoverable(&self, name: &str) -> Vec<String> {
         let announced = self
             .announced
@@ -309,6 +336,7 @@ impl Hub {
         names.sort();
         names
     }
+    /// Holds or releases every dial to one node.
     #[cfg(any(test, feature = "test-support"))]
     pub fn stall_peer(&self, address: &str, stalled: bool) {
         let mut peers = self
@@ -321,6 +349,7 @@ impl Hub {
             peers.remove(address);
         }
     }
+    /// Dials from one node to another on a protocol.
     pub fn protocol_dials(&self, from: &str, to: &str, protocol: Protocol) -> usize {
         self.protocol_dials
             .lock()
@@ -329,6 +358,7 @@ impl Hub {
             .copied()
             .unwrap_or(0)
     }
+    /// Dials to a node.
     pub fn dials_to(&self, address: &str) -> usize {
         self.peer_dials
             .lock()
@@ -337,6 +367,7 @@ impl Hub {
             .copied()
             .unwrap_or(0)
     }
+    /// Waits until a node was dialed `count` times.
     pub async fn wait_dials(&self, address: &str, count: usize) {
         let mut events = self.dial_events.subscribe();
         loop {
@@ -349,17 +380,21 @@ impl Hub {
             }
         }
     }
+    /// Bytes written so far, as a watch.
     pub fn written(&self) -> tokio::sync::watch::Receiver<usize> {
         self.written.subscribe()
     }
+    /// Signals a network change to every node.
     pub fn network_changed(&self) {
         self.connectivity.send_replace(());
     }
+    /// Whether a node listens.
     pub fn listens(&self, name: &str) -> bool {
         self.listeners
             .lock()
             .is_ok_and(|listeners| listeners.contains_key(name))
     }
+    /// A node's request admission, or `None` when it does not listen.
     pub fn rpc_admission(&self, name: &str) -> Option<RpcAdmission> {
         let listeners = self.listeners.lock().ok()?;
         let listener = listeners.get(name)?;
@@ -369,18 +404,22 @@ impl Hub {
             refused: listener.refused.load(Ordering::SeqCst),
         })
     }
+    /// Fires when any node's admission changes.
     pub fn admission_changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.admissions.subscribe()
     }
+    /// Starts, dials and closes so far.
     pub fn counts(&self) -> [usize; 3] {
         [&self.starts, &self.dials, &self.closes].map(|count| count.load(Ordering::SeqCst))
     }
+    /// Severs every link stream of a node.
     #[cfg(any(test, feature = "test-support"))]
     pub fn sever_links(&self, node: &str) {
         self.sever(|nodes, protocol| {
             protocol == Protocol::Link && nodes.iter().any(|name| name == node)
         });
     }
+    /// Cuts every stream once `bytes` more are written, or never for `None`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn cut_after(&self, bytes: Option<usize>) {
         let waiters: Vec<_> = {
@@ -619,8 +658,11 @@ impl AsyncWrite for Pipe {
     }
 }
 
+/// One named node on a `Hub`.
 pub struct Memory {
+    /// The hub it is on.
     pub hub: Arc<Hub>,
+    /// Its name, which is also its route.
     pub name: String,
 }
 struct Node {

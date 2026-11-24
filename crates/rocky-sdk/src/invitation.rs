@@ -30,6 +30,7 @@ const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
 const MAX_OPEN: usize = 64;
 const MAX_LABEL: usize = crate::registry::MAX_LABEL;
 
+/// Identifies one invitation, for `cancel_invitation` and `Person::invitation`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvitationId(pub(crate) Commitment);
 impl InvitationId {
@@ -68,6 +69,7 @@ impl<'de> Deserialize<'de> for InvitationId {
     }
 }
 
+/// What an invitation grants; pass it to `Database::invite`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Invite {
     access: Access,
@@ -77,7 +79,9 @@ pub struct Invite {
     person: Option<PersonId>,
 }
 impl Invite {
+    /// How long an invitation stays redeemable unless `valid_for` says otherwise.
     pub const DEFAULT_VALIDITY: Duration = Duration::from_secs(10 * 60);
+    /// An invitation that grants `access`, valid for ten minutes.
     pub fn new(access: Access) -> Self {
         Self {
             access,
@@ -87,21 +91,27 @@ impl Invite {
             person: None,
         }
     }
+    /// Also grants this partition; repeat for more.
     #[must_use]
     pub fn partition(mut self, partition: Partition) -> Self {
         self.partitions.push(partition);
         self
     }
+    /// Names the device it admits and, on the person's first invitation, the person; at most 256
+    /// bytes.
     #[must_use]
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
     }
+    /// How long it stays redeemable, from one minute to 30 days.
     #[must_use]
     pub fn valid_for(mut self, validity: Duration) -> Self {
         self.valid_for = validity;
         self
     }
+    /// Admits only this person's configured person key, with no secret in the code; use it to
+    /// re-invite a person who lost their only device.
     #[must_use]
     pub fn for_identity(mut self, person: PersonId) -> Self {
         self.person = Some(person);
@@ -122,20 +132,31 @@ impl Invite {
     }
 }
 
+/// An issued invitation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invitation {
+    /// Its id.
     pub id: InvitationId,
+    /// The code to hand to the joiner; a default code admits whoever holds it, once.
     pub code: InvitationCode,
+    /// When it stops being redeemable.
     pub expires: Timestamp,
 }
 
+/// An invitation as `Database::invitations` lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingInvitation {
+    /// Its id.
     pub id: InvitationId,
+    /// The access it grants.
     pub access: Access,
+    /// The partitions it grants.
     pub partitions: Vec<Partition>,
+    /// Its label.
     pub label: Option<String>,
+    /// When it stops being redeemable.
     pub expires: Timestamp,
+    /// Who redeemed it, or `None` while open.
     pub redeemed_by: Option<PersonId>,
 }
 
@@ -147,17 +168,37 @@ fn timestamp(seconds: u64) -> Timestamp {
     )
 }
 
+/// Why an invitation could not be issued or cancelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InviteError {
+    /// Inviting needs an attached network the joiner can reach.
     NetworkRequired,
-    TooManyOpen { limit: usize },
-    Validity { min: Duration, max: Duration },
-    LabelTooLong { limit: usize },
+    /// Too many invitations are open; cancel one or let it expire.
+    TooManyOpen {
+        /// The most open at once.
+        limit: usize,
+    },
+    /// The validity is outside the allowed range.
+    Validity {
+        /// The shortest allowed.
+        min: Duration,
+        /// The longest allowed.
+        max: Duration,
+    },
+    /// The label is too long.
+    LabelTooLong {
+        /// The longest label in bytes.
+        limit: usize,
+    },
+    /// The person is already a member with other access or an admin; link a device instead.
     AlreadyMember,
+    /// No such open invitation.
     Unknown,
+    /// The invitation was already redeemed.
     Redeemed,
 }
 impl InviteError {
+    /// A stable snake-case code.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NetworkRequired => "network_required",
@@ -197,15 +238,24 @@ impl std::fmt::Display for InviteError {
 }
 impl std::error::Error for InviteError {}
 
+/// Why an invitation could not be redeemed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinError {
+    /// The code is malformed.
     Invalid,
+    /// The invitation expired.
     Expired,
+    /// The invitation was already redeemed.
     Used,
+    /// The invitation was cancelled.
     Cancelled,
+    /// A `for_identity` invitation was redeemed with another person key.
     OtherIdentity,
+    /// The invitation is for another application.
     OtherApplication,
+    /// The person is already a member; link a device instead.
     AlreadyMember,
+    /// The issuing device is offline; retry when it is online.
     IssuerUnreachable,
 }
 impl JoinError {
@@ -217,6 +267,7 @@ impl JoinError {
         Self::OtherIdentity,
         Self::AlreadyMember,
     ];
+    /// A stable snake-case code.
     pub fn code(&self) -> &'static str {
         match self {
             Self::Invalid => "invitation_invalid",
@@ -229,6 +280,7 @@ impl JoinError {
             Self::IssuerUnreachable => "issuer_unreachable",
         }
     }
+    /// Whether a retry may succeed.
     pub fn retryable(&self) -> bool {
         matches!(self, Self::IssuerUnreachable)
     }
@@ -295,6 +347,8 @@ struct Code {
     expires: u64,
 }
 
+/// The text a joiner redeems with `Configuration::join`; it prints and parses as one URL-safe
+/// string.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitationCode(Box<Code>);
 impl InvitationCode {

@@ -1,102 +1,184 @@
 use rocky_core::Blocker;
 
+/// The one error every SDK call returns; match on `kind()`, and its message explains the cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     kind: ErrorKind,
     detail: String,
 }
 
+/// What went wrong, as a value an application matches on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// This device's access does not allow the call.
     Denied {
+        /// The table, or `None` for a database-wide right.
         table: Option<String>,
+        /// The right the call needed.
         need: Right,
+        /// Why the device lacks it.
         reason: DenyReason,
     },
+    /// The person or device was removed; it no longer reads, writes or syncs, even after reopening.
     Removed,
+    /// The data has not arrived or cannot be decrypted yet; `blockers` say what clears it.
     Blocked {
+        /// The table, when one read was refused.
         table: Option<String>,
+        /// What the data waits for and what clears each.
         blockers: Vec<Blocker>,
     },
+    /// The device's credentials changed during the call; retry.
     AuthorityChanged,
+    /// A concurrent change conflicted; retry.
     Conflict,
+    /// Too many calls are pending or storage is busy; retry.
     Busy,
+    /// A write exceeded a size limit.
     TooLarge {
+        /// Which limit.
         limit: Limit,
+        /// The size in bytes.
         size: usize,
+        /// The limit in bytes; a replayed write's intent holds at most 128 KiB.
         max: usize,
     },
+    /// Storage is over its quota.
     Quota,
+    /// SQLite or Rocky refused a statement.
     Sql {
+        /// The SQLite result code.
         code: i32,
+        /// SQLite's message.
         message: String,
+        /// Why Rocky refused the statement in a replayed write, or `None` when SQLite refused it.
         unsupported: Option<Unsupported>,
     },
+    /// A column value did not fit the requested type.
     Decode(crate::DecodeError),
+    /// The schema is invalid.
     Schema(Box<crate::SchemaError>),
+    /// A migration to the declared schema has not finished on this device.
     MigrationPending,
+    /// A migration step failed and its version was withdrawn; a retry does not clear it.
     MigrationFailed {
+        /// The version the migration targeted.
         version: u32,
+        /// The failing step's index.
         step: usize,
     },
+    /// The database is at a version that removed a table or field this application declares;
+    /// upgrade the application.
     UpgradeRequired {
+        /// The database's version.
         current: u32,
+        /// The application's declared version.
         declared: u32,
     },
+    /// This copy is older than what peers have seen from it, as after restoring a backup; it reads
+    /// and syncs but refuses writes, so re-invite it as a new device.
     StoreSuperseded,
+    /// A store-only configuration was asked for something it cannot do.
     StoreOnly(crate::StoreOnlyRefusal),
+    /// The data needs a newer version of Rocky.
     UnsupportedGeneration,
+    /// The database holds as many people and devices as it can.
     RegistryFull,
+    /// The database holds as many revocations as it can.
     RevocationSetFull,
+    /// A peer or this device rejected a credential or message.
     Rejected,
+    /// An invitation could not be issued or cancelled.
     Invite(crate::InviteError),
+    /// An invitation could not be redeemed.
     Join(crate::JoinError),
+    /// A device could not be linked.
     Link(crate::LinkError),
+    /// An access change was refused.
     Access(crate::AccessError),
+    /// The network refused or failed the call.
     Service(crate::ServiceError),
+    /// The schema removes data or narrows a role; open with `Configuration::open_confirmed` and the
+    /// report's digest.
     RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
+    /// The schema drops a role people still hold.
     RoleInUse(crate::RoleInUse),
+    /// A peer failed the call.
     Remote {
+        /// Whether the peer says a retry may succeed.
         retryable: bool,
     },
+    /// The database or transaction is closed.
     Closed,
+    /// Local storage failed.
     Storage,
+    /// An unexpected internal failure; never retryable.
     Internal,
 }
 
+/// A right a call needs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Right {
+    /// Read the table.
     Read,
+    /// Write the table.
     Write,
+    /// Insert rows into the table.
     Append,
+    /// Update this column.
     Update(String),
+    /// Allocate a row id in the table.
     Allocate,
+    /// Administer people and access.
     Administer,
+    /// Sign as the person, which needs `Configuration::identity`.
     Sign,
 }
 
+/// Why a device lacks a right.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DenyReason {
+    /// The person's access does not include it.
     NotGranted,
-    PartitionNotGranted { group: String },
-    PartitionNotCreated { group: String },
+    /// The person holds no partition with these values; an admin grants one with `grant_partition`.
+    PartitionNotGranted {
+        /// The partition group.
+        group: String,
+    },
+    /// No partition with these values exists; create it with `create_partition`.
+    PartitionNotCreated {
+        /// The partition group.
+        group: String,
+    },
+    /// A store-only device holds no readable data.
     StoreOnly,
+    /// Only an admin may do this.
     AdminRequired,
+    /// Only the owner's root key may do this.
     OwnerRequired,
+    /// The call needs the person key; supply it with `Configuration::identity`.
     IdentityRequired,
 }
 
+/// A size limit a write can exceed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Limit {
+    /// The SQL intent a replayed write records, at most 128 KiB.
     Intent,
+    /// One encrypted frame.
     Frame,
 }
 
+/// Why Rocky refused a statement in a replayed write.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Unsupported {
+    /// The statement calls a clock or random function, which would differ on replay; bind the value
+    /// as a parameter instead.
     NonDeterministic(String),
+    /// The statement uses a `WITH` clause.
     With,
+    /// The statement kind is not allowed in a transaction.
     Statement,
 }
 
@@ -268,10 +350,12 @@ impl Error {
         crate::node::typed_error(&error)
     }
 
+    /// What went wrong.
     pub fn kind(&self) -> &ErrorKind {
         &self.kind
     }
 
+    /// A stable snake-case code for tests and logs.
     #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> &str {
         self.kind.code()
@@ -281,6 +365,7 @@ impl Error {
         self.kind.code()
     }
 
+    /// Whether retrying the same call may succeed; it follows from the kind.
     pub fn retryable(&self) -> bool {
         match &self.kind {
             ErrorKind::Blocked { .. }
@@ -295,6 +380,7 @@ impl Error {
         }
     }
 
+    /// The blockers of a `Blocked` error, or none.
     pub fn blockers(&self) -> &[Blocker] {
         match &self.kind {
             ErrorKind::Blocked { blockers, .. } => blockers,

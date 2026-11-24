@@ -7,12 +7,17 @@ use rocky_credentials::{Granted, PartitionGrant, WholeAccess};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// What a person may do in the database.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
+    /// Read and write every table and partition.
     Full,
+    /// Read every table and partition.
     Read,
+    /// Hold and forward encrypted data without reading it, for a relay.
     Store,
+    /// The rights of a role the schema declares.
     Role(RoleName),
 }
 impl Access {

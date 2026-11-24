@@ -1,3 +1,6 @@
+//! An embedded SQLite database that syncs end-to-end encrypted between the people and devices
+//! its owner authorizes.
+#![deny(missing_docs)]
 #![recursion_limit = "256"]
 #![cfg_attr(
     all(test, target_family = "wasm"),
@@ -8,6 +11,13 @@
     )
 )]
 mod access;
+#[cfg_attr(
+    any(test, feature = "test-support"),
+    expect(
+        missing_docs,
+        reason = "activity records are fixtures for Rocky's own tests"
+    )
+)]
 mod activity;
 mod bootstrap_intent;
 mod configuration;
@@ -21,11 +31,13 @@ mod extension;
 mod generation;
 mod groups;
 mod identities;
+/// Held changes and history retention.
 pub mod inspection;
 mod invitation;
 mod membership;
 mod mesh;
 mod node;
+/// Partition progress and key deliveries.
 pub mod partitions;
 mod pause;
 mod peer;
@@ -42,14 +54,20 @@ mod service;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod simulation;
 mod sql;
+/// The reports `Database::status` and `sync_now` return.
 pub mod status;
 mod store_only;
 mod sync;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_directory;
 #[cfg(any(test, feature = "test-support"))]
+#[expect(
+    missing_docs,
+    reason = "fixtures for Rocky's own tests, not application API"
+)]
 mod testing;
 mod tip_schemas;
+/// The transport contract custom transports implement, and an in-process transport.
 pub mod transport;
 
 pub use access::Access;

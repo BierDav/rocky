@@ -23,9 +23,15 @@ pub(crate) mod fault;
 pub(crate) mod incarnation;
 mod residence;
 
+/// A new database and the keys that own it, returned once.
 pub struct Created {
+    /// The open database.
     pub database: Database,
+    /// The offline root key; store its phrase offline, as only `make_admin` and `revoke_admin` need
+    /// it.
     pub root: crate::RootKey,
+    /// The owner's person key; store it in the app's secure storage and pass it to
+    /// `Configuration::identity`.
     pub owner: crate::IdentityKey,
 }
 type Minted = Arc<std::sync::Mutex<Option<crate::IdentityKey>>>;
@@ -194,6 +200,8 @@ impl Shared {
     }
 }
 
+/// An open database; clones share it, every call is a future the caller may drop, and `close` ends
+/// it for every clone.
 #[derive(Clone)]
 pub struct Database {
     shared: Arc<Shared>,
@@ -269,10 +277,12 @@ impl Worker {
     }
 }
 impl Database {
+    /// Lock timings for qualification runs.
     #[cfg(feature = "qualification")]
     pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, crate::Error> {
         Ok(self.shared.request(Command::LockMeasurements).await?)
     }
+    /// Reactor timings for qualification runs.
     #[cfg(feature = "qualification")]
     pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, crate::Error> {
         self.shared
@@ -430,6 +440,7 @@ impl Database {
             scope,
         }
     }
+    /// The database's identity, the same on every device.
     pub fn scope(&self) -> rocky_core::Scope {
         self.scope
     }
@@ -474,12 +485,14 @@ impl Database {
         }
         result?.map_err(crate::Error::failed)
     }
+    /// Attaches a network after open; fails with `NetworkAttached` while one is attached.
     pub async fn attach(&self, network: Network) -> Result<(), crate::Error> {
         self.shared
             .request(|reply| Command::Attach(network, reply))
             .await?
             .map_err(crate::Error::failed)
     }
+    /// Detaches the network, closing it only if the database started it.
     pub async fn detach(&self) -> Result<(), crate::Error> {
         Ok(self.shared.request(Command::Detach).await?)
     }
@@ -508,6 +521,7 @@ impl Database {
             })
             .await?
     }
+    /// Whether a committed transaction applied or was dropped on replay, or `None` while unknown.
     pub async fn transaction_outcome(
         &self,
         token: crate::TransactionToken,
@@ -517,6 +531,7 @@ impl Database {
             .await?
             .map_err(crate::Error::failed)
     }
+    /// Clears the `WriteDropped` alert of a dropped transaction.
     pub async fn acknowledge_drop(
         &self,
         token: crate::TransactionToken,
@@ -526,12 +541,14 @@ impl Database {
             .await?
             .map_err(crate::Error::failed)
     }
+    /// Makes every commit returned so far durable on disk.
     pub async fn flush(&self) -> Result<(), crate::Error> {
         self.shared
             .request(Command::Flush)
             .await?
             .map_err(crate::Error::failed)
     }
+    /// Streams changes to the named tables; an empty list observes all tables.
     pub async fn observe(&self, tables: &[&str]) -> Result<TableEvents, crate::Error> {
         let tables = tables.iter().map(|table| (*table).to_owned()).collect();
         let observer = self
@@ -541,6 +558,7 @@ impl Database {
             .map_err(crate::Error::failed)?;
         Ok(TableEvents::new(observer))
     }
+    /// Closes the database for every clone, finishing pending writes.
     pub async fn close(&self) -> Result<(), crate::Error> {
         let mut worker = self.shared.worker.lock().await;
         if let Some(worker) = worker.take() {

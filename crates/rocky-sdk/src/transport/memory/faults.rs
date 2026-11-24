@@ -1,15 +1,24 @@
 use super::Protocol;
 use std::time::Duration;
 
+/// Faults injected on one link; the default injects none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkFaults {
+    /// Delay added to each write.
     pub latency: Duration,
+    /// Random extra delay up to this much.
     pub jitter: Duration,
+    /// Bytes per second, or `None` for unlimited.
     pub bandwidth: Option<usize>,
+    /// Chance per mille that a write stalls.
     pub stalls: u16,
+    /// How long a stall lasts.
     pub stall: Duration,
+    /// Chance per mille that a stream is cut.
     pub cuts: u16,
+    /// Bytes within which a cut stream fails.
     pub cut_within: usize,
+    /// Chance per mille that a dial is refused.
     pub refusals: u16,
 }
 impl LinkFaults {
@@ -21,9 +30,11 @@ impl LinkFaults {
     }
 }
 
+/// A deterministic random sequence for fault injection.
 #[derive(Clone, Debug)]
 pub struct Draws(u64);
 impl Draws {
+    /// A sequence from `seed`.
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
@@ -43,6 +54,7 @@ impl Draws {
         }
         Self(seed ^ hash ^ ordinal.wrapping_mul(0x9e37_79b9_7f4a_7c15))
     }
+    /// The next number.
     pub fn draw(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
@@ -50,12 +62,14 @@ impl Draws {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
+    /// The next number below `bound`, or 0 for a bound of 0.
     pub fn below(&mut self, bound: u64) -> u64 {
         match bound {
             0 => 0,
             bound => self.draw() % bound,
         }
     }
+    /// True with a chance of `per_mille` in a thousand.
     pub fn chance(&mut self, per_mille: u16) -> bool {
         self.below(1000) < u64::from(per_mille)
     }

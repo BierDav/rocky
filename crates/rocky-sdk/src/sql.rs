@@ -5,7 +5,9 @@ use crate::{
 };
 use std::{collections::VecDeque, sync::Arc};
 
+/// Converts a Rust value into a statement parameter; `params!` uses it.
 pub trait IntoSqlValue {
+    /// The parameter value.
     fn into_sql_value(self) -> SqlValue;
 }
 impl IntoSqlValue for SqlValue {
@@ -62,6 +64,8 @@ impl IntoSqlValue for TransactionToken {
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+/// Identifies one committed transaction on every device, for `transaction_outcome` and drop
+/// reports.
 pub struct TransactionToken(rocky_core::Commitment);
 impl TransactionToken {
     pub(crate) fn new(transaction: rocky_core::Commitment) -> Self {
@@ -102,11 +106,13 @@ impl<T: IntoSqlValue> IntoSqlValue for Option<T> {
         self.map_or(SqlValue::Null, IntoSqlValue::into_sql_value)
     }
 }
+/// Builds a statement's parameter list from values that implement `IntoSqlValue`.
 #[macro_export]
 macro_rules! params {
     ($($value:expr),* $(,)?) => { vec![$($crate::IntoSqlValue::into_sql_value($value)),*] };
 }
 
+/// A column value that could not become the requested Rust type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodeError(pub String);
 impl std::fmt::Display for DecodeError {
@@ -116,7 +122,9 @@ impl std::fmt::Display for DecodeError {
 }
 impl std::error::Error for DecodeError {}
 
+/// Converts a column value into a Rust value; `Row::get` uses it.
 pub trait FromSqlValue: Sized {
+    /// The Rust value, or why the column value does not fit.
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError>;
 }
 impl FromSqlValue for SqlValue {
@@ -207,15 +215,19 @@ impl FromSqlValue for Timestamp {
     }
 }
 
+/// A point in time as Unix microseconds, stored as an integer column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(i64);
 impl Timestamp {
+    /// The instant `micros` after the Unix epoch.
     pub const fn from_unix_micros(micros: i64) -> Self {
         Self(micros)
     }
+    /// Microseconds since the Unix epoch.
     pub const fn unix_micros(self) -> i64 {
         self.0
     }
+    /// The instant as a `SystemTime`, or `None` outside its range.
     pub fn system_time(self) -> Option<web_time::SystemTime> {
         let offset = std::time::Duration::from_micros(self.0.unsigned_abs());
         if self.0 < 0 {
@@ -251,18 +263,22 @@ impl<T: FromSqlValue> FromSqlValue for Option<T> {
     }
 }
 
+/// One result row.
 #[derive(Clone, Debug)]
 pub struct Row {
     columns: Arc<Vec<String>>,
     values: Vec<SqlValue>,
 }
 impl Row {
+    /// The column names, in order.
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
+    /// The values, in column order.
     pub fn values(&self) -> &[SqlValue] {
         &self.values
     }
+    /// The value of the named column; a name that appears twice needs an alias or `get_at`.
     pub fn get<T: FromSqlValue>(&self, column: &str) -> Result<T, DecodeError> {
         let mut matches = self
             .columns
@@ -279,6 +295,7 @@ impl Row {
         }
         self.get_at(index)
     }
+    /// The value of the column at `index`.
     pub fn get_at<T: FromSqlValue>(&self, index: usize) -> Result<T, DecodeError> {
         let value = self
             .values
@@ -303,6 +320,7 @@ impl Source<'_> {
         }
     }
 }
+/// A query's rows, read in pages as `next` is called.
 pub struct Rows<'a> {
     source: Source<'a>,
     statement: u64,
@@ -346,9 +364,11 @@ impl<'a> Rows<'a> {
         self.pending = page.rows.into();
         self.done = page.done;
     }
+    /// The column names, in order.
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
+    /// The next row, or `None` after the last.
     pub async fn next(&mut self) -> Result<Option<Row>, Error> {
         loop {
             if let Some(values) = self.pending.pop_front() {
@@ -374,6 +394,7 @@ impl<'a> Rows<'a> {
             self.page(page);
         }
     }
+    /// Every remaining row.
     pub async fn collect(mut self) -> Result<Vec<Row>, Error> {
         let mut rows = Vec::new();
         while let Some(row) = self.next().await? {
@@ -393,6 +414,8 @@ impl Drop for Rows<'_> {
 }
 
 impl Database {
+    /// Runs one read outside a transaction and returns its rows; a read of data that has not
+    /// arrived yet fails with `Blocked`.
     pub async fn query(
         &self,
         sql: &str,
@@ -408,6 +431,7 @@ impl Database {
         };
         Ok(Rows::from_page(source, 1, page))
     }
+    /// Starts a write transaction, which rolls back unless committed.
     pub async fn transaction(&self) -> Result<Transaction, crate::Error> {
         let connection = self
             .connect(ConnectionOptions {
@@ -421,25 +445,33 @@ impl Database {
     }
 }
 
+/// What a commit recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Commit {
+    /// The transaction changed nothing, so nothing syncs.
     NoChanges,
+    /// The transaction was recorded and syncs under this token.
     Recorded(TransactionToken),
 }
 
+/// A write transaction whose statements are recorded as SQL intents and replayed on every device.
 #[must_use = "a transaction must be committed or it rolls back"]
 pub struct Transaction {
     connection: Connection,
     token: TransactionToken,
 }
 impl Transaction {
+    /// The token the transaction commits under.
     pub fn token(&self) -> TransactionToken {
         self.token
     }
+    /// The connection id the qualification measurements name.
     #[cfg(feature = "qualification")]
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
     }
+    /// Runs a statement that returns no rows; a constraint violation on replay drops the whole
+    /// transaction on every device.
     pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), Error> {
         let rows = self.query(sql, params).await?;
         if rows.done {
@@ -450,6 +482,8 @@ impl Transaction {
             None => Ok(()),
         }
     }
+    /// Runs a statement inside the transaction and returns its rows; `BEGIN`, `COMMIT` and
+    /// `ROLLBACK` are refused.
     pub async fn query(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'_>, Error> {
         if !matches!(
             rocky_storage::sql::classify(sql),
@@ -462,6 +496,8 @@ impl Transaction {
         }
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
     }
+    /// Allocates a row id in `table`, unique across devices; `partition` names the partition's
+    /// values, empty for an unpartitioned table.
     pub async fn next_id(
         &mut self,
         table: &str,
@@ -479,6 +515,8 @@ impl Transaction {
             .ok_or_else(|| Error::internal("row id allocation returned no row"))?;
         Ok(row.get_at(0)?)
     }
+    /// Commits locally and returns at once; the commit syncs later, and `Database::flush` makes it
+    /// durable.
     pub async fn commit(self) -> Result<Commit, Error> {
         let result = async {
             self.connection
@@ -493,6 +531,7 @@ impl Transaction {
             None => Commit::NoChanges,
         })
     }
+    /// Discards the transaction.
     pub async fn rollback(self) -> Result<(), Error> {
         let result = self
             .connection

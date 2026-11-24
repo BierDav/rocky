@@ -67,24 +67,34 @@ mod qualification {
 
     tokio::task_local! { static RECORDING: ReactorMeasurements; }
 
+    /// Records how long the database's reactor polls and SQL calls take, for qualification runs.
     #[derive(Clone, Default)]
     pub struct ReactorMeasurements(Arc<Mutex<Option<ReactorSnapshot>>>);
 
+    /// Recorded reactor timings.
     #[derive(Debug, Default)]
     pub struct ReactorSnapshot {
+        /// Poll durations in microseconds per task.
         pub polls: BTreeMap<String, Vec<u64>>,
+        /// SQL call timings per connection.
         pub calls: BTreeMap<u64, Vec<SqlCallTiming>>,
     }
 
+    /// The timing of one SQL call.
     #[derive(Debug)]
     pub struct SqlCallTiming {
+        /// When it was queued.
         pub queued_at: Instant,
+        /// When it was answered.
         pub replied_at: Instant,
+        /// Microseconds it waited in the queue.
         pub queue_us: u64,
+        /// Microseconds it ran.
         pub in_call_us: u64,
     }
 
     impl ReactorMeasurements {
+        /// Starts recording, discarding earlier timings.
         pub fn start(&self) {
             *self
                 .0
@@ -92,6 +102,7 @@ mod qualification {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(ReactorSnapshot::default());
         }
+        /// The timings so far, leaving recording on.
         pub fn take(&self) -> ReactorSnapshot {
             self.0
                 .lock()
@@ -100,6 +111,7 @@ mod qualification {
                 .map(std::mem::take)
                 .unwrap_or_default()
         }
+        /// The timings so far, ending recording.
         pub fn stop(&self) -> ReactorSnapshot {
             self.0
                 .lock()

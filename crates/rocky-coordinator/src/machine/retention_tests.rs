@@ -112,7 +112,7 @@ impl Mesh {
 }
 fn control(
     authority: &PrivateKey,
-    trusted: &PrivateKey,
+    admin: &PrivateKey,
     scope: Scope,
     revision: u64,
     time: u64,
@@ -122,7 +122,7 @@ fn control(
             scope,
             configuration: [5; 16],
             revision,
-            trusted: vec![trusted.public_key()],
+            admins: vec![admin.public_key()],
             publisher: None,
             not_before: time - DAY,
             expires: time + 300 * DAY,

@@ -14,8 +14,8 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub struct ControlRequest {
     /// The tenant key that signs the control certificate.
     pub tenant: PrivateKey,
-    /// The 1 to 32 identity keys whose devices may call the coordinator.
-    pub trusted: Vec<PublicKey>,
+    /// The 1 to 32 admin identity keys whose devices call without a membership chain.
+    pub admins: Vec<PublicKey>,
     /// Seconds the certificate is valid.
     pub lifetime: u64,
     /// The request id, which keeps a retry from applying twice.
@@ -109,8 +109,8 @@ impl ControlClient {
         root: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
     ) -> Result<ControlReceipt, Failure> {
         let _held = self.lock.lock().await;
-        if request.trusted.is_empty() || request.trusted.len() > 32 {
-            return Err("trusted must list 1 through 32 identity keys".into());
+        if request.admins.is_empty() || request.admins.len() > crate::machine::MAX_ADMINS {
+            return Err("admins must list 1 through 32 identity keys".into());
         }
         let (revision, grant, admission) = match request.revision {
             ControlRevision::Register { grant, admission } => {
@@ -126,7 +126,7 @@ impl ControlClient {
                 scope: domain.scope,
                 configuration: genesis.configuration,
                 revision,
-                trusted: request.trusted.clone(),
+                admins: request.admins.clone(),
                 publisher: Some(Box::new(domain.publisher)),
                 not_before,
                 expires,

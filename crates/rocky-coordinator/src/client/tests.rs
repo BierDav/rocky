@@ -197,7 +197,7 @@ impl Service {
             scope,
             configuration: genesis.genesis.configuration,
             revision: 1,
-            trusted: vec![node.public_key()],
+            admins: vec![node.public_key()],
             publisher: Some(Box::new(publisher_key)),
             not_before: time - 60,
             expires: time + 3600,
@@ -259,7 +259,7 @@ impl Service {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
+async fn an_admin_node_claims_and_a_retry_returns_the_same_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("company-1/invoices").unwrap();
@@ -311,7 +311,7 @@ async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn only_trusted_nodes_claim() {
+async fn only_admin_nodes_claim() {
     let service = Service::start().await;
     let invoices = Name::new("invoices").unwrap();
     let stranger = service.client(&PrivateKey::new());
@@ -332,13 +332,10 @@ async fn only_trusted_nodes_claim() {
             .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
             .await,
         Err(CoordinationError::Denied(Refusal::NotMember)),
-        "a trusted node's key without its certificate is no identity"
+        "an admin node's key without its certificate is no identity"
     );
-    let trusted = service.client(&service.node);
-    let reading = trusted
-        .counter(service.scope, invoices, None)
-        .await
-        .unwrap();
+    let admin = service.client(&service.node);
+    let reading = admin.counter(service.scope, invoices, None).await.unwrap();
     assert_eq!(reading.value, 0);
 }
 
@@ -350,7 +347,7 @@ fn control_beyond_the_client_request_limit(service: &Service) -> ControlCertific
         .clone();
     control.revision += 1;
     control
-        .trusted
+        .admins
         .extend((0..Request::MAX_CLIENT_BYTES / 32).map(|_| PrivateKey::new().public_key()));
     ControlCertificate::sign(control, &service.tenant).unwrap()
 }

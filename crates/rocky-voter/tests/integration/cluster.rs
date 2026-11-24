@@ -330,7 +330,7 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     assert_eq!(
         distinct,
         (1..=24).collect(),
-        "concurrent claims from both trusted nodes take distinct values"
+        "concurrent claims from both admin nodes take distinct values"
     );
     for (n, (claim, value)) in taken.iter().enumerate() {
         let retried = nodes[n % 2]
@@ -407,12 +407,12 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         assert_eq!(
             client.claim(scope, invoices.clone(), claim(104)).await,
             Err(CoordinationError::Denied(Refusal::NotMember)),
-            "only the domain's trusted nodes claim"
+            "only the domain's admin nodes claim"
         );
         assert_eq!(
             client.counter(scope, invoices.clone(), None).await,
             Err(CoordinationError::Denied(Refusal::NotMember)),
-            "only the domain's trusted nodes read a counter"
+            "only the domain's admin nodes read a counter"
         );
     }
     assert_eq!(

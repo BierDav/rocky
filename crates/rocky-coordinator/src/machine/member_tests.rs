@@ -113,7 +113,7 @@ impl Fixture {
             other => panic!("reading: {other:?}"),
         }
     }
-    fn trusted_claim(&mut self, counter: &str, claim: Claim, time: u64) -> u64 {
+    fn admin_claim(&mut self, counter: &str, claim: Claim, time: u64) -> u64 {
         let request = self.certified(
             Operation::Claim {
                 scope: self.scope,
@@ -164,17 +164,17 @@ impl Fixture {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_writer_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
+fn a_writer_that_is_not_an_admin_claims_gap_free_values_with_admin_nodes() {
     let mut f = Fixture::new(Limits::default());
     let writer = f.person(&[Right::Insert]);
     assert!(
         !f.state.controls[0]
             .control
-            .trusted
+            .admins
             .contains(&writer.node.public_key())
     );
     assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
-    assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 2);
+    assert_eq!(f.admin_claim("invoices", claim(2, T), T), 2);
     assert_eq!(f.claim_by(&writer, "invoices", claim(3, T), T + 1), Ok(3));
     assert_eq!(
         f.claim_by(&writer, "invoices", claim(1, T), T + 2),
@@ -257,14 +257,14 @@ fn readers_strangers_and_foreign_chains_never_claim() {
         Err(CoordinationError::Denied(Refusal::NotMember)),
         "a person of another domain claims nothing here"
     );
-    assert_eq!(f.trusted_claim("invoices", claim(7, T), T), 2);
+    assert_eq!(f.admin_claim("invoices", claim(7, T), T), 2);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_request_signed_outside_the_extension_label_is_refused() {
     let mut f = Fixture::new(Limits::default());
     let writer = f.person(&[Right::Insert]);
-    f.trusted_claim("invoices", claim(1, T), T);
+    f.admin_claim("invoices", claim(1, T), T);
     let request = f.presenting(
         &writer,
         Operation::Counter {
@@ -382,7 +382,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_control_without_a_publisher_admits_only_trusted_nodes() {
+fn a_control_without_a_publisher_admits_only_admin_nodes() {
     let mut f = Fixture::new(Limits::default());
     let writer = f.person(&[Right::Insert]);
     let mut control = f.state.controls[0].control.clone();
@@ -410,5 +410,5 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
         Err(CoordinationError::Denied(Refusal::NotMember)),
         "a control that names no publisher admits no person"
     );
-    assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 1);
+    assert_eq!(f.admin_claim("invoices", claim(2, T), T), 1);
 }

@@ -84,7 +84,7 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
             .unwrap();
         assert_eq!(
             retried, value,
-            "a claim retried by the other trusted node answers the same value"
+            "a claim retried by the other admin node answers the same value"
         );
         values.push(value);
     }
@@ -147,7 +147,7 @@ fn snapshot_round_trip_keeps_values_and_claim_identities() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
+fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
     let mut fixture = Fixture::new(Limits::default());
     let stranger = PrivateKey::new();
     let owner = fixture.owner.clone();
@@ -155,7 +155,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
         assert_eq!(
             fixture.claim_as(key, "invoices", claim(1, T), T),
             Err(CoordinationError::Denied(Refusal::NotMember)),
-            "neither an unknown node nor the domain's control authority is a trusted node"
+            "neither an unknown node nor the domain's control authority is an admin node"
         );
         let read = Operation::Counter {
             scope: fixture.scope,
@@ -182,7 +182,7 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     assert_eq!(
         fixture.state.apply_at(T, &uncertified),
         Err(CoordinationError::Denied(Refusal::NotMember)),
-        "a request without a node certificate presents no trusted identity"
+        "a request without a node certificate presents no admin identity"
     );
     let mut unknown = fixture.scope;
     unknown.domain = DomainId([9; 16]);
@@ -378,7 +378,7 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn trusted_siblings_claim_until_their_identity_unlinks_them() {
+fn admin_siblings_claim_until_their_identity_unlinks_them() {
     use rocky_credentials::{Authority, CredentialChain, Revocation, SignedRevocation};
     let mut f = Fixture::new(Limits::default());
     let identity = f.nodes[0].clone();

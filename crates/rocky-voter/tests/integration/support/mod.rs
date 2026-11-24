@@ -147,7 +147,7 @@ impl Cluster {
                 scope: self.scope,
                 configuration: self.genesis.genesis.configuration,
                 revision,
-                trusted: vec![self.executor.public_key(), self.alternate.public_key()],
+                admins: vec![self.executor.public_key(), self.alternate.public_key()],
                 publisher: None,
                 not_before: timestamp() - 1,
                 expires: timestamp() + 3600,

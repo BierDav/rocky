@@ -214,7 +214,7 @@ async fn registered_tenant(
             scope,
             configuration: genesis.genesis.configuration,
             revision: 1,
-            trusted: vec![tenant.public_key()],
+            admins: vec![tenant.public_key()],
             publisher: None,
             not_before: time - 60,
             expires: time + 3_600,

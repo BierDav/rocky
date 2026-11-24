@@ -454,7 +454,7 @@ async fn register_control(
             scope,
             configuration: genesis.genesis.configuration,
             revision: 1,
-            trusted: vec![executor.public_key()],
+            admins: vec![executor.public_key()],
             publisher: Some(Box::new(executor.public_key())),
             not_before: time.saturating_sub(1),
             expires: time + 3600,

@@ -48,14 +48,14 @@ impl Tenant {
         )
         .unwrap()
     }
-    fn control(&self, scope: Scope, revision: u64, trusted: &[&PrivateKey]) -> ControlCertificate {
-        self.signed_control(scope, revision, trusted, &self.key)
+    fn control(&self, scope: Scope, revision: u64, admins: &[&PrivateKey]) -> ControlCertificate {
+        self.signed_control(scope, revision, admins, &self.key)
     }
     fn signed_control(
         &self,
         scope: Scope,
         revision: u64,
-        trusted: &[&PrivateKey],
+        admins: &[&PrivateKey],
         signer: &PrivateKey,
     ) -> ControlCertificate {
         ControlCertificate::sign(
@@ -63,7 +63,7 @@ impl Tenant {
                 scope,
                 configuration: [5; 16],
                 revision,
-                trusted: trusted.iter().map(|k| k.public_key()).collect(),
+                admins: admins.iter().map(|k| k.public_key()).collect(),
                 publisher: None,
                 not_before: T - DAY,
                 expires: T + 300 * DAY,
@@ -352,7 +352,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn owners_change_trusted_nodes_and_keep_the_counters() {
+fn owners_change_admin_nodes_and_keep_the_counters() {
     let service = Service::with(false, log_limits());
     let mut m = service.open();
     let a = Tenant::new();
@@ -389,7 +389,7 @@ fn owners_change_trusted_nodes_and_keep_the_counters() {
             T
         ),
         Err(CoordinationError::Denied(Refusal::NotDomainAuthority)),
-        "a revision signed by another key, even a trusted node, is refused"
+        "a revision signed by another key, even an admin node, is refused"
     );
 }
 
@@ -581,7 +581,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
         assert_eq!(
             m.retry_tenant(&request),
             Some(tenant.key.public_key()),
-            "the shared trusted node's calls count against the tenant of the domain it names"
+            "the shared admin node's calls count against the tenant of the domain it names"
         );
         assert_eq!(m.tenant_lane(&request), Some(tenant.key.public_key()));
     }

@@ -172,7 +172,7 @@ impl Counters {
                 scope: device.scope,
                 configuration: genesis.configuration,
                 revision,
-                trusted: vec![device.publisher],
+                admins: vec![device.publisher],
                 publisher: Some(Box::new(device.publisher)),
                 not_before,
                 expires,

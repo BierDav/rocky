@@ -306,14 +306,14 @@ impl Tenant {
         genesis: &CertifiedGenesis,
         scope: Scope,
         revision: u64,
-        trusted: &[&PrivateKey],
+        admins: &[&PrivateKey],
     ) -> ControlCertificate {
         ControlCertificate::sign(
             DomainControl {
                 scope,
                 configuration: genesis.genesis.configuration,
                 revision,
-                trusted: trusted.iter().map(|k| k.public_key()).collect(),
+                admins: admins.iter().map(|k| k.public_key()).collect(),
                 publisher: None,
                 not_before: timestamp() - 60,
                 expires: timestamp() + DAY,

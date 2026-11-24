@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 const ACCOUNTED_DOMAIN_BYTES: usize = 1024;
 const ACCOUNTED_TENANT_BYTES: usize = 64;
 pub const MAX_PUBLIC_DOMAINS: usize = 65536;
-pub const TRUSTED_NODES: usize = 32;
+pub const MAX_ADMINS: usize = 32;
 pub const REQUEST_LABEL: &str = "rocky.ext.coordinator-request.v10";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -603,7 +603,7 @@ impl Metadata {
         time: u64,
     ) -> Result<(), CoordinationError> {
         let control = self.current_control(scope, time)?;
-        if !self.trusts(control, request, time) {
+        if !self.calls_as_admin(control, request, time) {
             self.member(control, claim, request, time)
                 .map_err(CoordinationError::Denied)?;
         }
@@ -794,7 +794,7 @@ impl Metadata {
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
-            && !self.trusts(&certificate.control, request, request.time)
+            && !self.calls_as_admin(&certificate.control, request, request.time)
             && !(counter
                 && self
                     .member(&certificate.control, false, request, request.time)
@@ -880,21 +880,21 @@ impl Metadata {
         }
         Ok(usage)
     }
-    fn trusted_budget(
+    fn admin_budget(
         &self,
         certificate: &ControlCertificate,
         retired: Option<Scope>,
     ) -> Result<(), CoordinationError> {
-        let mut keys: BTreeSet<_> = certificate.control.trusted.iter().copied().collect();
+        let mut keys: BTreeSet<_> = certificate.control.admins.iter().copied().collect();
         for existing in self.controls.iter().filter(|c| {
             c.issuer == certificate.issuer
                 && c.control.scope != certificate.control.scope
                 && Some(c.control.scope) != retired
                 && self.state.find(c.control.scope).is_ok_and(Domain::open)
         }) {
-            keys.extend(existing.control.trusted.iter().copied());
+            keys.extend(existing.control.admins.iter().copied());
         }
-        if keys.len() > TRUSTED_NODES {
+        if keys.len() > MAX_ADMINS {
             return Err(CoordinationError::Backpressure);
         }
         Ok(())
@@ -904,7 +904,7 @@ impl Metadata {
         certificate: &ControlCertificate,
         time: u64,
     ) -> Result<(), CoordinationError> {
-        self.trusted_budget(certificate, None)?;
+        self.admin_budget(certificate, None)?;
         let scope = certificate.control.scope;
         if self.genesis_bound(scope) || self.issuer(scope).is_none() {
             return certificate.verify(&self.genesis.genesis, time);
@@ -956,7 +956,7 @@ impl Metadata {
         Ok(Outcome::Controlled(reference))
     }
     fn install(&mut self, certificate: ControlCertificate) -> Result<(), CoordinationError> {
-        self.trusted_budget(&certificate, None)?;
+        self.admin_budget(&certificate, None)?;
         let control = &certificate.control;
         self.state.domains.push(Domain::new(control.scope));
         self.controls.push(certificate);
@@ -1070,7 +1070,7 @@ impl Metadata {
         if self.genesis_bound(scope) {
             return Err(CoordinationError::Denied(Refusal::NotDomainAuthority));
         }
-        self.trusted_budget(certificate, None)?;
+        self.admin_budget(certificate, None)?;
         certificate.check_without_authority(&self.genesis.genesis, time)
     }
     fn current_control(
@@ -1090,7 +1090,7 @@ impl Metadata {
         }
         Ok(&certificate.control)
     }
-    fn trusts(&self, control: &DomainControl, request: &Request, time: u64) -> bool {
+    fn calls_as_admin(&self, control: &DomainControl, request: &Request, time: u64) -> bool {
         if let Some(publisher) = control.publisher.as_deref().copied() {
             let expected = rocky_credentials::DatabaseContext {
                 publisher,
@@ -1107,7 +1107,7 @@ impl Metadata {
             }
         }
         request.identity(time).is_some_and(|identity| {
-            control.trusted.contains(&identity)
+            control.admins.contains(&identity)
                 && self.state.find(control.scope).is_ok_and(|domain| {
                     !domain.revocations.revokes_origin(&identity)
                         && !domain.revocations.ends_node_of(identity, request.key, true)

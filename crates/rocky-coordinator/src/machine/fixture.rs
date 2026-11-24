@@ -23,7 +23,7 @@ impl Fixture {
                 scope,
                 configuration: [4; 16],
                 revision: 1,
-                trusted: nodes.iter().map(PrivateKey::public_key).collect(),
+                admins: nodes.iter().map(PrivateKey::public_key).collect(),
                 publisher: Some(Box::new(owner.public_key())),
                 not_before: T - 1,
                 expires: T + 100_000,

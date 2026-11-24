@@ -13,7 +13,7 @@ pub const MAX_FRAME: usize = 256 * 1024;
 pub const MAX_RECORDS: usize = 65536;
 /// The largest encoded state a decoder accepts, in bytes.
 pub const MAX_STORE: usize = 1024 * 1024 * 1024;
-const CONTROL_LABEL: &str = "rocky.control.v4";
+const CONTROL_LABEL: &str = "rocky.control.v5";
 
 /// One Raft voter of the coordinator.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,8 +42,8 @@ pub struct DomainControl {
     pub configuration: Configuration,
     /// Starts at 1 and rises with each renewal.
     pub revision: u64,
-    /// The identity keys whose devices may call.
-    pub trusted: Vec<PublicKey>,
+    /// The admin identity keys whose devices call without a membership chain.
+    pub admins: Vec<PublicKey>,
     /// The database's root key, whose membership chain the coordinator checks; `None` admits no device
     /// calls.
     pub publisher: Option<Box<PublicKey>>,
@@ -90,12 +90,12 @@ impl ControlCertificate {
         let c = &self.control;
         if c.configuration != genesis.configuration
             || c.revision == 0
-            || c.trusted.is_empty()
-            || c.trusted.len() > crate::machine::TRUSTED_NODES
+            || c.admins.is_empty()
+            || c.admins.len() > crate::machine::MAX_ADMINS
             || c.not_before > time
             || c.expires <= time
             || c.expires - c.not_before > genesis.max_control_lifetime
-            || c.trusted.iter().collect::<BTreeSet<_>>().len() != c.trusted.len()
+            || c.admins.iter().collect::<BTreeSet<_>>().len() != c.admins.len()
             || !self
                 .issuer
                 .verify(&bytes(CONTROL_LABEL, c)?, &self.signature)

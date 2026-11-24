@@ -46,7 +46,7 @@ pub(super) async fn run(
             scope,
             configuration: genesis.genesis.configuration,
             revision: 1,
-            trusted: vec![key.public_key()],
+            admins: vec![key.public_key()],
             publisher: None,
             not_before: now,
             expires,

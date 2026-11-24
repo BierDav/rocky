@@ -117,7 +117,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     assert_eq!(
         commit(&a_alt, sa, fresh_claim(3)).await,
         Ok(2),
-        "either trusted node takes the next number"
+        "either admin node takes the next number"
     );
 
     a_owner

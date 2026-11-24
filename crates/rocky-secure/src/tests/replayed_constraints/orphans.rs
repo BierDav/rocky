@@ -192,3 +192,37 @@ async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
     );
     assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restored_keeps_it() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let device = a_sealed_membership_whose_team_base_is_lost(&c, &root.path().join("d.db")).await;
+    device
+        .replica
+        .set_role(crate::RoleConfig {
+            role: crate::ReplicaRole::Partial,
+        })
+        .await
+        .unwrap();
+    for name in ["teams", "people", "notes", "memberships"] {
+        device.replica.subscribe(c.scope(name)).await.unwrap();
+    }
+    let own_frames_not_back_since_eviction = format!(
+        "INSERT INTO secure_evicted_logs VALUES(?,7,X'{}')",
+        "11".repeat(32)
+    );
+    execute(
+        &device.replica,
+        &own_frames_not_back_since_eviction,
+        Some(c.scope("teams")),
+    )
+    .await;
+    device
+        .replica
+        .rebuild_projection(c.scope("memberships"))
+        .await
+        .unwrap();
+    assert_eq!(orphaned_memberships(&device.replica).await, 1);
+    device.replica.audit(c.scope("memberships")).await.unwrap();
+}

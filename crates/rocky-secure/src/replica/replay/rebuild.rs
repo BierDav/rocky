@@ -443,8 +443,7 @@ impl<A: RowApplication> Inner<A> {
                 let settled = match settled_scopes.get(&scope) {
                     Some(settled) => *settled,
                     None => {
-                        let settled = self.holds(scope).await?
-                            && self.readable_blockers(scope).await?.is_empty();
+                        let settled = self.settled(scope).await?;
                         settled_scopes.insert(scope, settled);
                         settled
                     }
@@ -458,6 +457,11 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(None)
+    }
+    async fn settled(&self, scope: ResourceScope) -> Result<bool, Error> {
+        Ok(self.holds(scope).await?
+            && !self.restoring(scope).await?
+            && self.readable_blockers(scope).await?.is_empty())
     }
     fn parent_scope(
         &self,

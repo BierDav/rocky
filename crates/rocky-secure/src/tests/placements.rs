@@ -1111,3 +1111,170 @@ async fn a_departed_authors_placements_written_after_the_revocation_are_refused(
     );
     assert_eq!(relayed.placed().await, 0, "a refused page stores nothing");
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_seal_leaves_out_a_departed_authors_positions_past_a_gap_that_never_arrives() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &keys[0], 3, None)
+        .await
+        .unwrap();
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &keys[1], 3, None)
+        .await
+        .unwrap();
+    follow_main(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &carol, lineage.domain).await;
+    carol.follow_bookmark(lineage.domain, "main").await.unwrap();
+    insert(&carol, "unsent", "dies with carol's device").await;
+    identity_insert(
+        &session(&carol).await,
+        "INSERT INTO tags(key,label) VALUES('t1','tag')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    sync_scope(&lineage, &carol, &alice, &keys[0], lineage.scope("tags")).await;
+    let node = |replica: &Replica| {
+        let replica = replica.clone();
+        async move {
+            replica
+                .inner
+                .lock(crate::replica::Class::Background)
+                .await
+                .config
+                .node
+                .public_key()
+        }
+    };
+    let (alice_node, carol_node) = (node(&alice).await, node(&carol).await);
+    let (alice_author, carol_author) = (
+        crate::writer::writer(&alice_node),
+        crate::writer::writer(&carol_node),
+    );
+    assert_eq!(
+        scalar(&alice, "SELECT count(*) FROM secure_operations").await,
+        1,
+        "alice holds carol's later position only"
+    );
+    alice
+        .learn_revocations(&revoking_node(
+            &lineage,
+            carol_node,
+            rocky_credentials::RevocationMode::Lost,
+            now().unwrap(),
+        ))
+        .await
+        .unwrap();
+    drop(carol);
+    let marks_of = |seal: &rocky_credentials::SignedSeal, author| {
+        seal.statement
+            .frontier
+            .iter()
+            .find(|mark| mark.author == author)
+            .map(|mark| mark.sequence)
+    };
+    for round in ["one", "two"] {
+        insert(&alice, round, "an honest later write").await;
+        let sealed = seal(&lineage, &alice).await;
+        assert_eq!(
+            marks_of(&sealed, carol_author),
+            None,
+            "a seal never claims a position no one can supply"
+        );
+        assert!(
+            marks_of(&sealed, alice_author).is_some(),
+            "another author's later frames are still sealed"
+        );
+        alice.finalize_path(lineage.domain).await.unwrap();
+        assert_eq!(
+            alice
+                .compaction_status(lineage.domain)
+                .await
+                .unwrap()
+                .finalized,
+            Some(sealed.id().unwrap()),
+            "the seal finalizes past the gap"
+        );
+        alice.compact(lineage.domain, 0).await.unwrap();
+        assert_eq!(
+            alice
+                .compaction_status(lineage.domain)
+                .await
+                .unwrap()
+                .compacted,
+            Some(sealed.id().unwrap()),
+            "the gap does not block compaction"
+        );
+    }
+    assert_eq!(scalar(&alice, "SELECT count(*) FROM items").await, 2);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn positions_past_a_gap_arrive_in_a_later_seal_once_it_is_filled() {
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &keys[0], 3, None)
+        .await
+        .unwrap();
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &keys[1], 3, None)
+        .await
+        .unwrap();
+    follow_main(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &carol, lineage.domain).await;
+    carol.follow_bookmark(lineage.domain, "main").await.unwrap();
+    insert(&carol, "late", "arrives after the first seal").await;
+    identity_insert(
+        &session(&carol).await,
+        "INSERT INTO tags(key,label) VALUES('t1','tag')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    sync_scope(&lineage, &carol, &alice, &keys[0], lineage.scope("tags")).await;
+    let carol_author = crate::writer::writer(
+        &carol
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .node
+            .public_key(),
+    );
+    let mark_of = |seal: &rocky_credentials::SignedSeal| {
+        seal.statement
+            .frontier
+            .iter()
+            .find(|mark| mark.author == carol_author)
+            .map(|mark| mark.sequence)
+    };
+    insert(&alice, "one", "first").await;
+    let first = seal(&lineage, &alice).await;
+    assert_eq!(mark_of(&first), None, "the first seal stops before the gap");
+    alice.finalize_path(lineage.domain).await.unwrap();
+    crate::tests::exchange_graphs(&alice, &carol, lineage.domain).await;
+    sync_scope(&lineage, &carol, &alice, &keys[0], lineage.scope("items")).await;
+    insert(&alice, "two", "second").await;
+    let second = seal(&lineage, &alice).await;
+    assert_eq!(
+        mark_of(&second),
+        Some(1),
+        "once the gap is filled, both positions arrive in the next seal"
+    );
+    alice.finalize_path(lineage.domain).await.unwrap();
+    assert_eq!(
+        alice
+            .compaction_status(lineage.domain)
+            .await
+            .unwrap()
+            .finalized,
+        Some(second.id().unwrap())
+    );
+    assert_eq!(scalar(&alice, "SELECT count(*) FROM items").await, 3);
+    assert_eq!(scalar(&alice, "SELECT count(*) FROM tags").await, 1);
+}

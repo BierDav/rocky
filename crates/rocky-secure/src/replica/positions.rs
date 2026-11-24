@@ -211,7 +211,7 @@ impl Runs {
         }
         self.0.insert(start, end);
     }
-    fn through(&self, mut next: u64) -> u64 {
+    pub(super) fn through(&self, mut next: u64) -> u64 {
         for (&start, &end) in &self.0 {
             if start > next {
                 break;
@@ -234,6 +234,46 @@ type Positions = (
 );
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) async fn accounted_positions(
+        &self,
+        domain: Scope,
+    ) -> Result<BTreeMap<WriterId, Runs>, Error> {
+        let custody = self.custody_scopes(now()?)?;
+        let scopes = self.readiness_scopes(domain).await?;
+        let based = self.base_frontiers(domain, &scopes, &custody).await?;
+        let mut accounted = BTreeMap::<WriterId, Runs>::new();
+        for row in rows(
+            &self.conn,
+            "SELECT scope,author,kind,start,end FROM secure_position_ranges",
+        )
+        .await?
+        {
+            let [
+                SqlValue::Blob(scope),
+                SqlValue::Blob(author),
+                SqlValue::Integer(kind),
+                SqlValue::Integer(start),
+                SqlValue::Integer(end),
+            ] = row.as_slice()
+            else {
+                return Err(Error::Corrupt("position range".into()));
+            };
+            let scope: ResourceScope = decode(scope)?;
+            if scope.domain != domain {
+                continue;
+            }
+            let author = stored_writer(author)?;
+            let (start, mut end) = interval(*start, *end)?;
+            if *kind == 2 && custody.contains(&scope) {
+                match based.get(&(scope, author)) {
+                    Some(covered) if *covered >= start => end = end.min(*covered),
+                    _ => continue,
+                }
+            }
+            accounted.entry(author).or_default().insert(start, end);
+        }
+        Ok(accounted)
+    }
     pub(super) async fn held_positions(
         &self,
         domain: Scope,

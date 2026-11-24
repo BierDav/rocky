@@ -93,12 +93,37 @@ impl<A: RowApplication> Inner<A> {
             self.refuse_pruned_close(scope).await?;
         }
         let graph = self.scope_graph(scope)?;
-        let mut marks = self.inherited_marks(&graph)?;
+        let inherited = self.inherited_marks(&graph)?;
+        let mut marks = inherited.clone();
         let headers = self
             .domain_headers_from(scope, self.engine_matches())
             .await?;
         self.fold_marks(&graph, &mut marks, headers)?;
-        Ok(into_marks(marks))
+        self.gap_free_marks(scope, marks, &inherited).await
+    }
+    async fn gap_free_marks(
+        &self,
+        scope: Scope,
+        marks: BTreeMap<WriterId, u64>,
+        inherited: &BTreeMap<WriterId, u64>,
+    ) -> Result<Vec<AuthorMark>, Error> {
+        let accounted = self.accounted_positions(scope).await?;
+        let mut gap_free = BTreeMap::new();
+        for (author, mark) in marks {
+            let sealed = inherited.get(&author).copied();
+            let first_unsealed = sealed.map_or(0, |sealed| sealed.saturating_add(1));
+            let first_unaccounted = accounted
+                .get(&author)
+                .map_or(first_unsealed, |runs| runs.through(first_unsealed));
+            let reach = match first_unaccounted.checked_sub(1) {
+                Some(last) if first_unaccounted > first_unsealed => Some(mark.min(last)),
+                _ => sealed,
+            };
+            if let Some(reach) = reach {
+                gap_free.insert(author, reach);
+            }
+        }
+        Ok(into_marks(gap_free))
     }
     async fn refuse_pruned_close(&self, scope: Scope) -> Result<(), Error> {
         for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
@@ -239,14 +264,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             scope,
             |inner| {
                 let graph = inner.scope_graph(scope)?;
-                Ok((inner.inherited_marks(&graph)?, graph))
+                let inherited = inner.inherited_marks(&graph)?;
+                Ok((inherited.clone(), inherited, graph))
             },
-            async |inner, (marks, graph), headers| inner.fold_marks(graph, marks, headers),
-            async |inner, (marks, _)| {
+            async |inner, (marks, _, graph), headers| inner.fold_marks(graph, marks, headers),
+            async |inner, (marks, inherited, _)| {
                 if close {
                     inner.refuse_pruned_close(scope).await?;
                 }
-                Ok(into_marks(marks))
+                inner.gap_free_marks(scope, marks, &inherited).await
             },
         )
         .await

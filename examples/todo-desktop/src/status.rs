@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use todo_app::Member;
 
 const REFRESH: Duration = Duration::from_secs(1);
-const SYNC_EVERY: u32 = 3;
 
 #[component]
 pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
@@ -18,18 +17,11 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
         let todos = polled.clone();
         async move {
             let database = todos.database().clone();
-            let mut tick: u32 = 0;
             loop {
-                tick = tick.wrapping_add(1);
                 match database.status().await {
                     Ok(current) => {
-                        let online = current.network.networking_enabled;
                         status.set(Some(current));
                         error.set(None);
-                        let pass_due = online && tick.is_multiple_of(SYNC_EVERY) && !syncing();
-                        if pass_due {
-                            let _ = database.sync_now().await;
-                        }
                     }
                     Err(failure) => error.set(Some(failure.to_string())),
                 }
@@ -41,7 +33,7 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
         return rsx! { div { class: "box muted", "Reading sync status…" } };
     };
     let network = &current.network;
-    let online = network.networking_enabled;
+    let online = network.sync != SyncMode::Off;
     let name = |node: &str| {
         members
             .iter()
@@ -88,7 +80,7 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                 }
                 button { class: "secondary",
                     onclick: move |_| { let todos = toggling.clone(); spawn(async move {
-                        if let Err(failure) = todos.database().set_sync(if online { SyncMode::Off } else { SyncMode::Manual }).await { error.set(Some(failure.to_string())) }
+                        if let Err(failure) = todos.database().set_sync(if online { SyncMode::Off } else { SyncMode::Live }).await { error.set(Some(failure.to_string())) }
                     }); },
                     if online { "Go offline" } else { "Go online" }
                 }

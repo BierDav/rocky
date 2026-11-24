@@ -4,7 +4,7 @@ use crate::test_snapshot as snap;
 use crate::{AttachmentState, AttemptOperation, AttemptOutcome, LinkState, SkipReason};
 
 #[tokio::test(start_paused = true)]
-async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> Result<(), Failure> {
+async fn status_names_the_sync_mode_and_an_empty_pass_is_not_a_skip() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
@@ -12,24 +12,17 @@ async fn empty_pass_disabled_control_and_suspension_are_independent_facts() -> R
             let a = enrolled(root.path(), &hub, "a", None).await?;
             let first = a.observed_status().await?;
             assert_eq!(first.network.connected_peer_count, 0);
+            assert_eq!(first.network.sync, crate::SyncMode::Manual);
             let report = a.sync(&*transport(&a).await?).await?.0;
             assert_eq!(report["peers"], json!([]));
             assert!(report["skip"].is_null());
-            snap::value(a.enter_background()).await?;
             start(&a, true).await?;
-            let suspended = a.observed_status().await?;
-            assert!(suspended.network.networking_enabled);
-            assert!(suspended.network.worker_enabled);
-            assert!(!suspended.network.foreground);
-            assert!(!suspended.network.worker_running);
-            let report: crate::SyncReport =
-                serde_json::from_value(a.sync(&*transport(&a).await?).await?.0)?;
-            assert_eq!(report.skip, Some(SkipReason::Suspended));
+            let live = a.observed_status().await?;
+            assert_eq!(live.network.sync, crate::SyncMode::Live);
             snap::value(a.set_networking_enabled(false)).await?;
             let disabled = a.observed_status().await?;
-            assert!(!disabled.network.networking_enabled);
-            assert!(!disabled.network.foreground);
-            assert_ne!(disabled.token, suspended.token);
+            assert_eq!(disabled.network.sync, crate::SyncMode::Off);
+            assert_ne!(disabled.token, live.token);
             a.detach().await;
             let report: crate::SyncReport = a.sync_optional(None).await?.0;
             assert_eq!(report.skip, Some(SkipReason::NetworkingDisabled));
@@ -69,7 +62,10 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             };
             let (status, ()) = tokio::join!(wait, advance);
             assert!(status?.authority.expired);
-            assert!(!a.observed_status().await?.network.worker_enabled);
+            assert_eq!(
+                a.observed_status().await?.network.sync,
+                crate::SyncMode::Manual
+            );
             a.detach().await;
             Ok(())
         }))

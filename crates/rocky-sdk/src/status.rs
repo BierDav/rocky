@@ -63,7 +63,6 @@ pub enum FailureKind {
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     NetworkingDisabled,
-    Suspended,
     Backoff,
     InboundReconciliation,
     Covered,
@@ -321,9 +320,7 @@ pub struct NetworkStatus {
     pub attachment: AttachmentState,
     pub kind: Option<String>,
     pub ownership: Option<NetworkOwnership>,
-    pub networking_enabled: bool,
-    pub foreground: bool,
-    pub worker_enabled: bool,
+    pub sync: crate::SyncMode,
     pub worker_running: bool,
     pub reconciling: bool,
     pub inbound: Option<InboundStatus>,

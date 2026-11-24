@@ -78,7 +78,9 @@ pub fn configuration(
     identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
     network: Option<Network>,
 ) -> Configuration {
-    let mut configuration = Configuration::new(directory, schema).expect("fixture schema");
+    let mut configuration = Configuration::new(directory, schema)
+        .expect("fixture schema")
+        .sync(rocky_sdk::SyncMode::Manual);
     if let Some(secrets) = secrets {
         configuration = configuration.secrets(secrets);
     }

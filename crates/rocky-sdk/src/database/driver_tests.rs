@@ -46,7 +46,9 @@ fn open(directory: &Path, network: Option<Network>) -> Result<Configuration, Fai
         .entry(directory.to_path_buf())
         .or_default()
         .clone();
-    let configuration = Configuration::new(directory, snap::schema(SHOPPING))?.secrets(keys);
+    let configuration = Configuration::new(directory, snap::schema(SHOPPING))?
+        .secrets(keys)
+        .sync(crate::SyncMode::Manual);
     Ok(match network {
         Some(network) => configuration.network(network),
         None => configuration,

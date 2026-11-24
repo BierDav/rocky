@@ -34,7 +34,9 @@ fn configuration(
     hub: &Arc<Hub>,
 ) -> Result<Configuration, Failure> {
     let name = directory.to_string_lossy().into_owned();
-    Ok(Configuration::new(directory, schema)?.network(Network::Owned(hub.connector(&name))))
+    Ok(Configuration::new(directory, schema)?
+        .network(Network::Owned(hub.connector(&name)))
+        .sync(crate::SyncMode::Manual))
 }
 async fn open_rolled_out(
     directory: &Path,

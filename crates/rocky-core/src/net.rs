@@ -164,7 +164,6 @@ pub trait Discovery: Send + Sync {
     ) -> BoxFuture<'a, Result<(), Failure>>;
     fn found(&self) -> BoxFuture<'_, Option<Found>>;
     fn paths(&self) -> Vec<(String, PathState)>;
-    fn foreground(&self, _foreground: bool) {}
 }
 
 pub trait Connector: Send + Sync {

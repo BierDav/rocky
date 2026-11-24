@@ -140,9 +140,7 @@ impl Node {
                     NetworkOwnership::Application
                 }
             }),
-            networking_enabled: self.online.load(Ordering::SeqCst),
-            foreground: self.foreground.load(Ordering::SeqCst),
-            worker_enabled: self.automatic.load(Ordering::SeqCst),
+            sync: self.sync_mode(),
             worker_running: *self.worker_running.borrow(),
             reconciling: *self.sync_state.borrow() != SyncActivityState::Idle,
             inbound: service.as_ref().map(|service| InboundStatus {
@@ -496,8 +494,6 @@ impl Node {
     ) -> Result<(SyncReport, super::PassOutcome), Failure> {
         let skip = if !self.online.load(Ordering::SeqCst) {
             Some(SkipReason::NetworkingDisabled)
-        } else if !self.foreground.load(Ordering::SeqCst) {
-            Some(SkipReason::Suspended)
         } else {
             None
         };

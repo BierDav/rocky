@@ -16,10 +16,7 @@ use rocky_core::{
 use rocky_platform::time::{SystemTime, UNIX_EPOCH};
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::{
-        Arc, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, PoisonError},
     time::Duration,
 };
 use tokio::sync::{Mutex, mpsc, watch};
@@ -316,7 +313,6 @@ struct Inner {
     announced: std::sync::Mutex<Option<Announced>>,
     sender: mpsc::Sender<Found>,
     found: Mutex<mpsc::Receiver<Found>>,
-    foreground: AtomicBool,
     closed: watch::Sender<bool>,
     failed: std::sync::Mutex<[Option<String>; 2]>,
 }
@@ -331,7 +327,6 @@ impl Finder {
             announced: std::sync::Mutex::new(None),
             sender,
             found: Mutex::new(found),
-            foreground: AtomicBool::new(true),
             closed: watch::channel(false).0,
             failed: std::sync::Mutex::default(),
         }))
@@ -342,9 +337,6 @@ impl Finder {
     }
     fn fail(&self, path: usize, reason: Option<String>) {
         self.0.failed.lock().unwrap_or_else(PoisonError::into_inner)[path] = reason;
-    }
-    fn local_runs(&self) -> bool {
-        self.0.asked.local && self.0.foreground.load(Ordering::SeqCst)
     }
     fn start(&self, announce: Option<([u8; 32], Vec<[u8; 32]>)>) {
         let mut announced = self
@@ -361,7 +353,7 @@ impl Finder {
             return;
         };
         let mut tasks = Vec::new();
-        if self.local_runs() && !topics.is_empty() {
+        if self.0.asked.local && !topics.is_empty() {
             tasks.push(rocky_platform::task::spawn(
                 self.clone().local(node, topics.clone()),
             ));
@@ -381,19 +373,6 @@ impl Finder {
             tasks,
         });
     }
-    fn restart(&self) {
-        let current = self
-            .0
-            .announced
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .map(|announced| (announced.node, announced.topics.clone()));
-        if current.is_some() {
-            self.start(current);
-        }
-    }
-
     async fn local(self, node: [u8; 32], topics: Vec<[u8; 32]>) {
         let mut endpoints = self.0.endpoint.clone();
         loop {
@@ -532,19 +511,13 @@ impl Discovery for Finder {
             Some(reason) => PathState::Unavailable(reason.clone()),
             None => PathState::On,
         };
-        let local = state(self.local_runs(), &failed[0]);
+        let local = state(self.0.asked.local, &failed[0]);
         let topic = match &self.0.asked.topic {
             Topic::Unavailable(reason) => PathState::Unavailable(reason.clone()),
             Topic::Off => PathState::Off,
             Topic::On(_) => state(true, &failed[1]),
         };
         vec![(LOCAL_PATH.into(), local), (TOPIC_PATH.into(), topic)]
-    }
-    fn foreground(&self, foreground: bool) {
-        if self.0.foreground.swap(foreground, Ordering::SeqCst) != foreground {
-            self.fail(0, None);
-            self.restart();
-        }
     }
 }
 

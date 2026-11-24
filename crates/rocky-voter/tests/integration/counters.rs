@@ -29,6 +29,7 @@ fn configuration(directory: &Path, hub: &Arc<Hub>, name: &str) -> Configuration 
     Configuration::new(directory, &schema)
         .unwrap()
         .network(Network::Owned(hub.connector(name)))
+        .sync(rocky_sdk::SyncMode::Manual)
 }
 fn invoices() -> Name {
     Name::new("invoices").unwrap()

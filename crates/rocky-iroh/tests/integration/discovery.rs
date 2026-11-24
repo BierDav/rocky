@@ -69,18 +69,6 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
             "members never hear of an endpoint of another topic"
         );
     }
-    discovery(&a)?.foreground(false);
-    assert_eq!(
-        discovery(&a)?.paths()[0].1,
-        PathState::Off,
-        "the background stops the local path"
-    );
-    discovery(&a)?.foreground(true);
-    assert_eq!(
-        discovery(&a)?.paths()[0].1,
-        PathState::On,
-        "the foreground resumes the local path"
-    );
     tokio::join!(a_port.close(), b_port.close(), c_port.close());
     assert!(discovery(&a)?.found().await.is_none());
     Ok(())

@@ -50,8 +50,7 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     for mode in [
         rocky_sdk::SyncMode::Off,
         rocky_sdk::SyncMode::Manual,
-        rocky_sdk::SyncMode::Foreground,
-        rocky_sdk::SyncMode::Background,
+        rocky_sdk::SyncMode::Live,
     ] {
         assert!(database.set_sync(mode).await.is_err(), "{mode:?}");
     }

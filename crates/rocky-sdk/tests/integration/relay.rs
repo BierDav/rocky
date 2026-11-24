@@ -16,6 +16,7 @@ fn relay_configuration(
 ) -> Configuration {
     Configuration::store_only(directory)
         .network(Network::Owned(hub.connector("relay")))
+        .sync(rocky_sdk::SyncMode::Manual)
         .identity(person.clone())
 }
 async fn invited_relay(

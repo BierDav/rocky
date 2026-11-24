@@ -75,8 +75,7 @@ impl std::error::Error for ServiceError {}
 pub enum SyncMode {
     Off,
     Manual,
-    Foreground,
-    Background,
+    Live,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

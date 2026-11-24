@@ -76,6 +76,7 @@ struct Setup {
     install: Install,
     confirmation: Option<String>,
     page_cache: rocky_secure::PageCache,
+    sync: crate::SyncMode,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
@@ -361,6 +362,7 @@ impl Database {
             install,
             confirmation,
             page_cache: configuration.page_cache,
+            sync: configuration.sync,
             #[cfg(test)]
             expose: None,
         };
@@ -1293,6 +1295,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         Some(schema) => node.with_declared(schema.clone()),
         None => node,
     });
+    node.start_in(setup.sync);
     #[cfg(test)]
     if let Some(expose) = &setup.expose {
         let _ = expose.send(Arc::downgrade(&node));

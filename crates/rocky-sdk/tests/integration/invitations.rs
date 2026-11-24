@@ -41,7 +41,8 @@ fn joining(
     person: Option<&Arc<dyn IdentityProvider>>,
 ) -> Result<Configuration, Failure> {
     let configuration = Configuration::new(directory, common::parsed_schema())?
-        .network(Network::Owned(hub.connector(&directory.to_string_lossy())));
+        .network(Network::Owned(hub.connector(&directory.to_string_lossy())))
+        .sync(rocky_sdk::SyncMode::Manual);
     Ok(match person {
         Some(person) => configuration.identity(person.clone()),
         None => configuration,

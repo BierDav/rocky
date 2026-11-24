@@ -1,5 +1,6 @@
 use crate::{
-    Created, Database, IdentityProvider, Network, Opened, Schema, SecretStore, database::Install,
+    Created, Database, IdentityProvider, Network, Opened, Schema, SecretStore, SyncMode,
+    database::Install,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -10,6 +11,7 @@ pub struct Configuration {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) identity: Option<Arc<dyn IdentityProvider>>,
     pub(crate) network: Option<Network>,
+    pub(crate) sync: SyncMode,
     pub(crate) page_cache: rocky_secure::PageCache,
 }
 impl Configuration {
@@ -27,6 +29,7 @@ impl Configuration {
             secrets: None,
             identity: None,
             network: None,
+            sync: SyncMode::Live,
             page_cache: rocky_secure::PageCache::default(),
         }
     }
@@ -43,6 +46,11 @@ impl Configuration {
     #[must_use]
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
+        self
+    }
+    #[must_use]
+    pub fn sync(mut self, mode: SyncMode) -> Self {
+        self.sync = mode;
         self
     }
     #[must_use]

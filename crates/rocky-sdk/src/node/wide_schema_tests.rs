@@ -60,7 +60,9 @@ fn open(
     hub: &Arc<Hub>,
     name: &str,
 ) -> Result<Configuration, Failure> {
-    Ok(Configuration::new(directory, schema)?.network(Network::Owned(hub.connector(name))))
+    Ok(Configuration::new(directory, schema)?
+        .network(Network::Owned(hub.connector(name)))
+        .sync(crate::SyncMode::Manual))
 }
 fn settings(directory: &Path) -> Settings {
     Settings::load(&directory.join("rocky.sqlite")).unwrap()

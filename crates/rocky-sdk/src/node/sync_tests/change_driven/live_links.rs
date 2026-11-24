@@ -1786,47 +1786,6 @@ async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), 
 }
 
 #[tokio::test(start_paused = true)]
-async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> {
-    tokio::task::LocalSet::new()
-        .run_until(frozen(async {
-            let root = tempfile::tempdir()?;
-            let hub = Arc::new(Hub::default());
-            let (a, b) = pair(root.path(), &hub).await?;
-            let before = tokio::time::Instant::now();
-            start(&a, false).await?;
-            snap::value(a.enter_background()).await?;
-            assert!(tokio::time::Instant::now() - before < Duration::from_secs(1));
-            assert!(
-                a.observed_peers()
-                    .await
-                    .iter()
-                    .all(|peer| peer.link.state == crate::LinkState::Closed)
-            );
-            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
-            let service = b.current().ok_or("service")?;
-            until(|| !service.live.contains(peer)).await;
-            let contact = b.settings.lock().await.peers[&peer].clone();
-            assert!(
-                b.request_link(&*transport(&b).await?, peer, &contact)
-                    .await
-                    .is_err()
-            );
-            assert_eq!(a.current().ok_or("service")?.live.len(), 0);
-            snap::value(a.enter_foreground()).await?;
-            start(&a, true).await?;
-            until(|| a.current().is_some_and(|service| service.live.len() == 1)).await;
-            assert_eq!(
-                a.observed_peers().await[0].link.state,
-                crate::LinkState::Open
-            );
-            a.detach().await;
-            b.detach().await;
-            Ok(())
-        }))
-        .await
-}
-
-#[tokio::test(start_paused = true)]
 async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {

@@ -469,7 +469,7 @@ impl Node {
                 Some(()) = passes.next(), if !passes.is_empty() => continue,
             }
             settle().await;
-            if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) {
+            if self.sync_mode() == crate::SyncMode::Live {
                 for (peer, id) in service.live.claim_publications() {
                     passes.push(self.publish_peer(&service, peer, id));
                 }
@@ -497,7 +497,7 @@ impl Node {
         }
     }
     pub(super) async fn open_links(self: &Arc<Self>, service: &Arc<Link>) {
-        if !self.automatic.load(Ordering::SeqCst) || !self.online.load(Ordering::SeqCst) {
+        if self.sync_mode() != crate::SyncMode::Live {
             return;
         }
         let settings = self.settings.lock().await.clone();
@@ -579,10 +579,7 @@ impl Node {
         settings: Shared<Settings>,
         handshake_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), Failure> {
-        if !self.foreground.load(Ordering::SeqCst)
-            || !self.online.load(Ordering::SeqCst)
-            || *service.stage.borrow() != Stage::Open
-        {
+        if !self.online.load(Ordering::SeqCst) || *service.stage.borrow() != Stage::Open {
             return Err("live links are disabled".into());
         }
         if let Some(statement) = self.revocation_notice.revoked(&settings).await? {
@@ -606,8 +603,7 @@ impl Node {
         };
         opened.attach_lanes(lanes)?;
         self.observe_peer_clock(opened.peer, opened.clock_offset);
-        if !self.foreground.load(Ordering::SeqCst)
-            || !self.online.load(Ordering::SeqCst)
+        if !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open
             || authority.has_changed()?
         {
@@ -711,9 +707,6 @@ impl Node {
         }
         let accepted = {
             self.replica.flush().await?;
-            if !self.foreground.load(Ordering::SeqCst) {
-                return Err("live links are disabled in the background".into());
-            }
             let admission_excludes_revocation_receipt = self.settings.lock().await;
             if let Some(statement) = self
                 .revocation_notice

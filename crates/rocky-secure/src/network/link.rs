@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 34;
+pub(super) const HANDSHAKE_VERSION: u32 = 35;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -16,7 +16,6 @@ pub enum CloseReason {
     Authority,
     Duplicate,
     NetworkingDisabled,
-    Suspended,
     WorkerDisabled,
     Detached,
     Busy,
@@ -778,7 +777,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v34",
+            "rocky.link.v35",
             "the cryptographic handshake accepts one current version"
         );
     }

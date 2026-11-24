@@ -212,7 +212,7 @@ impl Node {
     }
     pub(super) async fn deliver_unlinks(&self) -> Result<(), Failure> {
         let _delivery = self.unlink_delivery.lock().await;
-        if !self.online.load(Ordering::SeqCst) || !self.foreground.load(Ordering::SeqCst) {
+        if !self.online.load(Ordering::SeqCst) {
             return Ok(());
         }
         let Some(link) = self.current() else {

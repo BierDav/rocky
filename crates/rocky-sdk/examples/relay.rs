@@ -45,7 +45,6 @@ async fn open_tenants(
             Some(invitation) => configuration.join(&invitation.parse()?).await?.database,
             None => configuration.open().await?,
         };
-        database.set_sync(rocky_sdk::SyncMode::Foreground).await?;
         println!("{directory}: {}", database.contact().await?.uri);
         databases.push(database);
     }

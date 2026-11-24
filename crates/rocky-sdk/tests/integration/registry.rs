@@ -766,6 +766,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         let code = a.invite_as(reader.clone()).await;
         rocky_sdk::Configuration::new(root.join(&name), common::parsed_schema())?
             .network(memory(&hub, &name))
+            .sync(rocky_sdk::SyncMode::Manual)
             .join(&code)
             .await?
             .database

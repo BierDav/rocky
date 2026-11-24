@@ -143,9 +143,4 @@ impl Node {
             topic: path(TOPIC_PATH),
         }
     }
-    pub(super) async fn discovery_foreground(&self, foreground: bool) {
-        if let Some(discovery) = self.current().and_then(|link| link.discovery.clone()) {
-            discovery.foreground(foreground);
-        }
-    }
 }

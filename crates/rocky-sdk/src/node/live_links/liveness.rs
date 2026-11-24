@@ -261,7 +261,6 @@ fn close_reason(reason: CloseReason) -> &'static str {
         CloseReason::Authority => "authority",
         CloseReason::Duplicate => "duplicate",
         CloseReason::NetworkingDisabled => "networking_disabled",
-        CloseReason::Suspended => "suspended",
         CloseReason::WorkerDisabled => "worker_disabled",
         CloseReason::Detached => "detached",
         CloseReason::Busy => "busy",

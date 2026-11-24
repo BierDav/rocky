@@ -180,19 +180,27 @@ impl Node {
             }
             crate::SyncMode::Manual => {
                 self.set_networking_enabled(true).await?;
-                self.enter_foreground().await?;
                 self.set_automatic_sync(false).await
             }
-            crate::SyncMode::Foreground => {
+            crate::SyncMode::Live => {
                 self.set_networking_enabled(true).await?;
-                self.enter_foreground().await?;
                 self.set_automatic_sync(true).await
             }
-            crate::SyncMode::Background => {
-                self.set_networking_enabled(true).await?;
-                self.set_automatic_sync(true).await?;
-                self.enter_background().await
-            }
+        }
+    }
+    pub(crate) fn start_in(&self, mode: crate::SyncMode) {
+        self.online
+            .store(mode != crate::SyncMode::Off, Ordering::SeqCst);
+        self.automatic
+            .store(mode == crate::SyncMode::Live, Ordering::SeqCst);
+    }
+    pub(super) fn sync_mode(&self) -> crate::SyncMode {
+        if !self.online.load(Ordering::SeqCst) {
+            crate::SyncMode::Off
+        } else if self.automatic.load(Ordering::SeqCst) {
+            crate::SyncMode::Live
+        } else {
+            crate::SyncMode::Manual
         }
     }
     pub(super) async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {
@@ -239,27 +247,6 @@ impl Node {
         if !enabled && let Some(service) = self.current() {
             service.live.wait_empty().await;
         }
-        Ok(())
-    }
-    pub(super) async fn enter_foreground(&self) -> Result<(), Failure> {
-        self.foreground.store(true, Ordering::SeqCst);
-        self.discovery_foreground(true).await;
-        self.reset_retry(None);
-        self.wake_sync();
-        Ok(())
-    }
-    pub(super) async fn enter_background(&self) -> Result<(), Failure> {
-        self.foreground.store(false, Ordering::SeqCst);
-        self.control_sync();
-        let mut running = self.worker_running.subscribe();
-        running.wait_for(|running| !running).await?;
-        if let Some(service) = self.current() {
-            service
-                .live
-                .close(rocky_secure::network::link::CloseReason::Suspended);
-            service.live.wait_empty().await;
-        }
-        self.discovery_foreground(false).await;
         Ok(())
     }
 }

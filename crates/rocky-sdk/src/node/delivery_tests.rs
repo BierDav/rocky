@@ -43,7 +43,8 @@ fn parsed_schema() -> &'static crate::Schema {
 fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> Result<Configuration, Failure> {
     Ok(Configuration::new(directory, parsed_schema())?
         .secrets(keys(directory))
-        .network(crate::Network::Owned(hub.connector(name))))
+        .network(crate::Network::Owned(hub.connector(name)))
+        .sync(crate::SyncMode::Manual))
 }
 impl Device {
     fn new(database: Database, directory: PathBuf, name: &str, hub: &Arc<Hub>) -> Self {

@@ -253,7 +253,6 @@ pub(crate) struct Node {
     worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<SyncActivityState>,
     automatic: AtomicBool,
-    foreground: AtomicBool,
     sync_events: watch::Sender<u64>,
     link_events: watch::Sender<()>,
     sync_status: watch::Sender<SyncStatus>,
@@ -375,7 +374,6 @@ impl Node {
             worker_running: watch::channel(false).0,
             sync_state: watch::channel(SyncActivityState::Idle).0,
             automatic: AtomicBool::new(false),
-            foreground: AtomicBool::new(true),
             sync_events: watch::channel(0).0,
             link_events: watch::channel(()).0,
             link_revision: AtomicU64::new(0),
@@ -1496,10 +1494,7 @@ impl Node {
                 retry_only = false;
             }
             events.borrow_and_update();
-            if self.automatic.load(Ordering::SeqCst)
-                && self.online.load(Ordering::SeqCst)
-                && self.foreground.load(Ordering::SeqCst)
-            {
+            if self.sync_mode() == crate::SyncMode::Live {
                 self.worker_running.send_replace(true);
                 let running = WorkerActivity(self.worker_running.clone());
                 let result = tokio::select! {
@@ -1553,7 +1548,7 @@ impl Node {
                         Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
-                }, if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) && self.foreground.load(Ordering::SeqCst) => { retry_only = true; }
+                }, if self.sync_mode() == crate::SyncMode::Live => { retry_only = true; }
             }
         }
     }
@@ -1952,9 +1947,6 @@ impl Node {
         contact: &Contact,
         attempt: &mut Option<crate::status::Attempt>,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
-        if !self.foreground.load(Ordering::SeqCst) {
-            return Err("live links are disabled in the background".into());
-        }
         let addresses = contact.addresses(transport.kind());
         let service = self
             .current()

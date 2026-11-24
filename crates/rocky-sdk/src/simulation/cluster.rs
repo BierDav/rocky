@@ -50,7 +50,8 @@ impl Member {
         let schema = crate::Schema::parse(self.schema)?;
         let configuration = Configuration::new(&self.directory, &schema)?
             .secrets(secrets)
-            .network(Network::Owned(hub.connector(&self.name)));
+            .network(Network::Owned(hub.connector(&self.name)))
+            .sync(crate::SyncMode::Manual);
         let hosted = Database::host(&configuration, install, self.ahead.clone()).await?;
         self.running = Some(Running {
             database: hosted.database,

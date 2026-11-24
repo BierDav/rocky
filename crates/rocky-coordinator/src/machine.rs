@@ -81,48 +81,81 @@ impl State {
     }
 }
 
+/// What a coordinator request asks for.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Operation {
+    /// Publishes a control certificate.
     Control(Box<ControlCertificate>),
+    /// Changes the voters.
     Membership {
+        /// The new voters.
         voters: BTreeSet<u64>,
+        /// The voters the caller believes current.
         expected: BTreeSet<u64>,
+        /// The membership revision the caller believes current.
         expected_revision: u64,
     },
+    /// Closes a database's registration.
     Close {
+        /// The database.
         scope: Scope,
     },
+    /// Registers a database through a public service.
     Register(Box<Registration>),
+    /// Reads the tenant's usage.
     Usage,
+    /// Takes the next number of a counter.
     Claim {
+        /// The database.
         scope: Scope,
+        /// The counter.
         counter: crate::counters::Name,
+        /// The claim, which makes a retry return its first number.
         claim: crate::counters::Claim,
     },
+    /// Reads a counter.
     Counter {
+        /// The database.
         scope: Scope,
+        /// The counter.
         counter: crate::counters::Name,
+        /// A claim to look up, if any.
         claim: Option<crate::counters::Claim>,
     },
+    /// Pushes a database's revocations.
     Revoke {
+        /// The database.
         scope: Scope,
+        /// The revocations to merge.
         revocations: Box<RevocationSet>,
     },
 }
+/// A public registration: the root key's grant, the tenant's admission and the first certificate.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Registration {
+    /// The root key's grant.
     pub grant: SignedCoordinationGrant,
+    /// The provider's admission, if the service needs one.
     pub admission: Option<SignedTenantAdmission>,
+    /// The first control certificate.
     pub certificate: ControlCertificate,
 }
+/// A signed coordinator request.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
+    /// The genesis id it is bound to.
     pub genesis: Commitment,
+    /// The signing key.
     pub key: PublicKey,
+    /// A capability that certifies `key`, if any.
     pub certificate: Option<rocky_credentials::SignedCapability>,
+    /// The device's membership chain, for device calls.
     pub credentials: Option<CredentialChain>,
+    /// Makes a retry apply once.
     pub id: Commitment,
+    /// Unix seconds when it was made; more than 30 seconds off the coordinator's clock is refused.
     pub time: u64,
+    /// What it asks for.
     pub operation: Operation,
     signature: Signature,
 }
@@ -186,6 +219,7 @@ pub(crate) fn self_certified(
     )
 }
 impl Request {
+    /// Signs a request now.
     pub fn sign(
         genesis: Commitment,
         id: Commitment,
@@ -194,6 +228,7 @@ impl Request {
     ) -> Result<Self, CoordinationError> {
         Self::sign_at(genesis, id, operation, key, now()?)
     }
+    /// Signs a request at `time`.
     pub fn sign_at(
         genesis: Commitment,
         id: Commitment,
@@ -203,6 +238,7 @@ impl Request {
     ) -> Result<Self, CoordinationError> {
         Self::certified(genesis, id, operation, (key, None), time)
     }
+    /// Signs a request with an optional certifying capability.
     pub fn certified(
         genesis: Commitment,
         id: Commitment,
@@ -222,6 +258,7 @@ impl Request {
         )
         .signed(key)
     }
+    /// An unsigned request, for a signer outside this process such as a database.
     pub fn unsigned(
         genesis: Commitment,
         id: Commitment,
@@ -244,6 +281,7 @@ impl Request {
             signature: Signature::from_bytes(&[0; 64]),
         }
     }
+    /// Signs with `key`, which must be the request's key.
     pub fn signed(mut self, key: &p2panda_core::PrivateKey) -> Result<Self, CoordinationError> {
         if key.public_key() != self.key {
             return Err(CoordinationError::Denied(Refusal::Signature));
@@ -251,10 +289,12 @@ impl Request {
         self.signature = key.sign(&self.signing_bytes()?);
         Ok(self)
     }
+    /// Attaches a signature made elsewhere over `extension_body`.
     pub fn with_signature(mut self, signature: Signature) -> Self {
         self.signature = signature;
         self
     }
+    /// The bytes an external signer signs.
     pub fn extension_body(&self) -> Result<Vec<u8>, CoordinationError> {
         encode(&(
             self.genesis,
@@ -270,22 +310,27 @@ impl Request {
         rocky_credentials::extension_message(REQUEST_LABEL, &self.extension_body()?)
             .map_err(|_| CoordinationError::Corrupt)
     }
+    /// The identity the certificate vouches for at `time`.
     pub fn identity(&self, time: u64) -> Option<PublicKey> {
         self.certificate.as_ref()?.certifies(self.key, time).ok()
     }
+    /// Checks the genesis and signature.
     pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
             return Err(CoordinationError::Denied(Refusal::Signature));
         }
         Ok(())
     }
+    /// The largest encoded client request.
     pub const MAX_CLIENT_BYTES: usize = 16 * 1024;
+    /// Refuses a request over `MAX_CLIENT_BYTES`.
     pub fn within_client_limit(&self) -> Result<(), CoordinationError> {
         if encode(self)?.len() > Self::MAX_CLIENT_BYTES {
             return Err(CoordinationError::Denied(Refusal::Oversized));
         }
         Ok(())
     }
+    /// Refuses a request more than 30 seconds off the local clock.
     pub fn fresh(&self) -> Result<(), CoordinationError> {
         let coordinator_time = now()?;
         if coordinator_time.abs_diff(self.time) > 30 {
@@ -308,25 +353,39 @@ impl Request {
                 | Operation::Revoke { .. }
         )
     }
+    /// Whether the request only reads.
     pub fn read_only(&self) -> bool {
         matches!(self.operation, Operation::Usage | Operation::Counter { .. })
     }
 }
+/// A coordinator's answer to a request.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Outcome {
+    /// The number a claim took.
     Claimed(u64),
+    /// A counter's state.
     Counter(crate::counters::Reading),
+    /// The digest of the merged revocations.
     Revoked(Commitment),
+    /// The reference of the accepted control certificate.
     Controlled(Commitment),
+    /// The voters after a membership change.
     Membership(BTreeSet<u64>),
+    /// The registration was closed.
     Closed,
+    /// The tenant's usage.
     Usage(Usage),
 }
+/// What a tenant holds on the coordinator.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
+    /// Registered databases that are open.
     pub open_domains: usize,
+    /// Registered databases that were closed.
     pub closed_domains: usize,
+    /// Accounted bytes of state.
     pub bytes: usize,
+    /// Registrations made today.
     pub registrations_today: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -345,22 +404,27 @@ struct Tenant {
     day: u64,
     registrations: u32,
 }
+/// The coordinator's replicated state machine.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Metadata {
+    /// The deployment's genesis.
     pub genesis: CertifiedGenesis,
     controls: Vec<ControlCertificate>,
     state: State,
     retained: Vec<Retained>,
+    /// The voters membership changes aim for.
     pub desired_voters: BTreeSet<u64>,
     membership_revision: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tenants: Vec<Tenant>,
 }
 impl Metadata {
+    /// An empty state machine with the default limits.
     #[cfg(test)]
     pub fn new(genesis: CertifiedGenesis) -> Result<Self, CoordinationError> {
         Self::with_limits(genesis, Limits::default())
     }
+    /// An empty state machine with these limits.
     pub fn with_limits(
         genesis: CertifiedGenesis,
         limits: Limits,
@@ -376,23 +440,29 @@ impl Metadata {
             tenants: Vec::new(),
         })
     }
+    /// The last applied time.
     pub fn time(&self) -> u64 {
         self.state.time
     }
+    /// Registered tenants.
     pub fn tenants(&self) -> usize {
         self.tenants.len()
     }
+    /// What counters and domains hold.
     pub fn retention(&self) -> Retention {
         self.state.retention()
     }
+    /// Remembered request outcomes.
     pub fn retry_records(&self) -> usize {
         self.retained.len()
     }
+    /// Authenticates and authorizes a request before it is proposed.
     pub fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
         request.fresh()?;
         self.authorize_authenticated(request)
     }
+    /// Authorizes a request whose signature was already checked.
     pub fn authorize_authenticated(&self, request: &Request) -> Result<(), CoordinationError> {
         if self
             .retained
@@ -435,6 +505,7 @@ impl Metadata {
                 .map(|_| ()),
         }
     }
+    /// Applies a request at `time`.
     pub fn apply_at(&mut self, time: u64, request: &Request) -> Result<Outcome, CoordinationError> {
         let authenticated = self
             .genesis
@@ -442,6 +513,7 @@ impl Metadata {
             .and_then(|genesis| request.authenticate(genesis));
         self.apply_authenticated(time, request, authenticated)
     }
+    /// Applies a request with the result of an earlier signature check.
     pub fn apply_authenticated(
         &mut self,
         time: u64,
@@ -506,10 +578,12 @@ impl Metadata {
         }
         result
     }
+    /// Answers a read-only request without changing state.
     pub fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
         self.read_authenticated(request)
     }
+    /// Answers a read-only request whose signature was already checked.
     pub fn read_authenticated(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         match &request.operation {
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
@@ -730,6 +804,7 @@ impl Metadata {
         }
         self.tenant(certificate.issuer).ok().map(|t| t.key)
     }
+    /// The tenant whose lane a request uses, if any.
     pub fn tenant_lane(&self, request: &Request) -> Option<PublicKey> {
         self.tenant(self.retry_tenant(request)?).ok().map(|t| t.key)
     }
@@ -752,6 +827,7 @@ impl Metadata {
         }
         Ok(used)
     }
+    /// Accounted bytes of all state.
     pub fn total_used(&self) -> Result<usize, CoordinationError> {
         let mut used = self.state.bytes() + self.tenants.len() * ACCOUNTED_TENANT_BYTES;
         for certificate in &self.controls {

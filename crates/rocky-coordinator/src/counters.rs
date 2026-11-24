@@ -3,18 +3,25 @@ use rocky_core::{Commitment, MAX_COUNTER};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+/// Counters one database may hold.
 pub const MAX_COUNTERS: usize = 64;
+/// Seconds a claim's issuance time may lie ahead of the coordinator's clock.
 pub const ISSUE_SKEW: u64 = crate::transport::MAX_CLOCK_SKEW_SECONDS;
 const ACCOUNTED_COUNTER_BYTES: usize = 128;
 const ACCOUNTED_CLAIM_BYTES: usize = 64;
 
+/// The longest counter name in bytes.
 pub const MAX_NAME: usize = 64;
+/// Seconds a claim stays remembered, so a retry within seven days gets its first number.
 pub const CLAIM_WINDOW: u64 = 7 * 86_400;
+/// Claims remembered per counter; older ones are forgotten first.
 pub const CLAIM_RECORDS: usize = 1024;
+/// A counter name of 1 to 64 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
 pub struct Name(Vec<u8>);
 impl Name {
+    /// Refuses an empty name or one over `MAX_NAME` with `Configuration`.
     pub fn new(name: impl Into<Vec<u8>>) -> Result<Self, CoordinationError> {
         let name = name.into();
         if name.is_empty() || name.len() > MAX_NAME {
@@ -22,6 +29,7 @@ impl Name {
         }
         Ok(Self(name))
     }
+    /// The name's bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -37,18 +45,24 @@ impl From<Name> for Vec<u8> {
         name.0
     }
 }
+/// Identifies one claim, so a retry returns the number the first attempt took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
+    /// The claim's identity.
     pub id: Commitment,
+    /// Unix seconds when the claim was first made; a retry must repeat it.
     pub issued: u64,
 }
 impl Claim {
+    /// A random claim issued now, for a number no retry needs to match.
     pub fn fresh() -> Result<Self, CoordinationError> {
         Ok(Self {
             id: rocky_platform::entropy::random(),
             issued: crate::certified::now()?,
         })
     }
+    /// A claim derived from an application key such as an order id; retries need the same key and
+    /// the same `issued` time.
     pub fn keyed(key: &[u8], issued: u64) -> Self {
         Self {
             id: rocky_core::commitment("rocky.counter-claim.v1", key),
@@ -56,15 +70,22 @@ impl Claim {
         }
     }
 }
+/// A counter's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reading {
+    /// The last number taken, or 0 before any.
     pub value: u64,
+    /// What the coordinator remembers of the asked claim, or `None` when none was asked.
     pub claim: Option<Lookup>,
 }
+/// What the coordinator remembers of one claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lookup {
+    /// The claim took this number.
     Claimed(u64),
+    /// The claim took no number yet.
     Unclaimed,
+    /// The claim is past `CLAIM_WINDOW` or was forgotten, so its number is unknown.
     Expired,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

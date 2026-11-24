@@ -16,6 +16,7 @@ use rocky_core::{
 use rocky_credentials::{RevocationSet, SignedCapability};
 use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
+/// A low-level coordinator client that sends signed requests to the voters, leader first.
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
     key: PrivateKey,
@@ -24,7 +25,9 @@ pub struct NetworkCoordinator {
     preferred: Mutex<(Option<u64>, Option<u64>)>,
     observer: Mutex<Option<Observer>>,
 }
+/// Hears the outcome of every call, for health reporting.
 pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
+/// How long a call waits by default before it is `Unavailable`.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(12);
 const ATTEMPT_DEADLINE: Duration = Duration::from_secs(3);
 const PAUSE_BETWEEN_ROUNDS: Duration = Duration::from_millis(100);
@@ -33,6 +36,7 @@ fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
     Err(CoordinationError::Configuration)
 }
 impl NetworkCoordinator {
+    /// A client that dials voters directly over TCP, for operators and voters.
     #[cfg(not(target_family = "wasm"))]
     pub fn open(
         genesis: CertifiedGenesis,
@@ -59,9 +63,11 @@ impl NetworkCoordinator {
             observer: Mutex::new(None),
         })
     }
+    /// Sets the one observer of call outcomes.
     pub fn observe(&self, observer: Observer) {
         *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
     }
+    /// Attaches the capability that certifies this client's key for later requests.
     pub fn certify(&self, certificate: SignedCapability) {
         *self
             .certificate
@@ -72,9 +78,11 @@ impl NetworkCoordinator {
     pub(crate) fn certified_genesis(&self) -> &CertifiedGenesis {
         &self.genesis
     }
+    /// The genesis id requests name.
     pub fn genesis(&self) -> Result<Commitment, CoordinationError> {
         self.genesis.id()
     }
+    /// A client that reaches the voters a trust bundle names over `transport`.
     pub fn connect(
         bundle: &TrustBundle,
         key: PrivateKey,
@@ -175,6 +183,7 @@ impl NetworkCoordinator {
         }
         replies
     }
+    /// Sends an operation under a request id, which makes a retry apply once.
     pub async fn call(
         &self,
         id: Commitment,
@@ -182,9 +191,11 @@ impl NetworkCoordinator {
     ) -> Result<Outcome, CoordinationError> {
         self.submit(&self.request(id, operation)?).await
     }
+    /// Sends a prepared request within `CALL_DEADLINE`.
     pub async fn submit(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         self.submit_within(request, CALL_DEADLINE).await
     }
+    /// Sends a prepared request within `deadline`.
     pub async fn submit_within(
         &self,
         request: &Request,
@@ -239,6 +250,7 @@ impl NetworkCoordinator {
         .await
         .map_err(|_| CoordinationError::Unavailable)?
     }
+    /// Registers a database through a public service.
     pub async fn register(
         &self,
         grant: SignedCoordinationGrant,
@@ -261,6 +273,7 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// Publishes a control certificate.
     pub async fn control(
         &self,
         certificate: ControlCertificate,
@@ -274,6 +287,7 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// Takes the next number of a counter.
     pub async fn claim(
         &self,
         scope: Scope,
@@ -295,6 +309,7 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// Reads a counter.
     pub async fn counter(
         &self,
         scope: Scope,
@@ -316,6 +331,7 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// Pushes a database's revocations.
     pub async fn revoke(
         &self,
         scope: Scope,
@@ -335,12 +351,14 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// What this client's tenant has stored.
     pub async fn usage(&self) -> Result<crate::service::Usage, CoordinationError> {
         match self.call(nonce(), Operation::Usage).await? {
             Outcome::Usage(usage) => Ok(usage),
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// Closes a database's registration.
     pub async fn close_domain(
         &self,
         scope: Scope,
@@ -351,6 +369,7 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    /// One voter's health and metrics.
     #[cfg(not(target_family = "wasm"))]
     pub async fn status(&self, voter: u64) -> Result<crate::service::Status, CoordinationError> {
         exchange(
@@ -369,6 +388,7 @@ impl NetworkCoordinator {
             .find(|v| v.id == id)
             .ok_or(CoordinationError::Denied(Refusal::UnknownVoter))
     }
+    /// Starts the Raft group from one voter.
     #[cfg(not(target_family = "wasm"))]
     pub async fn initialize(&self, voter: u64) -> Result<(), CoordinationError> {
         exchange(
@@ -379,6 +399,7 @@ impl NetworkCoordinator {
         )
         .await?
     }
+    /// Asks one voter to snapshot its state now.
     #[cfg(not(target_family = "wasm"))]
     pub async fn snapshot(&self, voter: u64) -> Result<(), CoordinationError> {
         exchange(

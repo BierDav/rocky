@@ -16,9 +16,12 @@ use std::sync::Arc;
 
 const GRANT_LIFETIME_SECONDS: u64 = 3600;
 
+/// A failed `Counters` call: the coordinator's answer or the database's.
 #[derive(Debug)]
 pub enum CounterError {
+    /// The coordinator was unreachable or refused; `Unavailable` took no number.
     Coordination(CoordinationError),
+    /// The database could not supply or sign the device's credentials.
     Database(rocky_sdk::Error),
 }
 impl std::fmt::Display for CounterError {
@@ -41,12 +44,14 @@ impl From<rocky_sdk::Error> for CounterError {
     }
 }
 
+/// Gap-free named counters for one database, claimed through a coordinator.
 pub struct Counters {
     database: Database,
     client: Arc<NetworkCoordinator>,
     deadline: Duration,
 }
 impl Counters {
+    /// Claims through a coordinator client the application built.
     pub fn new(database: Database, client: Arc<NetworkCoordinator>) -> Self {
         Self {
             database,
@@ -54,6 +59,8 @@ impl Counters {
             deadline: CALL_DEADLINE,
         }
     }
+    /// Reaches the coordinator a trust bundle names over `transport`, whose kind the bundle must
+    /// list.
     pub fn connect(
         database: Database,
         bundle: &TrustBundle,
@@ -63,9 +70,12 @@ impl Counters {
         let client = NetworkCoordinator::connect(bundle, session, transport)?;
         Ok(Self::new(database, Arc::new(client)))
     }
+    /// Bounds how long each call waits, 12 seconds by default.
     pub fn with_deadline(self, deadline: Duration) -> Self {
         Self { deadline, ..self }
     }
+    /// Registers the database with the coordinator under `tenant`, signed by the database's root
+    /// key; `lifetime` is in seconds, at most the coordinator's `max_control_lifetime`.
     pub async fn register(
         &self,
         owner: &dyn IdentityProvider,
@@ -95,6 +105,7 @@ impl Counters {
         }));
         self.publish(tenant, certificate, operation).await
     }
+    /// Extends a registration before it expires, by another `lifetime` seconds.
     pub async fn renew(
         &self,
         tenant: &Tenant,
@@ -110,6 +121,8 @@ impl Counters {
         let operation = Operation::Control(Box::new(certificate.clone()));
         self.publish(tenant, certificate, operation).await
     }
+    /// Takes the next number of a counter for any person with write access; a retried
+    /// `Claim::keyed` returns its first number.
     pub async fn claim(&self, counter: &Name, claim: Claim) -> Result<u64, CounterError> {
         let device = self.database.device_credential().await?;
         let operation = Operation::Claim {
@@ -122,6 +135,7 @@ impl Counters {
             _ => Err(CoordinationError::Corrupt.into()),
         }
     }
+    /// Reads a counter's last number and, for `claim`, whether it took one.
     pub async fn read(
         &self,
         counter: &Name,
@@ -138,6 +152,7 @@ impl Counters {
             _ => Err(CoordinationError::Corrupt.into()),
         }
     }
+    /// Tells the coordinator which devices this database revoked, so their claims are refused.
     pub async fn share_revocations(&self) -> Result<Commitment, CounterError> {
         let device = self.database.device_credential().await?;
         Ok(self.client.revoke(device.scope, device.revocations).await?)

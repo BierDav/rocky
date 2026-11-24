@@ -4,8 +4,10 @@ use rocky_core::{AppId, ApplicationManifest};
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose};
 use serde::{Deserialize, Serialize};
 
+/// The longest application name in a grant, in bytes.
 pub const MAX_APPLICATION_NAME: usize = 128;
 
+/// The public key that identifies a tenant to the coordinator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CoordinatorControl(pub PublicKey);
 
@@ -25,20 +27,29 @@ fn current(
     Ok(())
 }
 
+/// A database root key's permission for a tenant to register the database.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinationGrant {
+    /// The database's root key.
     pub publisher: Publisher,
+    /// The application name in the database's manifest.
     pub application: String,
+    /// The tenant allowed to register.
     pub tenant: CoordinatorControl,
+    /// Unix seconds from which the grant is valid.
     pub not_before: u64,
+    /// Unix seconds at which the grant expires.
     pub expires: u64,
 }
+/// A grant signed by the database's root key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCoordinationGrant {
+    /// The signed grant.
     pub grant: CoordinationGrant,
     signature: Signature,
 }
 impl SignedCoordinationGrant {
+    /// Signs with the root key, refusing a key that is not the grant's publisher.
     pub fn sign(
         grant: CoordinationGrant,
         owner: &dyn IdentityProvider,
@@ -56,6 +67,7 @@ impl SignedCoordinationGrant {
             grant,
         })
     }
+    /// Checks the signature and validity at `time`, returning the application id.
     pub fn verify(&self, time: u64) -> Result<AppId, CoordinationError> {
         let grant = &self.grant;
         if grant.application.is_empty()
@@ -75,19 +87,27 @@ impl SignedCoordinationGrant {
     }
 }
 
+/// A coordinator provider's permission for a tenant to register on a public service.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantAdmission {
+    /// The provider's key, which the coordinator's genesis names.
     pub provider: PublicKey,
+    /// The admitted tenant.
     pub tenant: CoordinatorControl,
+    /// Unix seconds from which the admission is valid.
     pub not_before: u64,
+    /// Unix seconds at which the admission expires.
     pub expires: u64,
 }
+/// An admission signed by the provider.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedTenantAdmission {
+    /// The signed admission.
     pub admission: TenantAdmission,
     signature: Signature,
 }
 impl SignedTenantAdmission {
+    /// Signs with the provider's key, refusing a key that is not the admission's provider.
     pub fn sign(
         admission: TenantAdmission,
         provider: &PrivateKey,
@@ -100,6 +120,7 @@ impl SignedTenantAdmission {
             admission,
         })
     }
+    /// Checks the signature, provider and validity at `time`, returning the tenant.
     pub fn verify(
         &self,
         provider: PublicKey,
@@ -124,26 +145,32 @@ impl SignedTenantAdmission {
     }
 }
 
+/// A coordinator account; store its `secret` to renew registrations later.
 pub struct Tenant {
     key: PrivateKey,
     admission: Option<SignedTenantAdmission>,
 }
 impl Tenant {
+    /// A new random tenant.
     pub fn generate() -> Self {
         Self::from_secret(*PrivateKey::new().as_bytes())
     }
+    /// The tenant a stored secret restores.
     pub fn from_secret(secret: [u8; 32]) -> Self {
         Self {
             key: PrivateKey::from_bytes(&secret),
             admission: None,
         }
     }
+    /// The 32-byte secret to store; anyone holding it controls the tenant's registrations.
     pub fn secret(&self) -> [u8; 32] {
         *self.key.as_bytes()
     }
+    /// The tenant's public identity.
     pub fn control(&self) -> CoordinatorControl {
         CoordinatorControl(self.key.public_key())
     }
+    /// Attaches a provider's admission, refusing one issued to another tenant.
     pub fn admitted(self, admission: SignedTenantAdmission) -> Result<Self, CoordinationError> {
         if admission.admission.tenant != self.control() {
             return Err(CoordinationError::Denied(Refusal::NotAdmitted));
@@ -157,6 +184,7 @@ impl Tenant {
     pub(crate) fn key(&self) -> &PrivateKey {
         &self.key
     }
+    /// The attached admission, if any.
     pub fn admission(&self) -> Option<&SignedTenantAdmission> {
         self.admission.as_ref()
     }

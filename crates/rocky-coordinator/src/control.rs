@@ -10,30 +10,50 @@ use tokio::sync::Mutex;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+/// A registration or renewal an operator publishes for a database.
 pub struct ControlRequest {
+    /// The tenant key that signs the control certificate.
     pub tenant: PrivateKey,
+    /// The 1 to 32 identity keys whose devices may call the coordinator.
     pub trusted: Vec<PublicKey>,
+    /// Seconds the certificate is valid.
     pub lifetime: u64,
+    /// The request id, which keeps a retry from applying twice.
     pub id: Commitment,
+    /// A first registration or a later revision.
     pub revision: ControlRevision,
 }
+/// Whether a control certificate registers a database or updates it.
 pub enum ControlRevision {
+    /// The first registration, revision 1.
     Register {
+        /// The root key's grant to this tenant.
         grant: Option<Box<SignedCoordinationGrant>>,
+        /// The provider's admission of this tenant, if the service needs one.
         admission: Option<Box<SignedTenantAdmission>>,
     },
+    /// A later revision, above 1.
     Update(u64),
 }
+/// Proof of an accepted registration or renewal; keep it to renew.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlReceipt {
+    /// The tenant that signed it.
     pub tenant: PublicKey,
+    /// Its control revision.
     pub revision: u64,
+    /// The accepted certificate's reference.
     pub control: Commitment,
+    /// Unix seconds when it expires; renew before then.
     pub expires: u64,
 }
+/// The database a control request is for.
 pub struct Domain {
+    /// The database's scope.
     pub scope: Scope,
+    /// The application name in the database's manifest.
     pub application: String,
+    /// The database's root key.
     pub publisher: PublicKey,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -44,6 +64,7 @@ struct Signed {
     time: u64,
 }
 
+/// An operator's client that registers, renews and closes databases.
 pub struct ControlClient {
     bundle: TrustBundle,
     transport: Arc<dyn Transport>,
@@ -51,6 +72,7 @@ pub struct ControlClient {
     lock: Mutex<()>,
 }
 impl ControlClient {
+    /// A client for the coordinator a trust bundle names, keeping its state in `directory`.
     pub fn new(bundle: TrustBundle, transport: Arc<dyn Transport>, directory: PathBuf) -> Self {
         Self {
             bundle,
@@ -66,9 +88,11 @@ impl ControlClient {
             self.transport.clone(),
         )?)
     }
+    /// What a tenant has stored on the coordinator.
     pub async fn usage(&self, tenant: PrivateKey) -> Result<crate::service::Usage, Failure> {
         Ok(self.client(tenant)?.usage().await?)
     }
+    /// Closes a database's registration, refusing its later claims.
     pub async fn close(
         &self,
         scope: Scope,
@@ -77,6 +101,7 @@ impl ControlClient {
     ) -> Result<(), Failure> {
         Ok(self.client(tenant)?.close_domain(scope, id).await?)
     }
+    /// Publishes a control certificate for a database.
     pub async fn publish(
         &self,
         domain: Domain,

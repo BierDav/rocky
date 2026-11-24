@@ -5,26 +5,41 @@ use rocky_core::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// A message between a client or voter and a voter.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireMessage<A, V, S> {
+    /// A client request.
     Client(Box<crate::machine::Request>),
+    /// Raft log replication.
     Append(A),
+    /// A Raft vote.
     Vote(V),
+    /// A Raft snapshot transfer.
     Snapshot(S),
+    /// Asks for the voter's status.
     Status,
+    /// Asks the voter to snapshot now.
     SnapshotNow,
+    /// Starts the Raft group.
     Initialize,
 }
+/// A signed frame on the coordinator wire.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Envelope {
+    /// The genesis id it is bound to.
     pub genesis: Commitment,
+    /// The signing key.
     pub key: PublicKey,
+    /// Pairs a reply with its request.
     pub nonce: Commitment,
+    /// Unix seconds when it was signed.
     pub time: u64,
+    /// The encoded message.
     pub body: Vec<u8>,
     signature: Signature,
 }
 impl Envelope {
+    /// Encodes and signs a message.
     pub fn sign<T: Serialize>(
         genesis: Commitment,
         nonce: Commitment,
@@ -33,6 +48,7 @@ impl Envelope {
     ) -> Result<Self, CoordinationError> {
         Self::from_body(genesis, nonce, encode(body)?, key)
     }
+    /// Signs an encoded message.
     pub fn from_body(
         genesis: Commitment,
         nonce: Commitment,
@@ -56,12 +72,14 @@ impl Envelope {
             &(self.genesis, self.key, self.nonce, self.time, &self.body),
         )
     }
+    /// Checks the genesis and signature.
     pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
             return Err(CoordinationError::Denied(Refusal::Signature));
         }
         Ok(())
     }
+    /// Authenticates and decodes a client request, refusing any other message.
     pub fn client_request(
         &self,
         genesis: Commitment,
@@ -72,6 +90,7 @@ impl Envelope {
             _ => Err(CoordinationError::Denied(Refusal::UnexpectedMessage)),
         }
     }
+    /// Authenticates and refuses an envelope more than 30 seconds off the local clock.
     #[cfg(not(target_family = "wasm"))]
     pub fn verify(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         self.authenticate(genesis)?;
@@ -90,16 +109,20 @@ const ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE: usize = 2;
 
 const ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS: usize = 285;
 
+/// The largest frame a client request needs.
 pub const MAX_CLIENT_FRAME: usize = ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS
     + ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE
         * (crate::machine::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES);
 
+/// A fresh random nonce.
 pub fn nonce() -> Commitment {
     *PrivateKey::new().public_key().as_bytes()
 }
+/// Reads one frame of at most `MAX_FRAME` bytes.
 pub async fn read(stream: &mut (impl AsyncRead + Unpin)) -> Result<Envelope, CoordinationError> {
     read_bounded(stream, MAX_FRAME).await
 }
+/// Reads one frame of at most `max_frame` bytes.
 pub async fn read_bounded(
     stream: &mut (impl AsyncRead + Unpin),
     max_frame: usize,
@@ -118,6 +141,7 @@ pub async fn read_bounded(
         .map_err(|_| CoordinationError::Unavailable)?;
     decode(&bytes)
 }
+/// Writes one frame.
 pub async fn write(
     stream: &mut (impl AsyncWrite + Unpin),
     envelope: &Envelope,
@@ -139,6 +163,7 @@ pub async fn write(
         .await
         .map_err(|_| CoordinationError::Unavailable)
 }
+/// Sends a message and reads the reply, which `voter` must sign.
 pub async fn converse<T: Serialize + DeserializeOwned>(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     voter: PublicKey,
@@ -160,6 +185,7 @@ pub async fn converse<T: Serialize + DeserializeOwned>(
 pub enum NoRaft {}
 pub(crate) type Message = WireMessage<NoRaft, NoRaft, NoRaft>;
 
+/// Dials a voter over TCP and converses within three seconds.
 #[cfg(not(target_family = "wasm"))]
 pub async fn exchange<T: Serialize + DeserializeOwned>(
     voter: &Voter,

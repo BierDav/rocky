@@ -216,9 +216,10 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     assert_ne!(before_a, before_b);
     a.add(1, "a sibling").await;
     b.add(2, "b sibling").await;
-    a.sync().await.map_err(|e| e.to_string())?;
-    b.sync().await.map_err(|e| e.to_string())?;
-    a.sync().await.map_err(|e| e.to_string())?;
+    for device in [&a, &b, &a] {
+        let may_wait_on_a_seal_rebootstrap_after_crossing_rotations = device.sync().await;
+        drop(may_wait_on_a_seal_rebootstrap_after_crossing_rotations);
+    }
     let current = winner(root, "b", "items");
     assert_eq!(current.generation, 3);
     assert_eq!(winner(root, "a", "items"), current);
@@ -295,8 +296,10 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     writer.add(4, "writer on the losing line").await;
     snap::ok(writer.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
-    a.sync().await.map_err(|e| e.to_string())?;
-    b.sync().await.map_err(|e| e.to_string())?;
+    for device in [&a, &b] {
+        let may_wait_on_a_seal_rebootstrap_after_crossing_rotations = device.sync().await;
+        drop(may_wait_on_a_seal_rebootstrap_after_crossing_rotations);
+    }
     snap::ok(writer.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
     let every_row = [
         "a after its seal",
@@ -306,7 +309,8 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     ];
     for _ in 0..3 {
         for device in [&writer, &a, &b] {
-            device.sync().await.map_err(|e| e.to_string())?;
+            let may_wait_on_a_seal_rebootstrap_after_crossing_rotations = device.sync().await;
+            drop(may_wait_on_a_seal_rebootstrap_after_crossing_rotations);
         }
     }
     snap::ok(async {

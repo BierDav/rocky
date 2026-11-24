@@ -276,9 +276,10 @@ impl Node {
         }
         let renewed = self.renew(Some(transport), false, None, false).await;
         if let Err(error) = &renewed {
-            self.activity.record(crate::ActivityKind::RenewalFailed {
-                error: (error.to_string()).to_owned(),
-            });
+            self.activity
+                .record(crate::activity::ActivityKind::RenewalFailed {
+                    error: (error.to_string()).to_owned(),
+                });
         }
         if !member {
             renewed?;
@@ -465,9 +466,10 @@ impl Node {
         self.ensure_not_revoked().await?;
         match renewed {
             Ok(_) => {
-                self.activity.record(crate::ActivityKind::RightsChanged {
-                    person: crate::PersonId::new(pass.settings.identity),
-                });
+                self.activity
+                    .record(crate::activity::ActivityKind::RightsChanged {
+                        person: crate::PersonId::new(pass.settings.identity),
+                    });
                 Ok(Some(Rerun::Renewed))
             }
             Err(error) => {
@@ -475,9 +477,10 @@ impl Node {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get_or_insert(issuer);
-                self.activity.record(crate::ActivityKind::RenewalFailed {
-                    error: error.to_string(),
-                });
+                self.activity
+                    .record(crate::activity::ActivityKind::RenewalFailed {
+                        error: error.to_string(),
+                    });
                 Ok(None)
             }
         }
@@ -577,7 +580,7 @@ impl Node {
             Ok(false) => result,
             Err(error) => {
                 self.activity
-                    .record_changed(crate::ActivityKind::EpochDeliveryFailed {
+                    .record_changed(crate::activity::ActivityKind::EpochDeliveryFailed {
                         peer: (peer).to_owned(),
                         error: (error.to_string()).to_owned(),
                     });

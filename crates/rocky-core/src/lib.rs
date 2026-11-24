@@ -30,7 +30,7 @@ mod value;
 pub use key::{KeyColumn, MAX_KEY_BYTES, bound_key, key_components, key_values};
 pub use logical::*;
 pub use types::*;
-pub use value::{Real, SqlValue};
+pub use value::{NotANumber, Real, SqlValue};
 
 mod commitment;
 pub use commitment::*;

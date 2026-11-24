@@ -150,7 +150,7 @@ impl Node {
                 Err(error) => {
                     state.pairs.entry(pair).or_default().failed();
                     self.activity
-                        .record(crate::ActivityKind::TipSchemaUnavailable {
+                        .record(crate::activity::ActivityKind::TipSchemaUnavailable {
                             manifest: *manifest,
                             peer: (peer).to_owned(),
                             error: (error.to_string()).to_owned(),
@@ -232,7 +232,7 @@ impl Node {
         drop(settings);
         if let Err(error) = self.refresh_tip_node().await {
             self.activity
-                .record_changed(crate::ActivityKind::LineNodeFailed {
+                .record_changed(crate::activity::ActivityKind::LineNodeFailed {
                     error: (error.to_string()).to_owned(),
                 });
         }

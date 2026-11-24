@@ -247,15 +247,17 @@ impl Node {
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         drop(settings);
         let named = record.partition()?;
-        self.activity.record(crate::ActivityKind::PartitionCreated {
-            partition: named.clone(),
-            id,
-        });
-        if recipients > 0 {
-            self.activity.record(crate::ActivityKind::PartitionShared {
-                partition: named,
-                recipients,
+        self.activity
+            .record(crate::activity::ActivityKind::PartitionCreated {
+                partition: named.clone(),
+                id,
             });
+        if recipients > 0 {
+            self.activity
+                .record(crate::activity::ActivityKind::PartitionShared {
+                    partition: named,
+                    recipients,
+                });
         }
         self.wake_sync();
         Ok(record)
@@ -385,10 +387,11 @@ impl Node {
             .await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         if forwarded > 0 {
-            self.activity.record(crate::ActivityKind::PartitionShared {
-                partition: record.partition()?,
-                recipients: forwarded,
-            });
+            self.activity
+                .record(crate::activity::ActivityKind::PartitionShared {
+                    partition: record.partition()?,
+                    recipients: forwarded,
+                });
         }
         Ok(true)
     }

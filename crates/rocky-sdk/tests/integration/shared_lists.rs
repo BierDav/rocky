@@ -68,7 +68,7 @@ impl Peer {
         Ok(Self { database })
     }
 
-    async fn sync_now(&self) -> Result<Option<rocky_sdk::SyncReport>, rocky_sdk::Error> {
+    async fn sync_now(&self) -> Result<Option<rocky_sdk::status::SyncReport>, rocky_sdk::Error> {
         crate::support::peerless_ok(self.database.sync_now().await)
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
@@ -590,10 +590,13 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     )?;
     writer.sync_now().await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
-    snap::value(issuer.database.set_retention(
-        "items",
-        serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy)).expect("typed fixture"),
-    ))
+    snap::value(
+        issuer.database.set_retention(
+            "items",
+            serde_json::from_value::<rocky_sdk::inspection::RetentionPolicy>(json!(policy))
+                .expect("typed fixture"),
+        ),
+    )
     .await?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer

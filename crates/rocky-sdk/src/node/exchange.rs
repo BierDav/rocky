@@ -185,7 +185,7 @@ impl Node {
             .set_importing(pending.iter().copied().collect())
             .await;
         self.activity
-            .record_changed(crate::ActivityKind::BootstrapStarted {
+            .record_changed(crate::activity::ActivityKind::BootstrapStarted {
                 peer: (peer).to_owned(),
                 scopes: pending.len(),
             });
@@ -231,7 +231,7 @@ impl Node {
             return Ok(());
         }
         self.activity
-            .record(crate::ActivityKind::BootstrapFinished {
+            .record(crate::activity::ActivityKind::BootstrapFinished {
                 peer: (peer).to_owned(),
             });
         Ok(())

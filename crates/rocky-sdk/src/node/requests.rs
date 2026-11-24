@@ -34,9 +34,11 @@ impl Node {
             Request::TrustedStaleAfter(a, reply) => {
                 let _ = reply.send(self.set_trusted_stale_after(a).await);
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::Activity(a, reply) => {
                 let _ = reply.send(Ok(self.activity.after(a)));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::ActivityNext(a, mut reply) => {
                 let result = tokio::select! { result = self.next_activity(a) => result, () = reply.closed() => return, };
                 let _ = reply.send(result);
@@ -156,7 +158,8 @@ impl Node {
         })
     }
 
-    async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, Failure> {
+    #[cfg(any(test, feature = "test-support"))]
+    async fn next_activity(&self, after: u64) -> Result<crate::activity::ActivityPage, Failure> {
         let mut closing = self.closing.subscribe();
         self.activity
             .next(after, &mut closing)
@@ -240,9 +243,9 @@ impl Node {
     pub(super) async fn set_networking_enabled(&self, enabled: bool) -> Result<(), Failure> {
         if self.online.swap(enabled, Ordering::SeqCst) != enabled {
             self.activity.record(if enabled {
-                crate::ActivityKind::NetworkingEnabled
+                crate::activity::ActivityKind::NetworkingEnabled
             } else {
-                crate::ActivityKind::NetworkingDisabled
+                crate::activity::ActivityKind::NetworkingDisabled
             });
         }
         if enabled {

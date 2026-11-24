@@ -12,7 +12,6 @@ pub struct Configuration {
     pub(crate) identity: Option<Arc<dyn IdentityProvider>>,
     pub(crate) network: Option<Network>,
     pub(crate) sync: SyncMode,
-    pub(crate) page_cache: rocky_secure::PageCache,
 }
 impl Configuration {
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, crate::Error> {
@@ -30,7 +29,6 @@ impl Configuration {
             identity: None,
             network: None,
             sync: SyncMode::Live,
-            page_cache: rocky_secure::PageCache::default(),
         }
     }
     #[must_use]
@@ -51,11 +49,6 @@ impl Configuration {
     #[must_use]
     pub fn sync(mut self, mode: SyncMode) -> Self {
         self.sync = mode;
-        self
-    }
-    #[must_use]
-    pub fn page_cache(mut self, page_cache: rocky_secure::PageCache) -> Self {
-        self.page_cache = page_cache;
         self
     }
     pub async fn create(&self) -> Result<Created, crate::Error> {

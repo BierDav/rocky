@@ -229,6 +229,7 @@ const TWO_POW_63: f64 = -(i64::MIN as f64);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemaError {
     Invalid(String),
+    InvalidName(InvalidName),
     Role(crate::RoleError),
     Incompatible {
         table: String,
@@ -239,6 +240,7 @@ impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(reason) => write!(f, "invalid logical schema: {reason}"),
+            Self::InvalidName(invalid) => write!(f, "invalid logical schema: {invalid}"),
             Self::Role(error) => write!(f, "invalid logical schema: {error}"),
             Self::Incompatible { table, reason } => {
                 write!(f, "{table} cannot be installed: {reason:?}")
@@ -247,6 +249,74 @@ impl std::fmt::Display for SchemaError {
     }
 }
 impl std::error::Error for SchemaError {}
+impl From<InvalidName> for SchemaError {
+    fn from(invalid: InvalidName) -> Self {
+        Self::InvalidName(invalid)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidName {
+    pub path: String,
+    pub name: String,
+    pub rule: NameRule,
+}
+impl InvalidName {
+    pub fn new(path: impl Into<String>, name: impl Into<String>, rule: NameRule) -> Self {
+        Self {
+            path: path.into(),
+            name: name.into(),
+            rule,
+        }
+    }
+}
+impl std::fmt::Display for InvalidName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {:?} {}", self.path, self.name, self.rule)
+    }
+}
+impl std::error::Error for InvalidName {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameRule {
+    Identifier,
+    Reserved,
+    Unique,
+}
+impl std::fmt::Display for NameRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Identifier => {
+                "is no identifier: use 1 to 64 ASCII letters, digits or underscores, not starting with a digit"
+            }
+            Self::Reserved => "is reserved",
+            Self::Unique => "is used twice, ignoring case",
+        })
+    }
+}
+fn named(path: impl Into<String>, name: &str, rule: NameRule) -> Result<(), SchemaError> {
+    Err(InvalidName::new(path, name, rule).into())
+}
+pub(crate) fn sql_name(path: impl Into<String>, name: &str) -> Result<(), SchemaError> {
+    if !identifier(name) {
+        return named(path, name, NameRule::Identifier);
+    }
+    if reserved(name) {
+        return named(path, name, NameRule::Reserved);
+    }
+    Ok(())
+}
+fn unique_name(
+    path: impl Into<String>,
+    name: &str,
+    seen: &mut BTreeSet<String>,
+) -> Result<(), SchemaError> {
+    let path = path.into();
+    sql_name(path.clone(), name)?;
+    if !seen.insert(name.to_ascii_lowercase()) {
+        return named(path, name, NameRule::Unique);
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueError {
@@ -592,9 +662,7 @@ impl LogicalTable {
     }
     fn validate(&self) -> Result<(), SchemaError> {
         let name = &self.sql_name;
-        if !identifier(name) || reserved(name) {
-            return invalid(format!("table name {name}"));
-        }
+        sql_name("tables", name)?;
         let statement = tokenize(&self.create_sql).unwrap_or_default();
         let word = |index: usize, expected: &str| matches!(statement.get(index), Some(Token::Word(word)) if word.eq_ignore_ascii_case(expected));
         if !word(0, "CREATE") || !word(1, "TABLE") || statement.contains(&Token::Symbol(';')) {
@@ -605,10 +673,11 @@ impl LogicalTable {
         }
         let mut names = BTreeSet::new();
         for column in &self.columns {
-            if !identifier(&column.sql_name) || !names.insert(column.sql_name.to_ascii_lowercase())
-            {
-                return invalid(format!("{name} column {}", column.sql_name));
-            }
+            unique_name(
+                format!("tables.{name}.columns"),
+                &column.sql_name,
+                &mut names,
+            )?;
         }
         let mut key = BTreeSet::new();
         if self.primary_key.len() > usize::from(u8::MAX)
@@ -624,9 +693,8 @@ impl LogicalTable {
         for index in &self.indexes {
             let statement = tokenize(&index.create_sql).unwrap_or_default();
             let create = matches!(statement.first(), Some(Token::Word(word)) if word.eq_ignore_ascii_case("CREATE"));
-            if !identifier(&index.name)
-                || reserved(&index.name)
-                || !create
+            sql_name(format!("tables.{name}.indexes"), &index.name)?;
+            if !create
                 || statement.contains(&Token::Symbol(';'))
                 || index
                     .columns
@@ -966,19 +1034,13 @@ impl LogicalSchema {
                     view.name
                 ));
             }
-            if !identifier(&view.name)
-                || reserved(&view.name)
-                || !names.insert(view.name.to_ascii_lowercase())
-            {
-                return invalid(format!("view name {}", view.name));
-            }
+            unique_name("views", &view.name, &mut names)?;
         }
         let mut assertion_names = BTreeSet::new();
         for assertion in &self.assertions {
             let tokens = tokenize(&assertion.select_sql).unwrap_or_default();
-            if !identifier(&assertion.name)
-                || !assertion_names.insert(assertion.name.to_ascii_lowercase())
-                || !matches!(tokens.first(), Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))
+            unique_name("assertions", &assertion.name, &mut assertion_names)?;
+            if !matches!(tokens.first(), Some(Token::Word(word)) if word.eq_ignore_ascii_case("SELECT"))
                 || tokens.contains(&Token::Symbol(';'))
             {
                 return invalid(format!("assertion {} must be one SELECT", assertion.name));
@@ -987,9 +1049,7 @@ impl LogicalSchema {
         let mut restriction_names = BTreeSet::new();
         for restriction in &self.restrictions {
             let name = &restriction.name;
-            if !identifier(name) || !restriction_names.insert(name.to_ascii_lowercase()) {
-                return invalid(format!("restriction name {name}"));
-            }
+            unique_name("restrictions", name, &mut restriction_names)?;
             let Some(table) = self.table(&restriction.table) else {
                 return invalid(format!(
                     "restriction {name}: {} is not a table",
@@ -1392,7 +1452,11 @@ mod tests {
             .push(column("TITLE", Affinity::Text));
         assert_eq!(
             duplicate.validate(),
-            Err(SchemaError::Invalid("items column TITLE".into()))
+            Err(SchemaError::InvalidName(InvalidName::new(
+                "tables.items.columns",
+                "TITLE",
+                NameRule::Unique
+            )))
         );
     }
 

@@ -1024,7 +1024,12 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
             .after(0)
             .events
             .iter()
-            .filter(|event| matches!(event.detail, crate::ActivityKind::InvitationRedeemed { .. }))
+            .filter(|event| {
+                matches!(
+                    event.detail,
+                    crate::activity::ActivityKind::InvitationRedeemed { .. }
+                )
+            })
             .count()
     };
     let (joiner, rival_node) = (PrivateKey::new(), PrivateKey::new());

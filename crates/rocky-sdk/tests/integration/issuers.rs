@@ -1,6 +1,6 @@
 use common::{Device, Failure};
 use rocky_credentials::RevocationMode;
-use rocky_sdk::{Network, SyncReport, transport::memory::Hub};
+use rocky_sdk::{Network, status::SyncReport, transport::memory::Hub};
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
@@ -71,7 +71,7 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     }
     Err("the rows never became readable".into())
 }
-async fn device_info(device: &Device) -> rocky_sdk::AuthorityStatus {
+async fn device_info(device: &Device) -> rocky_sdk::status::AuthorityStatus {
     device.database.status().await.expect("status").authority
 }
 async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
@@ -236,7 +236,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
-            Some(&rocky_sdk::RevocationReason::Cascade {
+            Some(&rocky_sdk::status::RevocationReason::Cascade {
                 trusted: a_identity.clone()
             }),
             "{status:?}"
@@ -254,7 +254,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
-            Some(&rocky_sdk::RevocationReason::Cascade {
+            Some(&rocky_sdk::status::RevocationReason::Cascade {
                 trusted: a_identity
             }),
             "{status:?}"
@@ -467,7 +467,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
             .verified_revocation
             .as_ref()
             .map(|revoked| &revoked.reason),
-        Some(&rocky_sdk::RevocationReason::Cascade {
+        Some(&rocky_sdk::status::RevocationReason::Cascade {
             trusted: t_identity
         }),
         "the cut-off device learns the revoked trusted node is why: {status:?}"
@@ -520,7 +520,7 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
             .authority
             .verified_revocation
             .map(|notice| notice.reason),
-        Some(rocky_sdk::RevocationReason::Identity)
+        Some(rocky_sdk::status::RevocationReason::Identity)
     );
     member.close().await;
     owner.close().await;

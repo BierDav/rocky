@@ -43,7 +43,12 @@ share it, every call is a future the caller may drop, and `close` ends the
 database for every clone. `observe(&["notes"])` streams committed changes to
 the named tables (an empty list means all), `flush` makes every returned commit
 durable, and `status` with `status_changes` reports progress, blockers and the
-network.
+network. The crate root holds the types every application uses; status reports
+live in `rocky_sdk::status`, partition progress in `rocky_sdk::partitions`, and
+held changes and retention in `rocky_sdk::inspection`. A schema is built only
+with `Schema::builder`, `Table` (columns, keys, checks, indexes, foreign keys
+and partitioning) and `Role`. A float becomes a value with
+`SqlValue::try_from`, which refuses NaN.
 
 Every call, SQL included, returns one typed `rocky_sdk::Error`. Its `kind()`
 is an `ErrorKind` an application matches on, and `retryable()` follows from
@@ -59,7 +64,10 @@ Rocky refuses is `Sql { code, message, unsupported }`, where `unsupported`
 names `NonDeterministic(function)` for a clock or random value in a replayed
 write (bind the value instead) and `With` for a `WITH` clause there. A write
 over a size limit is `TooLarge { limit, size, max }`, and a failed migration is
-`MigrationFailed { version, step }`. Other kinds keep their typed cause, such
+`MigrationFailed { version, step }`. A schema with an invalid name is
+`Schema(SchemaError::InvalidName(..))`, whose `InvalidName { path, name, rule }`
+names, for example, a column of `tables.notes.columns` declared twice
+(`NameRule::Unique`). Other kinds keep their typed cause, such
 as `ServiceError`, `JoinError` or `RolloutConfirmationRequired`; an unknown
 internal failure is `Internal` and never retryable.
 
@@ -123,7 +131,7 @@ group is `Denied` with `PartitionNotGranted { group }`, and `status` lists a
 every device of every person whose access covers it through the delivery
 mailboxes, with no application call; store-only devices hold its frames but
 never its secret, and a device's replica follows its access.
-`DataStatus::partitions` reports whether each partition is held and complete.
+`status::DataStatus::partitions` reports whether each partition is held and complete.
 `Database::me` says who the device
 belongs to, its access and what it may do per table. Admins list people with
 `Database::people` (a `Person` per member with access, partitions and

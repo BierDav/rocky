@@ -33,6 +33,20 @@ pub enum SqlValue {
     Text(String),
     Blob(Vec<u8>),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotANumber;
+impl std::fmt::Display for NotANumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NaN is not a REAL value; SQLite stores it as NULL")
+    }
+}
+impl std::error::Error for NotANumber {}
+impl TryFrom<f64> for SqlValue {
+    type Error = NotANumber;
+    fn try_from(value: f64) -> Result<Self, NotANumber> {
+        Self::real(value).ok_or(NotANumber)
+    }
+}
 impl SqlValue {
     pub fn real(value: f64) -> Option<Self> {
         Real::new(value).map(Self::Real)
@@ -272,6 +286,15 @@ mod tests {
         ] {
             assert!(SqlValue::decode(&mut &corrupt[..]).is_err());
         }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_float_converts_to_a_real_value_unless_it_is_nan() {
+        assert_eq!(SqlValue::try_from(f64::NAN), Err(NotANumber));
+        assert_eq!(SqlValue::try_from(-0.0), SqlValue::try_from(0.0));
+        assert_eq!(
+            SqlValue::try_from(f64::INFINITY),
+            Ok(SqlValue::Real(Real::new(f64::INFINITY).unwrap()))
+        );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn getters_convert_between_storage_classes() {

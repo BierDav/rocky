@@ -1,6 +1,6 @@
 use crate::{
-    Commitment, KeyColumn, LOGICAL_SCHEMA_FORMAT, LogicalSchema, LogicalTable, PartitionValue,
-    SchemaError, Scope, SqlValue, commitment, identifier,
+    Commitment, InvalidName, KeyColumn, LOGICAL_SCHEMA_FORMAT, LogicalSchema, LogicalTable,
+    NameRule, PartitionValue, SchemaError, Scope, SqlValue, commitment, identifier,
 };
 use std::collections::BTreeMap;
 
@@ -24,12 +24,20 @@ impl LogicalSchema {
         let mut groups: BTreeMap<&str, PartitionGroup<'_>> = BTreeMap::new();
         for table in &self.tables {
             if let Some(name) = &table.partition_group
-                && (!identifier(name)
-                    || table.partition_by.is_empty()
-                    || self.format != LOGICAL_SCHEMA_FORMAT)
+                && !identifier(name)
+            {
+                return Err(InvalidName::new(
+                    format!("tables.{}.partition_group", table.sql_name),
+                    name,
+                    NameRule::Identifier,
+                )
+                .into());
+            }
+            if let Some(name) = &table.partition_group
+                && (table.partition_by.is_empty() || self.format != LOGICAL_SCHEMA_FORMAT)
             {
                 return Err(SchemaError::Invalid(format!(
-                    "{}: group {name} requires a valid name and partition columns in format 5",
+                    "{}: group {name} requires partition columns in format 5",
                     table.sql_name
                 )));
             }

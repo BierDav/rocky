@@ -277,7 +277,7 @@ impl Device {
             .filter_map(|item| item.split('/').next().map(String::from))
             .collect()
     }
-    pub async fn sync_now(&self) -> Result<rocky_sdk::SyncReport, rocky_sdk::Error> {
+    pub async fn sync_now(&self) -> Result<rocky_sdk::status::SyncReport, rocky_sdk::Error> {
         self.database.sync_now().await
     }
     pub async fn sync(&self) -> Result<Value, Value> {

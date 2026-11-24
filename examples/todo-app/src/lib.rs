@@ -4,7 +4,7 @@ pub mod roles;
 use rocky_sdk::{
     Affinity, Column, Commit, Configuration, Database, DeleteAction, DropReason,
     ForeignKeyDefinition, IndexColumn, IndexDefinition, Row, RowIdentity, Schema, SqlValue, Table,
-    TableDefinition, Transaction, TransactionOutcome, TransactionToken, params,
+    Transaction, TransactionOutcome, TransactionToken, params,
 };
 pub use roles::{Member, Role};
 use std::path::PathBuf;
@@ -20,40 +20,38 @@ pub const MAX_TITLE_BYTES: usize = 1024;
 
 pub fn schema() -> Result<Schema, Failure> {
     let title_check = format!("length(trim(title)) > 0 AND length(title) <= {MAX_TITLE_BYTES}");
-    let lists = grouped(
-        Table::replayed(LISTS)
-            .column(Column::new("title", Affinity::Text).required())
-            .check(title_check.clone())
-            .partition_by(["id"]),
-    );
-    let mut todos = grouped(
-        Table::replayed(TODOS)
-            .column(Column::new("list", Affinity::Blob).required())
-            .column(Column::new("title", Affinity::Text).required())
-            .column(
-                Column::new("completed", Affinity::Integer)
-                    .required()
-                    .default(false),
-            )
-            .column(Column::new("position", Affinity::Text).required())
-            .column(
-                Column::new("priority", Affinity::Integer)
-                    .required()
-                    .default(0),
-            )
-            .check(title_check)
-            .check("completed IN (0, 1)")
-            .index(unique("todos_list_title", ["list", "title"]))
-            .index(unique("todos_list_position", ["list", "position"]))
-            .primary_key(["list", "id"])
-            .partition_by(["list"]),
-    );
-    todos.foreign_keys.push(ForeignKeyDefinition {
-        columns: vec!["list".into()],
-        table: LISTS.into(),
-        on_delete: DeleteAction::Cascade,
-        deferred: false,
-    });
+    let lists = Table::replayed(LISTS)
+        .column(Column::new("title", Affinity::Text).required())
+        .check(title_check.clone())
+        .partition_by(["id"])
+        .partition_group(LIST_GROUP);
+    let todos = Table::replayed(TODOS)
+        .column(Column::new("list", Affinity::Blob).required())
+        .column(Column::new("title", Affinity::Text).required())
+        .column(
+            Column::new("completed", Affinity::Integer)
+                .required()
+                .default(false),
+        )
+        .column(Column::new("position", Affinity::Text).required())
+        .column(
+            Column::new("priority", Affinity::Integer)
+                .required()
+                .default(0),
+        )
+        .check(title_check)
+        .check("completed IN (0, 1)")
+        .index(unique("todos_list_title", ["list", "title"]))
+        .index(unique("todos_list_position", ["list", "position"]))
+        .primary_key(["list", "id"])
+        .partition_by(["list"])
+        .partition_group(LIST_GROUP)
+        .foreign_key(ForeignKeyDefinition {
+            columns: vec!["list".into()],
+            table: LISTS.into(),
+            on_delete: DeleteAction::Cascade,
+            deferred: false,
+        });
     let devices = Table::replayed(DEVICES)
         .column(Column::new("node", Affinity::Text).required())
         .column(Column::new("role", Affinity::Text).required())
@@ -72,11 +70,6 @@ pub fn schema() -> Result<Schema, Failure> {
                 .per_partition(LIST_GROUP),
         )
         .build()?)
-}
-fn grouped(table: Table) -> TableDefinition {
-    let mut table = table.definition();
-    table.partition_group = Some(LIST_GROUP.into());
-    table
 }
 fn unique<const N: usize>(name: &str, columns: [&str; N]) -> IndexDefinition {
     IndexDefinition {

@@ -9,8 +9,8 @@ pub fn small_directory() -> std::io::Result<Directory> {
 }
 
 pub fn peerless_ok(
-    result: Result<rocky_sdk::SyncReport, rocky_sdk::Error>,
-) -> Result<Option<rocky_sdk::SyncReport>, rocky_sdk::Error> {
+    result: Result<rocky_sdk::status::SyncReport, rocky_sdk::Error>,
+) -> Result<Option<rocky_sdk::status::SyncReport>, rocky_sdk::Error> {
     match result {
         Ok(report) => Ok(Some(report)),
         Err(error)

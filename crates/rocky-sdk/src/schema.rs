@@ -1,24 +1,24 @@
-use rocky_core::{RoleDefinition, RoleTable, SchemaError, TableAccess};
+use rocky_core::{InvalidName, NameRule, RoleDefinition, RoleTable, SchemaError, TableAccess};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {
-    pub format: u32,
-    pub application: String,
-    pub version: u32,
-    pub tables: Vec<rocky_core::TableDefinition>,
+    pub(crate) format: u32,
+    pub(crate) application: String,
+    pub(crate) version: u32,
+    pub(crate) tables: Vec<rocky_core::TableDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub views: Vec<rocky_core::LogicalView>,
+    pub(crate) views: Vec<rocky_core::LogicalView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assertions: Vec<rocky_core::LogicalAssertion>,
+    pub(crate) assertions: Vec<rocky_core::LogicalAssertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub restrictions: Vec<rocky_core::LogicalRestriction>,
+    pub(crate) restrictions: Vec<rocky_core::LogicalRestriction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub migrations: Vec<Migration>,
+    pub(crate) migrations: Vec<Migration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<RoleDefinition>,
+    pub(crate) roles: Vec<RoleDefinition>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,12 +31,6 @@ pub struct Migration {
 pub enum MigrationStep {
     Sql(String),
     Insert { insert: String, select: String },
-}
-fn identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        && name.as_bytes()[0].is_ascii_alphabetic()
 }
 fn invalid(reason: impl Into<String>) -> SchemaError {
     SchemaError::Invalid(reason.into())
@@ -76,8 +70,13 @@ impl Schema {
         if serde_json::to_vec(self).map_err(malformed)?.len() > rocky_core::MAX_DEFINITION_BYTES {
             return Err(invalid("schema quota"));
         }
-        if !identifier(&self.application) || self.version == 0 {
-            return Err(invalid("invalid application schema"));
+        if !rocky_core::identifier(&self.application) {
+            return Err(
+                InvalidName::new("application", &self.application, NameRule::Identifier).into(),
+            );
+        }
+        if self.version == 0 {
+            return Err(invalid("schema versions start at 1"));
         }
         if self.format != rocky_core::DEFINITION_FORMAT {
             return Err(invalid("unsupported schema definition format"));
@@ -180,23 +179,8 @@ impl Schema {
 }
 impl SchemaBuilder {
     #[must_use]
-    pub fn table(mut self, table: impl Into<rocky_core::TableDefinition>) -> Self {
-        self.0.tables.push(table.into());
-        self
-    }
-    #[must_use]
-    pub fn view(mut self, view: rocky_core::LogicalView) -> Self {
-        self.0.views.push(view);
-        self
-    }
-    #[must_use]
-    pub fn assertion(mut self, assertion: rocky_core::LogicalAssertion) -> Self {
-        self.0.assertions.push(assertion);
-        self
-    }
-    #[must_use]
-    pub fn restriction(mut self, restriction: rocky_core::LogicalRestriction) -> Self {
-        self.0.restrictions.push(restriction);
+    pub fn table(mut self, table: Table) -> Self {
+        self.0.tables.push(table.0);
         self
     }
     #[must_use]
@@ -211,26 +195,17 @@ impl SchemaBuilder {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleName(Cow<'static, str>);
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvalidName(pub String);
-impl std::fmt::Display for InvalidName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:?} is no role name: use an identifier other than admin, full, read or store",
-            self.0
-        )
-    }
-}
-impl std::error::Error for InvalidName {}
 impl RoleName {
     pub const fn from_static(name: &'static str) -> Self {
         Self(Cow::Borrowed(name))
     }
     pub fn new(name: impl Into<String>) -> Result<Self, InvalidName> {
         let name = name.into();
-        if !rocky_core::role_name_is_valid(&name) || rocky_core::role_name_is_reserved(&name) {
-            return Err(InvalidName(name));
+        if !rocky_core::role_name_is_valid(&name) {
+            return Err(InvalidName::new("roles", name, NameRule::Identifier));
+        }
+        if rocky_core::role_name_is_reserved(&name) {
+            return Err(InvalidName::new("roles", name, NameRule::Reserved));
         }
         Ok(Self(Cow::Owned(name)))
     }
@@ -318,8 +293,8 @@ impl Table {
         })
     }
     #[must_use]
-    pub fn column(mut self, column: impl Into<rocky_core::ColumnDefinition>) -> Self {
-        self.0.columns.push(column.into());
+    pub fn column(mut self, column: Column) -> Self {
+        self.0.columns.push(column.0);
         self
     }
     #[must_use]
@@ -347,13 +322,10 @@ impl Table {
         self.0.checks.push(expression.into());
         self
     }
-    pub fn definition(self) -> rocky_core::TableDefinition {
-        self.0
-    }
-}
-impl From<Table> for rocky_core::TableDefinition {
-    fn from(table: Table) -> Self {
-        table.0
+    #[must_use]
+    pub fn foreign_key(mut self, foreign_key: rocky_core::ForeignKeyDefinition) -> Self {
+        self.0.foreign_keys.push(foreign_key);
+        self
     }
 }
 
@@ -385,13 +357,5 @@ impl Column {
             rocky_core::SqlValue::Blob(value) => value.into(),
         });
         self
-    }
-    pub fn definition(self) -> rocky_core::ColumnDefinition {
-        self.0
-    }
-}
-impl From<Column> for rocky_core::ColumnDefinition {
-    fn from(column: Column) -> Self {
-        column.0
     }
 }

@@ -1,6 +1,6 @@
 use crate::common::{Device, Failure};
 use crate::support::snapshot as snap;
-use rocky_sdk::{AlertKind, ErrorKind, Network, SqlValue, transport::memory::Hub};
+use rocky_sdk::{ErrorKind, Network, SqlValue, status::AlertKind, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
 
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {

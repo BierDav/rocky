@@ -718,11 +718,11 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         }
         let before_alerts_b = trusted_alerts(&owners[1]).await?;
         assert!(!trusted_alerts(&owners[0]).await?.iter().any(|alert|
-            matches!(&alert.kind, rocky_sdk::AlertKind::TrustedIdentityStale { identity, .. }
+            matches!(&alert.kind, rocky_sdk::status::AlertKind::TrustedIdentityStale { identity, .. }
                 if identity == &person_key_0)));
         let linked_a = siblings[0].node().await;
         assert!(trusted_alerts(&owners[0]).await?.iter().any(|alert|
-            matches!(&alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
+            matches!(&alert.kind, rocky_sdk::status::AlertKind::TrustedNodeLinked { identity, node, .. }
                 if identity == &person_key_0 && node == &linked_a)));
         let before_registry_b = record(snap::ok(owners[1].database.people()).await, &person_key_1)?;
         assert_eq!(
@@ -857,7 +857,7 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
     Ok(())
 }
 
-async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::Alert>, Failure> {
+async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::status::Alert>, Failure> {
     Ok(device
         .database
         .status()
@@ -867,9 +867,9 @@ async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::Alert>, Failur
         .filter(|alert| {
             matches!(
                 alert.kind,
-                rocky_sdk::AlertKind::TrustedNodeLinked { .. }
-                    | rocky_sdk::AlertKind::TrustedNodeUnlinked { .. }
-                    | rocky_sdk::AlertKind::TrustedIdentityStale { .. }
+                rocky_sdk::status::AlertKind::TrustedNodeLinked { .. }
+                    | rocky_sdk::status::AlertKind::TrustedNodeUnlinked { .. }
+                    | rocky_sdk::status::AlertKind::TrustedIdentityStale { .. }
             )
         })
         .collect())
@@ -951,7 +951,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
             alerts
                 .iter()
                 .filter(|alert| matches!(&alert.kind,
-            rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
+            rocky_sdk::status::AlertKind::TrustedNodeLinked { identity, node, .. }
             if identity == &person && node == &third_node))
                 .count(),
             1,
@@ -974,7 +974,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
             alerts
                 .iter()
                 .filter(|alert| matches!(&alert.kind,
-            rocky_sdk::AlertKind::TrustedNodeUnlinked { identity, node, .. }
+            rocky_sdk::status::AlertKind::TrustedNodeUnlinked { identity, node, .. }
             if identity == &person && node == &third_node))
                 .count(),
             1,

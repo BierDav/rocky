@@ -231,9 +231,7 @@ impl SchemaDefinition {
 impl TableDefinition {
     fn build(&self) -> Result<LogicalTable, SchemaError> {
         let name = &self.name;
-        if !crate::identifier(name) {
-            return invalid(format!("table name {name}"));
-        }
+        crate::logical::sql_name("tables", name)?;
         let mut columns = Vec::new();
         let mut parts = Vec::new();
         for column in &self.columns {
@@ -243,9 +241,7 @@ impl TableDefinition {
                     column.name
                 ));
             }
-            if !crate::identifier(&column.name) {
-                return invalid(format!("{name} column {}", column.name));
-            }
+            crate::logical::sql_name(format!("tables.{name}.columns"), &column.name)?;
             let class = match (&column.derived, column.local_only) {
                 (Some(rule), false) => ColumnClass::Derived { rule: rule.clone() },
                 (None, true) => ColumnClass::LocalOnly,
@@ -308,9 +304,7 @@ impl TableDefinition {
         }
         let mut indexes = Vec::new();
         for index in &self.indexes {
-            if !crate::identifier(&index.name) {
-                return invalid(format!("{name} index {}", index.name));
-            }
+            crate::logical::sql_name(format!("tables.{name}.indexes"), &index.name)?;
             let mut terms: Vec<String> = index
                 .columns
                 .iter()

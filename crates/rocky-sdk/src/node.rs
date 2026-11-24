@@ -675,10 +675,11 @@ impl Node {
                         .await
                     {
                         let _ = node.absorb_revocations(Some(&error)).await;
-                        node.activity
-                            .record_changed(crate::ActivityKind::LinkAdmissionFailed {
+                        node.activity.record_changed(
+                            crate::activity::ActivityKind::LinkAdmissionFailed {
                                 error: (error.to_string()).to_owned(),
-                            });
+                            },
+                        );
                     }
                 } else {
                     let _permit = permit;
@@ -769,9 +770,10 @@ impl Node {
             })
             .await?;
         self.reset_retry(Some(node));
-        self.activity.record(crate::ActivityKind::PeerAdded {
-            peer: (node).to_owned(),
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::PeerAdded {
+                peer: (node).to_owned(),
+            });
         self.wake_sync();
         Ok(node)
     }
@@ -791,9 +793,10 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&node);
-        self.activity.record(crate::ActivityKind::PeerRemoved {
-            peer: (node).to_owned(),
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::PeerRemoved {
+                peer: (node).to_owned(),
+            });
         self.wake_sync();
         Ok(())
     }
@@ -970,14 +973,16 @@ impl Node {
                 .nodes
                 .contains(&rocky_credentials::PeerId::of(node))
         {
-            self.activity.record(crate::ActivityKind::NodeUnlinked {
-                identity: (identity).to_owned(),
-                node: (node).to_owned(),
-            });
+            self.activity
+                .record(crate::activity::ActivityKind::NodeUnlinked {
+                    identity: (identity).to_owned(),
+                    node: (node).to_owned(),
+                });
         } else {
-            self.activity.record(crate::ActivityKind::IdentityRevoked {
-                identity: (identity).to_owned(),
-            });
+            self.activity
+                .record(crate::activity::ActivityKind::IdentityRevoked {
+                    identity: (identity).to_owned(),
+                });
         }
         Ok(())
     }
@@ -1022,7 +1027,7 @@ impl Node {
         };
         if !dropped.is_empty() {
             self.activity
-                .record(crate::ActivityKind::RevocationCutDroppedStages {
+                .record(crate::activity::ActivityKind::RevocationCutDroppedStages {
                     identity: None,
                     count: dropped.len(),
                 });
@@ -1082,7 +1087,7 @@ impl Node {
         Box::pin(self.complete_revocation()).await?;
         if let Err(error) = self.seal_for_members().await {
             self.activity
-                .record(crate::ActivityKind::RevocationSealFailed {
+                .record(crate::activity::ActivityKind::RevocationSealFailed {
                     error: (error.to_string()).to_owned(),
                 });
         }
@@ -1100,7 +1105,7 @@ impl Node {
         self.replica.renew_credentials(chain.clone()).await?;
         if let Err(error) = self.refresh_line_node(settings).await {
             self.activity
-                .record_changed(crate::ActivityKind::LineNodeFailed {
+                .record_changed(crate::activity::ActivityKind::LineNodeFailed {
                     error: (error.to_string()).to_owned(),
                 });
         }
@@ -1203,7 +1208,7 @@ impl Node {
                 crate::database::align_role(&self.replica, &settings, &self.domain()).await?
             {
                 self.activity
-                    .record(crate::ActivityKind::RoleChanged { partial });
+                    .record(crate::activity::ActivityKind::RoleChanged { partial });
             }
             let grants_widened = settings.granted(&self.domain()).len() > readable;
             if grants_widened {
@@ -1246,9 +1251,10 @@ impl Node {
             && !promoted
             && let Err(error) = Box::pin(self.record_self()).await
         {
-            self.activity.record(crate::ActivityKind::RegistryFailed {
-                error: (error.to_string()).to_owned(),
-            });
+            self.activity
+                .record(crate::activity::ActivityKind::RegistryFailed {
+                    error: (error.to_string()).to_owned(),
+                });
         }
         if promoted {
             let _ = Box::pin(self.renew(None, true, None, true)).await;
@@ -1305,7 +1311,7 @@ impl Node {
                 let error = error.to_string();
                 if before.flatten().as_ref() != Some(&error) {
                     self.activity
-                        .record(crate::ActivityKind::PeerAttemptFailed {
+                        .record(crate::activity::ActivityKind::PeerAttemptFailed {
                             peer: (peer).to_owned(),
                             error: (error).to_owned(),
                         });
@@ -1313,10 +1319,11 @@ impl Node {
             }
             Ok(Exchanged { transfer, .. }) => {
                 if !matches!(before, Some(None)) {
-                    self.activity
-                        .record(crate::ActivityKind::PeerReconciliationCompleted {
+                    self.activity.record(
+                        crate::activity::ActivityKind::PeerReconciliationCompleted {
                             peer: (peer).to_owned(),
-                        });
+                        },
+                    );
                 }
                 let refusals_changed = transfer.refused != refused_before;
                 if refusals_changed {
@@ -1325,10 +1332,11 @@ impl Node {
                         .iter()
                         .map(|scope| self.scope_label(scope))
                         .collect();
-                    self.activity.record(crate::ActivityKind::ScopesRefused {
-                        peer: (peer).to_owned(),
-                        scopes,
-                    });
+                    self.activity
+                        .record(crate::activity::ActivityKind::ScopesRefused {
+                            peer: (peer).to_owned(),
+                            scopes,
+                        });
                 }
                 if transfer.waiting != waiting_before {
                     let scopes = transfer
@@ -1336,10 +1344,11 @@ impl Node {
                         .iter()
                         .map(|scope| self.scope_label(scope))
                         .collect();
-                    self.activity.record(crate::ActivityKind::ScopesWaiting {
-                        peer: (peer).to_owned(),
-                        scopes,
-                    });
+                    self.activity
+                        .record(crate::activity::ActivityKind::ScopesWaiting {
+                            peer: (peer).to_owned(),
+                            scopes,
+                        });
                 }
                 if transfer.scopes.is_empty() {
                     return;
@@ -1347,7 +1356,7 @@ impl Node {
                 let scopes = transfer
                     .scopes
                     .iter()
-                    .map(|(scope, moved)| crate::ActivityTransfer {
+                    .map(|(scope, moved)| crate::activity::ActivityTransfer {
                         scope: self.scope_label(scope),
                         pulled: moved.pulled as u64,
                         pushed: moved.pushed as u64,
@@ -1361,7 +1370,7 @@ impl Node {
                         (pulled + moved.pulled, pushed + moved.pushed)
                     });
                 if pulled + pushed > 0 {
-                    self.activity.record(crate::ActivityKind::Synced {
+                    self.activity.record(crate::activity::ActivityKind::Synced {
                         peer: (peer).to_owned(),
                         pulled: (pulled) as u64,
                         pushed: (pushed) as u64,
@@ -1371,7 +1380,7 @@ impl Node {
                 for (scope, moved) in &transfer.scopes {
                     if let Some((checkpoint, superseded)) = moved.checkpoint {
                         self.activity
-                            .record(crate::ActivityKind::CheckpointImported {
+                            .record(crate::activity::ActivityKind::CheckpointImported {
                                 scope: self.scope_label(scope),
                                 peer,
                                 checkpoint,
@@ -1382,10 +1391,10 @@ impl Node {
             }
         }
     }
-    fn scope_label(&self, scope: &ResourceScope) -> crate::ActivityScope {
+    fn scope_label(&self, scope: &ResourceScope) -> crate::activity::ActivityScope {
         let domain = self.domain();
         let own = domain.scopes().find(|(_, own)| own.table == scope.table);
-        crate::ActivityScope {
+        crate::activity::ActivityScope {
             table: own.map(|(name, _)| name.to_owned()),
             partition: own
                 .is_some_and(|(_, own)| own != *scope)

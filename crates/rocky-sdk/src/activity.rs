@@ -36,11 +36,6 @@ pub enum ActivityKind {
     PeerRemoved {
         peer: PublicKey,
     },
-    Renewed {
-        revocations: crate::RevocationStatus,
-        expires: u64,
-        keys: usize,
-    },
     IdentityRevoked {
         identity: PublicKey,
     },
@@ -105,14 +100,6 @@ pub enum ActivityKind {
     BootstrapFinished {
         peer: PublicKey,
     },
-    IdentityAdmitted {
-        identity: PublicKey,
-        access: crate::Access,
-    },
-    NodeLinked {
-        identity: PublicKey,
-        node: PublicKey,
-    },
     MemberSealFailed {
         error: String,
     },
@@ -161,9 +148,6 @@ pub enum ActivityKind {
     PartitionBootstrap {
         partition: crate::Partition,
     },
-    UnlinkUnpushed {
-        error: String,
-    },
     MembershipLinkRecorded {
         identity: PublicKey,
         node: rocky_credentials::PeerId,
@@ -208,12 +192,14 @@ pub struct ActivityEvent {
     pub at_epoch_millis: u64,
     pub detail: ActivityKind,
 }
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityPage {
     pub events: Vec<ActivityEvent>,
     pub token: u64,
 }
 const KEPT: usize = 512;
+#[cfg(any(test, feature = "test-support"))]
 const PAGE: usize = 128;
 struct Log {
     next: u64,
@@ -262,6 +248,7 @@ impl Activity {
             self.record(detail);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn after(&self, after: u64) -> ActivityPage {
         let log = self.0.borrow();
         let events: Vec<_> = log
@@ -276,6 +263,7 @@ impl Activity {
             .map_or(after.max(log.next - 1), |event| event.sequence);
         ActivityPage { events, token }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn next(
         &self,
         after: u64,

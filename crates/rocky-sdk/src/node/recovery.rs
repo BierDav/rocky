@@ -45,7 +45,7 @@ impl Node {
         .await;
         if let Err(error) = published {
             self.activity
-                .record_changed(crate::ActivityKind::MemberSealFailed {
+                .record_changed(crate::activity::ActivityKind::MemberSealFailed {
                     error: (error.to_string()).to_owned(),
                 });
             if sealing {
@@ -74,17 +74,18 @@ impl Node {
             }
             let awaiting = self.replica.awaiting_outcomes().await?;
             if !awaiting.is_empty() {
-                self.activity
-                    .record_changed(crate::ActivityKind::ReplayedAwaitingOutcomes {
+                self.activity.record_changed(
+                    crate::activity::ActivityKind::ReplayedAwaitingOutcomes {
                         transactions: awaiting.len(),
-                    });
+                    },
+                );
             }
             Ok::<_, Failure>(None)
         }
         .await;
         sealed.unwrap_or_else(|error| {
             self.activity
-                .record_changed(crate::ActivityKind::RoutineSealFailed {
+                .record_changed(crate::activity::ActivityKind::RoutineSealFailed {
                     error: (error.to_string()).to_owned(),
                 });
             Some(crate::SealSkip::Failed(error.to_string()))
@@ -146,10 +147,11 @@ impl Node {
             let blockers = match self.recover_locally().await {
                 Ok(blockers) => blockers,
                 Err(error) => {
-                    self.activity
-                        .record_changed(crate::ActivityKind::LocalRecoveryFailed {
+                    self.activity.record_changed(
+                        crate::activity::ActivityKind::LocalRecoveryFailed {
                             error: (error.to_string()).to_owned(),
-                        });
+                        },
+                    );
                     self.blockers().await.unwrap_or_default()
                 }
             };

@@ -1,6 +1,7 @@
 use crate::{Database, SqlValue, request::Request};
 #[cfg(any(test, feature = "test-support"))]
 use rocky_credentials::PublicKey;
+pub use rocky_secure::Holding;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,7 +151,7 @@ pub struct PartitionTableStatus {
     pub scope: Option<rocky_core::ResourceScope>,
     pub epochs: Vec<rocky_core::KeyEpoch>,
     pub current: Option<rocky_core::KeyEpoch>,
-    pub holding: Option<rocky_secure::Holding>,
+    pub holding: Option<Holding>,
 }
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]

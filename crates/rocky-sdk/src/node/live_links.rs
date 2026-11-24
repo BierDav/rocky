@@ -486,7 +486,7 @@ impl Node {
         loop {
             if let Err(error) = self.signal_link(service, peer, id).await {
                 self.activity
-                    .record_changed(crate::ActivityKind::LinkSignalFailed {
+                    .record_changed(crate::activity::ActivityKind::LinkSignalFailed {
                         peer: (peer).to_owned(),
                         error: (error.to_string()).to_owned(),
                     });
@@ -559,11 +559,12 @@ impl Node {
                         if node.learned.load(Ordering::SeqCst) {
                             node.wake_sync();
                         }
-                        node.activity
-                            .record_changed(crate::ActivityKind::LinkAttemptFailed {
+                        node.activity.record_changed(
+                            crate::activity::ActivityKind::LinkAttemptFailed {
                                 peer: (peer).to_owned(),
                                 error: (error.to_string()).to_owned(),
-                            });
+                            },
+                        );
                     }
                 }
             })
@@ -757,11 +758,12 @@ impl Node {
                     },
                 ) {
                     old.close.send_replace(Some(CloseReason::Duplicate));
-                    self.activity.record(crate::ActivityKind::LinkClosed {
-                        peer: (peer).to_owned(),
-                        reason: ("duplicate").to_owned(),
-                        error: None,
-                    });
+                    self.activity
+                        .record(crate::activity::ActivityKind::LinkClosed {
+                            peer: (peer).to_owned(),
+                            reason: ("duplicate").to_owned(),
+                            error: None,
+                        });
                 }
                 true
             }
@@ -811,10 +813,11 @@ impl Node {
             last.error = None;
         }
         service.live.events.send_replace(());
-        self.activity.record(crate::ActivityKind::LinkOpened {
-            peer: (peer).to_owned(),
-            reason: (if dialed { "dialed" } else { "accepted" }).to_owned(),
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::LinkOpened {
+                peer: (peer).to_owned(),
+                reason: (if dialed { "dialed" } else { "accepted" }).to_owned(),
+            });
         self.link_status_changed();
         let node = self.clone();
         let close_rx = close.subscribe();
@@ -841,11 +844,12 @@ impl Node {
             };
             if removed {
                 service.live.events.send_replace(());
-                node.activity.record(crate::ActivityKind::LinkClosed {
-                    peer: (peer).to_owned(),
-                    reason: (result.as_ref().copied().unwrap_or("error")).to_owned(),
-                    error: result.as_ref().err().map(ToString::to_string),
-                });
+                node.activity
+                    .record(crate::activity::ActivityKind::LinkClosed {
+                        peer: (peer).to_owned(),
+                        reason: (result.as_ref().copied().unwrap_or("error")).to_owned(),
+                        error: result.as_ref().err().map(ToString::to_string),
+                    });
                 node.link_status_changed();
                 if result.is_ok() && !persistent && !dialed && node.automatic.load(Ordering::SeqCst)
                 {

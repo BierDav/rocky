@@ -530,10 +530,11 @@ impl Node {
         }
         let nodes = self.identity_nodes(identity).await?;
         let recipients = self.share_with(&group, &nodes, true).await?;
-        self.activity.record(crate::ActivityKind::PartitionShared {
-            partition: partition.clone(),
-            recipients,
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::PartitionShared {
+                partition: partition.clone(),
+                recipients,
+            });
         self.wake_sync();
         Ok(())
     }
@@ -604,16 +605,17 @@ impl Node {
                 match self.share_new(&partition, &unserved).await {
                     Ok(0) => {}
                     Ok(recipients) => {
-                        self.activity.record(crate::ActivityKind::PartitionShared {
-                            partition,
-                            recipients,
-                        });
+                        self.activity
+                            .record(crate::activity::ActivityKind::PartitionShared {
+                                partition,
+                                recipients,
+                            });
                         self.wake_sync();
                     }
                     Err(error) => {
                         delivered = false;
                         self.activity
-                            .record(crate::ActivityKind::PartitionShareFailed {
+                            .record(crate::activity::ActivityKind::PartitionShareFailed {
                                 partition: Some(partition),
                                 error: error.to_string(),
                             });
@@ -644,7 +646,7 @@ impl Node {
     pub(super) async fn settle_grant_deliveries(&self) {
         if let Err(error) = self.deliver_grants_to_new_devices().await {
             self.activity
-                .record(crate::ActivityKind::PartitionShareFailed {
+                .record(crate::activity::ActivityKind::PartitionShareFailed {
                     partition: None,
                     error: error.to_string(),
                 });
@@ -748,9 +750,10 @@ impl Node {
             .await?;
         if begun || (published && change.exposed.is_none()) {
             for person in &change.people {
-                self.activity.record(crate::ActivityKind::RightsChanged {
-                    person: PersonId::new(*person),
-                });
+                self.activity
+                    .record(crate::activity::ActivityKind::RightsChanged {
+                        person: PersonId::new(*person),
+                    });
             }
             self.wake_sync();
         }
@@ -767,7 +770,7 @@ impl Node {
     pub(super) async fn settle_rights_change(&self) {
         if let Err(error) = self.complete_rights_change().await {
             self.activity
-                .record(crate::ActivityKind::RightsChangeFailed {
+                .record(crate::activity::ActivityKind::RightsChangeFailed {
                     error: error.to_string(),
                 });
         }
@@ -817,7 +820,7 @@ impl Node {
         };
         self.revoke_with(target, root).await?;
         self.activity
-            .record(crate::ActivityKind::IdentityRevoked { identity });
+            .record(crate::activity::ActivityKind::IdentityRevoked { identity });
         Ok(())
     }
 

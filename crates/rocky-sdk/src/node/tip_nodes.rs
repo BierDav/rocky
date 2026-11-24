@@ -189,7 +189,7 @@ impl Node {
     pub(crate) async fn try_ensure_tip_node(&self) {
         if let Err(error) = self.ensure_tip_node().await {
             self.activity
-                .record_changed(crate::ActivityKind::LineNodeFailed {
+                .record_changed(crate::activity::ActivityKind::LineNodeFailed {
                     error: (error.to_string()).to_owned(),
                 });
         }

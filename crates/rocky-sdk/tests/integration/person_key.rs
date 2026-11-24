@@ -1,8 +1,8 @@
 use crate::common::{self, Device, Failure};
 use crate::support::snapshot as snap;
 use rocky_sdk::{
-    Access, Configuration, DeclaredSchema, ErrorKind, IdentityKey, IdentityProvider, Invite,
-    Network, transport::memory::Hub,
+    Access, Configuration, ErrorKind, IdentityKey, IdentityProvider, Invite, Network,
+    status::DeclaredSchema, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};

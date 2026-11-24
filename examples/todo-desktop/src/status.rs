@@ -1,6 +1,6 @@
 use crate::{Shared, short};
 use dioxus::prelude::*;
-use rocky_sdk::{DatabaseStatus, SyncMode};
+use rocky_sdk::{SyncMode, status::DatabaseStatus};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use todo_app::Member;
 

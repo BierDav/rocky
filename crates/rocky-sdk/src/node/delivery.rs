@@ -178,7 +178,7 @@ impl Node {
     pub(super) fn record_delivery(&self, peer: PublicKey, report: Delivered) {
         if report != Delivered::default() {
             self.activity
-                .record(crate::ActivityKind::EnvelopesDelivered {
+                .record(crate::activity::ActivityKind::EnvelopesDelivered {
                     peer: (peer).to_owned(),
                     handed: (report.handed) as u64,
                     deposited: (report.deposited) as u64,
@@ -247,10 +247,11 @@ impl Node {
             match self.accept_delivery(peer, &node, &delivery).await {
                 Ok(()) => receipts.push(DeliveryReceipt::sign(&node, delivery.digest()?)?),
                 Err(error) => {
-                    self.activity.record(crate::ActivityKind::EnvelopeRefused {
-                        peer: (peer).to_owned(),
-                        error: (error.to_string()).to_owned(),
-                    });
+                    self.activity
+                        .record(crate::activity::ActivityKind::EnvelopeRefused {
+                            peer: (peer).to_owned(),
+                            error: (error.to_string()).to_owned(),
+                        });
                 }
             }
         }
@@ -328,14 +329,14 @@ impl Node {
         let named = crate::Partition::new(contents.group, values);
         if installed {
             self.activity
-                .record(crate::ActivityKind::PartitionKeyInstalled {
+                .record(crate::activity::ActivityKind::PartitionKeyInstalled {
                     partition: named.clone(),
                 });
         }
         if bootstrap {
             self.hold(&partition, true).await?;
             self.activity
-                .record(crate::ActivityKind::PartitionBootstrap { partition: named });
+                .record(crate::activity::ActivityKind::PartitionBootstrap { partition: named });
         }
         self.wake_sync();
         Ok(())

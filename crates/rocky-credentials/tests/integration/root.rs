@@ -1,7 +1,7 @@
 use rocky_core::{AppId, DomainId, MeshId, Scope};
 use rocky_credentials::{
-    Authority, CredentialChain, DAY, IdentityKey, MAX_CHAIN_LIFETIME, NEVER, Origin, PrivateKey,
-    Revocation, RevocationMode, RevocationSet, RootKey, SignedCapability,
+    Authority, CredentialChain, DAY, IdentityKey, IdentityProvider, MAX_CHAIN_LIFETIME, NEVER,
+    Origin, PrivateKey, Revocation, RevocationMode, RevocationSet, RootKey, SignedCapability,
 };
 
 const APP: AppId = AppId([3; 16]);
@@ -73,7 +73,7 @@ fn a_trusted_grant_never_expires_and_only_the_root_signs_one() {
     assert_eq!(
         chain
             .trusted_node(
-                root.public_key(),
+                root.public_key().unwrap(),
                 SCOPE,
                 node.public_key(),
                 Some((&RevocationSet::new(), far))
@@ -121,11 +121,11 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
             ..revocation(&a.0, &b.0)
         })
         .unwrap());
-    node_by_a.verify(root.public_key(), APP).unwrap();
+    node_by_a.verify(root.public_key().unwrap(), APP).unwrap();
     assert!(
         b_chain
             .trusted_node(
-                root.public_key(),
+                root.public_key().unwrap(),
                 SCOPE,
                 b_node.public_key(),
                 Some((&node_by_a, NOW))
@@ -136,11 +136,11 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
     let by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
         .revoke(revocation(&a.0, &b.0))
         .unwrap());
-    by_a.verify(root.public_key(), APP).unwrap();
+    by_a.verify(root.public_key().unwrap(), APP).unwrap();
     assert!(
         b_chain
             .trusted_node(
-                root.public_key(),
+                root.public_key().unwrap(),
                 SCOPE,
                 b_node.public_key(),
                 Some((&by_a, NOW))
@@ -154,7 +154,7 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
     assert!(
         b_chain
             .trusted_node(
-                root.public_key(),
+                root.public_key().unwrap(),
                 SCOPE,
                 b_node.public_key(),
                 Some((&by_root, NOW))
@@ -171,7 +171,7 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
         .unwrap());
     assert!(
         chain
-            .verify(root.public_key(), device.public_key(), &by_a, NOW)
+            .verify(root.public_key().unwrap(), device.public_key(), &by_a, NOW)
             .is_err(),
         "a trusted identity still revokes what it did not get from the root"
     );
@@ -184,7 +184,12 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
         .unwrap());
     assert!(
         chain
-            .verify(root.public_key(), device.public_key(), &node_by_a, NOW)
+            .verify(
+                root.public_key().unwrap(),
+                device.public_key(),
+                &node_by_a,
+                NOW
+            )
             .is_err(),
         "an issuer ends one node of a member it did not get from the root"
     );
@@ -236,7 +241,7 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     assert!(!lost_statement.ends_at(&renewed, false).unwrap());
     assert!(
         renewed_chain
-            .verify(root.public_key(), node.public_key(), &lost, NOW)
+            .verify(root.public_key().unwrap(), node.public_key(), &lost, NOW)
             .is_ok()
     );
     let after_loss = rocky_credentials::testing::authority(&honest.0, &honest.1)
@@ -263,7 +268,7 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
         })
         .unwrap());
     let verify = |chain: &CredentialChain, node: &PrivateKey| {
-        chain.verify(root.public_key(), node.public_key(), &revoked, NOW)
+        chain.verify(root.public_key().unwrap(), node.public_key(), &revoked, NOW)
     };
     assert!(verify(&enrolled, &node).is_err());
     assert!(verify(&renewed_chain, &node).is_err());
@@ -288,7 +293,12 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
         .unwrap());
     assert!(
         renewed_chain
-            .verify(root.public_key(), node.public_key(), &by_honest, NOW)
+            .verify(
+                root.public_key().unwrap(),
+                node.public_key(),
+                &by_honest,
+                NOW
+            )
             .is_ok(),
         "a trusted identity's statement naming another cascades to nothing"
     );
@@ -322,7 +332,7 @@ fn an_origin_states_its_trusted_grants_time() {
     .unwrap();
     let forged = CredentialChain(vec![lost.1.0[0].clone(), forged]);
     let error = forged
-        .issuer(root.public_key(), None)
+        .issuer(root.public_key().unwrap(), None)
         .err()
         .map(|error| error.to_string());
     assert_eq!(
@@ -331,7 +341,7 @@ fn an_origin_states_its_trusted_grants_time() {
     );
     honest
         .verify(
-            root.public_key(),
+            root.public_key().unwrap(),
             node.public_key(),
             &RevocationSet::new(),
             NOW,
@@ -350,7 +360,12 @@ fn an_identity_key_never_signs_as_the_root() {
         let chain = CredentialChain(vec![grant]);
         assert!(
             chain
-                .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
+                .trusted_identity(
+                    root.public_key().unwrap(),
+                    SCOPE,
+                    &RevocationSet::new(),
+                    NOW
+                )
                 .is_err(),
             "a trusted grant an identity key signs names no trusted identity under the root, even derived from the root's secret"
         );
@@ -358,7 +373,12 @@ fn an_identity_key_never_signs_as_the_root() {
     let (key, chain) = trusted(&restored);
     assert_eq!(
         chain
-            .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
+            .trusted_identity(
+                root.public_key().unwrap(),
+                SCOPE,
+                &RevocationSet::new(),
+                NOW
+            )
             .unwrap(),
         key.public_key(),
         "the root's own grant names its trusted identity, so the refusal above is the signer's"

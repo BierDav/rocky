@@ -1,7 +1,7 @@
 use crate::common::{Device, Failure};
 use rocky_sdk::{
-    Affinity, Column, Database, ErrorKind, Network, Schema, SqlValue, Table, Unsupported, params,
-    transport::memory::Hub,
+    Affinity, Column, Database, ErrorKind, InvalidName, NameRule, Network, Schema, SchemaError,
+    SqlValue, Table, Unsupported, params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -250,4 +250,49 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
     assert_eq!(all(&database).await?, ["after:-"]);
     database.close().await?;
     Ok(())
+}
+
+#[test]
+fn an_invalid_name_in_a_schema_names_its_path_and_the_rule_it_breaks() {
+    let text = || Column::new("body", Affinity::Text);
+    for (schema, path, name, rule) in [
+        (
+            Schema::builder("1st", 1).table(Table::replayed("notes").column(text())),
+            "application",
+            "1st",
+            NameRule::Identifier,
+        ),
+        (
+            Schema::builder("notes", 1).table(Table::replayed("my notes").column(text())),
+            "tables",
+            "my notes",
+            NameRule::Identifier,
+        ),
+        (
+            Schema::builder("notes", 1).table(Table::replayed("sqlite_notes").column(text())),
+            "tables",
+            "sqlite_notes",
+            NameRule::Reserved,
+        ),
+        (
+            Schema::builder("notes", 1).table(
+                Table::replayed("notes")
+                    .column(text())
+                    .column(Column::new("Body", Affinity::Text)),
+            ),
+            "tables.notes.columns",
+            "Body",
+            NameRule::Unique,
+        ),
+    ] {
+        let refused = schema.build().err();
+        let expected = InvalidName::new(path, name, rule);
+        assert!(
+            matches!(
+                refused.as_ref().map(rocky_sdk::Error::kind),
+                Some(ErrorKind::Schema(error)) if **error == SchemaError::InvalidName(expected.clone())
+            ),
+            "{expected}: {refused:?}"
+        );
+    }
 }

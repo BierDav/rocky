@@ -21,9 +21,6 @@ impl RootKey {
     pub fn secret(&self) -> [u8; 32] {
         self.0.secret()
     }
-    pub fn public_key(&self) -> PublicKey {
-        self.0.public_key()
-    }
     pub fn identity(&self) -> IdentityKey {
         let secret = zeroize::Zeroizing::new(self.secret());
         IdentityKey::from_secret(crate::group::hkdf(&[], &*secret, OWNER_IDENTITY_DERIVATION))
@@ -39,7 +36,7 @@ impl IdentityProvider for RootKey {
 }
 impl std::fmt::Debug for RootKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RootKey({})", self.public_key())
+        write!(f, "RootKey({})", self.0.public_key())
     }
 }
 
@@ -64,7 +61,7 @@ mod tests {
         let restored = RootKey::from_phrase(&root.phrase()).unwrap().identity();
         assert_eq!(restored.secret(), identity.secret());
         assert_ne!(identity.secret(), root.secret());
-        assert_ne!(identity.public_key(), root.public_key());
+        assert_ne!(identity.public_key(), root.public_key().unwrap());
         assert_ne!(
             RootKey::from_secret([8; 32]).identity().public_key(),
             identity.public_key()

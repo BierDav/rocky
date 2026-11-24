@@ -37,7 +37,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
             .database
             .set_retention(
                 "items",
-                serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy))
+                serde_json::from_value::<rocky_sdk::inspection::RetentionPolicy>(json!(policy))
                     .expect("typed fixture"),
             )
             .await?;
@@ -50,7 +50,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
         snap::observe(
             device.database.set_retention(
                 "missing",
-                serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy))
+                serde_json::from_value::<rocky_sdk::inspection::RetentionPolicy>(json!(policy))
                     .expect("typed fixture")
             )
         )
@@ -60,7 +60,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
     assert!(
         snap::observe(
             device.database.set_retention_limits(
-                serde_json::from_value::<rocky_sdk::RetentionLimits>(
+                serde_json::from_value::<rocky_sdk::inspection::RetentionLimits>(
                     json!({"hard_bytes": 0, "handles": 1})
                 )
                 .expect("typed fixture")
@@ -115,7 +115,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
         a.database
             .set_retention(
                 "items",
-                serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!({
+                serde_json::from_value::<rocky_sdk::inspection::RetentionPolicy>(json!({
                     "required": [], "behind": [], "copies": 1, "window": 0
                 }))
                 .expect("typed fixture"),

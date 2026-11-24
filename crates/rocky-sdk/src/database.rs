@@ -81,7 +81,6 @@ struct Setup {
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
     confirmation: Option<String>,
-    page_cache: rocky_secure::PageCache,
     sync: crate::SyncMode,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
@@ -383,7 +382,6 @@ impl Database {
             directory,
             install,
             confirmation,
-            page_cache: configuration.page_cache,
             sync: configuration.sync,
             #[cfg(test)]
             expose: None,
@@ -1208,9 +1206,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         adopt_committed_pending_schema(&mut settings, &vault, &directory, &path).await?;
         let domain = settings.domain()?;
-        let config = settings
-            .open_config(&vault, &domain)?
-            .with_page_cache(setup.page_cache);
+        let config = settings.open_config(&vault, &domain)?;
         let incarnation = incarnation::Incarnation::read(&path, &vault)?;
         let config = if incarnation.vouched() {
             config

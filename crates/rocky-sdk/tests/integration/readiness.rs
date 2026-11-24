@@ -13,7 +13,7 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     assert!(!status.authority.expired);
     assert_eq!(
         status.network.attachment,
-        rocky_sdk::AttachmentState::Detached
+        rocky_sdk::status::AttachmentState::Detached
     );
     assert!(matches!(status.authority.access, rocky_sdk::Access::Full));
     device.add(1, "apples").await;

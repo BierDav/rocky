@@ -502,8 +502,17 @@ async fn an_unknown_or_reserved_role_is_refused() -> Result<(), Failure> {
             .await
             .is_err()
     );
-    for reserved in ["admin", "Full", "read", "store", "not a name"] {
-        assert!(RoleName::new(reserved).is_err(), "{reserved}");
+    for (name, rule) in [
+        ("admin", rocky_sdk::NameRule::Reserved),
+        ("Full", rocky_sdk::NameRule::Reserved),
+        ("read", rocky_sdk::NameRule::Reserved),
+        ("store", rocky_sdk::NameRule::Reserved),
+        ("not a name", rocky_sdk::NameRule::Identifier),
+    ] {
+        assert_eq!(
+            RoleName::new(name).err(),
+            Some(rocky_sdk::InvalidName::new("roles", name, rule))
+        );
     }
     admin.close().await;
     Ok(())

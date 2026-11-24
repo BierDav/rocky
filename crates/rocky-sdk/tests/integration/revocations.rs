@@ -1,5 +1,5 @@
 use common::{Device, Failure};
-use rocky_sdk::{Network, RevocationStatus, SqlValue, transport::memory::Hub};
+use rocky_sdk::{Network, SqlValue, status::RevocationStatus, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -261,7 +261,7 @@ async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<()
 }
 
 async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
-    use rocky_sdk::RevocationReason;
+    use rocky_sdk::status::RevocationReason;
 
     let directory = tempfile::tempdir()?;
     let root = directory.path();

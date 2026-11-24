@@ -1,5 +1,10 @@
 use crate::{Database, request::Request};
 use rocky_core::Commitment;
+pub use rocky_core::replay::IntentStatement;
+pub use rocky_secure::{
+    CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow,
+    RetentionLimits, RetentionPolicy,
+};
 
 #[derive(Clone, Debug)]
 pub struct RetentionStatus {
@@ -47,10 +52,18 @@ impl Database {
         self.send(|reply| Request::TrustedStaleAfter(seconds, reply))
             .await
     }
-    pub async fn activity(&self, after: u64) -> Result<crate::ActivityPage, crate::Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn activity(
+        &self,
+        after: u64,
+    ) -> Result<crate::activity::ActivityPage, crate::Error> {
         self.send(|reply| Request::Activity(after, reply)).await
     }
-    pub async fn next_activity(&self, after: u64) -> Result<crate::ActivityPage, crate::Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn next_activity(
+        &self,
+        after: u64,
+    ) -> Result<crate::activity::ActivityPage, crate::Error> {
         self.send(|reply| Request::ActivityNext(after, reply)).await
     }
 }

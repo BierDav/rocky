@@ -32,12 +32,13 @@ impl Node {
                 .await?;
             issued
         };
-        self.activity.record(crate::ActivityKind::IdentityInvited {
-            invitation: issued.id,
-            person: issued.code.person().map(crate::PersonId::new),
-            access: invite.access().clone(),
-            expires: issued.expires,
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::IdentityInvited {
+                invitation: issued.id,
+                person: issued.code.person().map(crate::PersonId::new),
+                access: invite.access().clone(),
+                expires: issued.expires,
+            });
         Ok(issued.invitation())
     }
 
@@ -113,7 +114,7 @@ impl Node {
             .await?;
         if redeemed.first {
             self.activity
-                .record(crate::ActivityKind::InvitationRedeemed {
+                .record(crate::activity::ActivityKind::InvitationRedeemed {
                     invitation: redeemed.id,
                     identity: redeemed.device.identity,
                     node: redeemed.device.node,

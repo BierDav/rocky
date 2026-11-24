@@ -21,10 +21,10 @@ serialized!(
     sdk::TipStatus,
     sdk::TipInspection,
     sdk::TipCompaction,
-    sdk::DatabaseStatus,
-    sdk::SyncReport,
-    sdk::NetworkStatus,
-    sdk::RetentionLimits
+    sdk::status::DatabaseStatus,
+    sdk::status::SyncReport,
+    sdk::status::NetworkStatus,
+    sdk::inspection::RetentionLimits
 );
 pub async fn device(database: &sdk::Database) -> Result<Value, sdk::Error> {
     let authority = database.status().await?.authority;
@@ -103,7 +103,7 @@ impl Snapshot for sdk::ContactInfo {
         json!({"uri":self.uri,"node":self.node,"routes":self.routes})
     }
 }
-impl Snapshot for sdk::GenerationStatus {
+impl Snapshot for sdk::status::GenerationStatus {
     fn snapshot(self) -> Value {
         let reason = self.follow_required.then_some("follow_required");
         let mut view = serde_json::to_value(self).expect("snapshot");
@@ -132,7 +132,7 @@ impl Snapshot for sdk::Me {
         json!({"person":self.person.to_string(),"device":self.device.to_string(),"access":self.access,"admin":self.admin,"owner":self.owner,"tables":self.tables.into_iter().map(|(table,rights)|(table,json!({"read":rights.read,"insert":rights.insert,"update":rights.update,"delete":rights.delete}))).collect::<serde_json::Map<_,_>>(),"expires":micros(self.expires)})
     }
 }
-impl Snapshot for sdk::RetentionStatus {
+impl Snapshot for sdk::inspection::RetentionStatus {
     fn snapshot(self) -> Value {
         json!({"policy":self.policy,"covered":self.checkpoint.covered,"uncovered":self.checkpoint.uncovered,"pruned_prefix":self.checkpoint.pruned_prefix,"maintenance_error":self.checkpoint.maintenance_error})
     }
@@ -142,12 +142,12 @@ impl Snapshot for sdk::CreatedPartition {
         json!({"id":self.id,"partition":partition(self.partition)})
     }
 }
-impl Snapshot for sdk::PartitionStatus {
+impl Snapshot for sdk::partitions::PartitionStatus {
     fn snapshot(self) -> Value {
         json!({"group":self.group,"address":self.address,"current":self.current,"epochs":self.epochs,"tables":self.tables.into_iter().map(|table|json!({"table":table.table,"scope":table.scope,"partition":table.scope.map(|scope|data_encoding::HEXLOWER.encode(&scope.encryption)),"epochs":table.epochs,"current":table.current,"holding":table.holding.map(|holding|format!("{holding:?}").to_lowercase())})).collect::<Vec<_>>(),"recipients":self.recipients.into_iter().map(|recipient|json!({"node":recipient.node,"reference":recipient.reference,"epoch":recipient.epoch,"state":match recipient.state { sdk::DeliveryState::Delivered=>"delivered",sdk::DeliveryState::Deposited=>"deposited",sdk::DeliveryState::Pending=>"pending" }})).collect::<Vec<_>>()})
     }
 }
-impl Snapshot for Vec<sdk::HeldChange> {
+impl Snapshot for Vec<sdk::inspection::HeldChange> {
     fn snapshot(self) -> Value {
         fn decoded(bytes: &[u8]) -> Value {
             let mut slice = bytes;
@@ -156,7 +156,7 @@ impl Snapshot for Vec<sdk::HeldChange> {
                 _ => cell(sdk::SqlValue::Blob(bytes.to_vec())),
             }
         }
-        json!({"count":self.len(),"changes":self.into_iter().map(|change|json!({"id":data_encoding::HEXLOWER.encode(&change.id),"time":change.time,"rows":change.rows.into_iter().map(|row|json!({"table":row.table,"removed":row.removed,"row":data_encoding::HEXLOWER.encode(&row.row),"kind":match row.kind { sdk::HeldKind::Insert=>"insert",sdk::HeldKind::Update=>"update",sdk::HeldKind::Delete=>"delete" },"fields":row.fields.into_iter().map(|field|json!({"name":field.name,"value":decoded(&field.value),"written":field.written,"removed":field.removed,"current":field.current.map(|current|json!({"value":current.value.as_deref().map(decoded),"time":current.time,"author":current.author}))})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"intents":change.intents.into_iter().map(|intent|json!({"table":intent.table,"statements":intent.statements.into_iter().map(|statement|json!({"sql":statement.sql,"params":statement.params.into_iter().map(cell).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        json!({"count":self.len(),"changes":self.into_iter().map(|change|json!({"id":data_encoding::HEXLOWER.encode(&change.id),"time":change.time,"rows":change.rows.into_iter().map(|row|json!({"table":row.table,"removed":row.removed,"row":data_encoding::HEXLOWER.encode(&row.row),"kind":match row.kind { sdk::inspection::HeldKind::Insert=>"insert",sdk::inspection::HeldKind::Update=>"update",sdk::inspection::HeldKind::Delete=>"delete" },"fields":row.fields.into_iter().map(|field|json!({"name":field.name,"value":decoded(&field.value),"written":field.written,"removed":field.removed,"current":field.current.map(|current|json!({"value":current.value.as_deref().map(decoded),"time":current.time,"author":current.author}))})).collect::<Vec<_>>()})).collect::<Vec<_>>(),"intents":change.intents.into_iter().map(|intent|json!({"table":intent.table,"statements":intent.statements.into_iter().map(|statement|json!({"sql":statement.sql,"params":statement.params.into_iter().map(cell).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
 pub trait Scalar {
@@ -411,7 +411,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::InvitationRedeemed { invitation, identity, node } => json!({"kind":"invitation_redeemed","invitation":invitation,"identity":identity,"node":node}),
                 sdk::ActivityKind::PeerAdded { peer } => json!({"kind":"peer_added","peer":peer}),
                 sdk::ActivityKind::PeerRemoved { peer } => json!({"kind":"peer_removed","peer":peer}),
-                sdk::ActivityKind::Renewed { revocations, expires, keys } => json!({"kind":"renewed","revocations":revocations,"expires":expires.to_string(),"keys":keys}),
                 sdk::ActivityKind::IdentityRevoked { identity } => json!({"kind":"identity_revoked","identity":identity}),
                 sdk::ActivityKind::NodeUnlinked { identity, node } => json!({"kind":"node_unlinked","identity":identity,"node":node}),
                 sdk::ActivityKind::RevocationCutDroppedStages { identity, count } => json!({"kind":"revocation_cut_dropped_stages","identity":identity,"count":count}),
@@ -429,8 +428,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::EpochDeliveryFailed { peer, error } => json!({"kind":"epoch_delivery_failed","peer":peer,"error":error}),
                 sdk::ActivityKind::BootstrapStarted { peer, scopes } => json!({"kind":"bootstrap_started","peer":peer,"scopes":scopes}),
                 sdk::ActivityKind::BootstrapFinished { peer } => json!({"kind":"bootstrap_finished","peer":peer}),
-                sdk::ActivityKind::IdentityAdmitted { identity, access } => json!({"kind":"identity_admitted","identity":identity,"access":access}),
-                sdk::ActivityKind::NodeLinked { identity, node } => json!({"kind":"node_linked","identity":identity,"node":node}),
                 sdk::ActivityKind::MemberSealFailed { error } => json!({"kind":"member_seal_failed","error":error}),
                 sdk::ActivityKind::ReplayedAwaitingOutcomes { transactions } => json!({"kind":"replayed_awaiting_outcomes","transactions":transactions}),
                 sdk::ActivityKind::RoutineSealFailed { error } => json!({"kind":"routine_seal_failed","error":error}),
@@ -444,7 +441,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::EnvelopeRefused { peer, error } => json!({"kind":"envelope_refused","peer":peer,"error":error}),
                 sdk::ActivityKind::PartitionKeyInstalled { partition: installed } => json!({"kind":"partition_key_installed","partition":partition(installed)}),
                 sdk::ActivityKind::PartitionBootstrap { partition: held } => json!({"kind":"partition_bootstrap","partition":partition(held)}),
-                sdk::ActivityKind::UnlinkUnpushed { error } => json!({"kind":"unlink_unpushed","error":error}),
                 sdk::ActivityKind::MembershipLinkRecorded { identity, node, sequence } => json!({"kind":"membership_link_recorded","identity":identity,"node":node,"sequence":sequence}),
                 sdk::ActivityKind::NetworkingEnabled => json!({"kind":"networking_enabled"}),
                 sdk::ActivityKind::NetworkingDisabled => json!({"kind":"networking_disabled"}),

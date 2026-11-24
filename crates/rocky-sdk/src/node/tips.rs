@@ -435,7 +435,7 @@ impl Node {
             Ok(_) => self.observations.touch(),
             Err(error) => {
                 self.activity
-                    .record(crate::ActivityKind::FinalizationFailed {
+                    .record(crate::activity::ActivityKind::FinalizationFailed {
                         error: (error.to_string()).to_owned(),
                     });
             }

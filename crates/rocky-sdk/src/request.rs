@@ -40,8 +40,10 @@ pub(crate) enum Request {
         Reply<crate::RetentionLimits>,
     ),
     TrustedStaleAfter(u64, Reply<()>),
-    Activity(u64, Reply<crate::ActivityPage>),
-    ActivityNext(u64, Reply<crate::ActivityPage>),
+    #[cfg(any(test, feature = "test-support"))]
+    Activity(u64, Reply<crate::activity::ActivityPage>),
+    #[cfg(any(test, feature = "test-support"))]
+    ActivityNext(u64, Reply<crate::activity::ActivityPage>),
 
     Status(Reply<crate::DatabaseStatus>),
     StatusAfter(String, Reply<crate::DatabaseStatus>),
@@ -87,10 +89,12 @@ pub(crate) enum Request {
 }
 impl Request {
     pub(crate) fn allowed_after_logout(&self) -> bool {
-        matches!(
-            self,
-            Self::Status(..) | Self::StatusAfter(..) | Self::Activity(..) | Self::ActivityNext(..)
-        )
+        match self {
+            Self::Status(..) | Self::StatusAfter(..) => true,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Activity(..) | Self::ActivityNext(..) => true,
+            _ => false,
+        }
     }
     pub(crate) fn fail(self, error: crate::Failure) {
         match self {
@@ -109,9 +113,11 @@ impl Request {
             Self::TrustedStaleAfter(_, reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::Activity(_, reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::ActivityNext(_, reply) => {
                 let _ = reply.send(Err(error));
             }

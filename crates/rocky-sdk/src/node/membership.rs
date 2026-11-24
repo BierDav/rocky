@@ -36,10 +36,11 @@ impl Node {
             &Root::default(),
         )
         .await?;
-        self.activity.record(crate::ActivityKind::NodeUnlinked {
-            identity: owner,
-            node,
-        });
+        self.activity
+            .record(crate::activity::ActivityKind::NodeUnlinked {
+                identity: owner,
+                node,
+            });
         Ok(())
     }
     pub(super) async fn unlink_own(
@@ -424,7 +425,7 @@ impl Node {
             .commit_with_revocations(draft, &self.replica, &known)
             .await?;
         self.activity
-            .record(crate::ActivityKind::MembershipLinkRecorded {
+            .record(crate::activity::ActivityKind::MembershipLinkRecorded {
                 identity: (current.identity).to_owned(),
                 node: link.node,
                 sequence: link.sequence,

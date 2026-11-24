@@ -1,7 +1,15 @@
 # Rocky
 
-Rocky provides local-first SQLite storage, encrypted peer replication,
-credentials and optional iroh networking.
+Rocky is an embedded SQLite database for Rust apps that keeps a local copy on
+each device and syncs it, end-to-end encrypted, between the people its owner
+authorizes and their devices. You declare a schema and write SQL in
+transactions; Rocky merges concurrent changes, lets the owner and admins invite
+and remove people, links each person's devices, and enforces what each person
+may read and write, down to tables, columns and partitions. It runs natively
+and in the browser. Everything else is yours: UI, servers, the transport you
+plug in (iroh, TCP or WebSocket), business rules and backups. Guarantees that
+need a global authority, such as gap-free numbers or admitting a ticket once,
+come from the optional `rocky-coordinator` crate.
 
 See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests, module
 declarations and tests to navigate the implementation.

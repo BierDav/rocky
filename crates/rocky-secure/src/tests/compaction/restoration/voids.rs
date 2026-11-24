@@ -114,7 +114,7 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     .unwrap();
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(

@@ -30,9 +30,6 @@ pub use compaction::{CompactReport, CompactionStatus, FrameReplay, SealRebootstr
 mod crash;
 #[cfg(any(test, feature = "qualification"))]
 pub use crash::CrashPoint;
-pub(crate) mod custody;
-pub use custody::PartitionCustody;
-mod evict;
 mod frontiers;
 mod generation;
 mod schemas;
@@ -135,7 +132,6 @@ pub use checkpoint::{
     PruneReport, PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SealedOutcome,
     SealedOutcomes, SealedTransaction, SetSummary, SignedCheckpoint,
 };
-pub use evict::EvictReport;
 pub use generation::{EngineStatus, GenerationStatus};
 pub use held::{CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, SignedVoid};
 pub use migrate::ProjectionPlan;
@@ -149,10 +145,7 @@ use rocky_core::{
     Blocker, BlockerKind, ClearsBy, Commitment, MAX_CLOCK_AHEAD, ResourceScope, Right,
     RowApplication, RowChange, RowFields, RowSelection, RowWrite, SqlValue, TipId, WaitReason,
 };
-pub use roles::{
-    FrontierLog, Holding, PeerLag, RangePage, ReplicaRole, ReplicaStatus, RoleConfig,
-    ScopeFrontier, ScopeStatus, StateAdvice,
-};
+pub use roles::{FrontierLog, RangePage, ReplicaRole, RoleConfig, ScopeFrontier, StateAdvice};
 use serde::{Deserialize, Serialize};
 pub use session::{SecureSession, SecureTransaction, SessionStatus, UpdateMode};
 #[cfg(any(test, feature = "test-support"))]
@@ -769,14 +762,12 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         partition::SCHEMA,
         checkpoint::SCHEMA,
         checkpoint::AUDIT_MARK_SCHEMA,
-        checkpoint::ARCHIVE_SCHEMA,
         checkpoint::PULLED_SCHEMA,
         checkpoint::FAILURE_SCHEMA,
         compaction::SCHEMA,
         compaction::TRANSITION_SCHEMA,
         compaction::HISTORY_SCHEMA,
         roles::SCHEMA,
-        custody::SCHEMA,
         keys::SCHEMA,
         chains::SCHEMA,
         publication::SCHEMA,
@@ -1362,13 +1353,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [identity.clone()],
                 )
                 .await?;
-            inner
-                .conn
-                .execute(
-                    "INSERT OR IGNORE INTO secure_custody_bootstrap VALUES(1,?)",
-                    [inner.config.manifest.to_bytes().map_err(credential)?],
-                )
-                .await?;
             identity::check_node_chain(&inner.config.credentials)?;
             if !newest_copy {
                 inner.mark_unconfirmed().await?;
@@ -1387,7 +1371,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.load_typed().await?;
         inner.load_partitions().await?;
-        inner.load_custody_peers().await?;
         inner.revision = inner.stored_revision().await?;
         inner.notifications.send_replace(inner.revision);
         let revisions = inner.notifications.subscribe();
@@ -1780,7 +1763,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(inner);
         self.settle().await
     }
-    pub async fn evict_key(&self, scope: ResourceScope) {
+    #[cfg(test)]
+    pub(crate) async fn forget_key(&self, scope: ResourceScope) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.lose_keys(|key| key.scope == scope);
     }

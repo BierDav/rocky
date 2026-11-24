@@ -216,17 +216,6 @@ async fn reopen(lineage: &Lineage, dir: &Scratch, replica: Replica, key: &Privat
         .unwrap()
 }
 
-async fn tag_also(replica: &Replica, key: &str, item: &str) -> Commitment {
-    let id = item_id(replica, item).await;
-    let rows = identity_insert(
-        &session(replica).await,
-        "INSERT INTO tags(key,label,also) VALUES(?,'l',?)",
-        vec![text(key), id],
-    )
-    .await
-    .unwrap();
-    transaction(replica, rows).await
-}
 async fn full_node(replica: &Replica) -> (PublicKey, rocky_credentials::CredentialChain) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     (
@@ -250,76 +239,6 @@ async fn partial(replica: &Replica, full: &Replica, held: &[ResourceScope]) {
             .unwrap();
     }
 }
-async fn tag_rows(replica: &Replica) -> Vec<Vec<SqlValue>> {
-    select(
-        replica,
-        "SELECT key,item IS NULL,also IS NULL FROM tags ORDER BY key",
-    )
-    .await
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
-    let lineage = linked();
-    let dir = Scratch::new().await;
-    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
-    let a = open(&lineage, &dir, "a", &keys[0]).await;
-    follow_main(&lineage, &a).await;
-    insert(&a, "p", "parent").await;
-    let cascading = tag(&a, "t", "p").await;
-    let nulling = tag_also(&a, "u", "p").await;
-    let unlinked = {
-        let rows = identity_insert(
-            &session(&a).await,
-            "INSERT INTO tags(key,label) VALUES(?,'l')",
-            vec![text("v")],
-        )
-        .await
-        .unwrap();
-        transaction(&a, rows).await
-    };
-    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
-    let d = open(&lineage, &dir, "d", &keys[1]).await;
-    for scope in [items, tag_scope] {
-        sync_scope(&lineage, &a, &d, &keys[1], scope).await;
-    }
-    d.follow_bookmark(lineage.domain, "main").await.unwrap();
-    assert_eq!(tag_rows(&d).await.len(), 3);
-    partial(&d, &a, &[items, tag_scope]).await;
-    d.unsubscribe(items).await.unwrap();
-    d.evict(items).await.unwrap();
-    let fresh_holding_only_tags = open(&lineage, &dir, "fresh", &keys[2]).await;
-    let fresh = &fresh_holding_only_tags;
-    partial(fresh, &a, &[tag_scope]).await;
-    sync_scope(&lineage, &a, fresh, &keys[2], tag_scope).await;
-    fresh.follow_bookmark(lineage.domain, "main").await.unwrap();
-    fresh.settle().await.unwrap();
-    assert_eq!(tag_rows(&d).await, tag_rows(fresh).await);
-    assert_eq!(
-        tag_rows(&d).await,
-        vec![vec![text("v"), SqlValue::Integer(1), SqlValue::Integer(1)]]
-    );
-    for transaction in [cascading, nulling, unlinked] {
-        assert_eq!(
-            d.transaction_outcome(transaction).await.unwrap(),
-            fresh.transaction_outcome(transaction).await.unwrap()
-        );
-    }
-    assert!(matches!(
-        d.transaction_outcome(nulling).await.unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Dropped {
-            reason: rocky_core::replay::DropReason::Constraint,
-            sealed: false
-        })
-    ));
-    d.subscribe(items).await.unwrap();
-    sync_scope(&lineage, &a, &d, &keys[1], items).await;
-    d.restored(items).await.unwrap();
-    d.settle().await.unwrap();
-    assert_eq!(tags(&d).await, tags(&a).await);
-    assert_eq!(tag_rows(&d).await, tag_rows(&a).await);
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
     let lineage = linked();

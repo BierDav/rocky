@@ -3,7 +3,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct Cached {
     pub(super) role: Option<roles::RoleConfig>,
-    pub(super) holdings: BTreeMap<ResourceScope, Option<roles::Holding>>,
+    pub(super) subscriptions: BTreeMap<ResourceScope, bool>,
     pub(super) checkpoints: BTreeMap<i64, Option<checkpoint::Record>>,
 }
 pub(super) struct Metadata {
@@ -45,7 +45,7 @@ impl Metadata {
             cached.1.role = None;
         }
         if cached.0[1] != versions[1] {
-            cached.1.holdings.clear();
+            cached.1.subscriptions.clear();
         }
         if cached.0[2] != versions[2] {
             cached.1.checkpoints.clear();

@@ -17,7 +17,7 @@ pub(super) async fn preserved(f: &HeldPrefix, error: bool) {
     let result = f.replica.restored(f.lineage.scope("items")).await;
     assert_eq!(result.is_err(), error, "{result:?}");
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         1
     );
     assert_eq!(super::super::audit::snapshot(&f.replica).await, before);
@@ -108,7 +108,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
         .await
         .conn
         .execute(
-            "UPDATE secure_evicted_logs SET hash=? WHERE scope=?",
+            "UPDATE secure_restoration_guards SET hash=? WHERE scope=?",
             [wrong.as_bytes().to_vec(), blob.clone()],
         )
         .await
@@ -120,7 +120,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
         .await
         .conn
         .execute(
-            "UPDATE secure_evicted_logs SET hash=? WHERE scope=?",
+            "UPDATE secure_restoration_guards SET hash=? WHERE scope=?",
             [endpoint.as_bytes().to_vec(), blob.clone()],
         )
         .await
@@ -229,7 +229,7 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
         .await
         .unwrap();
     assert_eq!(
-        scalar(&fresh, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&fresh, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     let error = fresh.receive(f.frames[0].clone()).await.unwrap_err();
@@ -319,7 +319,7 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
     }
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(

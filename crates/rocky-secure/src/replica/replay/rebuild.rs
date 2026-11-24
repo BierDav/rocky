@@ -210,9 +210,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Ok(Rederived::Waiting("a scope holds pending frames"));
             }
-            if self.holding(scope).await? == Some(super::super::roles::Holding::Evicting) {
-                return Ok(Rederived::Waiting("a scope is being evicted"));
-            }
         }
         if self
             .direct
@@ -374,7 +371,7 @@ impl<A: RowApplication> Inner<A> {
         let mut bytes = values_blob(
             rows(
                 &self.conn,
-                "SELECT (SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='secure_applied'),(SELECT COUNT(*) FROM secure_operations WHERE status='pending'),(SELECT COALESCE(group_concat(c,','),'') FROM (SELECT scope||':'||sequence||':'||position AS c FROM secure_checkpoints ORDER BY scope,sequence)),(SELECT COALESCE(group_concat(f,','),'') FROM (SELECT hex(seal) AS f FROM secure_finalized ORDER BY domain,depth)),(SELECT COALESCE(group_concat(h,','),'') FROM (SELECT hex(scope)||state AS h FROM secure_subscriptions ORDER BY scope)),(SELECT COUNT(*) FROM secure_scope_state)",
+                "SELECT (SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='secure_applied'),(SELECT COUNT(*) FROM secure_operations WHERE status='pending'),(SELECT COALESCE(group_concat(c,','),'') FROM (SELECT scope||':'||sequence||':'||position AS c FROM secure_checkpoints ORDER BY scope,sequence)),(SELECT COALESCE(group_concat(f,','),'') FROM (SELECT hex(seal) AS f FROM secure_finalized ORDER BY domain,depth)),(SELECT COALESCE(group_concat(h,','),'') FROM (SELECT hex(scope) AS h FROM secure_subscriptions ORDER BY scope)),(SELECT COUNT(*) FROM secure_scope_state)",
             )
             .await?
             .first()

@@ -79,12 +79,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     async fn restoring(&self) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        rows(&inner.conn, "SELECT scope FROM secure_evicted_logs")
+        rows(&inner.conn, "SELECT scope FROM secure_restoration_guards")
             .await?
             .iter()
             .map(|record| match record.as_slice() {
                 [SqlValue::Blob(scope)] => decode(scope),
-                _ => Err(Error::Corrupt("eviction guard".into())),
+                _ => Err(Error::Corrupt("restoration guard".into())),
             })
             .collect()
     }

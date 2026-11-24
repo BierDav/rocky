@@ -907,7 +907,7 @@ pub(crate) async fn align_role(
             .map(|member| member.scope)
             .collect();
         for scope in whole.chain(granted) {
-            if replica.subscription(scope).await? != Some(rocky_secure::Holding::Held) {
+            if !replica.subscribed(scope).await? {
                 replica.subscribe(scope).await?;
             }
         }

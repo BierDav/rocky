@@ -1,10 +1,7 @@
-mod archive;
-pub(crate) use archive::CheckpointVouch;
-#[cfg(test)]
-mod backend_vectors;
-pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
 mod audit_mark;
+#[cfg(test)]
+mod backend_vectors;
 pub(super) use audit_mark::{AuditMark, Audited, SCHEMA as AUDIT_MARK_SCHEMA, Tail};
 mod create;
 mod failures;
@@ -494,7 +491,6 @@ pub(crate) enum Stage {
     Prune,
     Import,
     Switch,
-    Evict,
     Settle,
 }
 

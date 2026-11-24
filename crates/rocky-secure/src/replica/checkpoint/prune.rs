@@ -12,11 +12,6 @@ pub enum PruneBlock {
     SoleCopy {
         operation: Hash,
     },
-    Custody {
-        operation: Hash,
-        durable: usize,
-        needed: usize,
-    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PruneReport {
@@ -141,7 +136,6 @@ impl<A: RowApplication> Inner<A> {
         };
         let bound = *bound;
         let copies = policy.copies.max(1);
-        let custody = self.partition_custody(scope).await?;
         let blob = encode(&scope)?;
         transaction!(self, |inner| {
             let candidates = collect_rows(
@@ -195,13 +189,6 @@ impl<A: RowApplication> Inner<A> {
                     };
                     peers.insert(super::super::roles::peer_id(peer)?);
                 }
-                let custodians = if custody.copies == 0 {
-                    0
-                } else {
-                    inner
-                        .custody_count(scope, header.public_key, header.seq_num)
-                        .await?
-                };
                 step.blocked = policy
                     .required
                     .difference(&policy.behind)
@@ -212,13 +199,6 @@ impl<A: RowApplication> Inner<A> {
                     })
                     .or_else(|| {
                         (peers.len() < copies).then_some(PruneBlock::SoleCopy { operation })
-                    })
-                    .or_else(|| {
-                        (custodians < custody.copies).then_some(PruneBlock::Custody {
-                            operation,
-                            durable: custodians,
-                            needed: custody.copies,
-                        })
                     });
                 if step.blocked.is_some() {
                     step.more = false;

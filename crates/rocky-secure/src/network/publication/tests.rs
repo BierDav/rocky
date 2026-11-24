@@ -246,7 +246,7 @@ async fn missing_key_is_held_with_explicit_unknown_repair_until_key_installation
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let (a, b, alice, bob) = pair(&f, &dir).await;
-    b.evict_key(f.public).await;
+    b.forget_key(f.public).await;
     let cursor = b.frontier(f.public).await.unwrap();
     revocations::insert(&a, &f, 1, "row").await;
     let receipt = exchange(&f, &a, &b, &alice, &bob, &[cursor], |_| {})

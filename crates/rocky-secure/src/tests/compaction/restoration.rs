@@ -28,7 +28,7 @@ async fn an_endpoint_first_held_prefix_waits_across_reopen_until_the_last_gap_ar
     let before = held(&f.replica).await;
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(held(&f.replica).await, before);
@@ -56,7 +56,7 @@ async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
         f.replica.receive(frame.clone()).await.unwrap();
     }
     let before = super::audit::snapshot(&f.replica).await;
-    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_commit_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'restoration after delete'); END", ()).await.unwrap();
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_commit_failure AFTER DELETE ON secure_restoration_guards BEGIN SELECT RAISE(ABORT,'restoration after delete'); END", ()).await.unwrap();
     assert!(
         f.replica
             .restored(scope)
@@ -83,7 +83,7 @@ async fn a_failed_completion_transaction_preserves_every_authoritative_table() {
     f.replica.audit(scope).await.unwrap();
     f = f.reopen().await;
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     f.replica.audit(scope).await.unwrap();
@@ -94,7 +94,7 @@ async fn author_admission_clears_only_with_the_whole_write_transaction() {
     let mut f = negatives::filled().await;
     let scope = f.lineage.scope("items");
     let before = super::audit::snapshot(&f.replica).await;
-    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_author_failure AFTER DELETE ON secure_evicted_logs BEGIN SELECT RAISE(ABORT,'author restoration after delete'); END", ()).await.unwrap();
+    f.replica.inner.lock(crate::replica::Class::Background).await.conn.execute("CREATE TEMP TRIGGER restoration_author_failure AFTER DELETE ON secure_restoration_guards BEGIN SELECT RAISE(ABORT,'author restoration after delete'); END", ()).await.unwrap();
     let error = identity_insert(
         &session(&f.replica).await,
         "INSERT INTO items(key,title) VALUES('new','target line')",
@@ -120,7 +120,7 @@ async fn author_admission_clears_only_with_the_whole_write_transaction() {
     let held = held(&f.replica).await;
     insert(&f.replica, "new", "target line").await;
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     let original = self::held(&f.replica)

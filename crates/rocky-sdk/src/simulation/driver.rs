@@ -655,7 +655,7 @@ impl Simulation {
             GroupBeforeCommit | GroupAfterCommit => {
                 member.write(&format!("w{index}"), index as u64).await
             }
-            Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
+            Import | Switch | Settle | Apply | Rewind | Redo | UndoDeletion => {
                 self.sync(node).await.map(drop)
             }
         };
@@ -996,11 +996,7 @@ impl Simulation {
                 ))
                 .await?;
             let tables = status.tables;
-            if !tables.is_empty()
-                && tables
-                    .iter()
-                    .all(|table| table.holding == Some(rocky_secure::Holding::Held))
-            {
+            if !tables.is_empty() && tables.iter().all(|table| table.subscribed) {
                 held.insert(list.clone());
             }
         }

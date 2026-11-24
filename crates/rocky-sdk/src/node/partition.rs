@@ -467,8 +467,7 @@ impl Node {
                 .unwrap_or_default();
             (epochs, recipients)
         };
-        let holding: BTreeMap<ResourceScope, rocky_secure::Holding> =
-            self.replica.subscriptions().await?.into_iter().collect();
+        let subscriptions = self.replica.subscriptions().await?;
         let mut tables = Vec::new();
         for member in &partition.members {
             let epochs = self.replica.key_epochs(member.scope).await;
@@ -477,7 +476,7 @@ impl Node {
                 scope: Some(member.scope),
                 current: epochs.iter().copied().max(),
                 epochs,
-                holding: holding.get(&member.scope).copied(),
+                subscribed: subscriptions.contains(&member.scope),
             });
         }
         Ok(crate::PartitionStatus {
@@ -556,7 +555,7 @@ impl Node {
                         scope: None,
                         epochs: Vec::new(),
                         current: None,
-                        holding: None,
+                        subscribed: false,
                     })
                     .collect(),
                 recipients: Vec::new(),
@@ -615,10 +614,7 @@ impl Node {
                 if !complete {
                     break;
                 }
-                let holds = match self.replica.subscription(member.scope).await? {
-                    Some(holding) => holding == rocky_secure::Holding::Held,
-                    None => full,
-                };
+                let holds = full || self.replica.subscribed(member.scope).await?;
                 let label = rocky_core::scope_label(&member.scope);
                 complete = holds && !blockers.iter().any(|blocker| blocker.scope == label);
             }

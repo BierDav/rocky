@@ -13,7 +13,7 @@ async fn an_import_that_leaves_own_pruned_frames_uncovered_waits_for_them() {
     coverage_after_import(true, true).await;
 }
 async fn guards(replica: &Replica) -> i64 {
-    scalar(replica, "SELECT count(*) FROM secure_evicted_logs").await
+    scalar(replica, "SELECT count(*) FROM secure_restoration_guards").await
 }
 async fn coverage_after_import(missing: bool, restoration: bool) {
     let lineage = Lineage::new();

@@ -794,20 +794,21 @@ async fn frame_metadata_observes_writes_and_rollback() {
     .unwrap();
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let role = inner.role().await.unwrap();
-    let holding = inner.holding(f.public).await.unwrap();
+    let subscribed = inner.subscribed(f.public).await.unwrap();
     let before = crate::sqlite::statements();
     assert_eq!(inner.role().await.unwrap(), role);
-    assert_eq!(inner.holding(f.public).await.unwrap(), holding);
+    assert_eq!(inner.subscribed(f.public).await.unwrap(), subscribed);
     assert_eq!(crate::sqlite::statements(), before);
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
-    inner.conn.execute(
-        "INSERT INTO secure_subscriptions VALUES(?,'evicted') ON CONFLICT(scope) DO UPDATE SET state=excluded.state",
-        [encode(&f.public).unwrap()],
-    ).await.unwrap();
-    assert_eq!(
-        inner.holding(f.public).await.unwrap(),
-        Some(super::super::replica::roles::Holding::Evicted)
-    );
+    inner
+        .conn
+        .execute(
+            "INSERT OR IGNORE INTO secure_subscriptions VALUES(?)",
+            [encode(&f.public).unwrap()],
+        )
+        .await
+        .unwrap();
+    assert!(inner.subscribed(f.public).await.unwrap());
     let changed = super::super::replica::roles::RoleConfig {
         role: super::super::replica::roles::ReplicaRole::Partial,
     };
@@ -819,7 +820,7 @@ async fn frame_metadata_observes_writes_and_rollback() {
     inner.conn.execute("ROLLBACK", ()).await.unwrap();
     inner.invalidate_context();
     assert_eq!(inner.role().await.unwrap(), role);
-    assert_eq!(inner.holding(f.public).await.unwrap(), holding);
+    assert_eq!(inner.subscribed(f.public).await.unwrap(), subscribed);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -866,7 +867,7 @@ async fn an_unchanged_held_refresh_does_not_scan_history() {
     let before = crate::sqlite::statements();
     assert!(replica.held_changes().await.unwrap().is_empty());
     assert_eq!(crate::sqlite::statements() - before, empty);
-    replica.evict_key(f.private).await;
+    replica.forget_key(f.private).await;
     crate::sqlite::trace_statements(true);
     assert!(replica.held_changes().await.unwrap().is_empty());
     let statements = crate::sqlite::trace_statements(false);

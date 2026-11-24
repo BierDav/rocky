@@ -68,7 +68,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
             .await
             .conn
             .execute(
-                "UPDATE secure_evicted_logs SET hash=? WHERE scope=?",
+                "UPDATE secure_restoration_guards SET hash=? WHERE scope=?",
                 [hash.as_bytes().to_vec(), crate::encode(&scope).unwrap()],
             )
             .await
@@ -97,7 +97,7 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
             .await
             .conn
             .execute(
-                "UPDATE secure_evicted_logs SET hash=? WHERE scope=?",
+                "UPDATE secure_restoration_guards SET hash=? WHERE scope=?",
                 [
                     original_hash.as_bytes().to_vec(),
                     crate::encode(&scope).unwrap(),

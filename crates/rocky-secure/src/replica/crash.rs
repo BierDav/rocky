@@ -12,7 +12,6 @@ pub enum CrashPoint {
     BaseCleanup,
     BaseCleaned,
     Settle,
-    Evict,
     GroupBeforeCommit,
     GroupAfterCommit,
     Apply,
@@ -21,7 +20,7 @@ pub enum CrashPoint {
     UndoDeletion,
 }
 impl CrashPoint {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 16] = [
         Self::Import,
         Self::Switch,
         Self::Prune,
@@ -32,7 +31,6 @@ impl CrashPoint {
         Self::BaseCleanup,
         Self::BaseCleaned,
         Self::Settle,
-        Self::Evict,
         Self::GroupBeforeCommit,
         Self::GroupAfterCommit,
         Self::Apply,
@@ -51,7 +49,6 @@ impl CrashPoint {
             Self::BasePrepare => Stage::BasePrepare,
             Self::BaseCleanup => Stage::BaseCleanup,
             Self::Settle => Stage::Settle,
-            Self::Evict => Stage::Evict,
             Self::BasePrepared
             | Self::BasePublished
             | Self::BaseCleaned

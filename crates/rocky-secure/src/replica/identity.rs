@@ -505,12 +505,7 @@ impl<A: RowApplication> Inner<A> {
         self.ledger_marks(scope).await
     }
     pub(super) async fn ledger_waits(&self, scope: ResourceScope) -> Result<bool, Error> {
-        if matches!(
-            self.holding(scope).await?,
-            Some(roles::Holding::Evicting | roles::Holding::Evicted)
-        ) || !self.ledger_readable(scope)
-            || self.ledger_queued(scope).await?
-        {
+        if !self.ledger_readable(scope) || self.ledger_queued(scope).await? {
             return Ok(true);
         }
         if !self.has_pruned_prefix(scope).await? {

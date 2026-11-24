@@ -179,9 +179,7 @@ impl<A: RowApplication> Inner<A> {
         row: Commitment,
     ) -> Result<Companion, Error> {
         self.require_scope_readable(scope).await?;
-        let has_key = self.readable(scope)?;
-        let readable_held = has_key && self.holding(scope).await? != Some(roles::Holding::Evicting);
-        let record = if readable_held {
+        let record = if self.readable(scope)? {
             self.key_row(scope, row).await?
         } else {
             None
@@ -272,7 +270,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<SecurePage, Error> {
         self.require_scope_readable(scope).await?;
         let has_key = self.readable(scope)?;
-        let holding = self.holding(scope).await?;
         let mut page = SecurePage {
             revision: self.revision,
             rows: BTreeMap::new(),
@@ -282,7 +279,7 @@ impl<A: RowApplication> Inner<A> {
                 && !self.importing(scope).await?,
             next: None,
         };
-        if !has_key || holding == Some(roles::Holding::Evicting) {
+        if !has_key {
             return Ok(page);
         }
         let resource = scope;

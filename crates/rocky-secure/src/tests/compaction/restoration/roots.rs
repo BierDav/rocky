@@ -59,7 +59,7 @@ async fn a_verified_lower_prefix_anchors_a_held_and_signed_void_suffix() {
     let before = held(&f.replica).await;
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(held(&f.replica).await, before);
@@ -99,7 +99,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
         .await
         .conn
         .execute(
-            "UPDATE secure_evicted_logs SET sequence=1,hash=? WHERE scope=?",
+            "UPDATE secure_restoration_guards SET sequence=1,hash=? WHERE scope=?",
             [hash_at_sequence_one, crate::encode(&scope).unwrap()],
         )
         .await
@@ -111,7 +111,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
         .await
         .conn
         .execute(
-            "UPDATE secure_evicted_logs SET sequence=2,hash=? WHERE scope=?",
+            "UPDATE secure_restoration_guards SET sequence=2,hash=? WHERE scope=?",
             [
                 f.frames[2].id().unwrap().as_bytes().to_vec(),
                 crate::encode(&scope).unwrap(),
@@ -121,7 +121,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
         .unwrap();
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(

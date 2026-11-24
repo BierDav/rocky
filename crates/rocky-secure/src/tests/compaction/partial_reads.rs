@@ -53,7 +53,7 @@ async fn read(replica: &Replica, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error>
 async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
     let rows = crate::storage::rows(
         &replica.inner.lock(crate::replica::Class::Background).await.conn,
-        "SELECT (SELECT count(*) FROM secure_scope_state),(SELECT count(*) FROM secure_seal_anchors),(SELECT count(*) FROM secure_rebootstrap),(SELECT count(*) FROM secure_evicted_logs),(SELECT count(*) FROM secure_seal_bounds),(SELECT count(*) FROM secure_checkpoints)",
+        "SELECT (SELECT count(*) FROM secure_scope_state),(SELECT count(*) FROM secure_seal_anchors),(SELECT count(*) FROM secure_rebootstrap),(SELECT count(*) FROM secure_restoration_guards),(SELECT count(*) FROM secure_seal_bounds),(SELECT count(*) FROM secure_checkpoints)",
     )
     .await
     .unwrap();

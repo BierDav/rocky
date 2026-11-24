@@ -72,16 +72,8 @@ impl HeldPrefix {
             .await
             .unwrap();
         replica.subscribe(scope).await.unwrap();
-        replica
-            .acknowledge_frontier(
-                peer.public_key(),
-                &lineage.credentials(3, &peer),
-                &keeper.frontier(scope).await.unwrap(),
-            )
-            .await
-            .unwrap();
         assert_eq!(
-            replica.evict(scope).await.unwrap().operations,
+            replica.drop_local_history_for_test(scope).await,
             (prefix + count) as u64
         );
         replica.set_role(Default::default()).await.unwrap();
@@ -122,7 +114,7 @@ impl HeldPrefix {
             0
         );
         assert_eq!(
-            scalar(&replica, "SELECT count(*) FROM secure_evicted_logs").await,
+            scalar(&replica, "SELECT count(*) FROM secure_restoration_guards").await,
             1
         );
         if prefix > 0 {
@@ -144,7 +136,11 @@ impl HeldPrefix {
         let scope = self.lineage.scope("items");
         self.replica.restored(scope).await.unwrap();
         assert_eq!(
-            scalar(&self.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+            scalar(
+                &self.replica,
+                "SELECT count(*) FROM secure_restoration_guards"
+            )
+            .await,
             1
         );
         assert!(

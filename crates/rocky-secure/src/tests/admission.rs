@@ -351,16 +351,8 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     insert(&a, &f, 1, "held").await;
     let frontier = a.frontier(f.public).await.unwrap();
     let (configured, full_node) = (PrivateKey::new(), PrivateKey::new());
-    a.configure_peers([configured.public_key()]).await;
-    a.set_partition_custody(
-        f.public,
-        crate::PartitionCustody {
-            peers: [rocky_credentials::PeerId::of(full_node.public_key())].into(),
-            copies: 0,
-        },
-    )
-    .await
-    .unwrap();
+    a.configure_peers([configured.public_key(), full_node.public_key()])
+        .await;
     let serve = async |key: &PrivateKey| {
         let chain = f.credentials(key, f.full());
         a.acknowledge_frontier(key.public_key(), &chain, &frontier)
@@ -427,16 +419,8 @@ async fn an_admission_storm_evicts_neither_kept_nor_recently_admitted_peer_tips(
     keys.sort_by_key(peer_id);
     let strangers = keys.split_off(3);
     let [configured, full_node, active] = <[PrivateKey; 3]>::try_from(keys).unwrap();
-    a.configure_peers([configured.public_key()]).await;
-    a.set_partition_custody(
-        f.public,
-        crate::PartitionCustody {
-            peers: [peer_id(&full_node)].into(),
-            copies: 0,
-        },
-    )
-    .await
-    .unwrap();
+    a.configure_peers([configured.public_key(), full_node.public_key()])
+        .await;
     let admit = async |key: &PrivateKey| {
         a.admit_peer(
             key.public_key(),
@@ -459,7 +443,7 @@ async fn an_admission_storm_evicts_neither_kept_nor_recently_admitted_peer_tips(
     let mut displaced = Vec::new();
     for (role, honest) in [
         ("configured", &configured),
-        ("custody", &full_node),
+        ("second configured", &full_node),
         ("recently admitted", &active),
     ] {
         if a.admitted_tip(honest.public_key()).await.is_none() {
@@ -724,95 +708,6 @@ async fn acknowledgments_without_logs_remember_nothing_and_displace_no_tip() {
         "peers that record nothing leave nothing to remember"
     );
     assert!(a.admitted_tip(admitted.public_key()).await.is_some());
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn admission_reads_no_custody_policy_so_a_corrupt_one_fails_no_handshake() {
-    use crate::replica::MAX_REMEMBERED_PEERS;
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let a = open(&f, &dir, "a.db", &PrivateKey::new()).await;
-    let configured = PrivateKey::new();
-    a.configure_peers([configured.public_key()]).await;
-    a.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .conn
-        .execute(
-            "INSERT INTO secure_partition_custody VALUES(?,?)",
-            [vec![0xff], vec![0xff]],
-        )
-        .await
-        .unwrap();
-    let admit = async |key: &PrivateKey| {
-        a.admit_peer(
-            key.public_key(),
-            &f.credentials(key, f.full()),
-            rocky_core::TipId([7; 32]),
-        )
-        .await
-    };
-    admit(&configured).await.unwrap();
-    for _ in 0..MAX_REMEMBERED_PEERS {
-        admit(&PrivateKey::new())
-            .await
-            .expect("kept peers leave the whole bound to unconfigured peers");
-    }
-    let newest = PrivateKey::new();
-    admit(&newest)
-        .await
-        .expect("an admission beyond the bound evicts without reading storage");
-    admit(&configured)
-        .await
-        .expect("a configured peer is admitted whatever storage holds");
-    assert_eq!(a.admitted_peers().await, MAX_REMEMBERED_PEERS + 1);
-    assert!(a.admitted_tip(newest.public_key()).await.is_some());
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn custody_peers_stay_kept_across_reopening_and_leave_with_their_policy() {
-    use crate::replica::MAX_REMEMBERED_PEERS;
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let alice = PrivateKey::new();
-    let full_node = PrivateKey::new();
-    let a = open(&f, &dir, "a.db", &alice).await;
-    a.set_partition_custody(
-        f.public,
-        crate::PartitionCustody {
-            peers: [rocky_credentials::PeerId::of(full_node.public_key())].into(),
-            copies: 0,
-        },
-    )
-    .await
-    .unwrap();
-    a.close().await;
-    let a = open(&f, &dir, "a.db", &alice).await;
-    let admit = async |key: &PrivateKey| {
-        a.admit_peer(
-            key.public_key(),
-            &f.credentials(key, f.full()),
-            rocky_core::TipId([7; 32]),
-        )
-        .await
-        .unwrap();
-    };
-    admit(&full_node).await;
-    for _ in 0..=MAX_REMEMBERED_PEERS {
-        admit(&PrivateKey::new()).await;
-    }
-    assert!(
-        a.admitted_tip(full_node.public_key()).await.is_some(),
-        "a reopened replica keeps the custody peers its stored policies name"
-    );
-    a.set_partition_custody(f.public, crate::PartitionCustody::default())
-        .await
-        .unwrap();
-    assert!(
-        a.admitted_tip(full_node.public_key()).await.is_none(),
-        "a peer whose custody ends competes as the least recently seen"
-    );
-    assert_eq!(a.admitted_peers().await, MAX_REMEMBERED_PEERS);
 }
 
 const HANDSHAKE_TIME_SLACK: u64 = 5_000_000;

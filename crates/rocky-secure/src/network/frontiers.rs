@@ -107,7 +107,6 @@ impl NativeSession {
                     .record_frontiers(self.peer, &self.credentials, &remote)
                     .await?;
                 for (local, state) in held {
-                    self.request_custody(replica, local.scope).await?;
                     let needs_rows = local != &state.frontier
                         || local.logs.iter().any(|log| log.held != log.applied);
                     if state.importing {

@@ -438,12 +438,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(crate) async fn clear_typed(&mut self, scope: ResourceScope) -> Result<(), Error> {
-        if self.replayed_scope(scope) {
-            return self.clear_replayed(scope).await;
-        }
-        self.require_declared(scope, "eviction")
-    }
     pub(super) async fn reproject(&self, scope: ResourceScope) -> Result<(), Error> {
         if self.replayed_scope(scope) {
             return Ok(());

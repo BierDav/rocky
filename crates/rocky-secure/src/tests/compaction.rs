@@ -790,7 +790,7 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
         refusal.iter().all(|blocker| waiting.contains(blocker)) && !refusal.is_empty(),
         "{refusal:?} in {waiting:?}"
     );
-    assert_eq!(scalar(&a,"SELECT count(*) FROM secure_seal_anchors a JOIN secure_scope_state s ON s.id=a.scope WHERE s.scope=(SELECT scope FROM secure_evicted_logs LIMIT 1)").await,0);
+    assert_eq!(scalar(&a,"SELECT count(*) FROM secure_seal_anchors a JOIN secure_scope_state s ON s.id=a.scope WHERE s.scope=(SELECT scope FROM secure_restoration_guards LIMIT 1)").await,0);
     assert!(
         a.compaction_status(lineage.domain)
             .await

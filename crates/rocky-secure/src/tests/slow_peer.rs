@@ -170,17 +170,4 @@ async fn a_backlog_reaches_a_peer_whose_storage_stays_busy_past_each_read_deadli
         );
         assert!(own.logs.iter().all(|log| log.applied == u64::from(BACKLOG)));
     }
-    let status = device.replica_status().await.unwrap();
-    for scope in scopes {
-        let entry = status
-            .scopes
-            .iter()
-            .find(|entry| entry.scope == scope)
-            .unwrap();
-        assert!(
-            !entry.peers.is_empty() && entry.peers.iter().all(|lag| lag.behind == 0),
-            "the device records that the peer holds all of {scope:?}: {:?}",
-            entry.peers
-        );
-    }
 }

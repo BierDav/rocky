@@ -296,8 +296,7 @@ impl Node {
         if envelope.group() != partition.record.address {
             return Err("the delivery names another partition than its envelope".into());
         }
-        let holding: BTreeMap<ResourceScope, rocky_secure::Holding> =
-            self.replica.subscriptions().await?.into_iter().collect();
+        let subscriptions = self.replica.subscriptions().await?;
         let first_epoch = self
             .settings
             .lock()
@@ -309,11 +308,7 @@ impl Node {
         let held = partition
             .members
             .iter()
-            .all(|member| match holding.get(&member.scope) {
-                Some(rocky_secure::Holding::Held) => true,
-                Some(rocky_secure::Holding::Evicting | rocky_secure::Holding::Evicted) => false,
-                Some(rocky_secure::Holding::Left) | None => full && !first_epoch,
-            });
+            .all(|member| subscriptions.contains(&member.scope) || (full && !first_epoch));
         let bootstrap = !held && (contents.reason == Reason::Share || first_epoch);
         if self.awaits_partition_grant(&partition).await {
             let _ = Box::pin(self.renew(None, true, Some(envelope.issuer()), false)).await;

@@ -930,14 +930,8 @@ impl<A: RowApplication> Inner<A> {
                 .map(|(_, signed)| signed)
                 .filter(|signed| signed.signer() != peer));
         }
-        let keyless_holder = !self.can_read_key(scope, &self.local_grants(time)?);
-        if keyless_holder {
-            return Ok(self
-                .archived_checkpoint(scope, true)
-                .await?
-                .filter(|signed| {
-                    signed.signer() != peer && signed.verify_authority(self, time).is_ok()
-                }));
+        if !self.can_read_key(scope, &self.local_grants(time)?) {
+            return Ok(None);
         }
         let Ok((key_epoch, _)) = self.scope_key(scope) else {
             return Ok(None);
@@ -1126,11 +1120,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         if !(4096..=MAX_SECURE_FRAME).contains(&byte_quota) {
             return Err(denied("sync quota"));
-        }
-        if inner.scope_key(scope).is_err() {
-            return inner
-                .archived_page(scope, checkpoint, after, byte_quota)
-                .await;
         }
         let (generation, key) = inner.scope_key(scope)?;
         let (id, signed) = match inner.served_checkpoint(scope).await? {
@@ -1554,14 +1543,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verify_import_statement(&signed).await?;
         let statement = &signed.statement;
         let scope = statement.scope;
-        if matches!(
-            inner.holding(scope).await?,
-            Some(
-                crate::replica::roles::Holding::Evicting | crate::replica::roles::Holding::Evicted
-            )
-        ) {
-            return Err(denied("scope is not held by this replica"));
-        }
         if signed.signer() == inner.config.node.public_key() {
             return Err(denied(
                 "checkpoint definition/generation/key epoch mismatch",

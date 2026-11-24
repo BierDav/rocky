@@ -26,7 +26,7 @@ const STATE_TABLES: &[&str] = &[
     "secure_checkpoints",
     "secure_subscriptions",
     "secure_roles",
-    "secure_evicted_logs",
+    "secure_restoration_guards",
     "secure_seal_drops",
     "secure_partitions",
     "secure_followed_tip",
@@ -427,9 +427,9 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
         }
-        for record in rows(&self.conn, "SELECT scope FROM secure_evicted_logs").await? {
+        for record in rows(&self.conn, "SELECT scope FROM secure_restoration_guards").await? {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
-                return Err(Error::Corrupt("eviction guard".into()));
+                return Err(Error::Corrupt("restoration guard".into()));
             };
             let scope = decode::<ResourceScope>(scope)?;
             if !self.holds(scope).await? {

@@ -585,19 +585,19 @@ async fn a_granted_phone_holds_every_table_of_its_list_and_nothing_else() {
     )
     .await;
     phone.fetch(&issuer).await.unwrap();
-    let holding: BTreeMap<String, Value> = phone.status("A").await["tables"]
+    let subscribed: BTreeMap<String, Value> = phone.status("A").await["tables"]
         .as_array()
         .unwrap()
         .iter()
         .map(|table| {
             (
                 table["table"].as_str().unwrap().to_owned(),
-                table["holding"].clone(),
+                table["subscribed"].clone(),
             )
         })
         .collect();
     for table in TABLES {
-        assert_eq!(holding[table], "held", "{table}");
+        assert_eq!(subscribed[table], true, "{table}");
     }
     let progress = phone.database.status().await.unwrap().data.partitions;
     assert_eq!(

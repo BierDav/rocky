@@ -1,4 +1,4 @@
-use super::checkpoint::{MAX_CHECKPOINT_LOGS, key_of};
+use super::checkpoint::MAX_CHECKPOINT_LOGS;
 use super::*;
 use rocky_credentials::PeerId;
 mod restoration;
@@ -6,8 +6,8 @@ mod restoration;
 const PEER_FRONTIERS_LOG_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_peer_frontiers_log ON secure_peer_frontiers(scope,author,held)";
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_roles(id INTEGER PRIMARY KEY CHECK(id=1),config BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_subscriptions(scope BLOB PRIMARY KEY,state TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_evicted_logs(scope BLOB PRIMARY KEY,sequence INTEGER NOT NULL,hash BLOB NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS secure_subscriptions(scope BLOB PRIMARY KEY) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_restoration_guards(scope BLOB PRIMARY KEY,sequence INTEGER NOT NULL,hash BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_peer_frontiers(peer BLOB NOT NULL,scope BLOB NOT NULL,author BLOB NOT NULL,held INTEGER NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(peer,scope,author)) WITHOUT ROWID",
     PEER_FRONTIERS_LOG_INDEX,
     "CREATE INDEX IF NOT EXISTS secure_operations_scope ON secure_operations(scope,author,sequence)",
@@ -25,32 +25,6 @@ pub enum ReplicaRole {
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
     pub role: ReplicaRole,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Holding {
-    Held,
-    Left,
-    Evicting,
-    Evicted,
-}
-impl Holding {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Held => "held",
-            Self::Left => "left",
-            Self::Evicting => "evicting",
-            Self::Evicted => "evicted",
-        }
-    }
-    fn parse(label: &str) -> Result<Self, Error> {
-        Ok(match label {
-            "held" => Self::Held,
-            "left" => Self::Left,
-            "evicting" => Self::Evicting,
-            "evicted" => Self::Evicted,
-            _ => return Err(Error::Corrupt("subscription state".into())),
-        })
-    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrontierLog {
@@ -158,29 +132,6 @@ pub struct RangePage {
     pub frontier: ScopeFrontier,
     pub voids: Vec<SignedVoid>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PeerLag {
-    pub peer: PeerId,
-    pub behind: u64,
-    pub ahead: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScopeStatus {
-    pub scope: ResourceScope,
-    pub holding: Holding,
-    pub rows: u64,
-    pub covered: u64,
-    pub uncovered: u64,
-    pub pruned_logs: usize,
-    pub local_operations: u64,
-    pub custody: Vec<(PeerId, u64)>,
-    pub peers: Vec<PeerLag>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReplicaStatus {
-    pub role: RoleConfig,
-    pub scopes: Vec<ScopeStatus>,
-}
 
 impl<A: RowApplication> Inner<A> {
     pub(crate) async fn role(&self) -> Result<RoleConfig, Error> {
@@ -196,28 +147,25 @@ impl<A: RowApplication> Inner<A> {
         self.metadata.with(|cache| cache.role = Some(role.clone()));
         Ok(role)
     }
-    pub(crate) async fn holding(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
-        if let Some(holding) = self
+    pub(crate) async fn subscribed(&self, scope: ResourceScope) -> Result<bool, Error> {
+        if let Some(subscribed) = self
             .metadata
-            .with(|cache| cache.holdings.get(&scope).copied())
+            .with(|cache| cache.subscriptions.get(&scope).copied())
         {
-            return Ok(holding);
+            return Ok(subscribed);
         }
         let mut result = self
             .conn
             .query(
-                "SELECT state FROM secure_subscriptions WHERE scope=?",
+                "SELECT 1 FROM secure_subscriptions WHERE scope=?",
                 [encode(&scope)?],
             )
             .await?;
-        let holding = match result.next().await? {
-            Some(row) => Some(Holding::parse(&row.get::<String>(0)?)?),
-            None => None,
-        };
+        let subscribed = result.next().await?.is_some();
         self.metadata.with(|cache| {
-            cache.holdings.insert(scope, holding);
+            cache.subscriptions.insert(scope, subscribed);
         });
-        Ok(holding)
+        Ok(subscribed)
     }
     pub(super) fn custody_scopes(&self, time: u64) -> Result<BTreeSet<ResourceScope>, Error> {
         let grants = self.local_grants(time)?;
@@ -228,32 +176,16 @@ impl<A: RowApplication> Inner<A> {
             .collect())
     }
     pub(crate) async fn holds(&self, scope: ResourceScope) -> Result<bool, Error> {
-        Ok(match self.holding(scope).await? {
-            Some(Holding::Held) => true,
-            Some(Holding::Evicting | Holding::Evicted) => false,
-            Some(Holding::Left) | None => self.role().await?.role == ReplicaRole::Full,
-        })
+        Ok(self.subscribed(scope).await? || self.role().await?.role == ReplicaRole::Full)
     }
-    async fn set_holding(&self, scope: ResourceScope, holding: Holding) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "INSERT INTO secure_subscriptions VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET state=excluded.state",
-                bindings(vec![
-                    SqlValue::Blob(encode(&scope)?),
-                    SqlValue::Text(holding.label().into()),
-                ]),
-            )
-            .await?;
-        Ok(())
-    }
-    async fn eviction_guard(
+    async fn restoration_guard(
         &self,
         scope: ResourceScope,
     ) -> Result<Option<(i64, Option<Hash>)>, Error> {
         let mut result = self
             .conn
             .query(
-                "SELECT sequence,hash FROM secure_evicted_logs WHERE scope=?",
+                "SELECT sequence,hash FROM secure_restoration_guards WHERE scope=?",
                 [encode(&scope)?],
             )
             .await?;
@@ -279,7 +211,7 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("scope is not held by this replica"));
         }
         if header.public_key == self.config.node.public_key() {
-            let adoptable = match self.eviction_guard(scope).await? {
+            let adoptable = match self.restoration_guard(scope).await? {
                 Some((sequence, hash)) => {
                     let at = header.seq_num as i64;
                     at < sequence || (at == sequence && hash == Some(header.hash()))
@@ -327,7 +259,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         let scope = header.extensions.scope;
         if header.public_key != self.config.node.public_key()
-            || self.eviction_guard(scope).await?.is_none()
+            || self.restoration_guard(scope).await?.is_none()
         {
             return Ok(true);
         }
@@ -352,7 +284,7 @@ impl<A: RowApplication> Inner<A> {
         if !self.holds(scope).await? {
             return Err(denied("author needs a held scope"));
         }
-        if let Some(guard) = self.eviction_guard(scope).await? {
+        if let Some(guard) = self.restoration_guard(scope).await? {
             if !self.restoration_complete(scope, guard).await? {
                 return Err(denied(
                     "catch up the resubscribed scope before authoring in it",
@@ -360,7 +292,7 @@ impl<A: RowApplication> Inner<A> {
             }
             self.conn
                 .execute(
-                    "DELETE FROM secure_evicted_logs WHERE scope=?",
+                    "DELETE FROM secure_restoration_guards WHERE scope=?",
                     [encode(&scope)?],
                 )
                 .await?;
@@ -372,7 +304,7 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         endpoint: (i64, Option<Hash>),
     ) -> Result<(), Error> {
-        if let Some((held, hash)) = self.eviction_guard(scope).await? {
+        if let Some((held, hash)) = self.restoration_guard(scope).await? {
             if held > endpoint.0 {
                 return Ok(());
             }
@@ -385,7 +317,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
-                "INSERT INTO secure_evicted_logs VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=excluded.sequence,hash=excluded.hash",
+                "INSERT INTO secure_restoration_guards VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=excluded.sequence,hash=excluded.hash",
                 bindings(vec![
                     SqlValue::Blob(encode(&scope)?),
                     SqlValue::Integer(endpoint.0),
@@ -395,7 +327,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    pub(super) async fn save_eviction_guard(&self, scope: ResourceScope) -> Result<(), Error> {
+    pub(super) async fn save_restoration_guard(&self, scope: ResourceScope) -> Result<(), Error> {
         let log = match self.find_scope_id(scope).await? {
             Some(id) => self.log(id, self.config.node.public_key()).await?,
             None => None,
@@ -407,22 +339,7 @@ impl<A: RowApplication> Inner<A> {
         .await
     }
     pub(crate) async fn restoring(&self, scope: ResourceScope) -> Result<bool, Error> {
-        Ok(self.eviction_guard(scope).await?.is_some())
-    }
-    pub(super) async fn mark_evicting(
-        &self,
-        scope: ResourceScope,
-        done: bool,
-    ) -> Result<(), Error> {
-        self.set_holding(
-            scope,
-            if done {
-                Holding::Evicted
-            } else {
-                Holding::Evicting
-            },
-        )
-        .await
+        Ok(self.restoration_guard(scope).await?.is_some())
     }
     pub(crate) async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
         self.tip_frontier(scope).await
@@ -783,14 +700,6 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn set_role(&self, config: RoleConfig) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let evicting = rows(
-            &inner.conn,
-            "SELECT 1 FROM secure_subscriptions WHERE state='evicting' LIMIT 1",
-        )
-        .await?;
-        if config.role == ReplicaRole::Full && !evicting.is_empty() {
-            return Err(denied("finish the eviction in progress first"));
-        }
         let bytes = encode(&config)?;
         transaction!(inner, |inner| {
             inner
@@ -800,15 +709,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [bytes.clone()],
                 )
                 .await?;
-            if config.role == ReplicaRole::Full {
-                inner
-                    .conn
-                    .execute(
-                        "UPDATE secure_subscriptions SET state='held' WHERE state='evicted'",
-                        (),
-                    )
-                    .await?;
-            }
             Ok(())
         })
     }
@@ -819,11 +719,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .role()
             .await
     }
-    pub async fn subscription(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
+    pub async fn subscribed(&self, scope: ResourceScope) -> Result<bool, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .holding(scope)
+            .subscribed(scope)
             .await
     }
     pub async fn subscribe(&self, scope: ResourceScope) -> Result<(), Error> {
@@ -835,38 +735,133 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }) {
             return Err(denied("subscription needs whole-scope custody or read"));
         }
-        if inner.holding(scope).await? == Some(Holding::Evicting) {
-            return Err(denied("finish the eviction in progress first"));
-        }
-        transaction!(inner, |inner| inner.set_holding(scope, Holding::Held).await)
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_subscriptions VALUES(?)",
+                    [encode(&scope)?],
+                )
+                .await?;
+            Ok(())
+        })
     }
-    pub async fn unsubscribe(&self, scope: ResourceScope) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) async fn drop_local_history_for_test(&self, scope: ResourceScope) -> u64 {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        match inner.holding(scope).await? {
-            Some(Holding::Evicting | Holding::Evicted | Holding::Left) => Ok(()),
-            _ => {
-                let role = inner.role().await?;
-                let me = inner.config.node.public_key();
-                let wrote = match inner.find_scope_id(scope).await? {
-                    Some(id) => inner.log(id, me).await?.is_some(),
-                    None => false,
-                };
-                if role.role == ReplicaRole::Partial && wrote {
-                    let needed = inner.partition_custody(scope).await?.copies;
-                    let covering = if needed == 0 {
-                        0
-                    } else {
-                        inner.custody_coverage(scope).await?
-                    };
-                    if covering < needed {
-                        return Err(denied(&format!(
-                            "leaving needs {needed} durable custody receipts; {covering} cover the scope"
-                        )));
-                    }
-                }
-                transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await)
+        let blob = encode(&scope).unwrap();
+        let id = inner.find_scope_id(scope).await.unwrap();
+        let dropped = transaction!(inner, |inner| {
+            inner.save_restoration_guard(scope).await?;
+            inner
+                .replace_ledger(scope, super::identity::IdentityLedger::default())
+                .await?;
+            if inner.replayed_scope(scope) {
+                inner.clear_replayed(scope).await?;
             }
+            let operations = collect_rows(
+                inner
+                    .conn
+                    .query(
+                        "SELECT hash,LENGTH(header)+LENGTH(body) FROM secure_operations WHERE scope=?",
+                        [blob.clone()],
+                    )
+                    .await?,
+            )
+            .await?;
+            let mut bytes = 0;
+            for record in &operations {
+                let [SqlValue::Blob(hash), SqlValue::Integer(size)] = record.as_slice() else {
+                    return Err(Error::Corrupt("retained operation".into()));
+                };
+                for table in [
+                    "secure_operations",
+                    "secure_outbox",
+                    "secure_unoffered",
+                    "secure_ack",
+                    "secure_applied",
+                    "secure_publication_frames",
+                ] {
+                    inner
+                        .conn
+                        .execute(format!("DELETE FROM {table} WHERE hash=?"), [hash.clone()])
+                        .await?;
+                }
+                bytes += *size;
+            }
+            inner.clear_applied_cache();
+            inner.sweep_chains().await?;
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_retained SET records=records-?,bytes=bytes-?",
+                    [operations.len() as i64, bytes],
+                )
+                .await?;
+            inner
+                .conn
+                .execute("DELETE FROM secure_row_records WHERE scope=?", [blob.clone()])
+                .await?;
+            if let Some(id) = id {
+                for table in [
+                    "secure_checkpoint_base",
+                    "secure_checkpoint_overlay",
+                    "secure_checkpoint_scratch",
+                    "secure_rebootstrap_rows",
+                    "secure_seal_anchors",
+                    "secure_applied",
+                    "secure_stubs",
+                    "secure_logs",
+                    "secure_checkpoints",
+                    "secure_rebootstrap",
+                    "secure_rebootstrap_stubs",
+                    "secure_rebootstrap_pages",
+                    "secure_checkpoint_pages",
+                    "secure_checkpoint_stubs",
+                    "secure_compaction_live_creations",
+                    "secure_seal_bounds",
+                    "secure_seal_drops",
+                    "secure_replayed_seals",
+                    "secure_replayed_seal_rows",
+                    "secure_replayed_snapshots",
+                    "secure_replayed_base_source",
+                    "secure_replayed_base_rows",
+                    "secure_base_transition",
+                    "secure_base_cleanup",
+                    "secure_replayed_staged",
+                ] {
+                    inner
+                        .conn
+                        .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
+                        .await?;
+                }
+                inner
+                    .store_scope_state(id, 0, 0, &super::checkpoint::LtHash16::new(), 0)
+                    .await?;
+            }
+            for table in ["secure_retention", "secure_peer_frontiers", "secure_identity_ledger"] {
+                inner
+                    .conn
+                    .execute(format!("DELETE FROM {table} WHERE scope=?"), [blob.clone()])
+                    .await?;
+            }
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                    (),
+                )
+                .await?;
+            Ok(operations.len() as u64)
+        })
+        .unwrap();
+        if let Some(id) = id {
+            inner.verified_at.remove(&id);
         }
+        inner.publish_revision().await.unwrap();
+        inner.load_direct().await.unwrap();
+        inner.retry_rederive(scope.domain).await.unwrap();
+        dropped
     }
     #[cfg(test)]
     pub(crate) async fn merge_restoration_for_test(
@@ -876,7 +871,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Option<(i64, Option<Hash>)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.merge_restoration_guard(scope, endpoint).await?;
-        inner.eviction_guard(scope).await
+        inner.restoration_guard(scope).await
     }
     pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -884,7 +879,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(());
         }
         let cleared = transaction!(inner, |inner| {
-            let Some(guard) = inner.eviction_guard(scope).await? else {
+            let Some(guard) = inner.restoration_guard(scope).await? else {
                 return Ok(false);
             };
             if !inner.restoration_complete(scope, guard).await? {
@@ -893,7 +888,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .execute(
-                    "DELETE FROM secure_evicted_logs WHERE scope=?",
+                    "DELETE FROM secure_restoration_guards WHERE scope=?",
                     [encode(&scope)?],
                 )
                 .await?;
@@ -912,21 +907,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.publish_revision().await
     }
-    pub async fn subscriptions(&self) -> Result<Vec<(ResourceScope, Holding)>, Error> {
+    pub async fn subscriptions(&self) -> Result<BTreeSet<ResourceScope>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let mut scopes = Vec::new();
-        for record in rows(
-            &inner.conn,
-            "SELECT scope,state FROM secure_subscriptions ORDER BY scope",
-        )
-        .await?
-        {
-            let [SqlValue::Blob(scope), SqlValue::Text(state)] = record.as_slice() else {
+        let mut scopes = BTreeSet::new();
+        for record in rows(&inner.conn, "SELECT scope FROM secure_subscriptions").await? {
+            let [SqlValue::Blob(scope)] = record.as_slice() else {
                 return Err(Error::Corrupt("subscription".into()));
             };
-            scopes.push((decode(scope)?, Holding::parse(state)?));
+            scopes.insert(decode(scope)?);
         }
-        scopes.sort_by_key(|(scope, _)| *scope);
         Ok(scopes)
     }
     pub async fn held_scopes(
@@ -1030,136 +1019,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .authorize_peer(peer, credentials, scope)
     }
-    pub async fn replica_status(&self) -> Result<ReplicaStatus, Error> {
-        let (role, scopes) = {
-            let inner = self.inner.lock(crate::replica::Class::Background).await;
-            let mut scopes = BTreeSet::new();
-            for sql in [
-                "SELECT scope FROM secure_scope_state",
-                "SELECT scope FROM secure_subscriptions",
-            ] {
-                for record in rows(&inner.conn, sql).await? {
-                    let [SqlValue::Blob(scope)] = record.as_slice() else {
-                        return Err(Error::Corrupt("scope".into()));
-                    };
-                    scopes.insert(decode::<ResourceScope>(scope)?);
-                }
-            }
-            (inner.role().await?, scopes)
-        };
-        let mut status = Vec::new();
-        for scope in scopes {
-            rocky_platform::task::yield_now().await;
-            let inner = self.inner.lock(crate::replica::Class::Background).await;
-            let me = inner.config.node.public_key();
-            let holding = match inner.holding(scope).await? {
-                Some(holding) => holding,
-                None if role.role == ReplicaRole::Full => Holding::Held,
-                None => Holding::Left,
-            };
-            let blob = encode(&scope)?;
-            let frontier = inner.frontier(scope).await?;
-            let mut entry = ScopeStatus {
-                scope,
-                holding,
-                rows: 0,
-                covered: 0,
-                uncovered: 0,
-                pruned_logs: 0,
-                local_operations: frontier.log(me).map_or(0, |log| log.applied),
-                custody: vec![],
-                peers: vec![],
-            };
-            if let Some(id) = inner.find_scope_id(scope).await? {
-                let (rows, tombstones, _, _) = inner.scope_state(id).await?;
-                entry.rows = rows - tombstones;
-                let position = inner
-                    .checkpoint_record(id, true)
-                    .await?
-                    .map_or(0, |record| record.position);
-                let counts = collect_rows(
-                    inner
-                        .conn
-                        .query(
-                            "SELECT COALESCE(SUM(position<=?),0),COALESCE(SUM(position>?),0) FROM secure_applied WHERE scope=?",
-                            [position, position, id],
-                        )
-                        .await?,
-                )
-                .await?;
-                if let Some([SqlValue::Integer(covered), SqlValue::Integer(uncovered)]) =
-                    counts.first().map(Vec::as_slice)
-                {
-                    entry.covered = *covered as u64;
-                    entry.uncovered = *uncovered as u64;
-                }
-                entry.pruned_logs = inner.logs(id, None, true, MAX_CHECKPOINT_LOGS).await?.len();
-            }
-            let receipts = inner.durable_custodians(scope).await?;
-            for peer in inner.partition_custody(scope).await?.peers {
-                let held = receipts
-                    .iter()
-                    .find(|receipt| receipt.peer() == peer)
-                    .map_or(0, |receipt| receipt.held(me));
-                entry.custody.push((peer, held.min(entry.local_operations)));
-            }
-            let peers = collect_rows(
-                inner
-                    .conn
-                    .query(
-                        "SELECT DISTINCT peer FROM secure_peer_frontiers WHERE scope=? ORDER BY peer",
-                        [blob.clone()],
-                    )
-                    .await?,
-            )
-            .await?;
-            for record in peers {
-                let [SqlValue::Blob(peer)] = record.as_slice() else {
-                    return Err(Error::Corrupt("peer frontier".into()));
-                };
-                let peer = peer_id(peer)?;
-                let mut theirs = ScopeFrontier {
-                    scope,
-                    logs: vec![],
-                };
-                for log in collect_rows(
-                    inner
-                        .conn
-                        .query(
-                            "SELECT author,held,applied FROM secure_peer_frontiers WHERE peer=? AND scope=? ORDER BY author",
-                            [peer.as_bytes().to_vec(), blob.clone()],
-                        )
-                        .await?,
-                )
-                .await?
-                {
-                    let [
-                        SqlValue::Blob(author),
-                        SqlValue::Integer(held),
-                        SqlValue::Integer(applied),
-                    ] = log.as_slice()
-                    else {
-                        return Err(Error::Corrupt("peer frontier".into()));
-                    };
-                    theirs.logs.push(FrontierLog {
-                        author: key_of(author)?,
-                        held: *held as u64,
-                        applied: *applied as u64,
-                    });
-                }
-                entry.peers.push(PeerLag {
-                    peer,
-                    behind: theirs.lag_behind(&frontier),
-                    ahead: frontier.lag_behind(&theirs),
-                });
-            }
-            status.push(entry);
-        }
-        Ok(ReplicaStatus {
-            role,
-            scopes: status,
-        })
-    }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn exchange_frontiers(
@@ -1196,13 +1055,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }));
         }
         Ok(replies)
-    }
-    pub(crate) async fn evicted(&self, scope: ResourceScope) -> Result<bool, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        Ok(matches!(
-            inner.holding(scope).await?,
-            Some(Holding::Evicting | Holding::Evicted)
-        ))
     }
     pub(crate) async fn held_of(
         &self,

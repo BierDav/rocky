@@ -683,7 +683,7 @@ async fn a_pulled_seal_state_can_be_a_no_frames_record() {
     );
     assert_eq!(b.finish_seal_pull(f.private).await.unwrap(), sealed);
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM secure_evicted_logs").await,
+        count(&b, "SELECT COUNT(*) FROM secure_restoration_guards").await,
         0,
         "fetching a seal's state creates no restoration obligation"
     );

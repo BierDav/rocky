@@ -1063,7 +1063,7 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
         target.receipt_status(frame.id().unwrap()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    target.evict_key(fixture.private).await;
+    target.forget_key(fixture.private).await;
     assert_eq!(
         target.companion(fixture.private, [1; 32]).await.unwrap(),
         Companion::Unavailable

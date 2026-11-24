@@ -1674,7 +1674,7 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     assert_eq!(rows.len(), 5, "the cursor keeps its snapshot");
     cursor.reset().await.unwrap();
     cursor.next().await.unwrap();
-    alice.evict_key(t.salaries).await;
+    alice.forget_key(t.salaries).await;
     assert!(
         matches!(
             cursor.next().await,
@@ -1959,7 +1959,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
         [Cause::Sync].into(),
         "a receipt wakes the receiver's observers"
     );
-    alice.evict_key(t.salaries).await;
+    alice.forget_key(t.salaries).await;
     assert_eq!(
         salaries.next().await.unwrap().causes,
         [Cause::Authority].into(),

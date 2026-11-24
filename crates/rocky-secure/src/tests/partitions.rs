@@ -390,7 +390,7 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
+async fn partition_frames_keys_sql_and_checkpoints_are_isolated() {
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new();
     let author = PrivateKey::new();
@@ -633,53 +633,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .unwrap()
             .rows[0][0],
         SqlValue::Integer(30)
-    );
-    let (full_node, full_credentials) = {
-        let inner = a.inner.lock(crate::replica::Class::Background).await;
-        (
-            inner.config.node.public_key(),
-            inner.config.credentials.clone(),
-        )
-    };
-    restored
-        .set_role(crate::RoleConfig {
-            role: crate::ReplicaRole::Partial,
-        })
-        .await
-        .unwrap();
-    restored.subscribe(f.scope("A")).await.unwrap();
-    restored.subscribe(f.scope("B")).await.unwrap();
-    restored
-        .acknowledge_frontier(
-            full_node,
-            &full_credentials,
-            &a.frontier(f.scope("A")).await.unwrap(),
-        )
-        .await
-        .unwrap();
-    restored.unsubscribe(f.scope("A")).await.unwrap();
-    restored.evict(f.scope("A")).await.unwrap();
-    assert!(!restored.table_complete(f.scope("A").table).await.unwrap());
-    let remaining = restored
-        .session([f.scope("B")].into())
-        .await
-        .unwrap()
-        .sql(Default::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        remaining
-            .run("SELECT SUM(amount) FROM items", vec![])
-            .await
-            .unwrap()
-            .rows[0][0],
-        SqlValue::Integer(20)
-    );
-    assert!(
-        remaining
-            .run("SELECT * FROM items WHERE list='A'", vec![])
-            .await
-            .is_err()
     );
     assert_eq!(
         cp.statement.format,

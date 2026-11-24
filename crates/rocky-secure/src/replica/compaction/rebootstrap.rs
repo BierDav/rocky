@@ -248,7 +248,7 @@ impl<A: RowApplication> Inner<A> {
         if !reset {
             return Ok(());
         }
-        self.save_eviction_guard(scope).await?;
+        self.save_restoration_guard(scope).await?;
         let blob = encode(&scope)?;
         self.conn
             .execute(

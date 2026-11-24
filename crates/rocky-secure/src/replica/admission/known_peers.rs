@@ -1,5 +1,5 @@
 use super::MAX_REMEMBERED_PEERS;
-use rocky_core::{ResourceScope, TipId};
+use rocky_core::TipId;
 use rocky_credentials::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,8 +8,6 @@ pub(crate) struct KnownPeers {
     clock: u64,
     seen: BTreeMap<PeerId, Seen>,
     configured: BTreeSet<PeerId>,
-    custody: BTreeMap<ResourceScope, BTreeSet<PeerId>>,
-    kept: BTreeSet<PeerId>,
 }
 
 struct Seen {
@@ -29,7 +27,7 @@ impl KnownPeers {
             .map(|(peer, _)| peer)
     }
     pub(super) fn kept(&self, peer: &PeerId) -> bool {
-        self.kept.contains(peer)
+        self.configured.contains(peer)
     }
     pub(super) fn last_seen(&self, peer: &PeerId) -> Option<u64> {
         self.seen.get(peer).map(|seen| seen.at)
@@ -70,31 +68,6 @@ impl KnownPeers {
     }
     pub(super) fn configure(&mut self, peers: BTreeSet<PeerId>) {
         self.configured = peers;
-        self.rekeep();
-    }
-    pub(in crate::replica) fn custody(&self, scope: &ResourceScope) -> BTreeSet<PeerId> {
-        self.custody.get(scope).cloned().unwrap_or_default()
-    }
-    pub(in crate::replica) fn set_custody(
-        &mut self,
-        scope: ResourceScope,
-        peers: BTreeSet<PeerId>,
-    ) {
-        if peers.is_empty() {
-            self.custody.remove(&scope);
-        } else {
-            self.custody.insert(scope, peers);
-        }
-        self.rekeep();
-    }
-    fn rekeep(&mut self) {
-        self.kept = self
-            .custody
-            .values()
-            .flatten()
-            .chain(&self.configured)
-            .copied()
-            .collect();
         self.evict_beyond_bound(None);
     }
     fn tick(&mut self) -> u64 {
@@ -102,7 +75,7 @@ impl KnownPeers {
         self.clock
     }
     fn evict_beyond_bound(&mut self, arriving: Option<PeerId>) {
-        let unkept = |peer: &PeerId| !self.kept.contains(peer);
+        let unkept = |peer: &PeerId| !self.configured.contains(peer);
         let excess = self
             .seen
             .keys()

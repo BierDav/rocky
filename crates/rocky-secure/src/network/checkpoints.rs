@@ -13,17 +13,6 @@ pub(super) enum CheckpointMessage {
     PrunedLogs {
         page: PrunedPage,
     },
-    ArchiveProgress {
-        after: Option<Commitment>,
-        complete: bool,
-    },
-    ArchiveBegin {
-        signed: Box<SignedCheckpoint>,
-    },
-    ArchivePage {
-        page: Box<CheckpointPage>,
-        vouch: Box<crate::replica::checkpoint::CheckpointVouch>,
-    },
     CheckpointOffer {
         scope: ResourceScope,
     },
@@ -55,63 +44,6 @@ pub enum SealPull {
 }
 
 impl NativeSession {
-    pub(super) async fn push_checkpoint_custody<A: RowApplication>(
-        &mut self,
-        replica: &EncryptedReplica<A>,
-        scope: ResourceScope,
-    ) -> Result<(), Error> {
-        let Some(signed) = replica
-            .checkpoint_offer(self.peer, &self.credentials, scope)
-            .await?
-        else {
-            return Ok(());
-        };
-        if signed.statement.seal.is_none() || signed.statement.no_frames() {
-            return Ok(());
-        }
-        let checkpoint = signed.id()?;
-        self.send(CheckpointMessage::ArchiveBegin {
-            signed: Box::new(signed),
-        })
-        .await?;
-        let CheckpointMessage::ArchiveProgress {
-            mut after,
-            complete,
-        } = self.reply::<CheckpointMessage>().await?
-        else {
-            return Err(denied("unexpected checkpoint custody progress"));
-        };
-        if complete {
-            return Ok(());
-        }
-        loop {
-            if self.budget_low(MAX_SECURE_FRAME) {
-                return Ok(());
-            }
-            let page = replica
-                .checkpoint_page(
-                    self.peer,
-                    &self.credentials,
-                    scope,
-                    checkpoint,
-                    after,
-                    CHECKPOINT_PAGE / 2,
-                )
-                .await?;
-            let vouch = replica.vouch_checkpoint_page(&page).await?;
-            after = page.next;
-            self.send(CheckpointMessage::ArchivePage {
-                page: Box::new(page),
-                vouch: Box::new(vouch),
-            })
-            .await?;
-            self.acknowledged("checkpoint custody acknowledgement")
-                .await?;
-            if after.is_none() {
-                return Ok(());
-            }
-        }
-    }
     async fn pull_seal_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -366,10 +298,6 @@ impl NativeSession {
         self.ensure_holding(replica, scopes).await?;
         let mut offered = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            if replica.evicted(*scope).await? {
-                offered.push(None);
-                continue;
-            }
             offered.push(match self.checkpoint_offer(*scope).await? {
                 Some(signed)
                     if signed.statement.seal.is_some()
@@ -540,9 +468,6 @@ impl NativeSession {
             }));
         }
         self.ensure_holding(replica, &[scope]).await?;
-        if replica.evicted(scope).await? {
-            return Ok(None);
-        }
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };
@@ -635,19 +560,6 @@ impl NativeSession {
                     .pruned_page(self.peer, &self.credentials, scope, after)
                     .await?;
                 self.send(CheckpointMessage::PrunedLogs { page }).await
-            }
-            CheckpointMessage::ArchiveBegin { signed } => {
-                let (after, complete) = replica
-                    .begin_checkpoint_archive(self.peer, &self.credentials, *signed)
-                    .await?;
-                self.send(CheckpointMessage::ArchiveProgress { after, complete })
-                    .await
-            }
-            CheckpointMessage::ArchivePage { page, vouch } => {
-                replica
-                    .archive_checkpoint_page(self.peer, &self.credentials, *page, *vouch)
-                    .await?;
-                self.send(Message::Acknowledged).await
             }
             CheckpointMessage::CheckpointOffer { scope } => {
                 let signed = replica

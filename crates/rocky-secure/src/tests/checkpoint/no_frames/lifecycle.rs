@@ -1486,7 +1486,7 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     .unwrap();
     let guards = rows(
         &d.inner.lock(crate::replica::Class::Background).await.conn,
-        "SELECT * FROM secure_evicted_logs ORDER BY scope",
+        "SELECT * FROM secure_restoration_guards ORDER BY scope",
     )
     .await
     .unwrap();
@@ -1528,7 +1528,7 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     assert_eq!(
         rows(
             &d.inner.lock(crate::replica::Class::Background).await.conn,
-            "SELECT * FROM secure_evicted_logs ORDER BY scope"
+            "SELECT * FROM secure_restoration_guards ORDER BY scope"
         )
         .await
         .unwrap(),
@@ -1665,7 +1665,7 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
         );
     }
     assert_eq!(
-        count(&b, "SELECT COUNT(*) FROM secure_evicted_logs").await,
+        count(&b, "SELECT COUNT(*) FROM secure_restoration_guards").await,
         0
     );
     drop(b);

@@ -144,7 +144,7 @@ impl Snapshot for sdk::CreatedPartition {
 }
 impl Snapshot for sdk::partitions::PartitionStatus {
     fn snapshot(self) -> Value {
-        json!({"group":self.group,"address":self.address,"current":self.current,"epochs":self.epochs,"tables":self.tables.into_iter().map(|table|json!({"table":table.table,"scope":table.scope,"partition":table.scope.map(|scope|data_encoding::HEXLOWER.encode(&scope.encryption)),"epochs":table.epochs,"current":table.current,"holding":table.holding.map(|holding|format!("{holding:?}").to_lowercase())})).collect::<Vec<_>>(),"recipients":self.recipients.into_iter().map(|recipient|json!({"node":recipient.node,"reference":recipient.reference,"epoch":recipient.epoch,"state":match recipient.state { sdk::DeliveryState::Delivered=>"delivered",sdk::DeliveryState::Deposited=>"deposited",sdk::DeliveryState::Pending=>"pending" }})).collect::<Vec<_>>()})
+        json!({"group":self.group,"address":self.address,"current":self.current,"epochs":self.epochs,"tables":self.tables.into_iter().map(|table|json!({"table":table.table,"scope":table.scope,"partition":table.scope.map(|scope|data_encoding::HEXLOWER.encode(&scope.encryption)),"epochs":table.epochs,"current":table.current,"subscribed":table.subscribed})).collect::<Vec<_>>(),"recipients":self.recipients.into_iter().map(|recipient|json!({"node":recipient.node,"reference":recipient.reference,"epoch":recipient.epoch,"state":match recipient.state { sdk::DeliveryState::Delivered=>"delivered",sdk::DeliveryState::Deposited=>"deposited",sdk::DeliveryState::Pending=>"pending" }})).collect::<Vec<_>>()})
     }
 }
 impl Snapshot for Vec<sdk::inspection::HeldChange> {

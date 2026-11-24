@@ -209,7 +209,7 @@ async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restore
         device.replica.subscribe(c.scope(name)).await.unwrap();
     }
     let own_frames_not_back_since_eviction = format!(
-        "INSERT INTO secure_evicted_logs VALUES(?,7,X'{}')",
+        "INSERT INTO secure_restoration_guards VALUES(?,7,X'{}')",
         "11".repeat(32)
     );
     execute(

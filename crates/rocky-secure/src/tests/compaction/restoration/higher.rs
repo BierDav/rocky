@@ -99,7 +99,7 @@ async fn a_signed_higher_fork_refuses_both_completion_callers_until_its_exact_br
     let held = held(&f.replica).await;
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(self::held(&f.replica).await, held);
@@ -125,9 +125,12 @@ async fn admitted_historical_frames_do_not_need_a_fresh_unexpired_grant() {
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
     let node = inner.config.node.public_key();
     let admitted_in_a_rolled_back_transaction = inner.admit_author(scope, node).await;
-    let cleared = rows(&inner.conn, "SELECT count(*) FROM secure_evicted_logs")
-        .await
-        .unwrap();
+    let cleared = rows(
+        &inner.conn,
+        "SELECT count(*) FROM secure_restoration_guards",
+    )
+    .await
+    .unwrap();
     inner.conn.execute("ROLLBACK", ()).await.unwrap();
     drop(inner);
     crate::CLOCK_SKEW.with(|skew| skew.set(skew.get() - PAST_GRANT_EXPIRY));
@@ -136,7 +139,7 @@ async fn admitted_historical_frames_do_not_need_a_fresh_unexpired_grant() {
     assert_eq!(cleared, vec![vec![SqlValue::Integer(0)]]);
     f.replica.restored(scope).await.unwrap();
     assert_eq!(
-        scalar(&f.replica, "SELECT count(*) FROM secure_evicted_logs").await,
+        scalar(&f.replica, "SELECT count(*) FROM secure_restoration_guards").await,
         0
     );
     assert_eq!(self::held(&f.replica).await, held);

@@ -518,4 +518,86 @@ mod regressions {
         steps.extend([InviteTo(0, 2, "l0".into()), Sync(2)]);
         holds_at(178201, soak_at(178201, Wall::Moving), steps).await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_joiner_rebootstrapping_a_list_publishes_the_outcome_its_peers_reached()
+    -> Result<(), Failure> {
+        holds_at(
+            20311,
+            soak_at(20311, Wall::Moving),
+            vec![
+                Change(
+                    0,
+                    Change::Raise {
+                        list: "l0".into(),
+                        card: 5,
+                        by: -1,
+                    },
+                ),
+                Sync(1),
+                Change(
+                    1,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 0,
+                        name: 1,
+                        points: 4,
+                    },
+                ),
+                Seal(0),
+                Change(
+                    1,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 1,
+                        pinned: Some(3),
+                        name: 3,
+                        points: 1,
+                    },
+                ),
+                Change(
+                    0,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 6,
+                        pinned: None,
+                        name: 1,
+                        points: 1,
+                    },
+                ),
+                Sync(0),
+                Sync(1),
+                Invite(0, 2),
+                Online(0),
+                Sever(2, 0),
+                Change(
+                    1,
+                    Change::DropBoard {
+                        list: "l1".into(),
+                        board: 7,
+                    },
+                ),
+                Sync(1),
+                Change(
+                    1,
+                    Change::Raise {
+                        list: "l1".into(),
+                        card: 3,
+                        by: -1,
+                    },
+                ),
+                Change(
+                    0,
+                    Change::DropBoard {
+                        list: "l1".into(),
+                        board: 3,
+                    },
+                ),
+                Compact(1),
+                Invite(0, 3),
+                Compact(0),
+            ],
+        )
+        .await
+    }
 }

@@ -56,7 +56,7 @@ pub use access::Access;
 #[cfg(any(test, feature = "test-support"))]
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use configuration::Configuration;
-pub use connection::{ChangeCause, TableChange, TableEvents};
+pub use connection::{ChangeCause, DroppedTransaction, TableChange, TableEvents};
 pub use database::{Created, Database};
 #[cfg(any(test, feature = "test-support"))]
 pub use delivery::State as DeliveryState;

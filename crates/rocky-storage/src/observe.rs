@@ -1,5 +1,5 @@
 use crate::Error;
-use rocky_core::{Commitment, Scope};
+use rocky_core::{Commitment, Scope, replay::DropReason};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, Weak},
@@ -18,7 +18,7 @@ pub struct TableChange {
     pub tables: BTreeSet<String>,
     pub revisions: BTreeMap<Scope, u64>,
     pub causes: BTreeSet<Cause>,
-    pub dropped: BTreeSet<Commitment>,
+    pub dropped: BTreeMap<Commitment, DropReason>,
     pub sealed: BTreeSet<Commitment>,
     pub reconcile: bool,
 }
@@ -224,7 +224,7 @@ impl TableEvents {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcomes {
-    pub dropped: BTreeSet<Commitment>,
+    pub dropped: BTreeMap<Commitment, DropReason>,
     pub sealed: BTreeSet<Commitment>,
 }
 
@@ -312,14 +312,14 @@ mod tests {
         events.publish_outcomes(
             5,
             &Outcomes {
-                dropped: [[7; 32]].into(),
+                dropped: [([7; 32], DropReason::Schema)].into(),
                 sealed: [[8; 32]].into(),
             },
         );
         events.publish_outcomes(6, &Outcomes::default());
         for observer in [&mut items, &mut tags] {
             let change = observer.next().await.unwrap();
-            assert_eq!(change.dropped, [[7; 32]].into());
+            assert_eq!(change.dropped, [([7; 32], DropReason::Schema)].into());
             assert_eq!(change.sealed, [[8; 32]].into());
             assert!(change.tables.is_empty());
             assert_eq!(change.revisions, [(scope(1), 5)].into());
@@ -399,7 +399,7 @@ mod tests {
             id[..4].copy_from_slice(&index.to_le_bytes());
             let outcomes = if index % 2 == 0 {
                 Outcomes {
-                    dropped: [id].into(),
+                    dropped: [(id, DropReason::Constraint)].into(),
                     ..Outcomes::default()
                 }
             } else {
@@ -425,7 +425,7 @@ mod tests {
         events.publish_outcomes(
             1,
             &Outcomes {
-                dropped: [[9; 32]].into(),
+                dropped: [([9; 32], DropReason::Admission)].into(),
                 ..Outcomes::default()
             },
         );
@@ -434,6 +434,6 @@ mod tests {
             !change.reconcile,
             "the next change names its outcomes again"
         );
-        assert_eq!(change.dropped, [[9; 32]].into());
+        assert_eq!(change.dropped, [([9; 32], DropReason::Admission)].into());
     }
 }

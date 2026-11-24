@@ -979,9 +979,14 @@ pub struct TableEvents {
 pub struct TableChange {
     pub tables: Vec<String>,
     pub causes: Vec<ChangeCause>,
-    pub dropped: Vec<crate::TransactionToken>,
+    pub dropped: Vec<DroppedTransaction>,
     pub sealed: Vec<crate::TransactionToken>,
     pub reconcile: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DroppedTransaction {
+    pub token: crate::TransactionToken,
+    pub reason: rocky_core::replay::DropReason,
 }
 impl TableEvents {
     pub(crate) fn new(observer: TableObserver) -> Self {
@@ -1003,7 +1008,10 @@ impl TableEvents {
             dropped: change
                 .dropped
                 .into_iter()
-                .map(crate::TransactionToken::new)
+                .map(|(transaction, reason)| DroppedTransaction {
+                    token: crate::TransactionToken::new(transaction),
+                    reason,
+                })
                 .collect(),
             sealed: change
                 .sealed

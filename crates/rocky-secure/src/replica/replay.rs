@@ -24,6 +24,7 @@ const KEPT_OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_kept_outcom
 const REPLAYED_REDERIVE_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)";
 const REPLAYED_STUCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_stuck(id INTEGER PRIMARY KEY CHECK(id=1),inputs BLOB NOT NULL,violation TEXT NOT NULL)";
+const SCHEMA_DROPS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_schema_drops(txn BLOB PRIMARY KEY,node BLOB NOT NULL,written INTEGER NOT NULL) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_TABLE,
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
@@ -33,6 +34,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_kept_outcomes_txn ON secure_kept_outcomes(txn)",
     REPLAYED_REDERIVE_TABLE,
     REPLAYED_STUCK_TABLE,
+    SCHEMA_DROPS_TABLE,
 ];
 
 const MIGRATION_CAPTURE: (usize, usize) = (usize::MAX, usize::MAX);
@@ -186,7 +188,63 @@ pub const ROUTINE_SEAL_TRANSACTIONS: u64 = 128;
 
 pub(crate) const SEAL_SNAPSHOTS: i64 = 2;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaDrop {
+    pub transaction: Commitment,
+    pub node: PublicKey,
+    pub written: u64,
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
+    pub async fn schema_drops(&self) -> Result<Vec<SchemaDrop>, Error> {
+        let inner = self.inner.lock(Class::Interactive).await;
+        collect_rows(
+            inner
+                .conn
+                .query(
+                    "SELECT txn,node,written FROM secure_schema_drops ORDER BY written,txn",
+                    (),
+                )
+                .await?,
+        )
+        .await?
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [
+                SqlValue::Blob(transaction),
+                SqlValue::Blob(node),
+                SqlValue::Integer(written),
+            ] => Ok(SchemaDrop {
+                transaction: transaction
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("schema drop transaction".into()))?,
+                node: node
+                    .as_slice()
+                    .try_into()
+                    .ok()
+                    .and_then(|bytes| PublicKey::from_bytes(bytes).ok())
+                    .ok_or_else(|| Error::Corrupt("schema drop node".into()))?,
+                written: u64::try_from(*written)
+                    .map_err(|_| Error::Corrupt("schema drop time".into()))?,
+            }),
+            _ => Err(Error::Corrupt("schema drop".into())),
+        })
+        .collect()
+    }
+
+    pub async fn acknowledge_schema_drop(&self, transaction: Commitment) -> Result<bool, Error> {
+        let inner = self.inner.lock(Class::Interactive).await;
+        let removed = inner
+            .conn
+            .execute(
+                "DELETE FROM secure_schema_drops WHERE txn=?",
+                [transaction.to_vec()],
+            )
+            .await?;
+        Ok(removed > 0)
+    }
+
     pub async fn unsealed_replayed_transactions(&self) -> Result<u64, Error> {
         let inner = self.inner.lock(Class::Background).await;
         let rows = collect_rows(
@@ -1661,8 +1719,20 @@ impl<A: RowApplication> Inner<A> {
         let header = &operation.header;
         let stamp = stamp(header);
         let id = self.scope_id(header.extensions.scope).await?;
-        if dropped.is_some() {
-            self.touch_dropped(transaction);
+        if let Some(dropped) = dropped {
+            self.touch_dropped(transaction, dropped.reason);
+            if dropped.reason == DropReason::Schema {
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO secure_schema_drops VALUES(?,?,?)",
+                        bindings(vec![
+                            SqlValue::Blob(transaction.to_vec()),
+                            SqlValue::Blob(header.public_key.as_bytes().to_vec()),
+                            clock_value(stamp.clock)?,
+                        ]),
+                    )
+                    .await?;
+            }
         }
         self.conn
             .execute(

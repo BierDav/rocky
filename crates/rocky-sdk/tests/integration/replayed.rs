@@ -123,7 +123,10 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
     }
     loop {
         let change = events.next().await?;
-        if change.dropped.contains(&later) {
+        if change.dropped.contains(&rocky_sdk::DroppedTransaction {
+            token: later,
+            reason: rocky_sdk::DropReason::Constraint,
+        }) {
             break;
         }
     }

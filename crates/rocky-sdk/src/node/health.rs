@@ -10,7 +10,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 #[derive(Default)]
 pub(super) struct TrustedWatch {
@@ -167,7 +167,27 @@ impl Node {
                 .chain(regressed)
                 .map(|kind| Alert { kind, since: None }),
         );
+        alerts.extend(self.write_dropped_alerts().await?);
         Ok(alerts)
+    }
+    async fn write_dropped_alerts(&self) -> Result<Vec<Alert>, Failure> {
+        let admin = self.settings.lock().await.issuer();
+        let own = self.replica.node_key();
+        Ok(self
+            .replica
+            .schema_drops()
+            .await?
+            .into_iter()
+            .filter(|drop| admin || drop.node == own)
+            .map(|drop| Alert {
+                kind: AlertKind::WriteDropped {
+                    token: crate::TransactionToken::new(drop.transaction),
+                    node: drop.node.to_hex(),
+                    reason: crate::DropReason::Schema,
+                },
+                since: Some(drop.written),
+            })
+            .collect())
     }
     async fn tip_chain_alerts(&self) -> Result<Vec<Alert>, Failure> {
         let graph = match self.replica.tip_graph(self.domain().scope).await {

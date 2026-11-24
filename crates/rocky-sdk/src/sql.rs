@@ -59,7 +59,9 @@ impl IntoSqlValue for TransactionToken {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct TransactionToken(rocky_core::Commitment);
 impl TransactionToken {
     pub(crate) fn new(transaction: rocky_core::Commitment) -> Self {

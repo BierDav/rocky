@@ -232,9 +232,13 @@ impl<A: RowApplication> Inner<A> {
             touched.tables.insert(table.to_ascii_lowercase());
         }
     }
-    pub(super) fn touch_dropped(&self, transaction: Commitment) {
+    pub(super) fn touch_dropped(
+        &self,
+        transaction: Commitment,
+        reason: rocky_core::replay::DropReason,
+    ) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
-            touched.outcomes.dropped.insert(transaction);
+            touched.outcomes.dropped.insert(transaction, reason);
         }
     }
     pub(super) fn touch_sealed(&self, transaction: Commitment) {

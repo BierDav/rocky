@@ -1180,3 +1180,129 @@ fn failed_at(error: &(dyn std::error::Error + 'static), version: u32, step: usiz
             if *failed == version && *at == step
     )
 }
+
+async fn dropped_alerts(device: &Device) -> Result<Vec<rocky_sdk::TransactionToken>, Failure> {
+    Ok(device
+        .database
+        .status()
+        .await?
+        .alerts
+        .into_iter()
+        .filter_map(|alert| match alert.kind {
+            rocky_sdk::status::AlertKind::WriteDropped {
+                token,
+                reason: rocky_sdk::DropReason::Schema,
+                ..
+            } => Some(token),
+            _ => None,
+        })
+        .collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_write_a_removal_no_longer_applies_is_dropped_loudly() -> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let owner = Device::create(&dirs("owner"), network("owner")).await?;
+    let bob = Device::join(
+        &dirs("bob"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("bob")),
+    )
+    .await?;
+    let carol = Device::join(
+        &dirs("carol"),
+        &owner.invite().await,
+        Network::Owned(hub.connector("carol")),
+    )
+    .await?;
+    introduce(&owner, &bob).await;
+    introduce(&owner, &carol).await;
+    owner.add(1, "Coffee").await;
+    sync(&bob).await;
+    sync(&carol).await;
+    bob.close().await;
+    owner.close().await;
+
+    let owner = reopen(&dirs("owner"), &memoed(), network("owner")).await?;
+    sync(&carol).await;
+    owner.close().await;
+    let owner =
+        Device::new(common::confirmed(open(&dirs("owner"), &untitled(), network("owner"))).await?)?;
+    sync(&carol).await;
+
+    let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
+    let events = bob.database.observe(&[]).await?;
+    let mut tx = bob.database.transaction().await?;
+    let id = tx.next_id("items", Vec::new()).await?;
+    tx.execute(
+        "INSERT INTO items(id,key,completed,title) VALUES(?,'tea',0,'Tea')",
+        vec![id.sql()],
+    )
+    .await?;
+    let rocky_sdk::Commit::Recorded(tea) = tx.commit().await? else {
+        return Err("a write has a token".into());
+    };
+    introduce(&owner, &bob).await;
+    for _ in 0..3 {
+        sync(&bob).await;
+        sync(&carol).await;
+        sync(&owner).await;
+    }
+    assert_eq!(generation(&bob).await["current"]["schema"], 3);
+    let dropped = rocky_sdk::DroppedTransaction {
+        token: tea,
+        reason: rocky_sdk::DropReason::Schema,
+    };
+    while !events.next().await?.dropped.contains(&dropped) {}
+    assert_eq!(
+        bob.database.transaction_outcome(tea).await?,
+        Some(rocky_sdk::TransactionOutcome::Dropped {
+            reason: rocky_sdk::DropReason::Schema,
+            sealed: false,
+        })
+    );
+    assert_eq!(
+        dropped_alerts(&bob).await?,
+        [tea],
+        "the writer is told its write was dropped"
+    );
+    assert_eq!(
+        dropped_alerts(&owner).await?,
+        [tea],
+        "an admin is told a member's write was dropped"
+    );
+    assert_eq!(
+        dropped_alerts(&carol).await?,
+        [],
+        "a member that neither wrote it nor administers stays quiet"
+    );
+
+    bob.close().await;
+    let bob = reopen(&dirs("bob"), &untitled(), network("bob")).await?;
+    assert_eq!(
+        dropped_alerts(&bob).await?,
+        [tea],
+        "the alert survives a restart until it is acknowledged"
+    );
+    bob.database.acknowledge_drop(tea).await?;
+    assert_eq!(dropped_alerts(&bob).await?, []);
+    bob.close().await;
+    let bob = reopen(&dirs("bob"), &untitled(), network("bob")).await?;
+    assert_eq!(
+        dropped_alerts(&bob).await?,
+        [],
+        "an acknowledged drop stays acknowledged"
+    );
+    assert_eq!(
+        dropped_alerts(&owner).await?,
+        [tea],
+        "each device acknowledges for itself"
+    );
+    bob.close().await;
+    carol.close().await;
+    owner.close().await;
+    Ok(())
+}

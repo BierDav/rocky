@@ -45,7 +45,13 @@ async fn seal(world: &World) -> Result<String, Failure> {
 async fn notified(events: &TableEvents, token: TransactionToken) -> Result<(), Failure> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if events.next().await?.dropped.contains(&token) {
+            if events
+                .next()
+                .await?
+                .dropped
+                .iter()
+                .any(|dropped| dropped.token == token)
+            {
                 return Ok::<_, Failure>(());
             }
         }

@@ -145,6 +145,10 @@ enum Command {
         crate::TransactionToken,
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
+    AcknowledgeDrop(
+        crate::TransactionToken,
+        oneshot::Sender<Result<(), Failure>>,
+    ),
     Flush(oneshot::Sender<Result<(), Failure>>),
 }
 type Greeting = Result<rocky_core::Scope, Failure>;
@@ -510,6 +514,15 @@ impl Database {
     ) -> Result<Option<rocky_core::replay::TransactionOutcome>, crate::Error> {
         self.shared
             .request(|reply| Command::Outcome(token, reply))
+            .await?
+            .map_err(crate::Error::failed)
+    }
+    pub async fn acknowledge_drop(
+        &self,
+        token: crate::TransactionToken,
+    ) -> Result<(), crate::Error> {
+        self.shared
+            .request(|reply| Command::AcknowledgeDrop(token, reply))
             .await?
             .map_err(crate::Error::failed)
     }
@@ -1542,6 +1555,17 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                         .await
                         .map_err(Failure::from);
                     let _ = reply.send(outcome);
+                });
+            }
+            Command::AcknowledgeDrop(token, reply) => {
+                crate::reactor::spawn_in(&mut tasks, "acknowledge drop", async move {
+                    let acknowledged = node
+                        .replica
+                        .acknowledge_schema_drop(token.commitment())
+                        .await
+                        .map(drop)
+                        .map_err(Failure::from);
+                    let _ = reply.send(acknowledged);
                 });
             }
         }

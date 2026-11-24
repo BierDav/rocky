@@ -413,6 +413,11 @@ pub enum AlertKind {
         held: u64,
         reported: u64,
     },
+    WriteDropped {
+        token: crate::TransactionToken,
+        node: String,
+        reason: crate::DropReason,
+    },
 }
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);

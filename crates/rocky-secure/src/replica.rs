@@ -76,6 +76,7 @@ mod removal;
 pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
 use replay::Rebuilding;
+pub use replay::SchemaDrop;
 pub use replay::outcomes::OutcomeDivergence;
 mod restore;
 mod revoked_heads;
@@ -723,6 +724,9 @@ impl<A> Clone for EncryptedReplica<A> {
     }
 }
 impl<A> EncryptedReplica<A> {
+    pub fn node_key(&self) -> PublicKey {
+        self.node
+    }
     #[cfg(any(test, feature = "qualification"))]
     pub fn lock_measurements(&self) -> LockMeasurements {
         self.inner.measurements()

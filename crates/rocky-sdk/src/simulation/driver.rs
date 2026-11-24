@@ -603,6 +603,9 @@ impl Simulation {
                 crate::AlertKind::TrustedNodeUnlinked { node, .. } => {
                     format!("{} unlinked", name(node))
                 }
+                crate::AlertKind::WriteDropped { node, reason, .. } => {
+                    format!("{} write dropped ({reason:?})", name(node))
+                }
                 crate::AlertKind::TrustedIdentityStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)

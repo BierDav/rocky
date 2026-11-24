@@ -460,13 +460,9 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                         .write()
                         .push("Many changes were dropped or sealed at once.".into());
                 }
-                for token in change.dropped {
-                    let reason = match todos.dropped(token).await {
-                        Ok(Some((reason, _))) => format!("{reason:?}").to_lowercase(),
-                        Ok(None) => "unknown".into(),
-                        Err(failure) => failure.to_string(),
-                    };
-                    let whose = if own.read().contains(&token) {
+                for dropped in change.dropped {
+                    let reason = format!("{:?}", dropped.reason).to_lowercase();
+                    let whose = if own.read().contains(&dropped.token) {
                         "A change made here"
                     } else {
                         "A change from another device"

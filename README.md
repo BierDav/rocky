@@ -162,7 +162,12 @@ data to `version`. A step may read the previous version's rows as
 `parent.<table>`, but not correlated with the row it writes, so renaming a
 field takes two versions: one adds the new field and copies the old one into
 it (`UPDATE items SET label = title`), and a later one drops the old field once
-every device runs the first.
+every device runs the first. A write made under an earlier version that a
+later one can no longer apply, such as a late write into a removed field, is
+dropped with `DropReason::Schema` on every device, and loudly: `observe`
+delivers it in `TableChange::dropped` as a `DroppedTransaction { token, reason
+}`, and the writer's device and every admin device raise a `WriteDropped`
+alert in `status` that survives restarts until `acknowledge_drop(token)`.
 A schema version that drops tables or fields or narrows a role opens on an
 issuer only through `Configuration::open_confirmed` with the digest of the
 `RolloutImpact` its refusal carries; `narrowed_roles` names the roles that

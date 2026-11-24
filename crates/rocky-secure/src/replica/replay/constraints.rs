@@ -139,119 +139,236 @@ pub(in crate::replica) fn check_member_order<'a>(
     Ok(())
 }
 
+enum Check<'a> {
+    Reference {
+        child: &'a rocky_core::LogicalTable,
+        partitions: Vec<&'a Vec<SqlValue>>,
+    },
+    Assertion {
+        name: &'a str,
+        sql: String,
+        params: Vec<SqlValue>,
+    },
+}
+
+impl Check<'_> {
+    fn failure(&self) -> String {
+        match self {
+            Check::Reference { child, .. } => {
+                format!("FOREIGN KEY constraint failed: {}", child.sql_name)
+            }
+            Check::Assertion { name, .. } => format!("assertion {name} failed"),
+        }
+    }
+}
+
+enum Evaluated {
+    Rows(Vec<Vec<SqlValue>>),
+    Overflow,
+}
+
+fn distinct_partitions<'a>(written: impl Iterator<Item = &'a Written>) -> Vec<&'a Vec<SqlValue>> {
+    let mut partitions: Vec<&Vec<SqlValue>> = Vec::new();
+    for (_, partition) in written {
+        if !partitions.contains(&partition) {
+            partitions.push(partition);
+        }
+    }
+    partitions
+}
+
+fn replayed_checks<'a>(
+    schema: &'a rocky_core::LogicalSchema,
+    written: &'a [Written],
+    deferred_all: bool,
+) -> Result<Vec<Check<'a>>, Error> {
+    let wrote = |name: &str| {
+        written
+            .iter()
+            .any(|(table, _)| table.eq_ignore_ascii_case(name))
+    };
+    let mut checks = Vec::new();
+    for table in &schema.tables {
+        let checked_parents: Vec<&str> = table
+            .foreign_keys
+            .iter()
+            .filter(|key| key.deferred || deferred_all)
+            .map(|key| key.table.as_str())
+            .collect();
+        let checked = table.class == TableClass::Replayed
+            && !checked_parents.is_empty()
+            && (wrote(&table.sql_name) || checked_parents.iter().any(|parent| wrote(parent)));
+        if !checked {
+            continue;
+        }
+        let partitions = distinct_partitions(written.iter().filter(|(name, _)| {
+            name.eq_ignore_ascii_case(&table.sql_name)
+                || checked_parents
+                    .iter()
+                    .any(|parent| name.eq_ignore_ascii_case(parent))
+        }));
+        if !table.partition_by.is_empty()
+            && partitions
+                .iter()
+                .any(|partition| partition.len() != table.partition_by.len())
+        {
+            return Err(Error::Corrupt(
+                "a reference crosses partition groups".into(),
+            ));
+        }
+        checks.push(Check::Reference {
+            child: table,
+            partitions,
+        });
+    }
+    for assertion in &schema.assertions {
+        let tables = assertion.tables();
+        let partitions =
+            distinct_partitions(written.iter().filter(|(table, _)| tables.contains(table)));
+        for partition in partitions {
+            let mut rules = BTreeMap::new();
+            for name in &tables {
+                let logical = schema
+                    .table(name)
+                    .ok_or_else(|| Error::Corrupt("assertion table".into()))?;
+                let partitioned = !logical.partition_by.is_empty();
+                rules.insert(
+                    name.clone(),
+                    TablePartitions {
+                        columns: super::super::partition::partition_columns(logical)?,
+                        complete: !partitioned,
+                        held: if partitioned {
+                            vec![partition.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        waiting: Vec::new(),
+                    },
+                );
+            }
+            let checked = rocky_storage::partition_sql::check_assertion(
+                &assertion.select_sql,
+                &schema.views,
+                &rules,
+            )
+            .map_err(|refusal| {
+                Error::Corrupt(format!("assertion {}: {refusal}", assertion.name))
+            })?;
+            checks.push(Check::Assertion {
+                name: &assertion.name,
+                sql: checked.sql,
+                params: checked.params,
+            });
+        }
+    }
+    Ok(checks)
+}
+
 impl<A: RowApplication> Inner<A> {
     pub(in crate::replica) async fn replayed_violation(
         &self,
         written: &[Written],
+        undo_in_applied_order: &[&[Undo]],
         deferred_all: bool,
     ) -> Result<Option<String>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(None);
         };
-        let schema = typed.rows.schema();
-        let wrote = |name: &str| {
-            written
-                .iter()
-                .any(|(table, _)| table.eq_ignore_ascii_case(name))
-        };
-        for table in &schema.tables {
-            let checked_parents: Vec<&str> = table
-                .foreign_keys
-                .iter()
-                .filter(|key| key.deferred || deferred_all)
-                .map(|key| key.table.as_str())
-                .collect();
-            let checked = table.class == TableClass::Replayed
-                && !checked_parents.is_empty()
-                && (wrote(&table.sql_name) || checked_parents.iter().any(|parent| wrote(parent)));
-            if !checked {
-                continue;
-            }
-            let reached = written.iter().filter(|(name, _)| {
-                name.eq_ignore_ascii_case(&table.sql_name)
-                    || checked_parents
-                        .iter()
-                        .any(|parent| name.eq_ignore_ascii_case(parent))
-            });
-            if self.breaks_a_reference(table, reached).await? {
-                return Ok(Some(format!(
-                    "FOREIGN KEY constraint failed: {}",
-                    table.sql_name
-                )));
+        let checks = replayed_checks(typed.rows.schema(), written, deferred_all)?;
+        let mut violated = Vec::new();
+        for check in &checks {
+            match self.evaluate(check).await? {
+                Evaluated::Overflow => {
+                    return Ok(Some(format!(
+                        "{}: {}",
+                        check.failure(),
+                        rocky_storage::exact::OVERFLOW
+                    )));
+                }
+                Evaluated::Rows(rows) if rows.is_empty() => {}
+                Evaluated::Rows(rows) => violated.push((check, rows)),
             }
         }
-        for assertion in &schema.assertions {
-            let tables = assertion.tables();
-            let mut partitions: Vec<&Vec<SqlValue>> = Vec::new();
-            for (_, partition) in written.iter().filter(|(table, _)| tables.contains(table)) {
-                if !partitions.contains(&partition) {
-                    partitions.push(partition);
+        if violated.is_empty() {
+            return Ok(None);
+        }
+        let before = self
+            .before_the_transaction(undo_in_applied_order, async || {
+                let mut before = Vec::with_capacity(violated.len());
+                for (check, _) in &violated {
+                    before.push(match self.evaluate(check).await? {
+                        Evaluated::Rows(rows) => rows,
+                        Evaluated::Overflow => Vec::new(),
+                    });
                 }
+                Ok(before)
+            })
+            .await?;
+        Ok(violated
+            .iter()
+            .zip(before)
+            .find(|((_, after), before)| after.iter().any(|row| !before.contains(row)))
+            .map(|((check, _), _)| check.failure()))
+    }
+
+    async fn before_the_transaction<T>(
+        &self,
+        undo_in_applied_order: &[&[Undo]],
+        read: impl AsyncFnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.conn.execute("SAVEPOINT before_replayed", ()).await?;
+        let read = async {
+            let mut plans = BTreeMap::new();
+            for undo in undo_in_applied_order.iter().rev() {
+                self.restore(undo, &mut plans).await?;
             }
-            for partition in partitions {
-                let mut rules = BTreeMap::new();
-                for name in &tables {
-                    let logical = schema
-                        .table(name)
-                        .ok_or_else(|| Error::Corrupt("assertion table".into()))?;
-                    let partitioned = !logical.partition_by.is_empty();
-                    rules.insert(
-                        name.clone(),
-                        TablePartitions {
-                            columns: super::super::partition::partition_columns(logical)?,
-                            complete: !partitioned,
-                            held: if partitioned {
-                                vec![partition.clone()]
-                            } else {
-                                Vec::new()
-                            },
-                            waiting: Vec::new(),
-                        },
-                    );
-                }
-                let checked = rocky_storage::partition_sql::check_assertion(
-                    &assertion.select_sql,
-                    &schema.views,
-                    &rules,
-                )
-                .map_err(|refusal| {
-                    Error::Corrupt(format!("assertion {}: {refusal}", assertion.name))
-                })?;
-                let mut rows = match self
+            read().await
+        }
+        .await;
+        let rolled_back = self.conn.execute("ROLLBACK TO before_replayed", ()).await;
+        let released = self.conn.execute("RELEASE before_replayed", ()).await;
+        let read = read?;
+        rolled_back?;
+        released?;
+        Ok(read)
+    }
+
+    async fn evaluate(&self, check: &Check<'_>) -> Result<Evaluated, Error> {
+        match check {
+            Check::Reference { child, partitions } => self
+                .violating_rows(child, partitions)
+                .await
+                .map(Evaluated::Rows),
+            Check::Assertion { sql, params, .. } => {
+                match self
                     .conn
-                    .query(&checked.sql, storage::bindings(checked.params))
+                    .query(sql, storage::bindings(params.clone()))
                     .await
                 {
-                    Err(error) if error.is_overflow() => {
-                        return Ok(Some(format!(
-                            "assertion {} failed: {}",
-                            assertion.name,
-                            rocky_storage::exact::OVERFLOW
-                        )));
-                    }
-                    rows => rows?,
-                };
-                if rows.next().await?.is_some() {
-                    return Ok(Some(format!("assertion {} failed", assertion.name)));
+                    Err(error) if error.is_overflow() => Ok(Evaluated::Overflow),
+                    rows => Ok(Evaluated::Rows(collect_rows(rows?).await?)),
                 }
             }
         }
-        Ok(None)
     }
-    async fn breaks_a_reference(
+
+    async fn violating_rows(
         &self,
         child: &rocky_core::LogicalTable,
-        reached: impl Iterator<Item = &Written>,
-    ) -> Result<bool, Error> {
+        partitions: &[&Vec<SqlValue>],
+    ) -> Result<Vec<Vec<SqlValue>>, Error> {
+        let key = child
+            .primary_key
+            .iter()
+            .map(|column| format!("c.{}", typed::quoted(column)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT k.fkid,{key} FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid",
+            typed::quoted(&child.sql_name)
+        );
         if child.partition_by.is_empty() {
-            let mut rows = self
-                .conn
-                .query(
-                    "SELECT 1 FROM pragma_foreign_key_check(?) LIMIT 1",
-                    [child.sql_name.clone()],
-                )
-                .await?;
-            return Ok(rows.next().await?.is_some());
+            return collect_rows(self.conn.query(&sql, [child.sql_name.clone()]).await?).await;
         }
         let in_partition = child
             .partition_by
@@ -260,29 +377,13 @@ impl<A: RowApplication> Inner<A> {
             .map(|(index, column)| format!("c.{}=?{}", typed::quoted(column), index + 2))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let sql = format!(
-            "SELECT 1 FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid WHERE {in_partition} LIMIT 1",
-            typed::quoted(&child.sql_name)
-        );
-        let mut partitions: Vec<&Vec<SqlValue>> = Vec::new();
-        for (_, partition) in reached {
-            if !partitions.contains(&partition) {
-                partitions.push(partition);
-            }
-        }
+        let sql = format!("{sql} WHERE {in_partition}");
+        let mut violating = Vec::new();
         for partition in partitions {
-            if partition.len() != child.partition_by.len() {
-                return Err(Error::Corrupt(
-                    "a reference crosses partition groups".into(),
-                ));
-            }
             let mut values = vec![SqlValue::Text(child.sql_name.clone())];
             values.extend(partition.iter().cloned());
-            let mut rows = self.conn.query(&sql, bindings(values)).await?;
-            if rows.next().await?.is_some() {
-                return Ok(true);
-            }
+            violating.extend(collect_rows(self.conn.query(&sql, bindings(values)).await?).await?);
         }
-        Ok(false)
+        Ok(violating)
     }
 }

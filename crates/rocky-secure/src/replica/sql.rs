@@ -1142,7 +1142,8 @@ impl<A: RowApplication> SecureSql<A> {
                 .collect();
             super::replay::check_member_order(typed.rows.schema(), named.iter().copied())?;
         }
-        if let Some(violated) = inner.replayed_violation(&written, false).await? {
+        let undone: Vec<&[super::replay::Undo]> = undo.values().map(Vec::as_slice).collect();
+        if let Some(violated) = inner.replayed_violation(&written, &undone, false).await? {
             return Err(Error::Sql(SqlError::Statement {
                 code: SQLITE_CONSTRAINT,
                 message: violated,

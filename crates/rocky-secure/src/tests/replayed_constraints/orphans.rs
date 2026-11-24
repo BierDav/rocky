@@ -74,6 +74,28 @@ async fn orphaned_memberships(replica: &EncryptedReplica<TypedRows>) -> usize {
     .len()
 }
 
+async fn keep_an_orphaned_membership(replica: &EncryptedReplica<TypedRows>, tenant: i64) {
+    let missing = format!("X'{}'", "00".repeat(40));
+    execute(replica, "PRAGMA foreign_keys=OFF", None).await;
+    execute(
+        replica,
+        &format!(
+            "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES({tenant},{missing},{missing},'member',1,1,{missing})"
+        ),
+        None,
+    )
+    .await;
+    execute(replica, "PRAGMA foreign_keys=ON", None).await;
+}
+
+async fn memberships(replica: &EncryptedReplica<TypedRows>) -> usize {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    crate::storage::rows(&inner.conn, "SELECT 1 FROM memberships")
+        .await
+        .unwrap()
+        .len()
+}
+
 async fn a_sealed_membership_whose_team_base_is_lost(c: &Constrained, path: &Path) -> Device {
     let device = c.open(path).await;
     follow_main(c, &device.replica).await;
@@ -151,18 +173,7 @@ async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
     let c = graph();
     let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
-    let receiver = &devices[1].replica;
-    let missing = format!("X'{}'", "00".repeat(40));
-    execute(receiver, "PRAGMA foreign_keys=OFF", None).await;
-    execute(
-        receiver,
-        &format!(
-            "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(2,{missing},{missing},'member',1,1,{missing})"
-        ),
-        None,
-    )
-    .await;
-    execute(receiver, "PRAGMA foreign_keys=ON", None).await;
+    keep_an_orphaned_membership(&devices[1].replica, 2).await;
     devices[0]
         .commit(
             &c,
@@ -225,4 +236,175 @@ async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restore
         .unwrap();
     assert_eq!(orphaned_memberships(&device.replica).await, 1);
     device.replica.audit(c.scope("memberships")).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_valid_transaction_into_the_partition_of_a_tolerated_orphan_applies_as_on_its_peers() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    keep_an_orphaned_membership(&devices[1].replica, 1).await;
+    let ids = devices[0]
+        .commit(
+            &c,
+            &[
+                "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,#next(teams),#next(people),'member',1,1,#id)",
+                "INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)",
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let frames = devices[0].fresh().await;
+    let statuses = devices[1].replica.receive_all(frames.clone()).await;
+    assert_eq!(
+        statuses.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        vec![ReceiveStatus::Applied; frames.len()]
+    );
+    let transaction = c.transaction(&frames);
+    let applied = Some(TransactionOutcome::Applied { sealed: false });
+    assert_eq!(
+        devices[0]
+            .replica
+            .transaction_outcome(transaction)
+            .await
+            .unwrap(),
+        applied
+    );
+    assert_eq!(
+        devices[1]
+            .replica
+            .transaction_outcome(transaction)
+            .await
+            .unwrap(),
+        applied,
+        "an orphan that was already in tenant 1 is no violation of this transaction"
+    );
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+    assert_eq!(memberships(&devices[1].replica).await, 2);
+    let team = ids[1];
+    devices[1]
+        .commit(
+            &c,
+            &[
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team},#next(people),'owner',1,1,#id)"
+                ),
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'beta',#id)",
+            ],
+        )
+        .await
+        .expect("a local commit beside the orphan is no violation either");
+    assert_eq!(memberships(&devices[1].replica).await, 3);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_transaction_orphaning_a_row_beside_a_tolerated_orphan_still_drops() {
+    let c = graph();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, ids, _) = devices(
+        &c,
+        root.path(),
+        2,
+        &[
+            "INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)",
+            "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+        ],
+    )
+    .await;
+    let (team, person) = (ids[0], ids[1]);
+    keep_an_orphaned_membership(&devices[1].replica, 1).await;
+    devices[1]
+        .commit(
+            &c,
+            &[&format!("DELETE FROM teams WHERE tenant=1 AND id={team}")],
+        )
+        .await
+        .unwrap();
+    let deleted = devices[1].fresh().await;
+    devices[0]
+        .commit(
+            &c,
+            &[
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team},{person},'member',1,1,#id)"
+                ),
+                "INSERT INTO notes(tenant,message,id) VALUES(1,'joined',#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let joined = devices[0].fresh().await;
+    let clock = |frame: &EncryptedFrame| frame.operation_ref().unwrap().header.timestamp;
+    assert!(
+        joined
+            .iter()
+            .all(|frame| deleted.iter().all(|delete| clock(frame) > clock(delete))),
+        "the membership replays after the delete of its team"
+    );
+    devices[1].receive(&joined).await;
+    assert_eq!(
+        devices[1]
+            .replica
+            .transaction_outcome(c.transaction(&joined))
+            .await
+            .unwrap(),
+        Some(TransactionOutcome::Dropped {
+            reason: DropReason::Constraint,
+            sealed: false,
+        }),
+        "a membership of a team deleted before it is a violation the transaction introduces"
+    );
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+    assert_eq!(memberships(&devices[1].replica).await, 1);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_assertion_failing_before_a_transaction_refuses_only_what_the_transaction_breaks() {
+    let c = Constrained::new();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
+    let unbalanced = format!("X'{}'", "11".repeat(40));
+    execute(
+        &devices[1].replica,
+        &format!("INSERT INTO orders(total,id) VALUES(7,{unbalanced})"),
+        None,
+    )
+    .await;
+    let ids = devices[0]
+        .commit(
+            &c,
+            &[
+                "INSERT INTO lines(parent,amount,id) VALUES(#next(orders),5,#id)",
+                "INSERT INTO orders(total,id) VALUES(5,#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let balanced = devices[0].fresh().await;
+    devices[1].receive(&balanced).await;
+    assert_eq!(
+        devices[1]
+            .replica
+            .transaction_outcome(c.transaction(&balanced))
+            .await
+            .unwrap(),
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "an order that was already unbalanced is no violation of this transaction"
+    );
+    let order = ids[1];
+    for device in &devices {
+        let error = device
+            .commit(
+                &c,
+                &[&format!("UPDATE orders SET total=6 WHERE id={order}")],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            constraint_error(error),
+            "assertion order_total failed",
+            "unbalancing another order is a violation the transaction introduces"
+        );
+    }
 }

@@ -686,6 +686,16 @@ impl<A: RowApplication> Inner<A> {
         undo: &[Undo],
         plans: &mut BTreeMap<String, rocky_storage::capture::Table>,
     ) -> Result<(), Error> {
+        for undo in undo {
+            self.touch(&undo.table);
+        }
+        self.restore(undo, plans).await
+    }
+    async fn restore(
+        &self,
+        undo: &[Undo],
+        plans: &mut BTreeMap<String, rocky_storage::capture::Table>,
+    ) -> Result<(), Error> {
         if undo.is_empty() {
             return Ok(());
         }
@@ -715,7 +725,6 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Result<Vec<_>, _>>()?;
         self.deferring_foreign_keys(async || {
             for (table, undo) in tables.iter().zip(undo) {
-                self.touch(&table.name);
                 if undo.before.is_none() {
                     self.conn
                         .execute(&table.delete_by_key(), bindings(undo.key.clone()))
@@ -1347,8 +1356,12 @@ impl<A: RowApplication> Inner<A> {
         for row in replayed.iter().flat_map(|replayed| &replayed.written) {
             note(&mut written, row.clone());
         }
+        let undo: Vec<&[Undo]> = replayed
+            .iter()
+            .map(|replayed| replayed.undo.as_slice())
+            .collect();
         let dropped = self
-            .replayed_violation(&written, deferred_all)
+            .replayed_violation(&written, &undo, deferred_all)
             .await?
             .map(|violated| Dropped {
                 reason: DropReason::Constraint,

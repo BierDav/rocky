@@ -112,7 +112,7 @@ pub(super) enum Action {
     Alerts(usize),
     Watch(usize),
     Woken(usize),
-    Trust(usize),
+    MakeAdmin(usize),
     Mesh(usize),
     WatchMesh(usize, usize),
     WokenMesh(usize),
@@ -153,7 +153,7 @@ impl fmt::Display for Action {
             Self::Alerts(node) => write!(f, "alerts {}", name(node)),
             Self::Watch(node) => write!(f, "watch {}", name(node)),
             Self::Woken(node) => write!(f, "woken {}", name(node)),
-            Self::Trust(node) => write!(f, "trust {}", name(node)),
+            Self::MakeAdmin(node) => write!(f, "make admin {}", name(node)),
             Self::Mesh(node) => write!(f, "mesh {}", name(node)),
             Self::WatchMesh(node, device) => {
                 write!(f, "watch mesh {} of {}", name(node), name(device))

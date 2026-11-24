@@ -164,7 +164,7 @@ impl Node {
         Ok(())
     }
 
-    pub(super) async fn trust_identity(
+    pub(super) async fn make_admin_identity(
         &self,
         identity: PublicKey,
         root: &super::Root,
@@ -174,7 +174,7 @@ impl Node {
             .settings
             .lock()
             .await
-            .trust(&registry, identity, root.signer())
+            .make_admin(&registry, identity, root.signer())
             .map_err(|error| -> Failure {
                 if error.is::<crate::enrollment::PublisherRequired>() {
                     error
@@ -231,19 +231,17 @@ impl Node {
         }
         let node = Settings::node_key(&self.vault)?;
         let identity = settings.identity;
-        let (links, opens) = if let Some(trusted) = settings.trusted_links().filter(|links| {
+        let (links, opens) = if let Some(admin_links) = settings.admin_links().filter(|links| {
             links.0[0]
                 .capability
                 .extended()
                 .is_ok_and(|e| e.trusted == Some(scope))
         }) {
-            (trusted, true)
+            (admin_links, true)
         } else if settings.issuer() {
             (settings.issuer_links(), false)
         } else {
-            return Err(refused(
-                "only a trusted identity or an issuer signs tip statements",
-            ));
+            return Err(refused("only an admin or an issuer signs tip statements"));
         };
         Ok(Signer {
             node,

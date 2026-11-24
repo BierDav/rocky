@@ -191,7 +191,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     assert_eq!(
         error.code(),
         "owner_required",
-        "a trusted node revokes no trusted node without the root: {error}"
+        "an admin node revokes no admin node without the root: {error}"
     );
     b.database
         .revoke_admin(

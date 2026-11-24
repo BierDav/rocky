@@ -265,7 +265,7 @@ pub(crate) struct Node {
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::HeldLink>>,
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
-    trusted_watch: std::sync::Mutex<health::TrustedWatch>,
+    admin_watch: std::sync::Mutex<health::AdminWatch>,
     tip_chain: Arc<tokio::sync::Mutex<()>>,
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
     mesh_revision: watch::Sender<u64>,
@@ -336,7 +336,7 @@ impl Node {
             mesh: Default::default(),
             link_requests: Default::default(),
             mesh_revision: watch::channel(0).0,
-            trusted_watch: Default::default(),
+            admin_watch: Default::default(),
             seal_skipped: Default::default(),
             tip_chain: Default::default(),
             report_failing: AtomicBool::new(false),
@@ -1008,7 +1008,7 @@ impl Node {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let (identity, lanes): (PublicKey, std::collections::BTreeSet<PublicKey>) = match *target {
             crate::enrollment::Revoke::Identity(identity)
-            | crate::enrollment::Revoke::TrustedIdentity(identity, _) => (
+            | crate::enrollment::Revoke::Admin(identity, _) => (
                 identity,
                 membership
                     .nodes(&identity)
@@ -1184,7 +1184,7 @@ impl Node {
         if let Some(peer) = renewed.contacted {
             self.inbound_sync(peer);
         }
-        let trusted = renewed.trusted.take();
+        let admin_grant = renewed.admin_grant.take();
         self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
         if !epochs_only && settings.issuer() && !current.issuer() {
@@ -1199,10 +1199,12 @@ impl Node {
             renewed.chain = settings.credentials.clone();
         }
         let (keys, adopted) = settings.adopt(&self.replica, &self.vault, &renewed).await?;
-        let promoted = match trusted {
-            Some(link) if settings.trusted_links().is_none() => {
+        let promoted = match admin_grant {
+            Some(link) if settings.admin_links().is_none() => {
                 let mut draft = (**settings).clone();
-                draft.install_trust(&self.vault, link).map_err(refused)?;
+                draft
+                    .install_admin_grant(&self.vault, link)
+                    .map_err(refused)?;
                 settings.commit(Shared::new(draft), &self.replica).await?;
                 true
             }

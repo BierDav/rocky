@@ -397,7 +397,7 @@ impl Node {
         let identity = person.key();
         if identity == settings.publisher
             || identity == settings.identity
-            || registry.trusted.contains_key(&identity)
+            || registry.admins.contains_key(&identity)
         {
             return Err(Box::new(AccessError::TargetIsAdmin));
         }
@@ -408,11 +408,8 @@ impl Node {
         let (settings, registry) = self.administered().await?;
         let membership = self.membership().await?;
         let time = now()?;
-        let admins = registry.trusted_identities(
-            settings.database_context()?,
-            &settings.revocations,
-            time,
-        )?;
+        let admins =
+            registry.admin_identities(settings.database_context()?, &settings.revocations, time)?;
         let mut people = Vec::new();
         for (identity, record) in &registry.records {
             let Some(admitted) = &record.admitted else {
@@ -586,7 +583,7 @@ impl Node {
         for (identity, record) in &registry.records {
             if record.grants.is_empty()
                 || record.admitted.is_none()
-                || registry.trusted.contains_key(identity)
+                || registry.admins.contains_key(identity)
                 || settings.revoked_identity(identity, &registry)
             {
                 continue;
@@ -803,7 +800,7 @@ impl Node {
         if settings.revoked_identity(&identity, &registry) {
             return Err(Box::new(crate::Error::removed()));
         }
-        if registry.trusted.contains_key(&identity) {
+        if registry.admins.contains_key(&identity) {
             return Err(Box::new(crate::Error::refused(
                 crate::Right::Administer,
                 crate::DenyReason::OwnerRequired,
@@ -833,7 +830,7 @@ impl Node {
         self.change_rights_after(None, version, &[person], Reach::Wider)
             .await?;
         self.check_fault(crate::database::fault::Stage::RightsChangeRecorded)?;
-        self.trust_identity(person.key(), root).await?;
+        self.make_admin_identity(person.key(), root).await?;
         self.check_fault(crate::database::fault::Stage::RightsChangeCommitted)?;
         self.complete_rights_change().await
     }
@@ -855,14 +852,14 @@ impl Node {
         if settings.revoked_identity(&identity, &registry) && removal == Removal::Departed {
             return Err(Box::new(crate::Error::removed()));
         }
-        if !registry.trusted.contains_key(&identity) {
+        if !registry.admins.contains_key(&identity) {
             return Err(Box::new(AccessError::NotAdmin));
         }
         let mode = match removal {
             Removal::Departed => RevocationMode::Lost,
             Removal::Compromised => RevocationMode::Compromised,
         };
-        self.revoke_with(Revoke::TrustedIdentity(identity, mode), root)
+        self.revoke_with(Revoke::Admin(identity, mode), root)
             .await?;
         self.activity
             .record(crate::activity::ActivityKind::IdentityRevoked { identity });

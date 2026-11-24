@@ -29,7 +29,7 @@ async fn run(nodes: usize, steps: Vec<Action>, kinds: &[&str]) -> Result<Vec<Str
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_trusted_node_sees_a_devices_alert_and_blocker_clear() -> Result<(), Failure> {
+async fn an_admin_node_sees_a_devices_alert_and_blocker_clear() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
     let relink = [Sever(1, 2), Heal(1, 2)];
     let mut steps = vec![Invite(0, 2), Sync(0), Sync(1), Sync(2), Mesh(0)];
@@ -88,7 +88,7 @@ async fn a_device_that_stops_reporting_shows_silent() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn only_trusted_nodes_receive_reports() -> Result<(), Failure> {
+async fn only_admin_nodes_receive_reports() -> Result<(), Failure> {
     let mut steps = vec![Invite(0, 2)];
     for _ in 0..2 {
         steps.extend([Sync(0), Sync(1), Sync(2)]);
@@ -116,12 +116,19 @@ async fn only_trusted_nodes_receive_reports() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
-    let steps = vec![Trust(2), Sever(1, 2), Sync(1), Sync(2), Mesh(2), Mesh(1)];
+async fn admin_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
+    let steps = vec![
+        MakeAdmin(2),
+        Sever(1, 2),
+        Sync(1),
+        Sync(2),
+        Mesh(2),
+        Mesh(1),
+    ];
     assert_eq!(
-        run(3, steps, &[" mesh ", " trust "]).await?,
+        run(3, steps, &[" mesh ", " make admin "]).await?,
         [
-            "trusted",
+            "admin",
             r#"mesh ["a: alerts [\"a linked\", \"c linked\"]", "b: alerts [], via a"]"#,
             "mesh none"
         ]
@@ -130,9 +137,9 @@ async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_trusted_node_flags_an_identity_it_has_not_heard_from() -> Result<(), Failure> {
+async fn an_admin_node_flags_an_identity_it_has_not_heard_from() -> Result<(), Failure> {
     let steps = vec![
-        Trust(2),
+        MakeAdmin(2),
         Sync(2),
         StaleAfter(0, Duration::from_secs(300)),
         Alerts(0),

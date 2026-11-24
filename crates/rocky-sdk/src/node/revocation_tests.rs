@@ -154,7 +154,7 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
 
 #[tokio::test]
 async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Result<(), Failure> {
-    use crate::registry::{Admitted, IdentityRecord, Registry, TrustedRecord};
+    use crate::registry::{AdminRecord, Admitted, IdentityRecord, Registry};
     use rocky_credentials::{Authority, RevocationMode};
     let directory = tempfile::tempdir()?;
     let root = crate::RootKey::generate();
@@ -165,9 +165,9 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
     let enrollee = PrivateKey::new().public_key();
     let grant = Authority::owner(&root).issue_trusted(target, node.domain().scope, now()?)?;
     let mut registry = Registry::default();
-    registry.trusted.insert(
+    registry.admins.insert(
         target,
-        TrustedRecord {
+        AdminRecord {
             granted: grant.capability.not_before,
             grant,
         },
@@ -189,7 +189,7 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
     for mode in [RevocationMode::Lost, RevocationMode::Compromised] {
         let mut settings = initial.clone();
         settings.begin_revocation(
-            crate::enrollment::Revoke::TrustedIdentity(target, mode),
+            crate::enrollment::Revoke::Admin(target, mode),
             (&registry, &membership),
             Some(&root),
         )?;
@@ -242,7 +242,7 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
             committed.records.entry(target).or_default().revoked = true;
             saved.complete_revocation(&node.vault, &node.domain(), (&committed, &membership))?;
             saved.begin_revocation(
-                crate::enrollment::Revoke::TrustedIdentity(target, RevocationMode::Compromised),
+                crate::enrollment::Revoke::Admin(target, RevocationMode::Compromised),
                 (&registry, &membership),
                 Some(&root),
             )?;
@@ -508,7 +508,7 @@ async fn status_verifies_revocations_outside_the_settings_lock() -> Result<(), F
     let directory = tempfile::tempdir()?;
     let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
     assert!(node.collects().await);
-    node.refresh_trusted_watch().await?;
+    node.refresh_admin_watch().await?;
     node.observed_status().await?;
     node.health_report().await?;
     assert_eq!(node.verified_under_settings.load(Ordering::Relaxed), 0);

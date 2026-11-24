@@ -148,13 +148,13 @@ impl Membership {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrustedObservation {
+pub struct AdminObservation {
     pub linked: u64,
     pub unlinked: Option<u64>,
     pub read: bool,
     pub acknowledged: bool,
 }
-impl TrustedObservation {
+impl AdminObservation {
     pub(crate) fn alerts(
         &self,
         identity: PublicKey,
@@ -183,11 +183,11 @@ impl TrustedObservation {
     }
 }
 
-pub(crate) fn observe_trusted(
+pub(crate) fn observe_admins(
     known: &rocky_credentials::RevocationSet,
-    trusted: &[PublicKey],
+    admins: &[PublicKey],
     time: u64,
-    observed: &mut BTreeMap<PublicKey, BTreeMap<PublicKey, TrustedObservation>>,
+    observed: &mut BTreeMap<PublicKey, BTreeMap<PublicKey, AdminObservation>>,
 ) -> Result<(), crate::Failure> {
     let membership = known.membership()?;
     for certificate in known.certificates().chain(
@@ -197,7 +197,7 @@ pub(crate) fn observe_trusted(
     ) {
         let identity = certificate.issuer;
         let node = certificate.capability.subject;
-        if !trusted.contains(&identity)
+        if !admins.contains(&identity)
             || known.contests_node(node)
             || !membership.accepts(certificate.id()?)
         {
@@ -208,7 +208,7 @@ pub(crate) fn observe_trusted(
                 .entry(identity)
                 .or_default()
                 .entry(node)
-                .or_insert(TrustedObservation {
+                .or_insert(AdminObservation {
                     linked: time,
                     unlinked: None,
                     read: false,
@@ -334,15 +334,15 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn trusted_observers_attribute_a_shared_node_to_neither_identity() {
+    fn admin_observers_attribute_a_shared_node_to_neither_identity() {
         let Shared {
             known,
             identities: [a, b, c, d],
             nodes: [own, shared, handed],
         } = shared_handed_and_own_nodes();
-        let trusted = [&a, &b, &c, &d].map(PrivateKey::public_key);
+        let admins = [&a, &b, &c, &d].map(PrivateKey::public_key);
         let mut observed = BTreeMap::new();
-        observe_trusted(&known, &trusted, 42, &mut observed).unwrap();
+        observe_admins(&known, &admins, 42, &mut observed).unwrap();
         let attributed = |identity: &PrivateKey, node: &PrivateKey| {
             observed
                 .get(&identity.public_key())

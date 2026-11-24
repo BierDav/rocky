@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub const MAX_IDENTITIES: usize = 256;
 pub const MAX_LABEL: usize = 256;
 pub(crate) const MAX_PARTITIONS: usize = 256;
-pub const MAX_TRUSTED: usize = 32;
+pub const MAX_ADMINS: usize = 32;
 
 #[derive(Debug)]
 pub struct RegistryFull;
@@ -42,7 +42,7 @@ pub struct Capability {
 pub type Grant = crate::partitions::StoredPartition;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrustedRecord {
+pub struct AdminRecord {
     pub grant: rocky_credentials::SignedCapability,
     pub granted: u64,
 }
@@ -102,7 +102,7 @@ impl IdentityRecord {
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     pub records: BTreeMap<PublicKey, IdentityRecord>,
-    pub trusted: BTreeMap<PublicKey, TrustedRecord>,
+    pub admins: BTreeMap<PublicKey, AdminRecord>,
 }
 impl Registry {
     pub fn get(&self, identity: &PublicKey) -> Option<&IdentityRecord> {
@@ -134,21 +134,21 @@ impl Registry {
                     .is_some_and(|admitted| admitted.origin == Some(origin))
             })
             .map(|(identity, _)| *identity)
-            .filter(|identity| !self.trusted.contains_key(identity))
+            .filter(|identity| !self.admins.contains_key(identity))
             .collect()
     }
-    pub fn trusted_identities(
+    pub fn admin_identities(
         &self,
         database: rocky_credentials::DatabaseContext,
         revocations: &rocky_credentials::RevocationSet,
         time: u64,
     ) -> Result<Vec<PublicKey>, Failure> {
         revocations.verify_in(database)?;
-        let mut trusted = Vec::new();
-        for (identity, record) in &self.trusted {
+        let mut admins = Vec::new();
+        for (identity, record) in &self.admins {
             let chain = rocky_credentials::CredentialChain(vec![record.grant.clone()]);
             if chain.database_context(database.publisher)? != database {
-                return Err("trusted grant belongs to another database".into());
+                return Err("admin grant belongs to another database".into());
             }
             let subject = chain.trusted_identity(
                 database.publisher,
@@ -157,22 +157,22 @@ impl Registry {
                 record.grant.capability.not_before,
             )?;
             if subject != *identity {
-                return Err("trusted grant names another identity".into());
+                return Err("admin grant names another identity".into());
             }
             if record.grant.capability.not_before <= time
                 && time < record.grant.capability.expires
                 && !revocations.revokes_trusted(&record.grant.capability.subject)
             {
-                trusted.push(*identity);
+                admins.push(*identity);
             }
         }
-        Ok(trusted)
+        Ok(admins)
     }
 
     fn apply(&mut self, identity: &str, entry: &str, value: &str) -> Result<(), Failure> {
         let identity: PublicKey = identity.parse()?;
         if entry == TRUSTED {
-            self.trusted.insert(identity, parse(value)?);
+            self.admins.insert(identity, parse(value)?);
             return Ok(());
         }
         let record = self.records.entry(identity).or_default();
@@ -327,7 +327,7 @@ impl Changes {
         self.push(identity, grant_entry(grant)?, grant, Mode::Delete)
     }
 
-    pub fn trusted(&mut self, identity: &PublicKey, record: &TrustedRecord) -> Result<(), Failure> {
+    pub fn admin(&mut self, identity: &PublicKey, record: &AdminRecord) -> Result<(), Failure> {
         self.push(identity, TRUSTED.into(), record, Mode::Replace)
     }
     pub fn label(&mut self, identity: &PublicKey, label: &[u8]) -> Result<(), Failure> {
@@ -489,7 +489,7 @@ mod tests {
     use rocky_credentials::{Authority, DatabaseContext, PrivateKey, RevocationSet};
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn foreign_or_misnamed_root_grants_cannot_make_registry_identities_trusted() {
+    fn foreign_or_misnamed_root_grants_cannot_make_registry_identities_admins() {
         let root = PrivateKey::new();
         let identity = PrivateKey::new().public_key();
         let database = DatabaseContext {
@@ -500,7 +500,7 @@ mod tests {
                 domain: rocky_core::DomainId([3; 16]),
             },
         };
-        let record = TrustedRecord {
+        let record = AdminRecord {
             grant: Authority::owner(&root)
                 .issue_trusted(
                     identity,
@@ -511,18 +511,18 @@ mod tests {
             granted: 100,
         };
         let registry = Registry {
-            trusted: [(identity, record.clone())].into(),
+            admins: [(identity, record.clone())].into(),
             ..Default::default()
         };
         let empty = RevocationSet::new();
         assert!(
             registry
-                .trusted_identities(database, &empty, 99)
+                .admin_identities(database, &empty, 99)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            registry.trusted_identities(database, &empty, 100).unwrap(),
+            registry.admin_identities(database, &empty, 100).unwrap(),
             [identity]
         );
         for foreign in [
@@ -538,15 +538,15 @@ mod tests {
                 ..database
             },
         ] {
-            assert!(registry.trusted_identities(foreign, &empty, 100).is_err());
+            assert!(registry.admin_identities(foreign, &empty, 100).is_err());
         }
         let misnamed = Registry {
-            trusted: [(PrivateKey::new().public_key(), record)].into(),
+            admins: [(PrivateKey::new().public_key(), record)].into(),
             ..Default::default()
         };
-        assert!(misnamed.trusted_identities(database, &empty, 100).is_err());
+        assert!(misnamed.admin_identities(database, &empty, 100).is_err());
         assert_eq!(
-            registry.trusted_identities(database, &empty, 100).unwrap(),
+            registry.admin_identities(database, &empty, 100).unwrap(),
             [identity]
         );
     }

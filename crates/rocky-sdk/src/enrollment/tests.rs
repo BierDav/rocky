@@ -623,7 +623,7 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                         access: None,
                         issuers: Vec::new(),
                         naming: None,
-                        trusted: None,
+                        admin_grant: None,
                     },
                 )?
                 .0;

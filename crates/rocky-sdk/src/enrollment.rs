@@ -39,7 +39,7 @@ pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
 const CONTACT_VERSION: u32 = 4;
 pub const MAX_CONTACTS: usize = 64;
 pub const MAX_DIALED: usize = 16;
-const MAX_ISSUERS: usize = crate::registry::MAX_TRUSTED;
+const MAX_ISSUERS: usize = crate::registry::MAX_ADMINS;
 const MAX_ROUTES: usize = 4;
 const MAX_ADDRESS: usize = 2048;
 pub(crate) const DEFAULT_TTL: u64 = 180 * 24 * 60 * 60;
@@ -273,7 +273,7 @@ pub struct Issuing {
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
     pub heard: BTreeMap<PublicKey, u64>,
     pub trusted_nodes:
-        BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::TrustedObservation>>,
+        BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::AdminObservation>>,
     pub stale_after: Option<u64>,
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
     pub rights_change: Option<RightsChange>,
@@ -300,7 +300,7 @@ pub struct Rotation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Revoke {
     Identity(PublicKey),
-    TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
+    Admin(PublicKey, rocky_credentials::RevocationMode),
     Node {
         owner: PublicKey,
         node: PublicKey,
@@ -355,7 +355,7 @@ impl Revoking {
         Some(Self {
             capability: record.capability().map(|capability| capability.id),
             access: record.access().cloned(),
-            administers: registry.trusted.contains_key(identity),
+            administers: registry.admins.contains_key(identity),
             partitions: record.partition_grants(domain),
         })
     }
@@ -619,7 +619,7 @@ pub struct Renewed {
     pub access: Option<Access>,
     pub issuers: Vec<String>,
     pub naming: Option<String>,
-    pub trusted: Option<SignedCapability>,
+    pub admin_grant: Option<SignedCapability>,
 }
 
 pub fn now() -> Result<u64, Failure> {
@@ -1188,7 +1188,7 @@ impl Settings {
         !self.issuers.is_empty()
             || membership.nodes(&own).count() > 1
             || registry.records.iter().any(|(identity, record)| {
-                *identity != own && !record.revoked && registry.trusted.contains_key(identity)
+                *identity != own && !record.revoked && registry.admins.contains_key(identity)
             })
     }
 
@@ -1300,13 +1300,13 @@ impl Settings {
             clock_skew: std::time::Duration::from_secs(SKEW),
         })
     }
-    pub fn trust(
+    pub fn make_admin(
         &self,
         registry: &Registry,
         identity: PublicKey,
         root: Option<&dyn IdentityProvider>,
     ) -> Result<(SignedCapability, Changes), Failure> {
-        let root = root_signer(root, self.publisher, "granting trust")?;
+        let root = root_signer(root, self.publisher, "granting admin")?;
         if self.tombstoned(&identity) || self.revocations.revokes_trusted(&identity) {
             return Err("identity was revoked".into());
         }
@@ -1316,26 +1316,30 @@ impl Settings {
             .ok_or("this identity is not recorded")?;
         record.capability().ok_or("this identity is not recorded")?;
         let live =
-            registry.trusted_identities(self.database_context()?, &self.revocations, now()?)?;
-        if !live.contains(&identity) && live.len() >= crate::registry::MAX_TRUSTED {
+            registry.admin_identities(self.database_context()?, &self.revocations, now()?)?;
+        if !live.contains(&identity) && live.len() >= crate::registry::MAX_ADMINS {
             return Err(format!(
-                "a domain has at most {} trusted identities",
-                crate::registry::MAX_TRUSTED
+                "a domain has at most {} admins",
+                crate::registry::MAX_ADMINS
             )
             .into());
         }
         let grant = Authority::owner(root).issue_trusted(identity, self.domain()?.scope, now()?)?;
         let mut changes = Changes::default();
-        changes.trusted(
+        changes.admin(
             &identity,
-            &crate::registry::TrustedRecord {
+            &crate::registry::AdminRecord {
                 grant: grant.clone(),
                 granted: now()?,
             },
         )?;
         Ok((grant, changes))
     }
-    pub fn install_trust(&mut self, vault: &Vault, link: SignedCapability) -> Result<(), Failure> {
+    pub fn install_admin_grant(
+        &mut self,
+        vault: &Vault,
+        link: SignedCapability,
+    ) -> Result<(), Failure> {
         let identity = CredentialChain(vec![link.clone()]).trusted_identity(
             self.publisher,
             self.domain()?.scope,
@@ -1343,7 +1347,7 @@ impl Settings {
             now()?,
         )?;
         if identity != self.identity {
-            return Err("the trusted grant names another identity".into());
+            return Err("the admin grant names another identity".into());
         }
         self.authority.get_or_insert_with(Issuing::default);
         self.access = Access::Full;
@@ -1352,11 +1356,11 @@ impl Settings {
         Ok(())
     }
     pub(crate) fn owns(&self) -> bool {
-        self.trusted_links()
+        self.admin_links()
             .and_then(|chain| chain.0.first()?.capability.extended().ok())
             .is_some_and(|extended| extended.owner)
     }
-    pub(crate) fn trusted_links(&self) -> Option<CredentialChain> {
+    pub(crate) fn admin_links(&self) -> Option<CredentialChain> {
         let chain = self.identity_links();
         chain
             .trusted_identity(
@@ -1751,13 +1755,13 @@ impl Settings {
             },
             known,
         )?;
-        if let Some(links) = self.trusted_links()
-            && !registry.trusted.contains_key(&self.identity)
+        if let Some(links) = self.admin_links()
+            && !registry.admins.contains_key(&self.identity)
         {
-            let grant = links.0.first().ok_or("missing trusted grant")?.clone();
-            changes.trusted(
+            let grant = links.0.first().ok_or("missing admin grant")?.clone();
+            changes.admin(
                 &self.identity,
-                &registry::TrustedRecord {
+                &registry::AdminRecord {
                     granted: grant.capability.not_before,
                     grant,
                 },
@@ -2188,7 +2192,7 @@ impl Settings {
                 access: None,
                 issuers,
                 naming,
-                trusted: None,
+                admin_grant: None,
             });
         }
         Err(failure)
@@ -2201,7 +2205,7 @@ impl Settings {
         first: Option<PublicKey>,
     ) -> Result<Renewed, Failure> {
         if self.issuer() {
-            if (learn || self.trusted_links().is_none())
+            if (learn || self.admin_links().is_none())
                 && let Some(transport) = transport
             {
                 match self.renew_remotely(vault, transport, first).await {
@@ -2220,7 +2224,7 @@ impl Settings {
                 access: None,
                 issuers: Vec::new(),
                 naming: None,
-                trusted: None,
+                admin_grant: None,
             });
         }
         let transport = transport.ok_or(ServiceError::NetworkRequired("renew"))?;
@@ -2334,7 +2338,7 @@ impl Settings {
             access,
             issuers,
             naming,
-            trusted,
+            admin_grant: trusted,
         })
     }
     pub(crate) fn access_widens(&self, domain: &Domain) -> Result<bool, Failure> {
@@ -2477,7 +2481,7 @@ impl Settings {
             issuers: self.issuer_contacts(&[request.node])?,
             naming: None,
             trusted: registry
-                .trusted
+                .admins
                 .get(&prior.subject)
                 .map(|record| record.grant.clone()),
         };
@@ -2646,7 +2650,7 @@ impl Settings {
         };
         let people: BTreeSet<PublicKey> = people
             .filter(|person| {
-                !registry.trusted.contains_key(person)
+                !registry.admins.contains_key(person)
                     && registry
                         .get(person)
                         .is_some_and(|record| !record.capabilities.is_empty())
@@ -2671,12 +2675,12 @@ impl Settings {
         cut: Vec<rocky_credentials::Cut>,
     ) -> Result<(), Failure> {
         let own = self.identity;
-        let trusted = match &target {
-            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
-                registry.trusted.contains_key(identity)
+        let admin = match &target {
+            Revoke::Identity(identity) | Revoke::Admin(identity, _) => {
+                registry.admins.contains_key(identity)
             }
             Revoke::Node { owner, .. } => {
-                if *owner == own || *owner == self.publisher || registry.trusted.contains_key(owner)
+                if *owner == own || *owner == self.publisher || registry.admins.contains_key(owner)
                 {
                     return Err("an admin's own devices are unlinked with its identity".into());
                 }
@@ -2687,34 +2691,28 @@ impl Settings {
                     return Err("a rights change names no person".into());
                 }
                 if owners.iter().any(|owner| {
-                    *owner == own
-                        || *owner == self.publisher
-                        || registry.trusted.contains_key(owner)
+                    *owner == own || *owner == self.publisher || registry.admins.contains_key(owner)
                 }) {
                     return Err("an admin's rights change only through the root".into());
                 }
                 false
             }
         };
-        let root = if trusted {
-            Some(root_signer(
-                root,
-                self.publisher,
-                "revoking a trusted identity",
-            )?)
+        let root = if admin {
+            Some(root_signer(root, self.publisher, "revoking an admin")?)
         } else {
             None
         };
         let mode = match &target {
-            Revoke::TrustedIdentity(_, mode) if trusted => *mode,
-            Revoke::TrustedIdentity(_, _) => return Err("identity is not trusted".into()),
-            Revoke::Identity(_) if trusted => {
-                return Err("revoking a trusted identity requires a revocation mode".into());
+            Revoke::Admin(_, mode) if admin => *mode,
+            Revoke::Admin(_, _) => return Err("identity is not an admin".into()),
+            Revoke::Identity(_) if admin => {
+                return Err("revoking an admin requires a revocation mode".into());
             }
             _ => rocky_credentials::RevocationMode::Lost,
         };
         let identities: Vec<PublicKey> = match &target {
-            &(Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _)) => {
+            &(Revoke::Identity(identity) | Revoke::Admin(identity, _)) => {
                 if identity == own {
                     return Err("an issuer cannot revoke its own identity".into());
                 }
@@ -2722,14 +2720,14 @@ impl Settings {
                     return Err("the root is never revoked".into());
                 }
                 if self.tombstoned(&identity)
-                    && !(trusted
+                    && !(admin
                         && mode == rocky_credentials::RevocationMode::Compromised
                         && !self.revocations.revokes_origin(&identity))
                 {
                     return Err("identity is already revoked".into());
                 }
                 let mut identities = BTreeSet::from([identity]);
-                if trusted && mode == rocky_credentials::RevocationMode::Compromised {
+                if admin && mode == rocky_credentials::RevocationMode::Compromised {
                     identities.extend(registry.enrolled_by(identity));
                 }
                 identities.into_iter().collect()
@@ -2782,7 +2780,7 @@ impl Settings {
         };
         let issuer = if root.is_some() { self.publisher } else { own };
         let statement = match &target {
-            &(Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _)) => Revocation {
+            &(Revoke::Identity(identity) | Revoke::Admin(identity, _)) => Revocation {
                 app: domain.manifest().app,
                 issuer,
                 time,
@@ -2794,7 +2792,7 @@ impl Settings {
                     .filter_map(|record| record.capability)
                     .chain(
                         registry
-                            .trusted
+                            .admins
                             .get(&identity)
                             .and_then(|record| record.grant.id().ok()),
                     )

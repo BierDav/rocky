@@ -597,7 +597,7 @@ fn admissible(
         .is_some_and(|held| held != access);
     if *identity == settings.identity
         || *identity == settings.publisher
-        || registry.trusted.contains_key(identity)
+        || registry.admins.contains_key(identity)
         || other_access
     {
         return Err(Box::new(JoinError::AlreadyMember));

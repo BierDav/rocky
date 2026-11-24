@@ -166,7 +166,7 @@ async fn only_trusted_devices_and_issuers_seal() -> Result<(), Failure> {
     );
     let refused = message(snap::observe(b.database.seal()).await.unwrap_err());
     assert!(
-        refused.contains("only a trusted identity or an issuer"),
+        refused.contains("only an admin or an issuer"),
         "a writer never seals: {refused}"
     );
 

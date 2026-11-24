@@ -13,7 +13,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 const VERSION: u32 = 7;
 
 #[derive(Default)]
-pub(super) struct TrustedWatch {
+pub(super) struct AdminWatch {
     granted: BTreeMap<PublicKey, u64>,
     nodes: BTreeMap<PublicKey, PublicKey>,
     heard: BTreeMap<PublicKey, u64>,
@@ -22,7 +22,7 @@ pub(super) struct TrustedWatch {
 }
 const ADMIN_STALE_AFTER_SECONDS: std::ops::RangeInclusive<u64> = 60..=10 * 366 * 24 * 60 * 60;
 const HEARD_SAVE: u64 = 3600;
-impl TrustedWatch {
+impl AdminWatch {
     fn hear(&mut self, node: &PublicKey, at: u64) {
         if self.nodes.contains_key(node) {
             let heard = self.heard.entry(*node).or_default();
@@ -113,13 +113,13 @@ impl Node {
     pub(super) fn alerts(&self) -> Vec<Alert> {
         let time = self.status_time().unwrap_or_default();
         let stale: Vec<Alert> = self
-            .trusted_watch
+            .admin_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .alerts(time)
             .collect();
         let membership = self
-            .trusted_watch
+            .admin_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .membership_alerts
@@ -222,7 +222,7 @@ impl Node {
             .map(|kind| Alert { kind, since: None })
             .collect())
     }
-    pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
+    pub(super) async fn refresh_admin_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
             match self.registry(&*self.settings_snapshot().await).await {
                 Ok(registry) => Some(registry),
@@ -249,20 +249,20 @@ impl Node {
             .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
             .unwrap_or_default();
         let time = self.status_time()?;
-        let trusted = registry
+        let admins = registry
             .as_ref()
-            .map(|registry| registry.trusted_identities(database, &known, time))
+            .map(|registry| registry.admin_identities(database, &known, time))
             .transpose()?
             .unwrap_or_default();
         let (granted, nodes) = match &registry {
             Some(registry) => {
                 let membership = crate::membership::Membership::replicated(&known, database)?;
-                let granted: BTreeMap<PublicKey, u64> = trusted
+                let granted: BTreeMap<PublicKey, u64> = admins
                     .iter()
                     .copied()
                     .filter(|identity| *identity != own)
                     .filter_map(|identity| {
-                        let record = registry.trusted.get(&identity)?;
+                        let record = registry.admins.get(&identity)?;
                         Some((identity, record.granted))
                     })
                     .collect();
@@ -285,11 +285,11 @@ impl Node {
             .unwrap_or_default();
         let mut observed = base.clone();
         if registry.is_some() {
-            crate::membership::observe_trusted(&known, &trusted, time, &mut observed)?;
+            crate::membership::observe_admins(&known, &admins, time, &mut observed)?;
         }
         let save = {
             let mut watch = self
-                .trusted_watch
+                .admin_watch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             watch.stale_after = saved.1.unwrap_or(ADMIN_STALE_AFTER.as_secs());
@@ -349,7 +349,7 @@ impl Node {
         } else {
             Vec::new()
         };
-        self.trusted_watch
+        self.admin_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .membership_alerts = membership_alerts;
@@ -365,9 +365,9 @@ impl Node {
             self.verified_under_settings.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn hear_trusted(&self, node: &PublicKey, at: u64) {
+    fn hear_admin(&self, node: &PublicKey, at: u64) {
         let mut watch = self
-            .trusted_watch
+            .admin_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let time = self.status_time().unwrap_or_default();
@@ -387,7 +387,7 @@ impl Node {
         }
         if !self.collects().await {
             return Err(Box::new(crate::node::Refused(
-                "only a trusted node watches other trusted nodes".into(),
+                "only an admin node watches other admin nodes".into(),
             )));
         }
         {
@@ -396,22 +396,22 @@ impl Node {
             draft
                 .authority
                 .as_mut()
-                .ok_or("a trusted node issues")?
+                .ok_or("an admin node issues")?
                 .stale_after = Some(seconds);
             settings.commit(draft, &self.replica).await?;
         }
-        self.refresh_trusted_watch().await?;
+        self.refresh_admin_watch().await?;
         self.observations.touch();
         Ok(())
     }
     pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {
-        self.trusted_watch
+        self.admin_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .deadline(time)
     }
     pub(super) async fn collects(&self) -> bool {
-        self.settings.lock().await.trusted_links().is_some()
+        self.settings.lock().await.admin_links().is_some()
     }
     fn proves_collector(
         &self,
@@ -422,7 +422,7 @@ impl Node {
         let compact = if chain.0.len() == 2 {
             chain.clone()
         } else {
-            let trusted = chain
+            let grant = chain
                 .0
                 .first()
                 .cloned()
@@ -431,7 +431,7 @@ impl Node {
                 .certificate()
                 .cloned()
                 .ok_or("collector credentials have no node certificate")?;
-            CredentialChain(vec![trusted, certificate])
+            CredentialChain(vec![grant, certificate])
         };
         Ok(compact
             .trusted_node(
@@ -443,7 +443,7 @@ impl Node {
             .is_ok())
     }
     pub(super) async fn health_report(&self) -> Result<HealthReport, Failure> {
-        self.refresh_trusted_watch().await?;
+        self.refresh_admin_watch().await?;
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         for blocker in self.blockers().await? {
             let kind = serde_json::to_value(&blocker.kind)?["type"]
@@ -528,8 +528,8 @@ impl Node {
             revisions.borrow_and_update();
             frames.borrow_and_update();
             mesh.borrow_and_update();
-            let trusted = self.collects().await;
-            let due = trusted && refreshed.elapsed() >= REFRESH;
+            let collects = self.collects().await;
+            let due = collects && refreshed.elapsed() >= REFRESH;
             let result = async {
                 let report = self.health_report().await?;
                 if due || last.as_ref().map(content) != Some(content(&report)) {
@@ -540,7 +540,7 @@ impl Node {
                     .await?;
                     last = Some(report);
                 }
-                if trusted {
+                if collects {
                     let time = self.status_time()?;
                     for (node, report, received) in
                         self.forwards(peer, due.then_some(time), &forwarded)
@@ -561,7 +561,7 @@ impl Node {
             .await;
             self.reported(result.as_ref().map(drop));
             let tick = async {
-                if trusted {
+                if collects {
                     rocky_platform::time::sleep_until(refreshed + REFRESH).await
                 } else {
                     std::future::pending().await
@@ -635,7 +635,7 @@ impl Node {
         {
             held.received = held.received.max(time);
         }
-        self.hear_trusted(&node, time);
+        self.hear_admin(&node, time);
         self.observations.touch();
     }
     async fn send_health(
@@ -697,9 +697,9 @@ impl Node {
             HealthMessage::Collector => {
                 let settings = self.settings.lock().await.clone();
                 if !self.proves_collector(&settings, peer, chain)? {
-                    return Err("the peer is no trusted node".into());
+                    return Err("the peer is no admin node".into());
                 }
-                self.hear_trusted(&peer, self.status_time()?);
+                self.hear_admin(&peer, self.status_time()?);
                 collector.send_replace(true);
                 return Ok(());
             }
@@ -718,7 +718,7 @@ impl Node {
             None if signed.node == peer => (time, None),
             None => return Err("a device reports only its own health".into()),
             Some(_) if !*collector.borrow() => {
-                return Err("only a trusted node forwards reports".into());
+                return Err("only an admin node forwards reports".into());
             }
             Some(at) => (at.min(time), Some(peer)),
         };
@@ -734,7 +734,7 @@ impl Node {
         if report.alerts.len() > MAX_ITEMS || report.blockers.len() > MAX_ITEMS {
             return Err("the report exceeds its bounds".into());
         }
-        self.hear_trusted(&signed.node, received);
+        self.hear_admin(&signed.node, received);
         let mut mesh = self.mesh.lock().unwrap_or_else(PoisonError::into_inner);
         let prior = mesh.get(&signed.node);
         if prior.is_some_and(|held| held.received > received) {
@@ -855,7 +855,7 @@ mod tests {
             rocky_credentials::PrivateKey::new().public_key(),
             rocky_credentials::PrivateKey::new().public_key(),
         ];
-        let mut watch = TrustedWatch {
+        let mut watch = AdminWatch {
             granted: [(identity, 100)].into(),
             nodes: nodes.into_iter().map(|node| (node, identity)).collect(),
             stale_after: 60,
@@ -876,7 +876,7 @@ mod tests {
         ));
         watch.hear(&nodes[1], 300);
         assert_eq!(watch.last().collect::<Vec<_>>(), [(identity, 150)]);
-        let restored = TrustedWatch {
+        let restored = AdminWatch {
             heard: watch.heard.clone(),
             granted: watch.granted.clone(),
             nodes: watch.nodes.clone(),
@@ -887,7 +887,7 @@ mod tests {
             restored.alerts(210).collect::<Vec<_>>(),
             watch.alerts(210).collect::<Vec<_>>()
         );
-        let ordinary_database = TrustedWatch::default();
+        let ordinary_database = AdminWatch::default();
         assert_eq!(ordinary_database.alerts(1000).count(), 0);
     }
 }

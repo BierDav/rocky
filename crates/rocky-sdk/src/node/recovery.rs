@@ -55,7 +55,7 @@ impl Node {
         None
     }
     pub(super) async fn seal_routinely(&self) -> Option<crate::SealSkip> {
-        self.settings.lock().await.trusted_links()?;
+        self.settings.lock().await.admin_links()?;
         let scope = self.domain().scope;
         let sealed = async {
             let due = self.replica.unsealed_replayed_transactions().await?
@@ -99,7 +99,7 @@ impl Node {
         let changed = match (&*skipped, reason) {
             (None, None) => false,
             (Some(_), None) => {
-                tracing::info!("this trusted node seals again");
+                tracing::info!("this admin node seals again");
                 *skipped = None;
                 true
             }
@@ -110,7 +110,7 @@ impl Node {
                         if *held == reason
                 );
                 if !same {
-                    tracing::warn!(%reason, "this trusted node skipped a due seal");
+                    tracing::warn!(%reason, "this admin node skipped a due seal");
                     let since = current
                         .as_ref()
                         .and_then(|alert| alert.since)

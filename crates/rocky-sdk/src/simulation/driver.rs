@@ -295,7 +295,7 @@ impl Simulation {
                     .map_err(|_| "not woken")???;
                 Ok(self.alerts(&alerts))
             }
-            Action::Trust(node) => {
+            Action::MakeAdmin(node) => {
                 self.invite_as(0, *node, crate::Invite::new(crate::Access::Full))
                     .await?;
                 let identity = self.database(*node)?.status().await?.authority.principal;
@@ -315,7 +315,7 @@ impl Simulation {
                     self.identities.insert(identity, name);
                 }
                 self.database(*node)?.renew().await?;
-                Ok("trusted".into())
+                Ok("admin".into())
             }
             Action::StaleAfter(node, after) => {
                 self.running(*node)?

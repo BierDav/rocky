@@ -8,16 +8,11 @@ pub enum CoordinationError {
     UnknownDomain,
     Denied(Refusal),
     Configuration,
-    StaleEpoch,
-    StaleHead,
-    InvalidCommitment,
     RequestConflict,
     Corrupt,
-    Retired,
     Expired,
     Backpressure,
     UnsupportedFormat,
-    Sealed,
 }
 impl CoordinationError {
     pub fn category(&self) -> &'static str {
@@ -28,16 +23,11 @@ impl CoordinationError {
             Self::UnknownDomain => "unknown_domain",
             Self::Denied(_) => "denied",
             Self::Configuration => "configuration",
-            Self::StaleEpoch => "stale_epoch",
-            Self::StaleHead => "stale_head",
-            Self::InvalidCommitment => "invalid_commitment",
             Self::RequestConflict => "request_conflict",
             Self::Corrupt => "corrupt",
-            Self::Retired => "retired",
             Self::Expired => "expired",
             Self::Backpressure => "backpressure",
             Self::UnsupportedFormat => "unsupported_format",
-            Self::Sealed => "sealed",
         }
     }
 }

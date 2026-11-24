@@ -255,11 +255,11 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
                 .is_some(),
             "each revoked device is told why by its own issuer"
         );
+        assert!(
+            device.purged().await,
+            "a revoked device refuses reads as Removed instead of serving what it held"
+        );
     }
-    assert_eq!(
-        texts(&x, "SELECT title FROM items ORDER BY title").await,
-        ["before"]
-    );
     Domain { a, b, x, y, m, n }.close().await;
     Ok(())
 }

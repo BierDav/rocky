@@ -337,7 +337,7 @@ impl Node {
                 .record_unless_revoked(&settings, statement.clone())
                 .await?
             {
-                self.record_ended(&statement, settings.identity)?;
+                self.record_ended(&statement, settings.identity).await?;
             }
             drop(settings);
             if let Some(link) = self.current() {

@@ -485,6 +485,14 @@ impl Node {
         if self.lifecycle.lock().await.is_logged_out() {
             return Err(refused("this device logged out of the domain"));
         }
+        if self.own_revocation().await?.is_some() {
+            return Err(Box::new(crate::SqlFailure {
+                code: crate::connection::code::AUTH,
+                message: "this device was removed or unlinked; its data is purged".into(),
+                retryable: false,
+                reason: crate::SqlReason::Revoked,
+            }));
+        }
         Ok(())
     }
     pub(crate) async fn sql_session(
@@ -800,6 +808,16 @@ impl Node {
         }
         Ok(())
     }
+    async fn own_revocation(&self) -> Result<Option<rocky_credentials::SignedRevocation>, Failure> {
+        let settings = self.settings_snapshot().await;
+        self.revocation_notice.revoked(&settings).await
+    }
+    pub(crate) async fn purge_if_removed(&self) {
+        if matches!(self.own_revocation().await, Ok(Some(_))) {
+            self.replica.logout().await;
+            self.observations.touch();
+        }
+    }
 
     fn reached(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<PublicKey, Reached>>, Failure> {
         self.reached
@@ -939,11 +957,13 @@ impl Node {
     async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<(), Failure> {
         self.revoke_with(target, &Root::default()).await
     }
-    fn record_ended(
+    async fn record_ended(
         &self,
         signed: &rocky_credentials::SignedRevocation,
         identity: PublicKey,
     ) -> Result<(), Failure> {
+        self.replica.logout().await;
+        self.observations.touch();
         let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let statement = &signed.statement;
         if !statement.identities.contains(&identity)
@@ -1136,7 +1156,7 @@ impl Node {
                         .record_unless_revoked(&current, revoked.0.clone())
                         .await?
                     {
-                        self.record_ended(&revoked.0, current.identity)?;
+                        self.record_ended(&revoked.0, current.identity).await?;
                     }
                     self.wake_sync();
                 }
@@ -1679,7 +1699,7 @@ impl Node {
                 .record_unless_revoked(&draft, statement.clone())
                 .await?
         {
-            self.record_ended(&statement, draft.identity)?;
+            self.record_ended(&statement, draft.identity).await?;
         }
         let rotated = match registry {
             Some(registry) => resumes || draft.begin_exposure_rotation(&registry)?,
@@ -2104,7 +2124,7 @@ impl Node {
                         .record_unless_revoked(&current, statement.clone())
                         .await?
                     {
-                        self.record_ended(&statement, current.identity)?;
+                        self.record_ended(&statement, current.identity).await?;
                     }
                     return Err(Box::new(crate::enrollment::Revoked(statement)));
                 }

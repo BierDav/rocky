@@ -1624,7 +1624,10 @@ async fn revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority
             hub.hold_cut.store(false, Ordering::SeqCst);
             let error = b.sync(&*transport(&b).await?).await.unwrap_err();
             assert!(error.is::<crate::enrollment::Revoked>());
-            assert!(rows(&b).await?.is_empty());
+            assert!(
+                rows(&b).await.is_err(),
+                "the revoked device purged its data and reads nothing"
+            );
             assert_eq!(
                 rows(&a).await?,
                 ["1"],

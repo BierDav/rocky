@@ -486,9 +486,13 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         snap::observe(bob.engine.sync_now()).await.is_err(),
         "a revoked device refuses to sync"
     );
-    assert!(
-        bob.items().await.is_empty(),
-        "a revoked device reads nothing"
+    assert_eq!(
+        snap::observe(snap::read(&bob.engine, "SELECT 1 FROM items", Vec::new()))
+            .await
+            .err()
+            .map(|refusal| refusal["code"].clone()),
+        Some(serde_json::json!("revoked")),
+        "a revoked device purged what it held and reads nothing"
     );
 
     assert!(

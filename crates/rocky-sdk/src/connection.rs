@@ -52,6 +52,7 @@ pub struct SqlFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SqlReason {
     Statement,
+    Revoked,
     Unavailable {
         table: String,
         reason: Unavailability,

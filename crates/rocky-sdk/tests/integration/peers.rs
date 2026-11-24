@@ -225,7 +225,10 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
         "a still-configured peer neither takes a revoked device's rows nor gives it any"
     );
     assert_eq!(b.titles().await, ["Fresh"]);
-    assert_eq!(c.titles().await, ["Late"]);
+    assert!(
+        c.purged().await,
+        "the revoked device purged what it held once it learned of the revocation"
+    );
     b.close().await;
     c.close().await;
     Ok(())

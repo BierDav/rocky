@@ -418,10 +418,9 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
         "the person keeps the devices the admin did not unlink"
     );
     let _ = phone.sync().await;
-    assert_eq!(
-        phone.titles().await,
-        ["Milk"],
-        "the unlinked device receives nothing written after its unlink"
+    assert!(
+        phone.purged().await,
+        "the unlinked device purges what it held and receives nothing after its unlink"
     );
     phone.close().await;
     laptop.close().await;

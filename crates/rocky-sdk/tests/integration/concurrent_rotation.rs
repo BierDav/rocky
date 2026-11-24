@@ -416,9 +416,11 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
                 .all(|epoch| epoch["generation"].as_u64().unwrap() < 3)
         );
         let _ = device.sync().await;
+        assert!(
+            device.purged().await,
+            "a reader that learns its removal purges the rows it held instead of opening later ones"
+        );
     }
-    assert_eq!(rows(&carol, "parts").await, ["b", "before"]);
-    assert_eq!(rows(&dave, "parts").await, ["a", "before"]);
     for device in [&a, &b, &carol, &dave] {
         device.close().await;
     }

@@ -9,7 +9,8 @@ impl Node {
         self.settings.lock().await.clone()
     }
     pub(crate) async fn registry(&self, settings: &Settings) -> Result<Registry, Failure> {
-        if !settings.issuer() {
+        let purged = self.revocation_notice.revoked(settings).await?.is_some();
+        if !settings.issuer() || purged {
             return Ok(Registry::default());
         }
         Box::pin(registry::read(&self.replica, self.domain().registry())).await

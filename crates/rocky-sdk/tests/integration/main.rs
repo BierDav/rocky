@@ -56,6 +56,8 @@ mod relay;
 #[cfg(not(target_family = "wasm"))]
 mod removal;
 #[cfg(not(target_family = "wasm"))]
+mod removed_people;
+#[cfg(not(target_family = "wasm"))]
 mod replayed;
 #[cfg(not(target_family = "wasm"))]
 mod revocations;

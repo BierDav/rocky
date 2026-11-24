@@ -59,6 +59,7 @@ impl ErrorKind {
                     reason: crate::Unavailability::Incomplete { .. },
                     ..
                 } => "missing_dependencies",
+                crate::SqlReason::Revoked => "revoked",
                 crate::SqlReason::Unavailable { .. } | crate::SqlReason::Statement => "sql",
             },
             Self::Decode(_) => "decode",

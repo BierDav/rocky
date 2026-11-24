@@ -264,6 +264,16 @@ impl Device {
             })
             .collect()
     }
+    pub async fn purged(&self) -> bool {
+        match self.database.query("SELECT 1", Vec::new()).await {
+            Err(error) => matches!(
+                error.kind,
+                rocky_sdk::ErrorKind::Sql(failure)
+                    if failure.reason == rocky_sdk::SqlReason::Revoked
+            ),
+            Ok(_) => false,
+        }
+    }
     pub async fn titles(&self) -> Vec<String> {
         let items = self.items().await;
         items

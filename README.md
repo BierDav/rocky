@@ -118,7 +118,14 @@ never its secret, and a device's replica follows its access.
 belongs to, its access and what it may do per table. Admins list people with
 `Database::people` (a `Person` per member with access, partitions and
 devices), change access with `set_access` and end a person with
-`remove(person, Removal::Departed | Removal::Compromised)`. `Me::owner` comes from the root-signed owner grant, so every
+`remove(person, Removal::Departed | Removal::Compromised)`. A removed or
+unlinked device that learns of it at its next sync drops its keys, so it can
+no longer read the data, and refuses every SQL read and commit with
+`SqlReason::Revoked`, also after reopening; its syncs fail with
+`ErrorKind::Revoked`, and `logout(Logout::PurgeOnClose)` then deletes its
+directory. A device that is offline cannot know yet: it keeps
+reading and committing locally until it syncs, and those commits never reach
+anyone else. `Me::owner` comes from the root-signed owner grant, so every
 linked device of the owner knows it at once. Narrowing access
 or taking a partition back revokes the person's current credentials and
 rotates the keys of everything they could read before; the issuer records

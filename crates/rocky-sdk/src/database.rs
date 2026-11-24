@@ -1288,6 +1288,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     }
     let started = async {
         node.signed(async {
+            node.purge_if_removed().await;
             node.restore_line_signers().await?;
             node.complete_revocation().await?;
             node.refresh_importing().await?;

@@ -134,7 +134,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         "a device joining after the rotation reads earlier rows from a sealed base"
     );
     assert!(common::exchange_failed(&m.sync().await));
-    assert_eq!(m.titles().await, ["before"]);
+    assert!(m.purged().await, "the removed writer purges what it held");
     assert_eq!(identity(root, "m")?["keys"]["items"], json!([1]));
     let a = Device::new(open(&root.join("a"), &hub, "a").open().await?)?;
     sync(&a)

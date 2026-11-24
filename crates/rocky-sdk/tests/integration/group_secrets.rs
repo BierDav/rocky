@@ -404,8 +404,8 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let (secrets, tables) = removed.epochs("A").await;
     assert_eq!(secrets, json!([1]));
     assert!(
-        uniform(&tables, json!([1])),
-        "the removed device holds no new key"
+        uniform(&tables, json!([])),
+        "the removed device holds no new key and drops the keys it held"
     );
 
     issuer.database.close().await.unwrap();
@@ -718,9 +718,16 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     );
     let _ = snap::string(removed.database.sync_now()).await;
     assert_eq!(
-        rows(removed).await,
-        vec![vec!["before".to_owned()]; 3],
-        "the removed reader is refused later rows"
+        snap::observe(snap::read(
+            &removed.database,
+            "SELECT key FROM items",
+            Vec::new()
+        ))
+        .await
+        .err()
+        .map(|refusal| refusal["code"].clone()),
+        Some(json!("revoked")),
+        "the removed reader is refused later rows and purges the earlier ones"
     );
     let (secrets, tables) = removed.epochs("A").await;
     assert_eq!(
@@ -728,7 +735,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
         json!([1]),
         "the removed reader holds no key of the new epoch"
     );
-    assert!(uniform(&tables, json!([1])));
+    assert!(uniform(&tables, json!([])));
     for (reader, _) in readers {
         reader.database.close().await.unwrap();
     }

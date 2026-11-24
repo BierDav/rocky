@@ -56,25 +56,26 @@ fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wiped_worker_reenrolled_with_its_node_key_catches_up_then_continues_its_lane()
+async fn a_wiped_worker_rejoins_as_a_new_device_and_catches_up_before_it_authors()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "a"))).await?;
-    let provisioning = a.invite().await;
     let worker = root.path().join("worker");
-    let w = Device::join(&worker, &provisioning, memory(&hub, "w")).await?;
+    let w = Device::join(&worker, &a.invite().await, memory(&hub, "w")).await?;
     w.sync().await.expect("join sync");
     w.add(1, "first").await;
     w.add(2, "second").await;
     w.sync().await.expect("sync");
     assert_eq!(a.titles().await.len(), 2);
     let before = identities(&a).await;
+    let node = w.node().await;
     w.close().await;
     drop(w);
     std::fs::remove_dir_all(&worker)?;
 
-    let w = Device::join(&worker, &provisioning, memory(&hub, "w2")).await?;
+    let w = Device::join(&worker, &a.invite().await, memory(&hub, "w2")).await?;
+    assert_ne!(w.node().await, node);
     w.sync().await.expect("catch up");
     assert_eq!(identities(&w).await, before);
     try_add(&w, "third").await.expect("caught-up lane authors");
@@ -145,8 +146,7 @@ async fn a_restored_copy_never_authors_and_rejoins_as_a_new_device() -> Result<(
     a.database
         .revoke_identity(snap::public_key(&old_identity))
         .await?;
-    std::fs::remove_dir_all(&device)?;
-    let d = Device::join(&device, &a.invite().await, memory(&hub, "d")).await?;
+    let d = Device::join(&root.path().join("d"), &a.invite().await, memory(&hub, "d")).await?;
     d.sync().await.expect("join sync");
     assert_ne!(d.node().await, restored_node);
     d.add(3, "from the new device").await;

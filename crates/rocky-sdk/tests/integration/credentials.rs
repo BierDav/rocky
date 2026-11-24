@@ -222,7 +222,7 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
             items(&w).await.unwrap_or_default().is_empty(),
             "a scoped writer does not read another collection"
         );
-        assert!(snap::observe(w.database.identities()).await.is_err());
+        assert!(snap::observe(w.database.people()).await.is_err());
         Ok(())
     };
     check(false).await?;
@@ -242,12 +242,12 @@ async fn roles_bound_reads_and_writes_across_renewal() -> Result<(), Failure> {
     synced(&w).await?;
     assert_eq!(notes(&a).await?, ["From writer", "Hello"]);
     assert_eq!(items(&a).await?, ["Milk"]);
-    let identities = snap::ok(a.database.identities()).await;
+    let identities = snap::ok(a.database.people()).await;
     let mut listed: Vec<Value> = identities["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|record| record["own"] != true)
+        .filter(|record| record["owner"] != true)
         .map(|record| record["access"].clone())
         .collect();
     listed.sort_by_key(Value::to_string);
@@ -314,7 +314,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     })
     .await;
     assert_eq!(i.titles().await, ["Eggs", "Milk"]);
-    let identities = snap::ok(i.database.identities()).await.to_string();
+    let identities = snap::ok(i.database.people()).await.to_string();
     assert!(identities.contains(m.identity().await.as_str()));
     for device in [&i, &m] {
         device.close().await;
@@ -362,11 +362,12 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         synced(device).await?;
         assert_eq!(items(device).await?, ["Before"]);
     }
-    let revoked = snap::ok(
-        a.database
-            .revoke_identity(snap::public_key(&(c.identity().await))),
-    )
+    snap::ok(a.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(c.identity().await))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
+    let revoked = snap::ok(a.database.info()).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     assert_eq!(
         identity(root, "a")?["keys"],
@@ -475,14 +476,15 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     item(&a, 1, "Before").await?;
     synced(&b).await?;
     let (c_node, c_identity) = (c.node().await, c.identity().await);
-    let identities = snap::ok(a.database.identities()).await;
-    let record = identities["identities"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|record| record["identity"] == c_identity)
-        .cloned()
-        .ok_or("c's record")?;
+    let c_chain: rocky_credentials::CredentialChain =
+        serde_json::from_value(identity(root, "c")?["credentials"].clone())?;
+    let c_capability = c_chain
+        .0
+        .iter()
+        .rev()
+        .find(|link| link.capability.kind == rocky_core::PrincipalKind::User)
+        .ok_or("c's capability")?
+        .id()?;
     for device in [&a, &b, &c] {
         device.close().await;
     }
@@ -501,17 +503,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             .as_secs(),
         nodes: Default::default(),
         identities: [serde_json::from_value(json!(c_identity))?].into(),
-        capabilities: [rocky_core::Commitment::try_from(
-            data_encoding::HEXLOWER
-                .decode(
-                    record["capability"]
-                        .as_str()
-                        .ok_or("capability")?
-                        .as_bytes(),
-                )?
-                .as_slice(),
-        )?]
-        .into(),
+        capabilities: [c_capability].into(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
     };
@@ -546,13 +538,13 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             saved["keys"],
             json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
         );
-        let listed = snap::ok(a.database.identities()).await;
+        let listed = snap::ok(a.database.people()).await;
         assert!(
             listed["identities"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .any(|record| record["identity"] == c_identity && record["revoked"] == true),
+                .all(|record| record["identity"] != c_identity),
             "{listed}"
         );
         let authority: rocky_credentials::RevocationSet =

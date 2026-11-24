@@ -146,10 +146,7 @@ impl Listed {
         for index in 0..lists {
             snap::ok(
                 a.database
-                    .create_partition(rocky_sdk::PartitionTarget::Table {
-                        table: "items".to_owned(),
-                        values: (list(index)).clone(),
-                    }),
+                    .create_partition(&rocky_sdk::Partition::new("items", (list(index)).clone())),
             )
             .await;
             snap::ok(

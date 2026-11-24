@@ -32,13 +32,8 @@ fn enroll(
     access: Access,
     registry: &Registry,
 ) -> Result<(CredentialChain, registry::Changes), Failure> {
-    let (enrollment, changes) = issuer.enrollment_for(
-        vault,
-        device,
-        (access, BTreeSet::new(), None),
-        None,
-        registry,
-    )?;
+    let (enrollment, changes) =
+        issuer.enrollment_for(vault, device, (access, &[], None), None, registry)?;
     let mut links = enrollment.chain.clone();
     links.0.push(enrollment.capability.clone());
     Ok((links, changes))
@@ -552,10 +547,9 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
         Ok(registry::IdentityRecord {
             admitted: Some(registry::Admitted {
                 origin: None,
-                kind: registry::Kind::Paired,
-                access: Some(access),
-                issuer,
-                enrolled: now()?,
+                access,
+                invited_by: issuer,
+                joined: now()?,
                 invitation: None,
             }),
             ..Default::default()
@@ -653,6 +647,7 @@ async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statem
                         access: None,
                         issuers: Vec::new(),
                         naming: None,
+                        trusted: None,
                     },
                 )?
                 .0;

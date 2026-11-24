@@ -1,5 +1,6 @@
 use common::{Device, Failure};
-use rocky_sdk::{Network, RevocationMode, SyncReport, transport::memory::Hub};
+use rocky_credentials::RevocationMode;
+use rocky_sdk::{Network, SyncReport, transport::memory::Hub};
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
@@ -113,11 +114,13 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     )
     .await?;
     let principal = device_info(&b).await.principal.to_hex();
-    let grant = a
-        .database
-        .trust(principal.parse()?, a.root_signer()?)
+    a.database
+        .make_admin(
+            rocky_sdk::PersonId::new(principal.parse()?),
+            a.root_signer()?,
+        )
         .await?;
-    b.database.install_trust(&grant.grant).await?;
+    b.database.renew().await?;
     a.database.add_peer(&b.contact().await).await?;
     let root_key = a.root_signer()?;
     let (a_node, b_node) = (a.node().await, b.node().await);
@@ -173,32 +176,45 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 
     let error = b
         .database
-        .revoke_identity(b_identity.parse()?)
+        .remove(
+            rocky_sdk::PersonId::new(b_identity.parse()?),
+            rocky_sdk::Removal::Departed,
+        )
         .await
         .err()
         .ok_or("revoked itself")?;
     assert_eq!(
         error.code(),
-        "publisher_required",
+        "owner_required",
         "a trusted node does not revoke itself without the root: {error}"
     );
     let error = b
         .database
-        .revoke_identity(a_identity.parse()?)
+        .remove(
+            rocky_sdk::PersonId::new(a_identity.parse()?),
+            rocky_sdk::Removal::Departed,
+        )
         .await
         .err()
         .ok_or("revoked a trusted node without the root")?;
     assert_eq!(
         error.code(),
-        "publisher_required",
+        "owner_required",
         "a trusted node revokes no trusted node without the root: {error}"
     );
-    let revoked = b
-        .database
-        .revoke_trusted(a_identity.parse()?, mode, root_key)
+    b.database
+        .revoke_admin(
+            rocky_sdk::PersonId::new(a_identity.parse()?),
+            rocky_sdk::AdminRevocation::Remove(match mode {
+                RevocationMode::Lost => rocky_sdk::Removal::Departed,
+                RevocationMode::Compromised => rocky_sdk::Removal::Compromised,
+            }),
+            root_key,
+        )
         .await?;
     assert_eq!(
-        revoked.revocations.statements, 1,
+        b.database.info().await?.revocations.statements,
+        1,
         "with the root, a trusted node revokes the lost one"
     );
     assert_issuers(root, "b", &[])?;
@@ -398,11 +414,13 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     )
     .await?;
     let t_identity = device_info(&t).await.principal.to_hex();
-    let grant = a
-        .database
-        .trust(t_identity.parse()?, a.root_signer()?)
+    a.database
+        .make_admin(
+            rocky_sdk::PersonId::new(t_identity.parse()?),
+            a.root_signer()?,
+        )
         .await?;
-    t.database.install_trust(&grant.grant).await?;
+    t.database.renew().await?;
     let (a_node, t_node) = (a.node().await, t.node().await);
     a.add(1, "Milk").await;
     synced(&t).await?;
@@ -422,19 +440,22 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
 
     let error = a
         .database
-        .revoke_identity(t_identity.parse()?)
+        .remove(
+            rocky_sdk::PersonId::new(t_identity.parse()?),
+            rocky_sdk::Removal::Departed,
+        )
         .await
         .err()
         .ok_or("revoked a trusted identity without the root")?;
     assert_eq!(
         error.code(),
-        "publisher_required",
+        "owner_required",
         "only the root revokes a trusted identity: {error}"
     );
     a.database
-        .revoke_trusted(
-            t_identity.parse()?,
-            RevocationMode::Compromised,
+        .revoke_admin(
+            rocky_sdk::PersonId::new(t_identity.parse()?),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
             a.root_signer()?,
         )
         .await?;
@@ -484,7 +505,13 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
     let owner = create(directory.path(), &hub, "owner").await?;
     let member = join(directory.path(), &hub, "member", &owner.invite().await).await?;
     let identity = member.database.info().await?.principal;
-    owner.database.revoke_identity(identity).await?;
+    owner
+        .database
+        .remove(
+            rocky_sdk::PersonId::new(identity),
+            rocky_sdk::Removal::Departed,
+        )
+        .await?;
     let _ = member.sync().await;
     let _ = member.database.renew().await;
     assert_eq!(

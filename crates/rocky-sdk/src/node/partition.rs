@@ -29,7 +29,7 @@ impl Node {
         }
         Ok(name)
     }
-    async fn group_partition(
+    pub(super) async fn group_partition(
         &self,
         target: &crate::PartitionTarget,
         naming: Naming,
@@ -360,7 +360,7 @@ impl Node {
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(true)
     }
-    async fn share(
+    pub(super) async fn share(
         &self,
         partition: GroupPartition,
         recipients: BTreeSet<PublicKey>,
@@ -570,40 +570,6 @@ impl Node {
             partition,
         })
     }
-    pub(super) async fn partition_recipients(
-        &self,
-        target: &crate::PartitionTarget,
-    ) -> Result<Vec<PublicKey>, Failure> {
-        if self.unknown_partition(target).await?.is_some() {
-            return Ok(Vec::new());
-        }
-        let partition = self.group_partition(target, Naming::Known).await?;
-        let address = record_key(&partition.record.address);
-        let membership = if self.settings.lock().await.issuer() {
-            Some(self.membership().await?)
-        } else {
-            None
-        };
-        let settings = self.settings.lock().await;
-        Ok(settings
-            .deliveries
-            .values()
-            .filter(|pending| pending.address == address)
-            .filter_map(|pending| {
-                settings
-                    .delivery_nodes
-                    .values()
-                    .chain(settings.peers.keys())
-                    .chain(
-                        membership.iter().flat_map(|membership| {
-                            membership.all().map(|(_, linked)| &linked.node)
-                        }),
-                    )
-                    .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
-                    .copied()
-            })
-            .collect())
-    }
     pub(super) async fn share_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -639,75 +605,6 @@ impl Node {
             );
         }
         Ok(nodes)
-    }
-    pub(super) async fn grant_partition(
-        &self,
-        identity: PublicKey,
-        target: &crate::PartitionTarget,
-    ) -> Result<crate::PartitionShare, Failure> {
-        if !self.settings.lock().await.issuer() {
-            return Err(refused("only an admin grants a partition"));
-        }
-        let partition = self.group_partition(target, Naming::Known).await?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let record = registry
-            .get(&identity)
-            .ok_or_else(|| refused("the identity is not recorded in this database"))?;
-        if record.revoked {
-            return Err(refused("the identity was revoked"));
-        }
-        let access = record
-            .access()
-            .ok_or_else(|| refused("the identity holds no recorded access"))?;
-        let domain = self.domain();
-        let recorded: Vec<_> = record
-            .grants
-            .iter()
-            .map(|grant| grant.grant.clone())
-            .collect();
-        let fresh = crate::access::HeldPartition {
-            group: partition.record.group.clone(),
-            values: partition.record.values.clone(),
-        };
-        let mut held = domain.held_partitions(&recorded);
-        held.insert(fresh.clone());
-        domain.compile(access, &held).map_err(refused)?;
-        let granted = domain
-            .compile(access, &BTreeSet::from([fresh.clone()]))
-            .map_err(refused)?;
-        let reads_every_member = partition.members.iter().all(|member| {
-            granted.partitions.iter().any(|grant| {
-                grant.table == member.scope.table && grant.rights.contains(&rocky_core::Right::Read)
-            })
-        });
-        if !reads_every_member {
-            return Err(refused(
-                "the identity's role does not read every table of this partition group",
-            ));
-        }
-        let mut changes = crate::registry::Changes::default();
-        for grant in granted.partitions.iter().filter(|grant| {
-            domain
-                .held_partitions(std::slice::from_ref(*grant))
-                .contains(&fresh)
-        }) {
-            changes.grant(
-                &identity,
-                &crate::registry::Grant {
-                    grant: grant.clone(),
-                },
-                Some(record),
-            )?;
-        }
-        self.commit(changes).await?;
-        let nodes = self.identity_nodes(identity).await?;
-        let shared = self.share(partition, nodes, None).await?;
-        self.activity.record(crate::ActivityKind::PartitionShared {
-            target: target.clone(),
-            recipients: shared.recipients.len(),
-        });
-        self.wake_sync();
-        Ok(shared)
     }
     pub(super) async fn partition_complete(&self, name: &str) -> Result<bool, Failure> {
         let logical = self.domain().logical().clone();

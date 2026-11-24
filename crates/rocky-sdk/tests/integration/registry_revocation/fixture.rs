@@ -71,7 +71,7 @@ pub(crate) async fn join(
     Ok(device)
 }
 pub(crate) async fn listed(device: &Device, identity: &str) -> Value {
-    snap::ok(device.database.identities()).await["identities"]
+    snap::ok(device.database.people()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
@@ -109,11 +109,8 @@ pub(crate) fn role(name: &'static str) -> rocky_sdk::Access {
 }
 pub(crate) async fn grant(issuer: &Device, identity: &str, list: &str) {
     snap::ok(issuer.database.grant_partition(
-        identity.parse().expect("public key"),
-        rocky_sdk::PartitionTarget::Group {
-            group: "list".to_owned(),
-            values: values(list),
-        },
+        rocky_sdk::PersonId::new(identity.parse().expect("public key")),
+        &rocky_sdk::Partition::new("list", values(list)),
     ))
     .await;
 }
@@ -129,10 +126,7 @@ impl Domain {
         for list in ["L", "M"] {
             snap::ok(
                 a.database
-                    .create_partition(rocky_sdk::PartitionTarget::Group {
-                        group: "list".to_owned(),
-                        values: (values(list)).clone(),
-                    }),
+                    .create_partition(&rocky_sdk::Partition::new("list", (values(list)).clone())),
             )
             .await;
             snap::ok(

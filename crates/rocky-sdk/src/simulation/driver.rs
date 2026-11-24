@@ -279,7 +279,9 @@ impl Simulation {
                     .root
                     .clone()
                     .ok_or("member 0 holds no root")?;
-                let grant = self.database(0)?.trust(identity.parse()?, root).await?;
+                self.database(0)?
+                    .make_admin(crate::PersonId::new(identity.parse()?), root)
+                    .await?;
                 let creator = self.database(0)?.status().await?;
                 for (member, identity) in
                     [(0, creator.authority.principal), (*node, identity.clone())]
@@ -287,7 +289,7 @@ impl Simulation {
                     let name = self.members[member].name.clone();
                     self.identities.insert(identity, name);
                 }
-                self.database(*node)?.install_trust(&grant.grant).await?;
+                self.database(*node)?.renew().await?;
                 Ok("trusted".into())
             }
             Action::StaleAfter(node, after) => {
@@ -445,10 +447,10 @@ impl Simulation {
             Action::Partition(list) => {
                 self.running(0)?
                     .database()?
-                    .create_partition(crate::PartitionTarget::Group {
-                        group: "list".into(),
-                        values: vec![crate::SqlValue::Text(list.clone())],
-                    })
+                    .create_partition(&crate::Partition::new(
+                        "list",
+                        vec![crate::SqlValue::Text(list.clone())],
+                    ))
                     .await?;
                 self.lists.push(list.clone());
                 Ok("created".into())
@@ -485,7 +487,7 @@ impl Simulation {
                 let identity = self.running(*node)?.database()?.info().await?.principal;
                 self.running(0)?
                     .database()?
-                    .revoke_identity(identity)
+                    .remove(crate::PersonId::new(identity), crate::Removal::Departed)
                     .await?;
                 self.members[*node].revoked = true;
                 self.members[*node].close().await?;

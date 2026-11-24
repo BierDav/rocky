@@ -205,12 +205,6 @@ impl std::fmt::Debug for PendingLink {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RevocationResult {
-    pub statement: String,
-    pub revocations: crate::RevocationStatus,
-    pub cut_dropped_stages: Vec<DroppedStage>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceRevocationReceipt {
     pub node: crate::PeerId,
@@ -219,20 +213,144 @@ pub struct DeviceRevocationReceipt {
     pub delivered: std::collections::BTreeSet<crate::PeerId>,
     pub pending: std::collections::BTreeSet<crate::PeerId>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DroppedStage {
-    pub node: PublicKey,
-    pub sequence: u64,
-    pub head: String,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TableRights {
+    pub read: bool,
+    pub insert: bool,
+    pub update: bool,
+    pub delete: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrustGrant {
-    pub identity: String,
-    pub capability: String,
-    pub grant: String,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Me {
+    pub person: PersonId,
+    pub device: DeviceId,
+    pub access: Access,
+    pub admin: bool,
+    pub owner: bool,
+    pub tables: std::collections::BTreeMap<String, TableRights>,
+    pub expires: Timestamp,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub id: DeviceId,
+    pub linked: Timestamp,
+    pub last_seen: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Person {
+    pub id: PersonId,
+    pub access: Access,
+    pub admin: bool,
+    pub owner: bool,
+    pub label: Option<String>,
+    pub joined: Timestamp,
+    pub invited_by: Option<PersonId>,
+    pub invitation: Option<crate::InvitationId>,
+    pub partitions: Vec<crate::Partition>,
+    pub devices: Vec<Device>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    Departed,
+    Compromised,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminRevocation {
+    KeepAsFull,
+    Remove(Removal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccessError {
+    AdminRequired,
+    OwnerRequired,
+    UnknownPerson,
+    UnknownRole(crate::RoleName),
+    TargetIsAdmin,
+    NotAdmin,
+    NotPerPartition {
+        role: crate::RoleName,
+        group: String,
+    },
+    PartitionsHeld,
+    PartialGroup {
+        group: String,
+    },
+    TooManyPartitions {
+        limit: usize,
+    },
+    Removed,
+    KeepAsFullUnsupported,
+}
+impl AccessError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AdminRequired => "admin_required",
+            Self::OwnerRequired => "owner_required",
+            Self::UnknownPerson => "person_unknown",
+            Self::UnknownRole(_) => "role_unknown",
+            Self::TargetIsAdmin => "target_is_admin",
+            Self::NotAdmin => "not_admin",
+            Self::NotPerPartition { .. } => "role_not_per_partition",
+            Self::PartitionsHeld => "partitions_held",
+            Self::PartialGroup { .. } => "role_reads_part_of_group",
+            Self::TooManyPartitions { .. } => "too_many_partitions",
+            Self::Removed => "removed",
+            Self::KeepAsFullUnsupported => "keep_as_full_unsupported",
+        }
+    }
+    pub(crate) fn of(
+        error: &crate::Failure,
+        access: &Access,
+        partitions: &[crate::Partition],
+    ) -> Self {
+        if let Some(unknown) = error.downcast_ref::<crate::access::UnknownRole>() {
+            return Self::UnknownRole(unknown.0.clone());
+        }
+        match (access, partitions.first()) {
+            (Access::Role(role), Some(partition)) => Self::NotPerPartition {
+                role: role.clone(),
+                group: partition.group.clone(),
+            },
+            _ => Self::PartitionsHeld,
+        }
+    }
+}
+impl std::fmt::Display for AccessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AdminRequired => f.write_str("only an admin manages people"),
+            Self::OwnerRequired => f.write_str("only the owner's root key manages admins"),
+            Self::UnknownPerson => f.write_str("no such person in this database"),
+            Self::UnknownRole(role) => write!(f, "the schema declares no role {role}"),
+            Self::TargetIsAdmin => f.write_str("an admin's rights change only through the owner"),
+            Self::NotAdmin => f.write_str("the person is not an admin"),
+            Self::NotPerPartition { role, group } => {
+                write!(f, "role {role} does not hold partitions of group {group}")
+            }
+            Self::PartitionsHeld => f.write_str(
+                "whole access holds every partition; revoke the person's partitions first",
+            ),
+            Self::PartialGroup { group } => write!(
+                f,
+                "the person's role does not read every table of partition group {group}"
+            ),
+            Self::TooManyPartitions { limit } => {
+                write!(f, "a person holds at most {limit} partitions")
+            }
+            Self::Removed => f.write_str("the person was removed"),
+            Self::KeepAsFullUnsupported => {
+                f.write_str("keeping a revoked admin as a full member is not supported yet")
+            }
+        }
+    }
+}
+impl std::error::Error for AccessError {}
 
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
@@ -251,6 +369,73 @@ pub struct DeviceInfo {
 impl Database {
     pub async fn info(&self) -> Result<DeviceInfo, crate::Error> {
         self.send(Request::Info).await
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn renew(&self) -> Result<(), crate::Error> {
+        self.send(Request::Renew).await
+    }
+    pub async fn me(&self) -> Result<Me, crate::Error> {
+        self.send(Request::Me).await
+    }
+    pub async fn people(&self) -> Result<Vec<Person>, crate::Error> {
+        self.send(Request::People).await
+    }
+    pub async fn set_access(&self, person: PersonId, access: Access) -> Result<(), crate::Error> {
+        self.send(|reply| Request::SetAccess(person, access, reply))
+            .await
+    }
+    pub async fn grant_partition(
+        &self,
+        person: PersonId,
+        partition: &crate::Partition,
+    ) -> Result<(), crate::Error> {
+        let partition = partition.clone();
+        self.send(|reply| Request::GrantPartition(person, partition, reply))
+            .await
+    }
+    pub async fn revoke_partition(
+        &self,
+        person: PersonId,
+        partition: &crate::Partition,
+    ) -> Result<(), crate::Error> {
+        let partition = partition.clone();
+        self.send(|reply| Request::RevokePartition(person, partition, reply))
+            .await
+    }
+    pub async fn create_partition(
+        &self,
+        partition: &crate::Partition,
+    ) -> Result<crate::Partition, crate::Error> {
+        let partition = partition.clone();
+        self.send(|reply| Request::CreatePartition(partition, reply))
+            .await
+    }
+    pub async fn remove(&self, person: PersonId, removal: Removal) -> Result<(), crate::Error> {
+        self.send_rooted(None, |root, reply| {
+            Request::Remove(person, removal, root, reply)
+        })
+        .await
+    }
+    pub async fn make_admin(
+        &self,
+        person: PersonId,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<(), crate::Error> {
+        self.send_rooted(Some(root), |root, reply| {
+            Request::MakeAdmin(person, root, reply)
+        })
+        .await
+    }
+    pub async fn revoke_admin(
+        &self,
+        person: PersonId,
+        revocation: AdminRevocation,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<(), crate::Error> {
+        self.send_rooted(Some(root), |root, reply| {
+            Request::RevokeAdmin(person, revocation, root, reply)
+        })
+        .await
     }
     pub async fn invite(&self, invite: crate::Invite) -> Result<crate::Invitation, crate::Error> {
         self.send(|reply| Request::Invite(Box::new(invite), reply))
@@ -287,9 +472,6 @@ impl Database {
         self.send(|reply| Request::DeviceRevocationReceipt(node, reply))
             .await
     }
-    pub async fn renew(&self) -> Result<(), crate::Error> {
-        self.send(Request::Renew).await
-    }
     pub async fn sync_now_with_identity(
         &self,
         identity: Arc<dyn crate::IdentityProvider>,
@@ -298,48 +480,6 @@ impl Database {
     }
     pub async fn logout(&self, purge_on_close: bool) -> Result<(), crate::Error> {
         self.send(|reply| Request::Logout(purge_on_close, reply))
-            .await
-    }
-    pub async fn trust(
-        &self,
-        identity: PublicKey,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<TrustGrant, crate::Error> {
-        self.send_rooted(Some(root), |root, reply| {
-            Request::Trust(identity, root, reply)
-        })
-        .await
-    }
-    pub async fn revoke_trusted(
-        &self,
-        identity: PublicKey,
-        mode: crate::RevocationMode,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<RevocationResult, crate::Error> {
-        self.revoke_identity_with_root(identity, mode, Some(root), true)
-            .await
-    }
-    pub async fn revoke_identity(
-        &self,
-        identity: PublicKey,
-    ) -> Result<RevocationResult, crate::Error> {
-        self.revoke_identity_with_root(identity, crate::RevocationMode::Lost, None, true)
-            .await
-    }
-    pub async fn revoke_identity_with_root(
-        &self,
-        identity: PublicKey,
-        mode: crate::RevocationMode,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-        keep: bool,
-    ) -> Result<RevocationResult, crate::Error> {
-        self.send_rooted(root, |root, reply| {
-            Request::RevokeIdentity(identity, mode, root, keep, reply)
-        })
-        .await
-    }
-    pub async fn install_trust(&self, grant: &str) -> Result<(), crate::Error> {
-        self.send(|reply| Request::InstallTrust(grant.into(), reply))
             .await
     }
 }

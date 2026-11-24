@@ -5,6 +5,7 @@ use common::{Device, Failure};
 use rocky_credentials::PrivateKey;
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::Value;
+use serde_json::json;
 use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":7,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
@@ -76,12 +77,19 @@ async fn create_partition(device: &Device) -> Value {
     snap::ok(
         device
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
+            .create_partition(&rocky_sdk::Partition::new("list", values())),
+    )
+    .await;
+    let status = snap::ok(
+        device
+            .database
+            .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".into(),
                 values: values(),
             }),
     )
-    .await
+    .await;
+    json!({ "epoch": status["current"] })
 }
 async fn write_group(device: &Device, prefix: &str) {
     let mut tx = device.database.transaction().await.expect("begin");
@@ -201,11 +209,10 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     .await?;
     offline.close().await;
     for device in [&a, &b] {
-        snap::ok(
-            device
-                .database
-                .revoke_identity(PrivateKey::new().public_key()),
-        )
+        snap::ok(device.database.remove(
+            rocky_sdk::PersonId::new(PrivateKey::new().public_key()),
+            rocky_sdk::Removal::Departed,
+        ))
         .await;
     }
     let before_a = winner(root, "a", "items");
@@ -271,11 +278,10 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
     }
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Off)).await;
     for device in [&a, &b] {
-        snap::ok(
-            device
-                .database
-                .revoke_identity(PrivateKey::new().public_key()),
-        )
+        snap::ok(device.database.remove(
+            rocky_sdk::PersonId::new(PrivateKey::new().public_key()),
+            rocky_sdk::Removal::Departed,
+        ))
         .await;
     }
     assert_ne!(winner(root, "a", "items"), winner(root, "b", "items"));
@@ -374,15 +380,15 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         )
         .await;
     }
-    snap::ok(
-        a.database
-            .revoke_identity(snap::public_key(&(carol.identity().await))),
-    )
+    snap::ok(a.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(carol.identity().await))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
-    snap::ok(
-        b.database
-            .revoke_identity(snap::public_key(&(dave.identity().await))),
-    )
+    snap::ok(b.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(dave.identity().await))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
     write(&a, "a").await;
     write(&b, "b").await;

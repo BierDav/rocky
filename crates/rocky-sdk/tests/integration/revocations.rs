@@ -126,18 +126,23 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     let empty = revocations(&a).await;
     assert_eq!(empty.statements, 0);
 
-    let by_a = a
-        .database
-        .revoke_identity(x.identity().await.parse()?)
+    a.database
+        .remove(
+            rocky_sdk::PersonId::new(x.identity().await.parse()?),
+            rocky_sdk::Removal::Departed,
+        )
         .await?;
-    let by_b = b
-        .database
-        .revoke_identity(y.identity().await.parse()?)
+    b.database
+        .remove(
+            rocky_sdk::PersonId::new(y.identity().await.parse()?),
+            rocky_sdk::Removal::Departed,
+        )
         .await?;
-    assert_ne!(by_a.statement, by_b.statement);
-    assert_eq!(by_a.revocations.statements, 1);
-    assert_eq!(by_b.revocations.statements, 1);
-    assert_ne!(by_a.revocations.digest, by_b.revocations.digest);
+    let by_a = a.database.info().await?.revocations;
+    let by_b = b.database.info().await?.revocations;
+    assert_eq!(by_a.statements, 1);
+    assert_eq!(by_b.statements, 1);
+    assert_ne!(by_a.digest, by_b.digest);
     assert_eq!(
         identity(root, "a")?["keys"],
         json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]}),
@@ -246,7 +251,7 @@ async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<()
 }
 
 async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
-    use rocky_sdk::{RevocationMode, RevocationReason};
+    use rocky_sdk::RevocationReason;
 
     let directory = tempfile::tempdir()?;
     let root = directory.path();
@@ -270,11 +275,13 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
         )?;
         a.database.add_peer(&issuer.contact().await).await?;
         let identity = issuer.identity().await;
-        let grant = a
-            .database
-            .trust(identity.parse()?, a.root_signer()?)
+        a.database
+            .make_admin(
+                rocky_sdk::PersonId::new(identity.parse()?),
+                a.root_signer()?,
+            )
             .await?;
-        issuer.database.install_trust(&grant.grant).await?;
+        issuer.database.renew().await?;
         issuers.push(issuer);
     }
     let [b, c]: [Device; 2] = issuers.try_into().map_err(|_| "two issuers")?;
@@ -287,17 +294,25 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     a.close().await;
     drop(a);
 
-    let lost = b
-        .database
-        .revoke_trusted(creator.parse()?, RevocationMode::Lost, root_signer.clone())
+    b.database
+        .revoke_admin(
+            rocky_sdk::PersonId::new(creator.parse()?),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Departed),
+            root_signer.clone(),
+        )
         .await?;
-    let compromised = c
-        .database
-        .revoke_trusted(creator.parse()?, RevocationMode::Compromised, root_signer)
+    c.database
+        .revoke_admin(
+            rocky_sdk::PersonId::new(creator.parse()?),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            root_signer,
+        )
         .await?;
-    assert_eq!(lost.revocations.statements, 1);
-    assert_eq!(compromised.revocations.statements, 1);
-    assert_ne!(lost.statement, compromised.statement);
+    let lost = b.database.info().await?.revocations;
+    let compromised = c.database.info().await?.revocations;
+    assert_eq!(lost.statements, 1);
+    assert_eq!(compromised.statements, 1);
+    assert_ne!(lost.digest, compromised.digest);
 
     let (first, second) = if b_first { (&b, &c) } else { (&c, &b) };
     let _ = first.sync_now().await;

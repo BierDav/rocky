@@ -13,6 +13,7 @@ mod live_links;
 mod membership;
 mod mesh;
 mod partition;
+mod people;
 mod recovery;
 mod registry;
 mod schema_publication;
@@ -78,6 +79,7 @@ fn named(error: Failure) -> Failure {
     if error.is::<crate::registry::RegistryFull>()
         || error.is::<crate::JoinError>()
         || error.is::<crate::InviteError>()
+        || error.is::<crate::AccessError>()
     {
         error
     } else {
@@ -688,6 +690,7 @@ impl Node {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     async fn renew_now(&self) -> Result<(), Failure> {
         let attached = self.network.read().await;
         let transport = attached.as_ref().map(|link| &*link.transport);
@@ -931,31 +934,9 @@ impl Node {
             }
         }
     }
-    async fn revoke_identity(
-        &self,
-        identity: PublicKey,
-        mode: rocky_credentials::RevocationMode,
-        root: &Root,
-        keep: bool,
-    ) -> Result<crate::RevocationResult, Failure> {
-        let target =
-            if root.signer().is_some() || mode == rocky_credentials::RevocationMode::Compromised {
-                crate::enrollment::Revoke::TrustedIdentity(identity, mode)
-            } else {
-                crate::enrollment::Revoke::Identity(identity)
-            };
-        let result = self.revoke_with(target, root, keep).await?;
-        self.activity.record(crate::ActivityKind::IdentityRevoked {
-            identity: (identity).to_owned(),
-        });
-        Ok(result)
-    }
     #[cfg(test)]
-    async fn revoke(
-        &self,
-        target: crate::enrollment::Revoke,
-    ) -> Result<crate::RevocationResult, Failure> {
-        self.revoke_with(target, &Root::default(), false).await
+    async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<(), Failure> {
+        self.revoke_with(target, &Root::default()).await
     }
     fn record_ended(
         &self,
@@ -996,6 +977,7 @@ impl Node {
                     .collect(),
             ),
             crate::enrollment::Revoke::Node { owner, node } => (owner, [node].into()),
+            crate::enrollment::Revoke::Rights(owner) => (owner, Default::default()),
         };
         let (mut cut, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
         for lane in lanes {
@@ -1010,29 +992,19 @@ impl Node {
         &self,
         target: crate::enrollment::Revoke,
         root: &Root,
-        keep: bool,
-    ) -> Result<crate::RevocationResult, Failure> {
+    ) -> Result<(), Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
-        let (cut, dropped) = if keep && root.signer().is_some() {
+        let (cut, dropped) = if root.signer().is_some() {
             self.revocation_cut(target, &membership).await?
         } else {
             Default::default()
         };
-        let dropped = dropped
-            .iter()
-            .map(|(lane, head)| crate::DroppedStage {
-                node: *lane,
-                sequence: head.sequence,
-                head: HEXLOWER.encode(&head.id),
-            })
-            .collect::<Vec<_>>();
         if !dropped.is_empty() {
             self.activity
                 .record(crate::ActivityKind::RevocationCutDroppedStages {
                     identity: None,
                     count: dropped.len(),
-                    heads: dropped.clone(),
                 });
         }
         let mut settings = self.settings.lock().await;
@@ -1070,7 +1042,6 @@ impl Node {
         if !rotated.is_empty() {
             self.hold_keys(&settings, &rotated).await?;
         }
-        let status = settings.revocation_status()?;
         drop(settings);
         Box::pin(self.complete_revocation()).await?;
         if let Err(error) = self.seal_for_members().await {
@@ -1079,11 +1050,7 @@ impl Node {
                     error: (error.to_string()).to_owned(),
                 });
         }
-        Ok(crate::RevocationResult {
-            statement: HEXLOWER.encode(&rotation.statement.id()?),
-            revocations: status,
-            cut_dropped_stages: dropped,
-        })
+        Ok(())
     }
     pub(super) async fn apply(
         &self,
@@ -1162,8 +1129,12 @@ impl Node {
         if let Some(peer) = renewed.contacted {
             self.inbound_sync(peer);
         }
+        let trusted = renewed.trusted.take();
         self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
+        if !epochs_only && settings.issuer() && !current.issuer() {
+            return Ok(false);
+        }
         let restores_revoked_authors =
             (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)?;
         if restores_revoked_authors {
@@ -1173,7 +1144,16 @@ impl Node {
             renewed.chain = settings.credentials.clone();
         }
         let (keys, adopted) = settings.adopt(&self.replica, &self.vault, &renewed).await?;
-        let mut changed = !epochs_only || adopted;
+        let promoted = match trusted {
+            Some(link) if settings.trusted_links().is_none() => {
+                let mut draft = (**settings).clone();
+                draft.install_trust(&self.vault, link).map_err(refused)?;
+                settings.commit(Shared::new(draft), &self.replica).await?;
+                true
+            }
+            _ => false,
+        };
+        let mut changed = !epochs_only || adopted || promoted;
         if changed {
             let readable = self
                 .granted
@@ -1194,7 +1174,7 @@ impl Node {
                 }
             }
         }
-        if settings.issuer() {
+        if settings.issuer() && !promoted {
             drop(settings);
             let registry = self.registry(&*self.settings_snapshot().await).await?;
             settings = self.settings.lock().await;
@@ -1217,13 +1197,20 @@ impl Node {
             settings.granted(&self.domain());
         drop(settings);
         self.refresh_importing().await?;
-        if self.settings.lock().await.issuer() {
+        if self.settings.lock().await.issuer() && !promoted {
             Box::pin(self.complete_revocation()).await?;
         }
-        if !epochs_only && let Err(error) = Box::pin(self.record_self()).await {
+        if !epochs_only
+            && !promoted
+            && let Err(error) = Box::pin(self.record_self()).await
+        {
             self.activity.record(crate::ActivityKind::RegistryFailed {
                 error: (error.to_string()).to_owned(),
             });
+        }
+        if promoted {
+            let _ = Box::pin(self.renew(None, true, None, true)).await;
+            self.observations.touch();
         }
         self.wake_sync();
         Ok(true)
@@ -2232,7 +2219,10 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
     let (kind, retryable) = if error.is::<crate::enrollment::Revoked>() {
         (crate::ErrorKind::Revoked, false)
     } else if error.is::<crate::enrollment::PublisherRequired>() {
-        (crate::ErrorKind::PublisherRequired, false)
+        (
+            crate::ErrorKind::Access(crate::AccessError::OwnerRequired),
+            false,
+        )
     } else if error.is::<crate::registry::RegistryFull>() {
         (crate::ErrorKind::RegistryFull, false)
     } else if let Some(error) = error.downcast_ref::<crate::InviteError>() {
@@ -2241,6 +2231,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::Join(*error), error.retryable())
     } else if let Some(error) = error.downcast_ref::<crate::LinkError>() {
         (crate::ErrorKind::Link(*error), error.retryable())
+    } else if let Some(error) = error.downcast_ref::<crate::AccessError>() {
+        (crate::ErrorKind::Access(error.clone()), false)
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
         (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {

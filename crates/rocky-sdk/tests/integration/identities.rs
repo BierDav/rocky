@@ -197,7 +197,11 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     for node in nodes {
         assert!(synced(node).await);
     }
-    snap::ok(owner.database.revoke_identity(snap::public_key(&(key)))).await;
+    snap::ok(owner.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(key))),
+        rocky_sdk::Removal::Departed,
+    ))
+    .await;
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
         assert_eq!(
@@ -207,9 +211,12 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     }
     let own = snap::ok(owner.database.info()).await["principal"].clone();
     assert!(
-        snap::observe(owner.database.revoke_identity(snap::public_key(&(own))))
-            .await
-            .is_err(),
+        snap::observe(owner.database.remove(
+            rocky_sdk::PersonId::new(snap::public_key(&(own))),
+            rocky_sdk::Removal::Departed
+        ))
+        .await
+        .is_err(),
         "the owner's own identity is never revoked"
     );
     for device in nodes.iter().chain([owner]) {
@@ -684,11 +691,14 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             let member = Device::new(member_opened.database)?;
             common::introduce(&owner, &member).await;
             if index == 0 {
-                let grant = owner
+                owner
                     .database
-                    .trust(db_personal.public_key()?, root_a.clone())
+                    .make_admin(
+                        rocky_sdk::PersonId::new(db_personal.public_key()?),
+                        root_a.clone(),
+                    )
                     .await?;
-                member.database.install_trust(&grant.grant).await?;
+                member.database.renew().await?;
             }
             owner.add(1, &format!("database {index}")).await;
             member.sync().await.map_err(|error| error.to_string())?;
@@ -789,13 +799,15 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         let person_key_0 = personals[0].public_key()?.to_hex();
         let person_key_1 = personals[1].public_key()?.to_hex();
         let record = |view: Value, key: &str| -> Result<Value, Failure> {
-            let mut record = view["identities"]
+            let Some(mut record) = view["identities"]
                 .as_array()
                 .ok_or("identity view")?
                 .iter()
                 .find(|record| record["identity"] == key)
-                .ok_or("personal identity record")?
-                .clone();
+                .cloned()
+            else {
+                return Ok(Value::Null);
+            };
             record
                 .as_object_mut()
                 .ok_or("identity record")?
@@ -803,11 +815,10 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             Ok(record)
         };
         if revoked_b {
-            snap::ok(
-                owners[1]
-                    .database
-                    .revoke_identity(snap::public_key(&(person_key_1))),
-            )
+            snap::ok(owners[1].database.remove(
+                rocky_sdk::PersonId::new(snap::public_key(&(person_key_1))),
+                rocky_sdk::Removal::Departed,
+            ))
             .await;
             for device in [&members[1], &siblings[1]] {
                 assert!(device.sync().await.is_err());
@@ -823,11 +834,16 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         assert!(trusted_alerts(&owners[0]).await?.iter().any(|alert|
             matches!(&alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
                 if identity == &person_key_0 && node == &linked_a)));
-        let before_registry_b = record(
-            snap::ok(owners[1].database.identities()).await,
-            &person_key_1,
-        )?;
-        assert_eq!(before_registry_b["access"], "read");
+        let before_registry_b = record(snap::ok(owners[1].database.people()).await, &person_key_1)?;
+        assert_eq!(
+            before_registry_b["access"],
+            if revoked_b {
+                Value::Null
+            } else {
+                json!("read")
+            },
+            "a removed person is no longer listed"
+        );
         let before_b = identity(path, "owner1")?["keys"].clone();
         let before_authority_b = identity(path, "owner1")?["revocations"].clone();
         let before_heard_b = identity(path, "owner1")?["authority"]["heard"].clone();
@@ -846,9 +862,9 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         assert!(siblings[0].sync().await.is_err());
         owners[0]
             .database
-            .revoke_trusted(
-                person_key_0.parse()?,
-                rocky_sdk::RevocationMode::Compromised,
+            .revoke_admin(
+                rocky_sdk::PersonId::new(person_key_0.parse()?),
+                rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
                 root_a.clone(),
             )
             .await?;
@@ -869,10 +885,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         }
         assert_eq!(identity(path, "owner1")?["keys"], before_b);
         assert_eq!(
-            record(
-                snap::ok(owners[1].database.identities()).await,
-                &person_key_1
-            )?,
+            record(snap::ok(owners[1].database.people()).await, &person_key_1)?,
             before_registry_b
         );
         for device in owners.into_iter().chain(members).chain(siblings) {
@@ -991,8 +1004,11 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     let first = Device::new(first_opened.database)?;
     common::introduce(&owner, &first).await;
     let person = personal.public_key()?.to_hex();
-    let grant = owner.database.trust(person.parse()?, root.clone()).await?;
-    first.database.install_trust(&grant.grant).await?;
+    owner
+        .database
+        .make_admin(rocky_sdk::PersonId::new(person.parse()?), root.clone())
+        .await?;
+    first.database.renew().await?;
     first.sync().await.map_err(|error| error.to_string())?;
     let second = Device::new(
         common::link(
@@ -1085,9 +1101,9 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     );
     owner
         .database
-        .revoke_trusted(
-            person.parse()?,
-            rocky_sdk::RevocationMode::Compromised,
+        .revoke_admin(
+            rocky_sdk::PersonId::new(person.parse()?),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
             root,
         )
         .await?;

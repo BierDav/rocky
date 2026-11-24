@@ -8,10 +8,6 @@ use rocky_secure::TipStatement;
 
 pub(crate) const BOOKMARK: &str = "main";
 
-fn hex(digest: &rocky_core::Commitment) -> String {
-    HEXLOWER.encode(digest)
-}
-
 pub(super) struct Signer {
     pub(super) node: PrivateKey,
     pub(super) identity: PublicKey,
@@ -168,35 +164,11 @@ impl Node {
         Ok(())
     }
 
-    pub(super) async fn install_trust(&self, grant: &str) -> Result<(), Failure> {
-        let link = HEXLOWER
-            .decode(grant.as_bytes())
-            .ok()
-            .and_then(|bytes| {
-                rocky_credentials::decode_bounded::<rocky_credentials::SignedCapability>(
-                    &bytes,
-                    rocky_credentials::MAX_CREDENTIAL_BYTES,
-                )
-                .ok()
-            })
-            .ok_or_else(|| refused("grant must be a hex trusted grant"))?;
-        let mut settings = self.settings.lock().await;
-        let mut draft = (**settings).clone();
-        draft.install_trust(&self.vault, link).map_err(refused)?;
-        settings.commit(Shared::new(draft), &self.replica).await?;
-        self.apply(&mut settings, Vec::new()).await?;
-        drop(settings);
-        let _ = Box::pin(self.renew(None, true, None, true)).await;
-        self.observations.touch();
-        self.wake_sync();
-        Ok(())
-    }
-
     pub(super) async fn trust_identity(
         &self,
         identity: PublicKey,
         root: &super::Root,
-    ) -> Result<crate::TrustGrant, Failure> {
+    ) -> Result<(), Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let (link, changes) = self
             .settings
@@ -220,11 +192,8 @@ impl Node {
         drop(settings);
         self.observations.touch();
         self.wake_sync();
-        Ok(crate::TrustGrant {
-            identity: identity.to_hex(),
-            capability: hex(&link.id()?),
-            grant: HEXLOWER.encode(&rocky_credentials::encode(&link)?),
-        })
+        link.id()?;
+        Ok(())
     }
 
     async fn followed_tip_changed(&self, before: TipId) {

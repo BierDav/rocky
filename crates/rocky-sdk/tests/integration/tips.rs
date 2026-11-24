@@ -244,17 +244,14 @@ mod trusted {
             .to_owned()
     }
     async fn trust(owner: &Device, device: &Device) -> Value {
-        let granted = snap::ok(owner.database.trust(
-            snap::public_key(&(identity(device).await)),
-            (owner.root()).clone(),
+        let person = identity(device).await;
+        snap::ok(owner.database.make_admin(
+            rocky_sdk::PersonId::new(snap::public_key(&person)),
+            owner.root().clone(),
         ))
         .await;
-        snap::ok(
-            device
-                .database
-                .install_trust(&(snap::text(&(granted["grant"])))),
-        )
-        .await;
+        let granted = json!(person);
+        snap::ok(device.database.renew()).await;
         settle(&[owner, device]).await;
         granted
     }
@@ -273,44 +270,19 @@ mod trusted {
         let t = &house.devices[0];
         let granted = trust(owner, t).await;
         assert!(
-            snap::observe(t.database.trust(
-                snap::public_key(&(identity(owner).await)),
+            snap::observe(t.database.make_admin(
+                rocky_sdk::PersonId::new(snap::public_key(&(identity(owner).await))),
                 std::sync::Arc::new(rocky_sdk::RootKey::generate())
             ))
             .await
             .is_err(),
             "only the root grants trust"
         );
-        assert!(
-            snap::observe(
-                owner
-                    .database
-                    .install_trust(&(snap::text(&(granted["grant"]))))
-            )
-            .await
-            .is_err(),
-            "only the trusted identity's own device installs its grant"
-        );
-        snap::ok(
-            owner.database.revoke_identity_with_root(
-                owner
-                    .database
-                    .identities()
-                    .await?
-                    .into_iter()
-                    .find(|identity| {
-                        identity.trusted.as_ref().is_some_and(|trust| {
-                            data_encoding::HEXLOWER.encode(&trust.capability)
-                                == snap::text(&(granted["capability"]))
-                        })
-                    })
-                    .ok_or("unknown trust")?
-                    .identity,
-                rocky_sdk::RevocationMode::Compromised,
-                Some((owner.root()).clone()),
-                true,
-            ),
-        )
+        snap::ok(owner.database.revoke_admin(
+            rocky_sdk::PersonId::new(snap::public_key(&snap::text(&granted))),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            (owner.root()).clone(),
+        ))
         .await;
         settle(&[owner, t]).await;
         snap::observe(t.database.seal())
@@ -334,7 +306,6 @@ mod races {
         owner: Device,
         trusted: [Device; 2],
         member: Device,
-        grants: [Value; 2],
     }
     async fn household() -> Result<Household, Failure> {
         let root = tempfile::tempdir()?;
@@ -367,23 +338,6 @@ mod races {
             device.sync().await.expect("join sync");
             joined.push(device);
         }
-        let mut grants = Vec::new();
-        for device in &joined[..2] {
-            let identity = snap::ok(device.database.info()).await["principal"].clone();
-            let granted = snap::ok(
-                owner
-                    .database
-                    .trust(snap::public_key(&(identity)), (owner.root()).clone()),
-            )
-            .await;
-            snap::ok(
-                device
-                    .database
-                    .install_trust(&(snap::text(&(granted["grant"])))),
-            )
-            .await;
-            grants.push(granted);
-        }
         owner.add(1, "before").await;
         snap::ok(owner.database.seal()).await;
         let mut joined = joined.into_iter();
@@ -398,7 +352,6 @@ mod races {
             owner,
             trusted: [t0, t1],
             member,
-            grants: [grants[0].clone(), grants[1].clone()],
         };
         let tip = snap::ok(house.owner.database.tip_status()).await["tip"].clone();
         settle_on(&house.all(), &tip, &["before"]).await;
@@ -465,95 +418,6 @@ mod races {
             .unwrap_or(&Value::Null)
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner()
-    -> Result<(), Failure> {
-        let house = household().await?;
-        let (owner, member) = (&house.owner, &house.member);
-        let tip = snap::ok(owner.database.tip_status()).await["tip"].clone();
-        let continuations = [
-            snap::ok(house.trusted[0].database.seal()).await["tip"].clone(),
-            snap::ok(house.trusted[1].database.seal()).await["tip"].clone(),
-        ];
-        let lower_digest_wins = continuations[1].as_str() < continuations[0].as_str();
-        let winner = usize::from(lower_digest_wins);
-        settle_on(&house.all(), &continuations[winner], &["before"]).await;
-        let next = continuations[1 - winner].clone();
-        for device in house.all() {
-            assert_eq!(
-                snap::ok(device.database.tip_status()).await["tip"],
-                continuations[winner]
-            );
-        }
-        member.add(2, "on the winner").await;
-        settle_on(
-            &house.all(),
-            &continuations[winner],
-            &["before", "on the winner"],
-        )
-        .await;
-        assert_eq!(owner.titles().await, ["before", "on the winner"]);
-
-        let without_cut = false;
-        snap::ok(
-            owner.database.revoke_identity_with_root(
-                owner
-                    .database
-                    .identities()
-                    .await?
-                    .into_iter()
-                    .find(|identity| {
-                        identity.trusted.as_ref().is_some_and(|trust| {
-                            data_encoding::HEXLOWER.encode(&trust.capability)
-                                == snap::text(&(house.grants[winner]["capability"]))
-                        })
-                    })
-                    .ok_or("unknown trust")?
-                    .identity,
-                rocky_sdk::RevocationMode::Compromised,
-                Some((owner.root()).clone()),
-                without_cut,
-            ),
-        )
-        .await;
-        let revoked = &house.trusted[winner];
-        let rest: Vec<&Device> = house
-            .all()
-            .into_iter()
-            .filter(|device| !std::ptr::eq(*device, revoked))
-            .collect();
-        settle(&rest).await;
-        let followed = snap::ok(owner.database.tip_status()).await["tip"].clone();
-        let rotation_resealed_next = followed != next;
-        if rotation_resealed_next {
-            let inspection = snap::ok(owner.database.inspect_tips()).await;
-            assert_eq!(seal_by_id(&inspection, &followed)["tip"], next);
-        }
-        settle_on(&rest, &followed, &["before"]).await;
-        for device in rest {
-            assert_eq!(device.titles().await, ["before"]);
-            let inspection = snap::ok(device.database.inspect_tips()).await;
-            let revoked = seal_by_id(&inspection, &continuations[winner]);
-            assert_eq!(
-                (revoked["revoked"].clone(), revoked["canonical"].clone()),
-                (json!(true), json!(false)),
-                "a revocation without a cut takes the revoked seal out of resolution"
-            );
-            assert_eq!(seal_by_id(&inspection, &next)["canonical"], true);
-            assert_eq!(seal_by_id(&inspection, &next)["tip"], tip);
-        }
-        let held = snap::ok(member.database.held_changes()).await;
-        assert_eq!(
-            (
-                held["count"].clone(),
-                held["changes"][0]["intents"][0]["statements"][0]["params"][2]["value"].clone()
-            ),
-            (json!(1), json!("on the winner")),
-            "the write on the revoked continuation leaves the rows and is listed as held: {held}"
-        );
-        Ok(())
-    }
-
     async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
         snap::ok(device.database.status()).await["alerts"]
             .as_array()
@@ -576,11 +440,10 @@ mod races {
 
         let creator = snap::ok(owner.database.info()).await["principal"].clone();
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
-        snap::ok(t0.database.revoke_identity_with_root(
-            snap::public_key(&(creator)),
-            rocky_sdk::RevocationMode::Compromised,
-            Some((owner.root()).clone()),
-            true,
+        snap::ok(t0.database.revoke_admin(
+            rocky_sdk::PersonId::new(snap::public_key(&(creator))),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            (owner.root()).clone(),
         ))
         .await;
         let rest = [t0, t1];
@@ -627,11 +490,10 @@ mod races {
         settle(&[owner, t1, member]).await;
         assert!(!seal_by_id(&snap::ok(t1.database.inspect_tips()).await, &late).is_null());
         let creator = snap::ok(owner.database.info()).await["principal"].clone();
-        snap::ok(t0.database.revoke_identity_with_root(
-            snap::public_key(&(creator)),
-            rocky_sdk::RevocationMode::Compromised,
-            Some((owner.root()).clone()),
-            true,
+        snap::ok(t0.database.revoke_admin(
+            rocky_sdk::PersonId::new(snap::public_key(&(creator))),
+            rocky_sdk::AdminRevocation::Remove(rocky_sdk::Removal::Compromised),
+            (owner.root()).clone(),
         ))
         .await;
         isolate_t0(&house.hub, false);

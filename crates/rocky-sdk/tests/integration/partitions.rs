@@ -25,11 +25,8 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let hub = Arc::new(Hub::default());
     let db = open(&path, &hub).create().await.unwrap().database;
     for name in ["A", "B"] {
-        snap::ok(db.create_partition(rocky_sdk::PartitionTarget::Table {
-            table: "items".to_owned(),
-            values: (values(name)).clone(),
-        }))
-        .await;
+        snap::ok(db.create_partition(&rocky_sdk::Partition::new("items", (values(name)).clone())))
+            .await;
     }
     let mut ids = Vec::new();
     for (name, amount) in [("A", 10i64), ("B", 20i64)] {
@@ -97,11 +94,8 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .parse()
         .unwrap();
     snap::ok(db.grant_partition(
-        reader_identity,
-        rocky_sdk::PartitionTarget::Table {
-            table: "items".to_owned(),
-            values: values("A"),
-        },
+        rocky_sdk::PersonId::new(reader_identity),
+        &rocky_sdk::Partition::new("items", values("A")),
     ))
     .await;
     let contact = snap::ok(db.contact()).await;
@@ -171,13 +165,13 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         (first.writer(), first.sequence() + 2)
     );
     tx.rollback().await.unwrap();
-    snap::ok(db.create_partition(rocky_sdk::PartitionTarget::Table {
-        table: "items".to_owned(),
-        values: (values("C")).clone(),
-    }))
+    snap::ok(db.create_partition(&rocky_sdk::Partition::new("items", (values("C")).clone()))).await;
+    snap::ok(db.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(reader_identity.to_string()))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
-    let revoked =
-        snap::ok(db.revoke_identity(snap::public_key(&(reader_identity.to_string())))).await;
+    let revoked = snap::ok(db.info()).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();

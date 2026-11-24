@@ -155,7 +155,11 @@ async fn removing_the_relay_stops_it_carrying_frames() -> Result<(), Failure> {
     introduce(&issuer, &relay).await;
     a.sync().await.expect("reach the relay");
     let (node, contact) = (relay.node().await, relay.contact().await);
-    snap::ok(issuer.database.revoke_identity(person.public_key()?)).await;
+    snap::ok(issuer.database.remove(
+        rocky_sdk::PersonId::new(person.public_key()?),
+        rocky_sdk::Removal::Departed,
+    ))
+    .await;
     a.sync().await.expect("learn the revocation");
     assert_eq!(
         a.peer(&node).await,

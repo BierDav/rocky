@@ -170,11 +170,8 @@ impl Peer {
     }
     async fn grant(&self, identity: PublicKey, list: &str) -> Result<Value, String> {
         snap::string(self.database.grant_partition(
-            identity,
-            rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: values(list),
-            },
+            rocky_sdk::PersonId::new(identity),
+            &rocky_sdk::Partition::new("list", values(list)),
         ))
         .await
     }
@@ -279,29 +276,18 @@ async fn granted(
 async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer")).await;
-    let created = snap::ok(
+    snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
-    assert_eq!(created["epoch"]["generation"], 1);
-    assert_eq!(
-        snap::ok(
-            issuer
-                .database
-                .create_partition(rocky_sdk::PartitionTarget::Table {
-                    table: "items".to_owned(),
-                    values: (values("A")).clone()
-                })
-        )
-        .await,
-        created,
-        "creating again is idempotent: the same secret and epoch"
-    );
+    snap::ok(
+        issuer
+            .database
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
+    )
+    .await;
     assert_eq!(issuer.store.group_secrets(), 1);
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1]));
@@ -403,10 +389,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         snap::ok(
             issuer
                 .database
-                .create_partition(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                }),
+                .create_partition(&rocky_sdk::Partition::new("list", (values(list)).clone())),
         )
         .await;
     }
@@ -422,12 +405,12 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         peer.fetch(&issuer).await.unwrap();
     }
 
-    let revoked = snap::ok(
-        issuer
-            .database
-            .revoke_identity(snap::public_key(&(removed_device.identity.to_string()))),
-    )
+    snap::ok(issuer.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(removed_device.identity.to_string()))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
+    let revoked = snap::ok(issuer.database.info()).await;
     assert_eq!(
         revoked["revocations"]["statements"], 1,
         "the issuer revokes a device it knows only through its partition grant"
@@ -438,17 +421,23 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         assert!(uniform(&tables, expected), "{list}: {tables:?}");
     }
     assert_eq!(issuer.store.group_secrets(), 3);
+    snap::ok(
+        issuer
+            .database
+            .create_partition(&rocky_sdk::Partition::new("list", (values("C")).clone())),
+    )
+    .await;
     let created = snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
+            .partition_status(rocky_sdk::PartitionTarget::Group {
                 group: "list".to_owned(),
-                values: (values("C")).clone(),
+                values: values("C"),
             }),
     )
     .await;
     assert_eq!(
-        created["epoch"]["generation"], 1,
+        created["current"]["generation"], 1,
         "key epochs follow each scope, not the revocations"
     );
 
@@ -468,7 +457,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
             )
             .expect("typed fixture"),
             Some(
-                serde_json::from_value::<rocky_core::KeyEpoch>(json!(created["epoch"]))
+                serde_json::from_value::<rocky_core::KeyEpoch>(json!(created["current"]))
                     .expect("typed fixture"),
             ),
         ),
@@ -484,8 +473,8 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         .await
         .unwrap_err();
     assert!(
-        refused.contains("revoked"),
-        "a revoked identity gets no grant: {refused}"
+        refused.contains("removed"),
+        "a removed person gets no grant: {refused}"
     );
 
     let states = issuer.recipients("A").await;
@@ -534,20 +523,16 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
         snap::ok(
             issuer
                 .database
-                .create_partition(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values(list)).clone(),
-                }),
+                .create_partition(&rocky_sdk::Partition::new("list", (values(list)).clone())),
         )
         .await;
     }
     let (device_peer, device) = issuer.enroll(&root.path().join("device"), "reader").await;
     issuer.grant(device.identity, "A").await.unwrap();
-    snap::ok(
-        issuer
-            .database
-            .revoke_identity(snap::public_key(&(device.identity.to_string()))),
-    )
+    snap::ok(issuer.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(device.identity.to_string()))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");
@@ -574,10 +559,7 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
         snap::ok(
             issuer
                 .database
-                .create_partition(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: (values("A")).clone(),
-                }),
+                .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
         )
         .await;
         let (device_peer, device) = issuer
@@ -586,11 +568,10 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
         issuer.grant(device.identity, "A").await.unwrap();
         device_peer.database.close().await.unwrap();
         issuer.store.limit(Some(budget));
-        let revoked = snap::string(
-            issuer
-                .database
-                .revoke_identity(snap::public_key(&(device.identity.to_string()))),
-        )
+        let revoked = snap::string(issuer.database.remove(
+            rocky_sdk::PersonId::new(snap::public_key(&(device.identity.to_string()))),
+            rocky_sdk::Removal::Departed,
+        ))
         .await;
         issuer.store.limit(None);
         let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
@@ -640,10 +621,7 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     assert_eq!(
@@ -687,10 +665,7 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     let (phone, device) = granted(&issuer, &root.path().join("phone"), "A", "reader").await;
@@ -845,10 +820,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     for table in TABLES {
@@ -874,11 +846,10 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
 
     let (removed, removed_device) = &readers[0];
     let (remaining, _) = &readers[1];
-    snap::ok(
-        issuer
-            .database
-            .revoke_identity(snap::public_key(&(removed_device.identity.to_string()))),
-    )
+    snap::ok(issuer.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(removed_device.identity.to_string()))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
     for table in TABLES {
         write(&issuer, table, "after").await;
@@ -922,10 +893,7 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     for table in TABLES {
@@ -953,10 +921,7 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     for table in TABLES {
@@ -994,10 +959,7 @@ async fn only_an_admin_shares_or_grants_a_partition() {
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     let (member, _) = granted(&issuer, &root.path().join("member"), "A", "reader").await;
@@ -1020,10 +982,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     snap::ok(
         issuer
             .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "list".to_owned(),
-                values: (values("A")).clone(),
-            }),
+            .create_partition(&rocky_sdk::Partition::new("list", (values("A")).clone())),
     )
     .await;
     for table in TABLES {
@@ -1092,7 +1051,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     assert_eq!(info["principal"], json!(keys.identity));
     assert_ne!(info["node"], json!(keys.node));
 
-    let listed = snap::ok(issuer.database.identities()).await;
+    let listed = snap::ok(issuer.database.people()).await;
     let record = listed["identities"]
         .as_array()
         .unwrap()
@@ -1101,7 +1060,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         .unwrap()
         .clone();
     assert_eq!(record["access"], json!({"role": "reader"}));
-    assert_eq!(record["partitions"].as_array().unwrap().len(), TABLES.len());
+    assert_eq!(record["partitions"].as_array().unwrap().len(), 1);
     assert!(
         record["nodes"]
             .as_array()

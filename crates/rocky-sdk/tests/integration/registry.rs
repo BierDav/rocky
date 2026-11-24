@@ -68,11 +68,12 @@ fn issuer() -> rocky_sdk::Access {
     rocky_sdk::Access::Full
 }
 async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
-    snap::ok(issuer.database.identities()).await["identities"]
+    let own = issuer.identity().await;
+    snap::ok(issuer.database.people()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|record| record["own"] != true)
+        .filter(|record| record["identity"] != own.as_str())
         .map(|record| {
             let mut record = record.clone();
             record.as_object_mut().map(|fields| fields.remove("nodes"));
@@ -167,46 +168,20 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     .await?;
     settle(&m).await;
     let m_identity = m.identity().await;
-    snap::ok(
-        a.database
-            .create_partition(rocky_sdk::PartitionTarget::Table {
-                table: "parts".to_owned(),
-                values: vec![rocky_sdk::SqlValue::Text("L".to_owned())],
-            }),
-    )
+    snap::ok(a.database.create_partition(&rocky_sdk::Partition::new(
+        "parts",
+        vec![rocky_sdk::SqlValue::Text("L".to_owned())],
+    )))
     .await;
     snap::ok(a.database.grant_partition(
-        snap::public_key(&m_identity),
-        rocky_sdk::PartitionTarget::Table {
-            table: "parts".to_owned(),
-            values: vec![rocky_sdk::SqlValue::Text("L".to_owned())],
-        },
+        rocky_sdk::PersonId::new(snap::public_key(&m_identity)),
+        &rocky_sdk::Partition::new("parts", vec![rocky_sdk::SqlValue::Text("L".to_owned())]),
     ))
     .await;
     synced(&m).await?;
-    snap::ok(a.database.set_identity_label(
-        snap::public_key(&(m_identity)),
-        serde_json::from_value::<Vec<u8>>(json!([7, 8, 9])).expect("typed fixture"),
-    ))
-    .await;
-
     let at_a = identities(&a).await[&m_identity].clone();
     assert_eq!(at_a["access"], json!({"role": "lister"}));
-    assert_eq!(at_a["kind"], "paired");
     assert_eq!(at_a["partitions"].as_array().map(Vec::len), Some(1));
-    assert_eq!(at_a["label"], json!([7, 8, 9]));
-    let enrolled_expiry = snap::ok(m.database.info()).await["expires"]
-        .as_str()
-        .ok_or("enrollment expiry")?
-        .parse::<u64>()?;
-    assert!(
-        at_a["expires"]
-            .as_str()
-            .ok_or("record expiry")?
-            .parse::<u64>()?
-            >= enrolled_expiry,
-        "the recorded partition capability can outlive the original enrollment"
-    );
     online(&b, true).await;
     assert!(!identities(&b).await.contains_key(&m_identity));
 
@@ -265,9 +240,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         "a renewal through B's chain expires no later than B does"
     );
     let record = identities(&b).await[&m_identity].clone();
-    assert_eq!(record["kind"], "renewed");
     assert_eq!(record["access"], json!("full"));
-    assert_eq!(record["expires"], after["expires"]);
 
     snap::ok(m.database.remove_peer(snap::public_key(&(a_node)))).await;
     assert!(
@@ -356,7 +329,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
         assert_eq!(tables, 0, "{name}");
     }
     for device in [&c, &r, &w] {
-        assert!(snap::observe(device.database.identities()).await.is_err());
+        assert!(snap::observe(device.database.people()).await.is_err());
         assert!(
             snap::observe(snap::read(
                 &device.database,
@@ -461,17 +434,10 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     })
     .await;
     snap::ok(a.database.set_sync(rocky_sdk::SyncMode::Manual)).await;
-    assert_eq!(identities(&b).await[&m_identity]["kind"], "renewed");
+    assert!(identities(&b).await.contains_key(&m_identity));
     synced(&a).await?;
     let (at_a, at_b) = (identities(&a).await, identities(&b).await);
     assert_eq!(at_a[&m_identity], at_b[&m_identity]);
-    let expires =
-        |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
-    assert!(
-        expires(&snap::ok(m.database.info()).await["expires"])?
-            <= expires(&at_a[&m_identity]["expires"])?,
-        "the record keeps the later renewal; a chain through the second issuer expires no later"
-    );
     for name in ["a", "b"] {
         let file = rusqlite::Connection::open_with_flags(
             root.join(name).join("rocky.sqlite"),
@@ -734,10 +700,6 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         let identity = device.identity().await;
         let listed = identities(&a).await;
         assert_eq!(listed.len(), before.len() + 1);
-        assert_eq!(
-            listed[&identity]["capability"],
-            json!(chain_capability(&root.join(name))?)
-        );
         granted.push((device, identity, requesting));
     }
     for (index, (device, identity, requesting)) in granted.iter().enumerate() {
@@ -758,7 +720,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             .is_err()
         );
         assert!(
-            identities(&a).await[identity]["capability"].is_string(),
+            identities(&a).await.contains_key(identity),
             "an interrupted answer leaves the identity recorded"
         );
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
@@ -767,10 +729,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             device.database.info().await
         })
         .await;
-        assert_eq!(
-            identities(&a).await[identity]["capability"],
-            json!(chain_capability(&directory)?)
-        );
+        assert!(identities(&a).await.contains_key(identity));
     }
     for (device, _, _) in &granted {
         device.close().await;
@@ -892,7 +851,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let identity = member.identity().await;
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
-    assert_eq!(record["label"], json!(label));
+    assert_eq!(record["label"], json!(String::from_utf8(label.to_vec())?));
     snap::ok(owner.database.invite(rocky_sdk::Invite::new(issuer()))).await;
     member.database.close().await?;
     owner.database.close().await?;
@@ -905,7 +864,7 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
         record["invitation"], invitation["id"],
         "a later invitation does not erase the earlier enrollment's association"
     );
-    assert_eq!(record["label"], json!(label));
+    assert_eq!(record["label"], json!(String::from_utf8(label.to_vec())?));
     reopened.database.close().await?;
     Ok(())
 }

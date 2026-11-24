@@ -48,10 +48,12 @@ pub enum ActivityKind {
         identity: PublicKey,
         node: PublicKey,
     },
+    RightsChanged {
+        person: crate::PersonId,
+    },
     RevocationCutDroppedStages {
         identity: Option<PublicKey>,
         count: usize,
-        heads: Vec<crate::DroppedStage>,
     },
     RevocationSealFailed {
         error: String,

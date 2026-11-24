@@ -1,7 +1,6 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Revoked,
-    PublisherRequired,
     RegistryFull,
     RevocationSetFull,
     Rejected,
@@ -19,6 +18,7 @@ pub enum ErrorKind {
     Invite(crate::InviteError),
     Join(crate::JoinError),
     Link(crate::LinkError),
+    Access(crate::AccessError),
     Service(crate::ServiceError),
     StoreOnly(crate::StoreOnlyRefusal),
     RolloutConfirmation(Box<crate::RolloutConfirmationRequired>),
@@ -31,7 +31,6 @@ impl ErrorKind {
     pub fn code(&self) -> &str {
         match self {
             Self::Revoked => "revoked",
-            Self::PublisherRequired => "publisher_required",
             Self::RegistryFull => "registry_full",
             Self::RevocationSetFull => "revocation_set_full",
             Self::Rejected => "rejected",
@@ -49,6 +48,7 @@ impl ErrorKind {
             Self::Invite(error) => error.code(),
             Self::Join(error) => error.code(),
             Self::Link(error) => error.code(),
+            Self::Access(error) => error.code(),
             Self::Service(service) => service.code(),
             Self::StoreOnly(_) => "store_only",
             Self::RolloutConfirmation(_) => "rollout_confirmation_required",
@@ -129,6 +129,12 @@ impl From<crate::JoinError> for Error {
     }
 }
 
+impl From<crate::AccessError> for Error {
+    fn from(error: crate::AccessError) -> Self {
+        let detail = error.to_string();
+        Self::new(ErrorKind::Access(error), detail)
+    }
+}
 impl From<crate::LinkError> for Error {
     fn from(error: crate::LinkError) -> Self {
         Self {

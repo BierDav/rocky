@@ -444,20 +444,20 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     .await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
-    let identities = snap::ok(creator.engine.identities()).await;
+    let identities = snap::ok(creator.engine.people()).await;
     assert_eq!(
         identities["identities"].as_array().map(Vec::len),
         Some(3),
         "the creator's, Alice's and Bob's identities"
     );
     let bob_identity = snap::ok(bob.engine.info()).await["principal"].clone();
+    snap::ok(creator.engine.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(bob_identity))),
+        rocky_sdk::Removal::Departed,
+    ))
+    .await;
     assert_eq!(
-        snap::ok(
-            creator
-                .engine
-                .revoke_identity(snap::public_key(&(bob_identity)))
-        )
-        .await["revocations"]["statements"],
+        snap::ok(creator.engine.info()).await["revocations"]["statements"],
         1
     );
     creator.add(1, "After revocation").await;

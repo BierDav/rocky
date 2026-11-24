@@ -229,10 +229,7 @@ async fn create_list(issuer: &Device) -> Result<(), Failure> {
     snap::value(
         issuer
             .database
-            .create_partition(crate::PartitionTarget::Group {
-                group: "list".into(),
-                values: values(),
-            }),
+            .create_partition(&crate::Partition::new("list", values())),
     )
     .await
     .map(drop)
@@ -315,10 +312,10 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     b.online(false).await?;
     let removed_node = removed.node().await?;
     share(a, &[&node, &third.node().await?, &removed_node]).await?;
-    snap::value(
-        a.database
-            .revoke_identity(removed.identity().await?.parse()?),
-    )
+    snap::value(a.database.remove(
+        crate::PersonId::new(removed.identity().await?.parse()?),
+        crate::Removal::Departed,
+    ))
     .await?;
     assert_eq!(a.state(&node).await?, "pending");
     relay(a, b).await?;
@@ -451,10 +448,10 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         })
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
-    snap::value(
-        a.database
-            .revoke_identity(removed.identity().await?.parse()?),
-    )
+    snap::value(a.database.remove(
+        crate::PersonId::new(removed.identity().await?.parse()?),
+        crate::Removal::Departed,
+    ))
     .await?;
     relay(&a, &b).await?;
     snap::value(a.database.sync_now()).await?;
@@ -548,7 +545,11 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         1,
         "a restarted mailbox keeps the deposit"
     );
-    snap::value(a.database.revoke_identity(identity.parse()?)).await?;
+    snap::value(a.database.remove(
+        crate::PersonId::new(identity.parse()?),
+        crate::Removal::Departed,
+    ))
+    .await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     snap::value(a.database.sync_now()).await?;
     assert_eq!(

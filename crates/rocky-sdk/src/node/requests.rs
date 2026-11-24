@@ -11,12 +11,6 @@ impl Node {
             Request::WithIdentity(loan, request) => {
                 Box::pin(loan.supply(self.request(*request))).await;
             }
-            Request::Identities(reply) => {
-                let _ = reply.send(self.identities().await);
-            }
-            Request::IdentityLabel(a, b, reply) => {
-                let _ = reply.send(self.label(a, b).await);
-            }
             Request::HeldChanges(reply) => {
                 let _ = reply.send(self.replica.held_changes().await.map_err(Into::into));
             }
@@ -53,8 +47,8 @@ impl Node {
             Request::PartitionComplete(a, reply) => {
                 let _ = reply.send(self.partition_complete(&a).await);
             }
-            Request::CreatePartition(a, reply) => {
-                let _ = reply.send(self.create_partition(&a).await);
+            Request::CreatePartition(partition, reply) => {
+                let _ = reply.send(self.create_named_partition(&partition).await);
             }
             Request::InstallPartition(a, b, c, reply) => {
                 let _ = reply.send(self.install_partition(&a, &b, &c).await);
@@ -92,11 +86,29 @@ impl Node {
             }
             #[cfg(any(test, feature = "test-support"))]
             Request::Tips(probe) => self.probe_tips(probe).await,
-            Request::InstallTrust(grant, reply) => {
-                let _ = reply.send(self.install_trust(&grant).await);
+            Request::Me(reply) => {
+                let _ = reply.send(self.me().await);
             }
-            Request::Trust(identity, root, reply) => {
-                let _ = reply.send(self.trust_identity(identity, &root).await);
+            Request::People(reply) => {
+                let _ = reply.send(self.people().await);
+            }
+            Request::SetAccess(person, access, reply) => {
+                let _ = reply.send(self.set_access(person, access).await);
+            }
+            Request::GrantPartition(person, partition, reply) => {
+                let _ = reply.send(self.grant_partition(person, &partition).await);
+            }
+            Request::RevokePartition(person, partition, reply) => {
+                let _ = reply.send(self.revoke_partition(person, &partition).await);
+            }
+            Request::Remove(person, removal, root, reply) => {
+                let _ = reply.send(self.remove(person, removal, &root).await);
+            }
+            Request::MakeAdmin(person, root, reply) => {
+                let _ = reply.send(self.make_admin(person, &root).await);
+            }
+            Request::RevokeAdmin(person, revocation, root, reply) => {
+                let _ = reply.send(self.revoke_admin(person, revocation, &root).await);
             }
             Request::Invite(invite, reply) => {
                 let _ = reply.send(self.invite(&invite).await);
@@ -107,6 +119,7 @@ impl Node {
             Request::Invitations(reply) => {
                 let _ = reply.send(self.invitations().await);
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::Renew(reply) => {
                 let _ = reply.send(self.renew_now().await);
             }
@@ -137,9 +150,6 @@ impl Node {
             Request::Unlink(node, reply) => {
                 let _ = reply.send(self.unlink(node).await.map(drop));
             }
-            Request::RevokeIdentity(identity, mode, root, keep, reply) => {
-                let _ = reply.send(self.revoke_identity(identity, mode, &root, keep).await);
-            }
             Request::Info(reply) => {
                 let _ = reply.send(self.device_info().await);
             }
@@ -158,17 +168,8 @@ impl Node {
             Request::NextPartition(table, reply) => {
                 let _ = reply.send(self.next_partition(&table).await);
             }
-            Request::PartitionRecipients(target, reply) => {
-                let _ = reply.send(self.partition_recipients(&target).await);
-            }
-            Request::GrantPartition(identity, target, reply) => {
-                let _ = reply.send(self.grant_partition(identity, &target).await);
-            }
             Request::SharePartition(target, recipients, epoch, reply) => {
                 let _ = reply.send(self.share_partition(&target, recipients, epoch).await);
-            }
-            Request::IdentityForNode(node, reply) => {
-                let _ = reply.send(self.identity_for_node(node).await);
             }
             Request::DeviceCredential(reply) => {
                 let _ = reply.send(self.device_credential().await);

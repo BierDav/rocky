@@ -276,16 +276,22 @@ impl Device {
     }
     pub async fn admit(&self, admin: &Device) {
         let identity = admin.database.info().await.expect("session").principal;
-        let grant = self
-            .database
-            .trust(identity, self.root())
+        self.database
+            .make_admin(rocky_sdk::PersonId::new(identity), self.root())
             .await
-            .expect("trust");
-        admin
-            .database
-            .install_trust(&grant.grant)
-            .await
-            .expect("install trust");
+            .expect("make admin");
+        for _ in 0..3 {
+            admin
+                .database
+                .renew()
+                .await
+                .expect("renew into the admin grant");
+            if admin.database.info().await.expect("session").issuer {
+                return;
+            }
+            let _ = self.database.sync_now().await;
+        }
+        panic!("renewal at an issuer that learned the grant installs it");
     }
     pub async fn contact(&self) -> String {
         self.database.contact().await.expect("contact").uri

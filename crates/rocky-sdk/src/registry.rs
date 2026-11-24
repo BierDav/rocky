@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 pub const MAX_IDENTITIES: usize = 256;
 pub const MAX_LABEL: usize = 256;
-const MAX_GRANTS: usize = 256;
+pub(crate) const MAX_PARTITIONS: usize = 256;
 pub const MAX_TRUSTED: usize = 32;
 
 #[derive(Debug)]
@@ -23,22 +23,13 @@ impl std::fmt::Display for RegistryFull {
 }
 impl std::error::Error for RegistryFull {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    Created,
-    Paired,
-    Renewed,
-}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admitted {
-    pub kind: Kind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access: Option<crate::Access>,
-    pub issuer: PublicKey,
+    pub access: crate::Access,
+    pub invited_by: PublicKey,
     pub origin: Option<PublicKey>,
-    pub enrolled: u64,
+    pub joined: u64,
     pub invitation: Option<crate::InvitationId>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,11 +39,7 @@ pub struct Capability {
     pub id: Commitment,
     pub expires: u64,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Grant {
-    pub grant: PartitionGrant,
-}
+pub type Grant = crate::partitions::StoredPartition;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedRecord {
@@ -84,9 +71,30 @@ impl IdentityRecord {
             .copied()
     }
     pub fn access(&self) -> Option<&crate::Access> {
-        self.admitted
-            .as_ref()
-            .and_then(|admitted| admitted.access.as_ref())
+        self.admitted.as_ref().map(|admitted| &admitted.access)
+    }
+    pub(crate) fn partitions(&self) -> Vec<crate::Partition> {
+        self.grants.iter().map(Grant::partition).collect()
+    }
+    pub(crate) fn held(
+        &self,
+        domain: &crate::domain::Domain,
+    ) -> Result<std::collections::BTreeSet<crate::access::HeldPartition>, Failure> {
+        let targets: Vec<_> = self
+            .partitions()
+            .iter()
+            .map(crate::Partition::target)
+            .collect();
+        domain.partition_targets(&targets)
+    }
+    pub(crate) fn partition_grants(&self, domain: &crate::domain::Domain) -> Vec<PartitionGrant> {
+        let Some(access) = self.access() else {
+            return Vec::new();
+        };
+        self.held(domain)
+            .and_then(|held| domain.compile(access, &held))
+            .map(|granted| granted.partitions)
+            .unwrap_or_default()
     }
 }
 
@@ -302,17 +310,13 @@ impl Changes {
         prior: Option<&IdentityRecord>,
     ) -> Result<(), Failure> {
         let known = prior.map_or(0, |record| record.grants.len());
-        if known >= MAX_GRANTS && !prior.is_some_and(|record| record.grants.contains(grant)) {
+        if known >= MAX_PARTITIONS && !prior.is_some_and(|record| record.grants.contains(grant)) {
             return Err("partition grant capacity of this identity reached".into());
         }
-        let digest =
-            rocky_core::commitment("rocky.sdk.registry-grant.v1", &serde_json::to_vec(grant)?);
-        self.push(
-            identity,
-            format!("grant/{}", HEXLOWER.encode(&digest)),
-            grant,
-            Mode::Keep,
-        )
+        self.push(identity, grant_entry(grant)?, grant, Mode::Keep)
+    }
+    pub fn ungrant(&mut self, identity: &PublicKey, grant: &Grant) -> Result<(), Failure> {
+        self.push(identity, grant_entry(grant)?, grant, Mode::Delete)
     }
 
     pub fn trusted(&mut self, identity: &PublicKey, record: &TrustedRecord) -> Result<(), Failure> {
@@ -330,6 +334,10 @@ impl Changes {
 }
 const IDENTITY: &str = "identity";
 const TRUSTED: &str = "trusted";
+fn grant_entry(grant: &Grant) -> Result<String, Failure> {
+    let digest = rocky_core::commitment("rocky.sdk.registry-grant.v2", &serde_json::to_vec(grant)?);
+    Ok(format!("grant/{}", HEXLOWER.encode(&digest)))
+}
 fn capability_entry(capability: &Capability) -> String {
     format!("capability/{}", HEXLOWER.encode(&capability.id))
 }

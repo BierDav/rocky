@@ -195,10 +195,10 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.add_peer(&c.contact().await)
         .await
         .map_err(|e| e.to_string())?;
-    snap::ok(
-        a.database
-            .revoke_identity(snap::public_key(&(c.identity().await))),
-    )
+    snap::ok(a.database.remove(
+        rocky_sdk::PersonId::new(snap::public_key(&(c.identity().await))),
+        rocky_sdk::Removal::Departed,
+    ))
     .await;
     assert_eq!(
         a.peer(&c.node().await).await,
@@ -404,8 +404,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 43);
-    for version in (0..43).chain([44, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 44);
+    for version in (0..44).chain([45, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

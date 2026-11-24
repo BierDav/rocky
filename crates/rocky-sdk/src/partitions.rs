@@ -1,6 +1,6 @@
 use crate::{Database, SqlValue, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +20,59 @@ impl Partition {
             group: self.group.clone(),
             values: self.values.clone(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredValue {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+impl StoredValue {
+    fn of(value: &SqlValue) -> Self {
+        match value {
+            SqlValue::Null => Self::Null,
+            SqlValue::Integer(value) => Self::Integer(*value),
+            SqlValue::Real(value) => Self::Real(value.bits()),
+            SqlValue::Text(value) => Self::Text(value.clone()),
+            SqlValue::Blob(value) => Self::Blob(value.clone()),
+        }
+    }
+    fn value(&self) -> SqlValue {
+        match self {
+            Self::Null => SqlValue::Null,
+            Self::Integer(value) => SqlValue::Integer(*value),
+            Self::Real(bits) => {
+                rocky_core::Real::from_bits(*bits).map_or(SqlValue::Null, SqlValue::Real)
+            }
+            Self::Text(value) => SqlValue::Text(value.clone()),
+            Self::Blob(value) => SqlValue::Blob(value.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredPartition {
+    group: String,
+    values: Vec<StoredValue>,
+}
+impl StoredPartition {
+    pub(crate) fn of(partition: &Partition) -> Self {
+        Self {
+            group: partition.group.clone(),
+            values: partition.values.iter().map(StoredValue::of).collect(),
+        }
+    }
+    pub(crate) fn partition(&self) -> Partition {
+        Partition::new(
+            self.group.clone(),
+            self.values.iter().map(StoredValue::value).collect(),
+        )
     }
 }
 
@@ -86,13 +139,6 @@ impl Database {
         self.send(|reply| Request::NextPartition(table.into(), reply))
             .await
     }
-    pub async fn partition_recipients(
-        &self,
-        target: PartitionTarget,
-    ) -> Result<Vec<PublicKey>, crate::Error> {
-        self.send(|reply| Request::PartitionRecipients(target, reply))
-            .await
-    }
     pub async fn share_partition(
         &self,
         target: PartitionTarget,
@@ -100,21 +146,6 @@ impl Database {
         epoch: Option<rocky_core::KeyEpoch>,
     ) -> Result<PartitionShare, crate::Error> {
         self.send(|reply| Request::SharePartition(target, recipients, epoch, reply))
-            .await
-    }
-    pub async fn grant_partition(
-        &self,
-        identity: PublicKey,
-        target: PartitionTarget,
-    ) -> Result<PartitionShare, crate::Error> {
-        self.send(|reply| Request::GrantPartition(identity, target, reply))
-            .await
-    }
-    pub async fn identity_for_node(
-        &self,
-        node: PublicKey,
-    ) -> Result<Option<PublicKey>, crate::Error> {
-        self.send(|reply| Request::IdentityForNode(node, reply))
             .await
     }
 }
@@ -174,13 +205,6 @@ impl Database {
     }
     pub async fn partition_complete(&self, table: &str) -> Result<bool, crate::Error> {
         self.send(|reply| Request::PartitionComplete(table.into(), reply))
-            .await
-    }
-    pub async fn create_partition(
-        &self,
-        target: PartitionTarget,
-    ) -> Result<PreparedPartition, crate::Error> {
-        self.send(|reply| Request::CreatePartition(target, reply))
             .await
     }
     pub async fn install_partition(

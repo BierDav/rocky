@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Access, Affinity, Column, Network, PartitionTarget, Role, RoleName, Schema, SqlValue, Table,
-    transport::memory::Hub,
+    Access, Affinity, Column, ErrorKind, Network, PersonId, Removal, Role, RoleName, Schema,
+    SqlValue, Table, TableRights, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -108,11 +108,8 @@ fn holds_reader_key(directory: &Path, table: &str) -> Result<bool, Failure> {
     let identity = common::authority_json(directory, "identity")?;
     Ok(identity["keys"].get(table).is_some())
 }
-fn ward(name: &str) -> PartitionTarget {
-    PartitionTarget::Group {
-        group: "ward".into(),
-        values: vec![SqlValue::Text(name.into())],
-    }
+fn ward(name: &str) -> rocky_sdk::Partition {
+    rocky_sdk::Partition::new("ward", vec![SqlValue::Text(name.into())])
 }
 async fn synced(device: &Device) -> Result<(), Failure> {
     device.sync().await.map_err(|error| error.to_string())?;
@@ -172,8 +169,203 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
         Access::Role(SCANNER),
         "the role survives into the installed settings"
     );
+    let me = scanner.database.me().await?;
+    assert_eq!(me.access, Access::Role(SCANNER));
+    assert!(!me.admin);
+    assert_eq!(
+        me.tables.get("tickets"),
+        Some(&TableRights {
+            read: true,
+            ..TableRights::default()
+        })
+    );
+    assert_eq!(
+        me.tables
+            .get("check_ins")
+            .map(|rights| (rights.insert, rights.update, rights.delete)),
+        Some((true, false, false))
+    );
+    assert_eq!(
+        scanner.database.people().await.map_err(|error| error.kind),
+        Err(ErrorKind::Access(rocky_sdk::AccessError::AdminRequired)),
+        "only an admin lists people"
+    );
+    assert!(admin.database.me().await?.admin);
     scanner.close().await;
     admin.close().await;
+    Ok(())
+}
+
+async fn person(device: &Device) -> Result<PersonId, Failure> {
+    Ok(device.database.me().await?.person)
+}
+
+#[tokio::test]
+async fn a_person_downgraded_to_read_can_no_longer_write() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = venue()?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Full))
+        .await?;
+    let member = Device::new(
+        open(&root.path().join("member"), &schema, &hub, "member")
+            .join(&invitation.code)
+            .await?,
+    )?;
+    synced(&member).await?;
+    insert(&member, "tickets", ["T1", "Ada"]).await?;
+    synced(&member).await?;
+    admin
+        .database
+        .set_access(person(&member).await?, Access::Read)
+        .await?;
+    synced(&admin).await?;
+    let _ = member.sync().await;
+    synced(&member).await?;
+    assert_eq!(member.database.me().await?.access, Access::Read);
+    assert!(
+        insert(&member, "tickets", ["T2", "Eve"]).await.is_err(),
+        "a person downgraded to Read writes nothing"
+    );
+    assert_eq!(rows(&member, "SELECT code FROM tickets").await?, ["T1"]);
+    insert(&admin, "tickets", ["T3", "Bob"]).await?;
+    synced(&admin).await?;
+    synced(&member).await?;
+    assert_eq!(
+        rows(&member, "SELECT code FROM tickets ORDER BY code").await?,
+        ["T1", "T3"],
+        "a downgraded person still reads"
+    );
+    member.close().await;
+    admin.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_removed_clinician_reads_no_chart_written_after_removal() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = clinic()?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
+    admin.database.create_partition(&ward("A")).await?;
+    insert(&admin, "charts", ["A", "before removal"]).await?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)).partition(ward("A")))
+        .await?;
+    let clinician = Device::new(
+        open(&root.path().join("clinician"), &schema, &hub, "clinician")
+            .join(&invitation.code)
+            .await?,
+    )?;
+    synced(&clinician).await?;
+    synced(&clinician).await?;
+    assert_eq!(
+        rows(&clinician, "SELECT note FROM charts").await?,
+        ["before removal"]
+    );
+    admin
+        .database
+        .remove(person(&clinician).await?, Removal::Departed)
+        .await?;
+    insert(&admin, "charts", ["A", "after removal"]).await?;
+    synced(&admin).await?;
+    let _ = clinician.sync().await;
+    let _ = clinician.sync().await;
+    let read = rows(&clinician, "SELECT note FROM charts").await;
+    assert!(
+        !read
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|note| note == "after removal"),
+        "{read:?}"
+    );
+    let removed = person(&clinician).await?;
+    assert!(
+        admin
+            .database
+            .people()
+            .await?
+            .iter()
+            .all(|listed| listed.id != removed),
+        "a removed person is no longer listed"
+    );
+    clinician.close().await;
+    admin.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_granted_chart_reaches_the_phone_and_the_laptop() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = clinic()?;
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
+    admin.database.create_partition(&ward("A")).await?;
+    insert(&admin, "charts", ["A", "chart in A"]).await?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)))
+        .await?;
+    let mut opened = open(&root.path().join("phone"), &schema, &hub, "phone")
+        .join(&invitation.code)
+        .await?;
+    let identity: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(opened.identity.take().ok_or("a minted identity")?);
+    let phone = Device::new(opened)?;
+    synced(&phone).await?;
+    let laptop = Device::new(
+        common::link(
+            open(&root.path().join("laptop"), &schema, &hub, "laptop"),
+            identity,
+            &phone.contact().await,
+            &phone.database,
+        )
+        .await?,
+    )?;
+    synced(&laptop).await?;
+    synced(&phone).await?;
+    synced(&admin).await?;
+    let clinician = person(&phone).await?;
+    assert_eq!(person(&laptop).await?, clinician);
+    let listed = admin.database.people().await?;
+    let devices = listed
+        .iter()
+        .find(|listed| listed.id == clinician)
+        .map(|listed| listed.devices.len());
+    assert_eq!(devices, Some(2), "{listed:?}");
+    admin
+        .database
+        .grant_partition(clinician, &ward("A"))
+        .await?;
+    synced(&admin).await?;
+    for device in [&phone, &laptop] {
+        synced(device).await?;
+        synced(device).await?;
+        assert_eq!(
+            rows(device, "SELECT note FROM charts").await?,
+            ["chart in A"]
+        );
+    }
+    for device in [phone, laptop, admin] {
+        device.close().await;
+    }
     Ok(())
 }
 
@@ -188,7 +380,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
             .await?,
     )?;
     for name in ["A", "B"] {
-        admin.database.create_partition(ward(name)).await?;
+        admin.database.create_partition(&ward(name)).await?;
         insert(&admin, "charts", [name, &format!("chart in {name}")]).await?;
     }
     ward_name(&admin, "A").await?;
@@ -210,7 +402,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     );
     admin
         .database
-        .grant_partition(clinician_identity, ward("A"))
+        .grant_partition(rocky_sdk::PersonId::new(clinician_identity), &ward("A"))
         .await?;
     synced(&admin).await?;
     synced(&clinician).await?;
@@ -227,7 +419,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     assert!(
         clinician
             .database
-            .grant_partition(clinician_identity, ward("B"))
+            .grant_partition(rocky_sdk::PersonId::new(clinician_identity), &ward("B"))
             .await
             .is_err(),
         "only an admin grants a partition"
@@ -235,7 +427,10 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
     assert!(
         admin
             .database
-            .grant_partition(admin.database.info().await?.principal, ward("B"))
+            .grant_partition(
+                rocky_sdk::PersonId::new(admin.database.info().await?.principal),
+                &ward("B")
+            )
             .await
             .is_err(),
         "whole access already holds every partition"

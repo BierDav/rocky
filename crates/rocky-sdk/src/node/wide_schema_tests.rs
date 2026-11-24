@@ -148,14 +148,10 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         );
         members.push((device, provisioned, dir));
     }
-    snap::ok(
-        owner
-            .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "book".to_owned(),
-                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
-            }),
-    )
+    snap::ok(owner.database.create_partition(&crate::Partition::new(
+        "book",
+        vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+    )))
     .await;
     snap::ok(
         owner.database.share_partition(
@@ -251,7 +247,11 @@ async fn exercise(count: usize) -> Result<(), Failure> {
             .is_err()
     );
     tx.rollback().await?;
-    snap::ok(owner.database.revoke_identity(members[0].1.principal)).await;
+    snap::ok(owner.database.remove(
+        crate::PersonId::new(members[0].1.principal),
+        crate::Removal::Departed,
+    ))
+    .await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
     assert_epochs(&members[0].0, count, &[1]).await;
@@ -287,14 +287,10 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
             .await?
             .database,
     );
-    snap::ok(
-        device
-            .database
-            .create_partition(rocky_sdk::PartitionTarget::Group {
-                group: "book".to_owned(),
-                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
-            }),
-    )
+    snap::ok(device.database.create_partition(&crate::Partition::new(
+        "book",
+        vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+    )))
     .await;
     let mut tx = device.database.transaction().await?;
     let id = tx

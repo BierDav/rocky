@@ -124,12 +124,10 @@ impl Todos {
             return Err("a device cannot remove itself; reset it instead".into());
         }
         let node_key = node.parse()?;
-        let identity = self
-            .database
-            .identity_for_node(node_key)
-            .await?
-            .ok_or("the node is not linked to a recorded identity")?;
-        self.database.revoke_identity(identity).await?;
+        let person = self.person_of(node_key).await?;
+        self.database
+            .remove(person, rocky_sdk::Removal::Departed)
+            .await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])
@@ -168,12 +166,24 @@ impl Todos {
             })
             .collect()
     }
+    async fn person_of(&self, node: rocky_sdk::PublicKey) -> Result<rocky_sdk::PersonId, Failure> {
+        let device = rocky_sdk::DeviceId::new(node);
+        self.database
+            .people()
+            .await?
+            .into_iter()
+            .find(|person| person.devices.iter().any(|held| held.id == device))
+            .map(|person| person.id)
+            .ok_or_else(|| "the node is not linked to a recorded person".into())
+    }
     pub async fn shared_with(&self, list: RowIdentity) -> Result<BTreeSet<String>, Failure> {
         Ok(self
             .database
-            .partition_recipients(list_target(list))
+            .partition_status(list_target(list))
             .await?
-            .iter()
+            .recipients
+            .into_iter()
+            .filter_map(|delivery| delivery.node)
             .map(|node| node.to_hex())
             .collect())
     }
@@ -192,13 +202,9 @@ impl Todos {
         for node in nodes {
             let key = node.parse()?;
             if partial.contains(node) {
-                let identity = self
-                    .database
-                    .identity_for_node(key)
-                    .await?
-                    .ok_or("the node is not linked to a recorded identity")?;
+                let person = self.person_of(key).await?;
                 self.database
-                    .grant_partition(identity, list_target(list))
+                    .grant_partition(person, &list_partition(list))
                     .await?;
             } else {
                 full.insert(key);
@@ -237,6 +243,9 @@ impl Todos {
     }
 }
 
+fn list_partition(list: RowIdentity) -> rocky_sdk::Partition {
+    rocky_sdk::Partition::new(LIST_GROUP, vec![list.sql()])
+}
 fn list_target(list: RowIdentity) -> PartitionTarget {
     PartitionTarget::Group {
         group: LIST_GROUP.into(),

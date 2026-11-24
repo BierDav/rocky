@@ -1,9 +1,9 @@
 use crate::{
-    Access, Failure, Partition, PersonId, SqlValue, Timestamp,
-    access::HeldPartition,
+    Access, Failure, Partition, PersonId, Timestamp,
     enrollment::{
         Contact, EnrollingIssuer, Enrollment, Intent, NodeKeys, Route, Settings, exchange, now,
     },
+    partitions::StoredPartition,
     peer::{PeerError, PeerReply, PeerRequest},
     registry::{Changes, Registry, RegistryFull},
     schema::Schema,
@@ -19,13 +19,7 @@ use rocky_credentials::{
 };
 use rocky_secure::{EncryptedReplica, PrivateKey};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::RangeInclusive,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, time::Duration};
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
 const BOOK_VERSION: u32 = 3;
@@ -387,52 +381,12 @@ impl std::str::FromStr for InvitationCode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StoredValue {
-    Null,
-    Integer(i64),
-    Real(u64),
-    Text(String),
-    Blob(Vec<u8>),
-}
-impl StoredValue {
-    fn of(value: &SqlValue) -> Self {
-        match value {
-            SqlValue::Null => Self::Null,
-            SqlValue::Integer(value) => Self::Integer(*value),
-            SqlValue::Real(value) => Self::Real(value.bits()),
-            SqlValue::Text(value) => Self::Text(value.clone()),
-            SqlValue::Blob(value) => Self::Blob(value.clone()),
-        }
-    }
-    fn value(&self) -> SqlValue {
-        match self {
-            Self::Null => SqlValue::Null,
-            Self::Integer(value) => SqlValue::Integer(*value),
-            Self::Real(bits) => {
-                rocky_core::Real::from_bits(*bits).map_or(SqlValue::Null, SqlValue::Real)
-            }
-            Self::Text(value) => SqlValue::Text(value.clone()),
-            Self::Blob(value) => SqlValue::Blob(value.clone()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Named {
-    group: String,
-    values: Vec<StoredValue>,
-}
-
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
     holder: Holder,
     access: Access,
-    partitions: BTreeSet<HeldPartition>,
-    named: Vec<Named>,
+    partitions: Vec<StoredPartition>,
     label: Option<String>,
     expires: u64,
     redeemed: Option<(PublicKey, PublicKey)>,
@@ -447,8 +401,7 @@ pub(crate) struct Book {
 struct Opening {
     holder: Holder,
     access: Access,
-    partitions: BTreeSet<HeldPartition>,
-    named: Vec<Named>,
+    partitions: Vec<StoredPartition>,
     label: Option<String>,
 }
 impl Book {
@@ -505,7 +458,6 @@ impl Book {
                 holder: opening.holder,
                 access: opening.access,
                 partitions: opening.partitions,
-                named: opening.named,
                 label: opening.label,
                 expires,
                 redeemed: None,
@@ -542,7 +494,11 @@ impl Book {
         let first = pending.redeemed.replace(held).is_none();
         Ok(Redemption {
             access: pending.access.clone(),
-            partitions: pending.partitions.clone(),
+            partitions: pending
+                .partitions
+                .iter()
+                .map(StoredPartition::partition)
+                .collect(),
             label: pending.label.clone().filter(|_| first),
             first,
         })
@@ -573,14 +529,9 @@ impl Book {
                 id: *id,
                 access: pending.access.clone(),
                 partitions: pending
-                    .named
+                    .partitions
                     .iter()
-                    .map(|named| {
-                        Partition::new(
-                            named.group.clone(),
-                            named.values.iter().map(StoredValue::value).collect(),
-                        )
-                    })
+                    .map(StoredPartition::partition)
                     .collect(),
                 label: pending.label.clone(),
                 expires: timestamp(pending.expires),
@@ -632,7 +583,7 @@ impl Issued {
 #[derive(Debug, PartialEq)]
 struct Redemption {
     access: Access,
-    partitions: BTreeSet<HeldPartition>,
+    partitions: Vec<Partition>,
     label: Option<String>,
     first: bool,
 }
@@ -667,8 +618,7 @@ impl Settings {
         }
         let domain = self.domain()?;
         let targets: Vec<_> = invite.partitions.iter().map(Partition::target).collect();
-        let partitions = domain.partition_targets(&targets)?;
-        domain.compile(&invite.access, &partitions)?;
+        domain.compile(&invite.access, &domain.partition_targets(&targets)?)?;
         let holder = match invite.person {
             Some(person) => {
                 let identity = person.key();
@@ -698,15 +648,7 @@ impl Settings {
             Opening {
                 holder: holder.clone(),
                 access: invite.access.clone(),
-                partitions,
-                named: invite
-                    .partitions
-                    .iter()
-                    .map(|partition| Named {
-                        group: partition.group.clone(),
-                        values: partition.values.iter().map(StoredValue::of).collect(),
-                    })
-                    .collect(),
+                partitions: invite.partitions.iter().map(StoredPartition::of).collect(),
                 label: invite.label.clone(),
             },
             validity,
@@ -764,7 +706,7 @@ impl Settings {
         let (enrollment, changes) = self.enrollment_for(
             vault,
             device,
-            (access, partitions, label.map(String::into_bytes)),
+            (access, &partitions, label.map(String::into_bytes)),
             Some(id),
             registry,
         )?;
@@ -881,8 +823,7 @@ mod tests {
         Opening {
             holder,
             access: Access::Full,
-            partitions: BTreeSet::new(),
-            named: Vec::new(),
+            partitions: Vec::new(),
             label: None,
         }
     }

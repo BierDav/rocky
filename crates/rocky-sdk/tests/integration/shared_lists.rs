@@ -320,14 +320,10 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
     let hub = Arc::new(Hub::default());
     let (issuer, writer) = checkpoint_writer(root.path(), &hub, ORDERED).await?;
     assert!(
-        snap::value(
-            writer
-                .database
-                .create_partition(rocky_sdk::PartitionTarget::Group {
-                    group: "list".to_owned(),
-                    values: values(&format!("{}{:016x}", "ab".repeat(32), 123))
-                })
-        )
+        snap::value(writer.database.create_partition(&rocky_sdk::Partition::new(
+            "list",
+            values(&format!("{}{:016x}", "ab".repeat(32), 123))
+        )))
         .await
         .is_err()
     );
@@ -950,11 +946,13 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
             .await?
             .database,
     )?;
-    let trusted = a
-        .database
-        .trust(b.database.info().await?.principal, owner)
+    a.database
+        .make_admin(
+            rocky_sdk::PersonId::new(b.database.info().await?.principal),
+            owner,
+        )
         .await?;
-    b.database.install_trust(&trusted.grant).await?;
+    b.database.renew().await?;
     let mut lists = Vec::new();
     for (peer, title) in [(&a, "From a"), (&b, "From b")] {
         snap::value(peer.database.next_partition("lists")).await?;

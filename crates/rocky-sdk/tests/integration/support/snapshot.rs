@@ -20,8 +20,6 @@ serialized!(
     sdk::TipStatus,
     sdk::TipInspection,
     sdk::TipCompaction,
-    sdk::TrustGrant,
-    sdk::RevocationResult,
     sdk::DatabaseStatus,
     sdk::SyncReport,
     sdk::NetworkStatus,
@@ -111,9 +109,25 @@ impl Snapshot for sdk::GenerationStatus {
         view
     }
 }
-impl Snapshot for Vec<sdk::IdentityInfo> {
+pub fn partition(partition: sdk::Partition) -> Value {
+    json!({"group":partition.group,"values":partition.values.into_iter().map(cell).collect::<Vec<_>>()})
+}
+fn micros(at: sdk::Timestamp) -> String {
+    at.unix_micros().to_string()
+}
+impl Snapshot for sdk::Partition {
     fn snapshot(self) -> Value {
-        json!({"identities":self.into_iter().map(|identity|json!({"identity":identity.identity,"kind":identity.kind,"issuer":identity.issuer,"origin":identity.origin,"enrolled":identity.enrolled.to_string(),"invitation":identity.invitation,"own":identity.own,"revoked":identity.revoked,"access":identity.access,"capability":identity.capability.map(|id|data_encoding::HEXLOWER.encode(&id)),"expires":identity.expires.map(|expires|expires.to_string()),"label":identity.label,"partitions":identity.partitions,"trusted":identity.trusted.map(|trust|json!({"capability":data_encoding::HEXLOWER.encode(&trust.capability),"granted":trust.granted.to_string(),"live":trust.live})),"nodes":identity.nodes.into_iter().map(|node|json!({"node":node.node,"linked":node.linked.to_string(),"last_seen":node.last_seen.map(|at|at.to_string()),"revoked":node.revoked})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+        partition(self)
+    }
+}
+impl Snapshot for Vec<sdk::Person> {
+    fn snapshot(self) -> Value {
+        json!({"identities":self.into_iter().map(|person|json!({"identity":person.id.to_string(),"access":person.access,"admin":person.admin,"owner":person.owner,"label":person.label,"joined":micros(person.joined),"invited_by":person.invited_by.map(|by|by.to_string()),"invitation":person.invitation,"partitions":person.partitions.into_iter().map(partition).collect::<Vec<_>>(),"nodes":person.devices.into_iter().map(|device|json!({"node":device.id.to_string(),"linked":micros(device.linked),"last_seen":device.last_seen.map(micros)})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+    }
+}
+impl Snapshot for sdk::Me {
+    fn snapshot(self) -> Value {
+        json!({"person":self.person.to_string(),"device":self.device.to_string(),"access":self.access,"admin":self.admin,"owner":self.owner,"tables":self.tables.into_iter().map(|(table,rights)|(table,json!({"read":rights.read,"insert":rights.insert,"update":rights.update,"delete":rights.delete}))).collect::<serde_json::Map<_,_>>(),"expires":micros(self.expires)})
     }
 }
 impl Snapshot for sdk::RetentionStatus {
@@ -399,7 +413,8 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::Renewed { revocations, expires, keys } => json!({"kind":"renewed","revocations":revocations,"expires":expires.to_string(),"keys":keys}),
                 sdk::ActivityKind::IdentityRevoked { identity } => json!({"kind":"identity_revoked","identity":identity}),
                 sdk::ActivityKind::NodeUnlinked { identity, node } => json!({"kind":"node_unlinked","identity":identity,"node":node}),
-                sdk::ActivityKind::RevocationCutDroppedStages { identity, count, heads } => json!({"kind":"revocation_cut_dropped_stages","identity":identity,"count":count,"heads":heads}),
+                sdk::ActivityKind::RevocationCutDroppedStages { identity, count } => json!({"kind":"revocation_cut_dropped_stages","identity":identity,"count":count}),
+                sdk::ActivityKind::RightsChanged { person } => json!({"kind":"rights_changed","person":person.to_string()}),
                 sdk::ActivityKind::RevocationSealFailed { error } => json!({"kind":"revocation_seal_failed","error":error}),
                 sdk::ActivityKind::LineNodeFailed { error } => json!({"kind":"line_node_failed","error":error}),
                 sdk::ActivityKind::RegistryFailed { error } => json!({"kind":"registry_failed","error":error}),

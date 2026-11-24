@@ -576,10 +576,7 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     for (_handle, list) in [(1, "first"), (2, "second")] {
         snap::ok(
             b.database
-                .create_partition(rocky_sdk::PartitionTarget::Table {
-                    table: "items".to_owned(),
-                    values: vec![text(list)],
-                }),
+                .create_partition(&rocky_sdk::Partition::new("items", vec![text(list)])),
         )
         .await;
 

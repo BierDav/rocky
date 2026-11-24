@@ -71,14 +71,21 @@ use the device key alone.
 `Read`, `Store` or a `Role` the schema declares with `SchemaBuilder::role`.
 A role reads, writes, appends to or updates named columns of the tables it
 lists; column lists restrict writes only. A role declared `per_partition`
-holds no partition of that group until a trusted identity calls
-`Database::grant_partition`; the person's next renewal, which the delivered
-group secret starts, carries the grant. `Full` and `Read` reach every
-partition. Only trusted identities grant partitions or share group secrets
-with members; a member hands the secret of a partition it created only to
-trusted nodes, and no access delegates further. A trusted identity becomes an
-administrator by inviting it, granting `Database::trust` with the root key
-and calling `Database::install_trust` on its node.
+holds no partition of that group until an admin calls
+`Database::grant_partition(person, &partition)`, which delivers the group
+secret to every device of that person; `revoke_partition` takes it back.
+`Full` and `Read` reach every partition. `Database::me` says who the device
+belongs to, its access and what it may do per table. Admins list people with
+`Database::people` (a `Person` per member with access, partitions and
+devices), change access with `set_access` and end a person with
+`remove(person, Removal::Departed | Removal::Compromised)`. Narrowing access
+or taking a partition back revokes the person's current credentials and
+rotates the keys they held; widening reaches the person at their next
+renewal. A refused call says why with an `AccessError` (`AdminRequired`,
+`OwnerRequired`, `UnknownPerson`, `TargetIsAdmin`, `PartialGroup`,
+`TooManyPartitions`, `Removed`, ...). The owner makes a member an admin with
+`make_admin(person, root)` and ends one with `revoke_admin(person,
+AdminRevocation::Remove(removal), root)`; both need the root key.
 Copying a closed database folder is a valid backup; a restored copy that
 peers have moved past reads and syncs but refuses to write
 (`StoreSuperseded`), and rejoins as a new device.
@@ -88,9 +95,8 @@ partition-key mailboxes for devices that are never online together, but never
 receives a data key. `Configuration::store_only` opens such a database without
 the application's schema, so one process can relay for many tenants
 (`cargo run -p rocky-sdk --example relay`).
-The root grants and revokes trust per identity; those calls fail with
-`publisher_required` without it. Every linked node of a trusted identity
-can invite, renew and revoke ordinary identities, and seals: Rocky seals
+Every linked node of an admin can invite, renew and remove ordinary
+members, and seals: Rocky seals
 routinely and when the schema changes, never through an application call.
 Linking another node needs the identity signer and matching codes on both
 devices, with no root ceremony. Every node certificate carries the node's

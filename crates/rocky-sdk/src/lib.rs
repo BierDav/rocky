@@ -60,7 +60,6 @@ pub use connection::{
 };
 pub use database::{Created, Database};
 pub use delivery::State as DeliveryState;
-pub use enrollment::PublisherRequired;
 pub use error::{Error, ErrorKind};
 pub use extension::DeviceCredential;
 pub use inspection::*;
@@ -69,12 +68,12 @@ pub use invitation::{
 };
 pub use partitions::*;
 pub use people::{
-    DeviceId, DeviceInfo, DeviceRevocationReceipt, DroppedStage, LinkCode, LinkError, LinkRequest,
-    Opened, PendingLink, PersonId, RevocationResult, TrustGrant,
+    AccessError, AdminRevocation, Device, DeviceId, DeviceInfo, DeviceRevocationReceipt, LinkCode,
+    LinkError, LinkRequest, Me, Opened, PendingLink, Person, PersonId, Removal, TableRights,
 };
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
-pub use registry::{Grant as RecordedPartitionGrant, Kind as IdentityOrigin};
+
 pub use rocky_core::replay::{DropReason, IntentStatement, TransactionOutcome};
 pub use rocky_core::{
     Affinity, Collation, ColumnDefinition, DeleteAction, ForeignKeyDefinition, IndexColumn,
@@ -87,8 +86,7 @@ pub use rocky_core::{
 };
 pub use rocky_core::{RoleError, SchemaError};
 pub use rocky_credentials::{
-    FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose,
-    RevocationMode, RootKey,
+    FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
 };
 pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldIntent, HeldKind, HeldRow, Holding,

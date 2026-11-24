@@ -826,12 +826,12 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     introduce(&a, &c).await;
     introduce(&b, &c).await;
     let principal = snap::ok(b.database.info()).await["principal"].clone();
-    let trusted = snap::ok(
-        a.database
-            .trust(snap::public_key(&(principal)), (a.root()).clone()),
-    )
+    snap::ok(a.database.make_admin(
+        rocky_sdk::PersonId::new(snap::public_key(&(principal))),
+        (a.root()).clone(),
+    ))
     .await;
-    snap::ok(b.database.install_trust(&(snap::text(&(trusted["grant"]))))).await;
+    snap::ok(b.database.renew()).await;
     let apples = c.add(1, "apples").await;
     c.sync().await.expect("sync");
     b.sync().await.expect("sync");

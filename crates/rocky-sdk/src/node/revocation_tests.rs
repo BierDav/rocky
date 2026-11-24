@@ -157,7 +157,7 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
 
 #[tokio::test]
 async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Result<(), Failure> {
-    use crate::registry::{Admitted, IdentityRecord, Kind, Registry, TrustedRecord};
+    use crate::registry::{Admitted, IdentityRecord, Registry, TrustedRecord};
     use rocky_credentials::{Authority, RevocationMode};
     let directory = tempfile::tempdir()?;
     let root = crate::RootKey::generate();
@@ -179,11 +179,10 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
         enrollee,
         IdentityRecord {
             admitted: Some(Admitted {
-                kind: Kind::Paired,
-                access: Some(crate::Access::Full),
-                issuer: target,
+                access: crate::Access::Full,
+                invited_by: target,
                 origin: Some(target),
-                enrolled: now()?,
+                joined: now()?,
                 invitation: None,
             }),
             ..IdentityRecord::default()
@@ -948,7 +947,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .and_then(|record| record.admitted.as_ref())
         .ok_or("the invited identity is not admitted")?;
     assert_eq!(admitted.invitation, Some(issued.id));
-    assert_eq!(admitted.access, Some(profile));
+    assert_eq!(admitted.access, profile);
     assert!(
         settings
             .invite(
@@ -1080,7 +1079,9 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     );
     assert_eq!(redemptions(), 1);
 
-    node.label(identity, b"Alice Smith".to_vec()).await?;
+    let mut relabeled = crate::registry::Changes::default();
+    relabeled.label(&identity, b"Alice Smith")?;
+    node.commit(relabeled).await?;
     assert!(matches!(
         node.answer_invitation(ask(&joiner, invited.id)?).await?,
         IdentityReply::Enrolled(_)

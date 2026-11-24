@@ -31,7 +31,6 @@ impl Node {
         self.revoke_with(
             crate::enrollment::Revoke::Node { owner, node },
             &Root::default(),
-            false,
         )
         .await?;
         self.activity.record(crate::ActivityKind::NodeUnlinked {

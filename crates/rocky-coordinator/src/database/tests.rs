@@ -173,7 +173,14 @@ async fn a_removed_person_or_a_reader_never_claims() {
     );
 
     let removed = writer.device_credential().await.unwrap().identity;
-    office.publisher.revoke_identity(removed).await.unwrap();
+    office
+        .publisher
+        .remove(
+            rocky_sdk::PersonId::new(removed),
+            rocky_sdk::Removal::Departed,
+        )
+        .await
+        .unwrap();
     publisher.share_revocations().await.unwrap();
     assert!(denied(
         writing

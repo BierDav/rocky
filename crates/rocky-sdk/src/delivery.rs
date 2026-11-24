@@ -273,12 +273,7 @@ fn reads_group(
     let whole = |grant: &rocky_core::ResourceGrant| {
         grant.rows == RowSelection::All && grant.rights.contains(&Right::Read)
     };
-    let recorded: Vec<_> = record
-        .grants
-        .iter()
-        .map(|grant| grant.grant.clone())
-        .collect();
-    let recorded = domain.effective_partitions(&recorded);
+    let recorded = record.partition_grants(domain);
     !record.revoked
         && partition.members.iter().all(|member| {
             record

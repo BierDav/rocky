@@ -105,13 +105,13 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     );
     let recorded = owner
         .database
-        .identities()
+        .people()
         .await?
         .into_iter()
-        .find(|record| record.identity == minted.public_key())
+        .find(|record| record.id == PersonId::new(minted.public_key()))
         .ok_or("the issuer recorded no admission")?;
     assert_eq!(recorded.invitation, Some(invitation.id));
-    assert_eq!(recorded.label.as_deref(), Some(b"Alice".as_slice()));
+    assert_eq!(recorded.label.as_deref(), Some("Alice"));
 
     for (name, person) in [("second", None), ("third", Some(generated_identity()))] {
         assert_eq!(
@@ -223,13 +223,13 @@ async fn a_cancelled_invitation_admits_no_one_and_leaves_no_record() -> Result<(
             .map(|error| error.kind),
         Some(ErrorKind::Invite(InviteError::Unknown))
     );
-    let before = owner.database.identities().await?.len();
+    let before = owner.database.people().await?.len();
     assert_eq!(
         refusal(join(&root.path().join("member"), &hub, None, &invitation.code).await)?,
         ErrorKind::Join(JoinError::Cancelled)
     );
     assert_eq!(
-        owner.database.identities().await?.len(),
+        owner.database.people().await?.len(),
         before,
         "a refused redemption admits nothing"
     );
@@ -289,7 +289,13 @@ async fn removing_the_identity_ends_its_unused_invitation() -> Result<(), Failur
         .database
         .invite(Invite::new(writer()).for_identity(PersonId::new(identity)))
         .await?;
-    owner.database.revoke_identity(identity).await?;
+    owner
+        .database
+        .remove(
+            rocky_sdk::PersonId::new(identity),
+            rocky_sdk::Removal::Departed,
+        )
+        .await?;
     assert_eq!(
         refusal(
             join(

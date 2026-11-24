@@ -82,7 +82,7 @@ async fn a_verified_lower_prefix_anchors_a_held_and_signed_void_suffix() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
+async fn an_exact_verified_installed_endpoint_covers_its_dropped_frames() {
     let mut f = HeldPrefix::with_anchor(3, 0).await;
     let scope = f.lineage.scope("items");
     stage(&f).await;

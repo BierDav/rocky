@@ -163,7 +163,7 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
     assert_eq!(
         live(&late, f.public).await,
         40,
-        "a full reader whose private key is evicted applies the public view"
+        "a full reader whose private key is lost applies the public view"
     );
     assert!(!late.snapshot(f.private).await.unwrap().complete);
     late.install_key(KeyMaterial::new(f.private, 1, [22; 32]))
@@ -514,7 +514,7 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     );
     assert!(
         replica.companion(f.private, [1; 32]).await.is_err(),
-        "attenuated credentials evict keys the new grants cannot read"
+        "attenuated credentials drop keys the new grants cannot read"
     );
 
     let mut racing = renewed.transaction();

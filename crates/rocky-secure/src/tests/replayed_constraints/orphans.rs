@@ -188,7 +188,7 @@ async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
             .await
             .unwrap(),
         Some(TransactionOutcome::Applied { sealed: false }),
-        "a membership whose team lives in an evicted partition is no violation of this transaction"
+        "a membership whose team lives in a partition not held here is no violation of this transaction"
     );
     assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
 }
@@ -208,13 +208,13 @@ async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restore
     for name in ["teams", "people", "notes", "memberships"] {
         device.replica.subscribe(c.scope(name)).await.unwrap();
     }
-    let own_frames_not_back_since_eviction = format!(
+    let own_frames_not_back_since_a_reset = format!(
         "INSERT INTO secure_restoration_guards VALUES(?,7,X'{}')",
         "11".repeat(32)
     );
     execute(
         &device.replica,
-        &own_frames_not_back_since_eviction,
+        &own_frames_not_back_since_a_reset,
         Some(c.scope("teams")),
     )
     .await;

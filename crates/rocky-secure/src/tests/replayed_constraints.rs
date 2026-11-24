@@ -739,6 +739,13 @@ fn reference_restrictions(schema: &LogicalSchema) -> Vec<String> {
     triggers
 }
 
+fn restamped(frame: &EncryptedFrame, node: &PrivateKey, clock: u64) -> EncryptedFrame {
+    let mut header = frame.operation_ref().unwrap().header.clone();
+    header.timestamp = clock;
+    header.sign(node);
+    frame.with_header(header.to_bytes())
+}
+
 fn latest_first(frames: &[EncryptedFrame]) -> Vec<EncryptedFrame> {
     let mut frames = frames.to_vec();
     frames.sort_by_key(|frame| {

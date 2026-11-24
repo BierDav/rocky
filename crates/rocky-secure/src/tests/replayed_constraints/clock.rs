@@ -29,12 +29,6 @@ async fn status(device: &Device, frame: &EncryptedFrame) -> String {
         other => panic!("{other:?}"),
     }
 }
-fn restamped(frame: &EncryptedFrame, node: &PrivateKey, clock: u64) -> EncryptedFrame {
-    let mut header = frame.operation_ref().unwrap().header.clone();
-    header.timestamp = clock;
-    header.sign(node);
-    frame.with_header(header.to_bytes())
-}
 fn ahead_blockers(blockers: &[Blocker]) -> Vec<(u64, u64)> {
     blockers
         .iter()

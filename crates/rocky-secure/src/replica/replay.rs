@@ -1440,12 +1440,23 @@ impl<A: RowApplication> Inner<A> {
             };
             starts.push((self.scope_id(scope).await?, (era, stamp(header))));
         }
+        let mut position = starts
+            .iter()
+            .map(|(_, order)| order.clone())
+            .min()
+            .ok_or_else(|| Error::Corrupt("an arriving transaction has no member".into()))?;
         let mut redo = self.rewind(starts).await?;
-        let Some(own) = redo
+        let own = redo
             .iter()
             .position(|redo| redo.transaction == transaction.0)
-            .map(|index| redo.remove(index))
-        else {
+            .map(|index| redo.remove(index));
+        if let Some(own) = &own {
+            position = position.min(own.order.clone());
+        }
+        let after = redo.split_off(redo.partition_point(|redo| redo.order < position));
+        self.redo(redo, time).await?;
+        let redo = after;
+        let Some(own) = own else {
             self.replay_transaction(transaction, intents, era, time, true)
                 .await?;
             return self.redo(redo, time).await;

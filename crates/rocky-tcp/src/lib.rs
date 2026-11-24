@@ -1,4 +1,6 @@
+//! Rocky's plain-TCP transport, for networks that already route and encrypt between peers.
 #![cfg(not(target_family = "wasm"))]
+#![deny(missing_docs)]
 
 use rocky_core::{
     Scope,
@@ -23,9 +25,13 @@ use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
 };
 
+/// The transport kind this crate reports in peer routes and diagnostics.
 pub const KIND: &str = "tcp";
+/// How long a dial or a connection's opening handshake may take before it fails.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
+/// Incoming connections a database scope queues before new ones are refused as busy.
 pub const PENDING: usize = 32;
+/// Requests one attachment serves at once; more are refused as busy.
 pub const RPC_REQUESTS: usize = 32;
 const VERSION: u32 = 1;
 const MAX_HEADER: usize = 512;
@@ -101,6 +107,8 @@ struct Shared {
     closed: watch::Sender<bool>,
 }
 
+/// Where a TCP attachment listens and the route it tells peers to dial; pass it to `Network::Owned`
+/// or call `start`.
 #[derive(Clone, Debug)]
 pub struct Options {
     bind: SocketAddr,
@@ -108,6 +116,7 @@ pub struct Options {
     websocket: bool,
 }
 impl Options {
+    /// Listens on `bind`, a loopback, LAN or mesh address; port 0 picks a free port.
     pub fn new(bind: SocketAddr) -> Self {
         Self {
             bind,
@@ -115,18 +124,25 @@ impl Options {
             websocket: false,
         }
     }
+    /// The `host:port` or WebSocket URL peers dial, as when the bound address is not reachable
+    /// from them; without it, peers dial the bound address.
     pub fn advertise(mut self, address: impl Into<String>) -> Self {
         self.advertise = Some(address.into());
         self
     }
+    /// Also accepts WebSocket handshakes on the listener, advertising `ws://` with the bound
+    /// address unless `advertise` names another route.
     #[cfg(feature = "websocket")]
     pub fn websocket(mut self) -> Self {
         self.websocket = true;
         self
     }
+    /// Binds and returns an attachment the application keeps, for `Network::Borrowed`; closing a
+    /// database never closes it.
     pub async fn start(&self) -> Result<Attachment, Failure> {
         self.serve(false).await
     }
+    /// An attachment that only dials out and accepts no connections.
     pub fn dialer() -> Attachment {
         Attachment::build(None, None, false, false)
     }
@@ -173,6 +189,7 @@ impl Connector for Options {
     }
 }
 
+/// A running TCP endpoint that one or more databases share; clones share it, and `close` stops it.
 #[derive(Clone)]
 pub struct Attachment(Arc<Shared>);
 impl Attachment {
@@ -193,6 +210,8 @@ impl Attachment {
             closed: watch::channel(false).0,
         }))
     }
+    /// An attachment with no listener of its own, for connections an application's HTTP server
+    /// upgrades and hands to `admit_websocket`; `advertise` is the public `ws://` or `wss://` URL.
     #[cfg(feature = "websocket")]
     pub fn external(advertise: impl Into<String>) -> Self {
         Self::build(None, Some(advertise.into()), true, false)
@@ -204,6 +223,7 @@ impl Attachment {
         }
         admit(self.0.clone(), stream).await
     }
+    /// Serves a connection the application's HTTP server already upgraded to WebSocket.
     #[cfg(feature = "websocket")]
     pub async fn admit_websocket(
         &self,
@@ -211,21 +231,26 @@ impl Attachment {
     ) -> Result<(), Failure> {
         self.admit(websocket::stream(upgraded).await).await
     }
+    /// The bound listener address, or `None` for a dialer or external attachment.
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.0.local
     }
+    /// Connections refused so far because no database listened on the scope or the queue was full.
     pub fn refused(&self) -> u64 {
         self.0.refused.load(Ordering::Relaxed)
     }
+    /// A transport for one database, passed as `Network::Borrowed`; each database takes its own.
     pub fn transport(&self) -> Arc<dyn Transport> {
         Arc::new(Port {
             attachment: self.clone(),
             route: Arc::new(Route::new()),
         })
     }
+    /// This attachment as a started connector, for `Network::Attached`.
     pub fn connected(&self) -> Connected {
         Connected::new(self.transport())
     }
+    /// Stops listening and closes every database's route on this attachment.
     pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             self.0.closed.send_replace(true);

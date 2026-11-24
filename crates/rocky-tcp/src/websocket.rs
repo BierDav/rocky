@@ -28,6 +28,8 @@ fn config() -> WebSocketConfig {
         .max_frame_size(Some(CHUNK))
 }
 
+/// The `Sec-WebSocket-Accept` value for a client's `Sec-WebSocket-Key`, for an HTTP server that
+/// upgrades connections itself.
 pub fn accept_key(key: &[u8]) -> String {
     derive_accept_key(key)
 }
@@ -42,6 +44,7 @@ pub(crate) async fn accept(stream: TcpStream) -> Result<Io<TcpStream>, Failure> 
     ))
 }
 
+/// Wraps an already upgraded server-side connection as a byte stream Rocky frames over.
 pub async fn stream<S>(io: S) -> Io<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -98,6 +101,7 @@ fn client_config() -> Result<Arc<rustls::ClientConfig>, Failure> {
     Ok(CONFIG.get_or_init(|| Arc::new(config)).clone())
 }
 
+/// A WebSocket connection read and written as a byte stream, in binary messages of at most 64 KiB.
 pub struct Io<S> {
     socket: WebSocketStream<S>,
     read: Bytes,

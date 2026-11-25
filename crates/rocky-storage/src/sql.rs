@@ -105,6 +105,12 @@ impl SqlError {
                 code: failure.extended_code,
                 message: message.clone().unwrap_or_else(|| failure.to_string()),
             },
+            Engine::Sqlite(failed @ rusqlite::Error::SqlInputError { error, .. }) => {
+                Self::Statement {
+                    code: error.extended_code,
+                    message: failed.to_string(),
+                }
+            }
             other => Self::Statement {
                 code: SQLITE_MISUSE,
                 message: other.to_string(),

@@ -90,6 +90,7 @@ pub use tip_observation::{
 pub(crate) mod tips;
 pub use tips::{LineNode, MigrationPending, TipStatement};
 mod typed;
+mod unreadable;
 mod workspace;
 
 #[cfg(test)]

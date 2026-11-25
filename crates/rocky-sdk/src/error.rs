@@ -21,7 +21,7 @@ pub enum ErrorKind {
         reason: DenyReason,
     },
     /// The person was removed or the device unlinked; it no longer reads, writes or syncs, even
-    /// after reopening, and its unreadable data stays until `logout(Logout::PurgeOnClose)`.
+    /// after reopening, and has deleted the rows it held.
     Removed,
     /// The data has not arrived or cannot be decrypted yet; `blockers` say what clears it.
     Blocked {
@@ -350,7 +350,7 @@ impl Error {
     pub(crate) fn removed() -> Self {
         Self::new(
             ErrorKind::Removed,
-            "this device's person was removed or the device was unlinked: it no longer reads, writes or syncs, and its unreadable data stays in its directory until logout(Logout::PurgeOnClose)",
+            "this device's person was removed or the device was unlinked: it no longer reads, writes or syncs and has deleted the rows it held; logout(Logout::PurgeOnClose) deletes the rest of its directory",
         )
     }
 

@@ -795,7 +795,7 @@ impl<A: RowApplication> Inner<A> {
         }
         quiet.preempted() > 0 && self.truncate_wal(QUIET_TRUNCATE_WAIT).await
     }
-    async fn truncate_wal(&mut self, busy: std::time::Duration) -> bool {
+    pub(super) async fn truncate_wal(&mut self, busy: std::time::Duration) -> bool {
         let waits = self.conn.connection().set_busy_timeout(busy).is_ok();
         #[cfg(feature = "qualification")]
         let started = web_time::Instant::now();

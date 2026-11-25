@@ -154,7 +154,7 @@ async fn a_removed_device_gives_one_explanation_on_sync_read_and_commit() -> Res
     }
     assert!(
         synced.to_string().contains("logout(Logout::PurgeOnClose)"),
-        "the message says the data stays until a purging logout: {synced}"
+        "the message names the purging logout that deletes the rest: {synced}"
     );
     household.member.close().await;
     household.owner.close().await;

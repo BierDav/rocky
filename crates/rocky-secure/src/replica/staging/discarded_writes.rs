@@ -1,6 +1,6 @@
 use super::*;
 
-const FRAME_RECORDS: [&str; 12] = [
+pub(in crate::replica) const FRAME_RECORDS: [&str; 12] = [
     "secure_migration_frames",
     "secure_publication_frames",
     "secure_publication_unsent",

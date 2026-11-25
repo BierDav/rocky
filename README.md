@@ -247,6 +247,14 @@ credentials of each of the person's devices, which get new ones without the
 partition at their next sync with an admin device. `Full` and `Read` reach
 every partition.
 
+A device that learns its access narrowed, at its next sync with an admin
+device, deletes what it can no longer read: the rows of a revoked partition or
+of a table its access no longer reads, Rocky's copies of them and their
+encrypted history, including its own writes there that never synced, since the
+credentials they were written under are revoked. A device that loses its last
+partition of a table reopens and reads none until it is granted one again, and
+then syncs that partition's rows anew.
+
 A person links another device with `Configuration::link(contact)` on the new
 device, configured with their person key, where `contact` is
 `Database::contact().uri` of a device they hold. The
@@ -270,12 +278,34 @@ Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
 an admin links or unlinks a device, and `AdminStale` when no device of an admin
 was heard from for 30 days (`Configuration::admin_stale_after`).
 
-A removed or unlinked device learns of it at its next sync. From then on it
-refuses every read, commit and sync with `ErrorKind::Removed`, also after
-reopening. It drops its keys, so its rows stay in its directory, unreadable,
-until `logout(Logout::PurgeOnClose)` deletes the directory at close. A
-device that is offline cannot know yet: it keeps reading and committing
-locally until it syncs, and those commits never reach anyone else.
+A removed or unlinked device learns of it at its next sync. It then deletes
+every row it holds, in local-only tables too, along with its commits that never
+synced, and from then on refuses every read, commit and sync with
+`ErrorKind::Removed`, also after reopening. It keeps only what reports
+`Removed`: its credentials, the schema and its keys.
+`logout(Logout::PurgeOnClose)` deletes those at close, and the directory with
+them unless it holds files of the application's own. A device that is offline
+cannot know yet: it keeps reading and committing locally until it syncs, and
+those commits never reach anyone else.
+
+### Data at rest
+
+Rocky encrypts what devices send and what relays hold, not a device's own
+store. `rocky.sqlite` in the database directory holds every row the device can
+read, and Rocky's copies of them, in plaintext: any SQLite client that can open
+the file reads them. The device's keys are under `secrets` in the directory
+unless `Configuration::secrets` keeps them elsewhere. Protect the directory as
+the operating system allows: full-disk encryption such as FileVault, BitLocker
+or LUKS, the platform's data protection on phones, and file permissions. In a
+browser the store lives in the origin's private file system, open to that
+origin's code.
+
+When a device deletes rows it can no longer read, SQLite overwrites their
+content in the file, Rocky releases the freed pages and truncates the
+write-ahead log; a read still running at that moment delays the truncation to
+the next checkpoint. Rocky cannot reach copies outside the database file, such
+as backups, file system snapshots, swap or the application's own copies, and a
+device that has not synced since a change still holds what it held.
 
 ## Unattended hosts
 

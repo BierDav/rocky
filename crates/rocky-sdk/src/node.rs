@@ -832,11 +832,12 @@ impl Node {
         let settings = self.settings_snapshot().await;
         self.revocation_notice.revoked(&settings).await
     }
-    pub(crate) async fn purge_if_removed(&self) {
-        if matches!(self.own_revocation().await, Ok(Some(_))) {
-            self.replica.logout().await;
+    pub(crate) async fn purge_if_removed(&self) -> Result<(), Failure> {
+        if let Ok(Some(_)) = self.own_revocation().await {
+            self.replica.forget_everything().await?;
             self.observations.touch();
         }
+        Ok(())
     }
 
     fn reached(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<PublicKey, Reached>>, Failure> {

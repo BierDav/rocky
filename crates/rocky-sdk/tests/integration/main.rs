@@ -38,6 +38,8 @@ mod issuers;
 #[cfg(not(target_family = "wasm"))]
 mod migrations;
 #[cfg(not(target_family = "wasm"))]
+mod narrowed_access;
+#[cfg(not(target_family = "wasm"))]
 mod natural_keys;
 #[cfg(not(target_family = "wasm"))]
 mod node_writers;

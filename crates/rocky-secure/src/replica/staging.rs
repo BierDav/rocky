@@ -3,6 +3,7 @@ use super::*;
 use rocky_core::Scope;
 
 mod discarded_writes;
+pub(super) use discarded_writes::FRAME_RECORDS;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_staged_schema(publication BLOB PRIMARY KEY,stage BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN('staged','committed','released'))) WITHOUT ROWID",

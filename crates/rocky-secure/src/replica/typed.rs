@@ -71,7 +71,7 @@ impl Typed {
             tables,
         })
     }
-    fn restrict(mut self, allowed: &BTreeSet<String>) -> Self {
+    pub(super) fn restrict(mut self, allowed: &BTreeSet<String>) -> Self {
         self.tables
             .retain(|table| allowed.contains(&table.table.sql_name));
         self
@@ -198,17 +198,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.validate_typed(&schema, domain)?;
             let typed = Typed::new(schema.clone(), domain, &readers)?;
             let allowed = inner.readable_names(&typed)?;
+            inner.forget_unreadable(Some(&allowed)).await?;
             transaction!(inner, |inner| {
                 let previous = inner.projection_access().await?;
                 if previous.is_none() && inner.installed_typed().await?.is_some() {
                     return Err(Error::Incompatible("a complete projection cannot become a readable projection; reinstall the database".into()));
-                }
-                if let Some(previous) = previous.as_ref()
-                    && !previous.is_subset(&allowed)
-                {
-                    return Err(Error::Incompatible(
-                        "projection grants changed; reinstall the database".into(),
-                    ));
                 }
                 inner.conn.execute("INSERT INTO secure_projection_access VALUES(1,?) ON CONFLICT(id) DO UPDATE SET tables=excluded.tables", [encode(&allowed)?]).await?;
                 Ok(())

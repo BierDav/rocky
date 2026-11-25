@@ -139,7 +139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(error);
         }
         inner.lose_keys(|key| !grants.iter().any(|grant| readable_grant(grant, key.scope)));
-        Ok(())
+        inner.forget_unreadable_by_credentials().await
     }
     pub async fn logout(&self) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;

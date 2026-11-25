@@ -222,6 +222,7 @@ impl RevocationNotice {
             return Ok(false);
         }
         self.write(&mut recorded, settings, statement).await?;
+        self.replica.forget_everything().await?;
         Ok(true)
     }
 }

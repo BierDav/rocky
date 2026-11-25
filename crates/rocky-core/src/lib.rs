@@ -4,7 +4,7 @@ mod definition;
 pub use definition::*;
 mod generation;
 pub use generation::{
-    Generation, Removed, SchemaChange, Unsupported, classify, classify_carrying, removed,
+    Generation, RefusedChange, Removed, SchemaChange, classify, classify_carrying, removed,
 };
 mod manifest;
 pub use manifest::*;

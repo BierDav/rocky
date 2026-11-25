@@ -2,7 +2,8 @@ use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, build, introduce, items, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, IndexColumn, IndexDefinition, Network, Schema, Table, transport::memory::Hub,
+    Affinity, Column, ErrorKind, ForeignKeyName, IndexColumn, IndexDefinition, Network,
+    RefusedChange, Schema, SchemaError, Table, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -591,16 +592,33 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
     let a = Device::create(root.path(), None).await?;
     a.add(1, "apples").await;
     a.close().await;
-    for (schema, refusal) in [(retyped(2), "changed type"), (renamed(), "needs a default")] {
+    for (schema, refusal) in [
+        (
+            retyped(2),
+            RefusedChange::ChangedType {
+                table: "items".into(),
+                column: "title".into(),
+            },
+        ),
+        (
+            renamed(),
+            RefusedChange::RequiredWithoutDefault {
+                table: "items".into(),
+                column: "label".into(),
+            },
+        ),
+    ] {
         let error = open(root.path(), &schema, None)
             .open()
             .await
             .err()
-            .expect("refused")
-            .to_string();
+            .ok_or("refused")?;
         assert!(
-            error.contains(refusal),
-            "a retyped name is refused, and a rename adds a required field that needs a default: {error}"
+            matches!(
+                error.kind(),
+                ErrorKind::Schema(schema) if **schema == SchemaError::Change(refusal.clone())
+            ),
+            "a retyped name is refused, and a rename adds a required field that needs a default: {error:?}"
         );
     }
     let a = reopen(root.path(), &common::schema(), None).await?;
@@ -1293,7 +1311,7 @@ fn linked() -> Schema {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {
+async fn a_refused_schema_change_is_a_typed_schema_error() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::new(
         common::create_as(
@@ -1307,13 +1325,20 @@ async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Resu
         .open()
         .await
         .err()
-        .expect("refused")
-        .to_string();
+        .ok_or("a reference over a field existing rows hold opened")?;
+    let expected = SchemaError::Change(RefusedChange::AddedReference(ForeignKeyName {
+        table: "items".into(),
+        columns: vec!["list".into()],
+        parent: "lists".into(),
+    }));
     assert!(
-        error.contains(
-            "the application schema cannot replace the installed one: foreign key items(list) -> lists would constrain existing rows; declare it on a new optional field"
-        ),
-        "{error}"
+        matches!(error.kind(), ErrorKind::Schema(schema) if **schema == expected),
+        "a refused change names its rule and foreign key: {error:?}"
+    );
+    assert!(!error.retryable());
+    assert_eq!(
+        error.to_string(),
+        "the application schema cannot replace the installed one: foreign key items(list) -> lists would constrain existing rows; declare it on a new optional field"
     );
     let a = reopen(root.path(), &linkable(), None).await?;
     assert_eq!(generation(&a).await["current"]["schema"], 1);

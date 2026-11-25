@@ -58,7 +58,8 @@ pub enum ErrorKind {
     },
     /// A column value did not fit the requested type.
     Decode(crate::DecodeError),
-    /// The schema is invalid.
+    /// `Schema::build` refused the schema, or the installed version cannot become it; the
+    /// `SchemaError` names the table, column or foreign key and the rule.
     Schema(Box<crate::SchemaError>),
     /// A migration to the declared schema has not finished on this device.
     MigrationPending,

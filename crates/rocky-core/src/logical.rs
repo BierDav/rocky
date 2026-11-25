@@ -244,10 +244,7 @@ pub enum SchemaError {
         table: String,
         reason: Incompatibility,
     },
-    LostEarlierName {
-        renamed: String,
-        earlier: String,
-    },
+    Change(crate::RefusedChange),
 }
 impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -258,14 +255,37 @@ impl std::fmt::Display for SchemaError {
             Self::Incompatible { table, reason } => {
                 write!(f, "{table} cannot be installed: {reason:?}")
             }
-            Self::LostEarlierName { renamed, earlier } => write!(
+            Self::Change(refusal) => write!(
                 f,
-                "{renamed} renames {earlier}, which had an earlier name; keep every earlier name with renamed_from, oldest first"
+                "the application schema cannot replace the installed one: {refusal}"
             ),
         }
     }
 }
 impl std::error::Error for SchemaError {}
+impl From<crate::RefusedChange> for SchemaError {
+    fn from(refusal: crate::RefusedChange) -> Self {
+        Self::Change(refusal)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignKeyName {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub parent: String,
+}
+impl std::fmt::Display for ForeignKeyName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({}) -> {}",
+            self.table,
+            self.columns.join(","),
+            self.parent
+        )
+    }
+}
 impl From<InvalidName> for SchemaError {
     fn from(invalid: InvalidName) -> Self {
         Self::InvalidName(invalid)
@@ -625,6 +645,13 @@ fn invalid<T>(reason: impl Into<String>) -> Result<T, SchemaError> {
     Err(SchemaError::Invalid(reason.into()))
 }
 impl LogicalTable {
+    pub fn foreign_key_name(&self, key: &LogicalForeignKey) -> ForeignKeyName {
+        ForeignKeyName {
+            table: self.sql_name.clone(),
+            columns: key.columns.clone(),
+            parent: key.table.clone(),
+        }
+    }
     pub fn foreign_key_sql(&self, key: &LogicalForeignKey) -> String {
         if key.on_delete == DELETE_SET_NULL && !self.nulls_whole(key) {
             return foreign_key_clause(&LogicalForeignKey {

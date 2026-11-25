@@ -122,9 +122,9 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         };
-        match rocky_core::classify_carrying(&installed, schema, carried)
-            .map_err(|refusal| incompatible(refusal.to_string()))?
-        {
+        match rocky_core::classify_carrying(&installed, schema, carried).map_err(|refusal| {
+            Error::Application(Box::new(rocky_core::SchemaError::from(refusal)))
+        })? {
             SchemaChange::Unchanged if cause == PlanCause::Install => return Ok(()),
             SchemaChange::Unchanged | SchemaChange::Local | SchemaChange::Replicated => {}
         }

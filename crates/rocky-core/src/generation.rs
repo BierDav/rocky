@@ -1,4 +1,6 @@
-use crate::{ColumnClass, LogicalColumn, LogicalForeignKey, LogicalSchema, LogicalTable};
+use crate::{
+    ColumnClass, ForeignKeyName, LogicalColumn, LogicalForeignKey, LogicalSchema, LogicalTable,
+};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,29 +16,31 @@ impl SchemaChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unsupported {
+pub enum RefusedChange {
     Application,
-    ChangedField(String),
-    RequiredField(String),
-    AddedReference(String),
-    FilledReference(String),
+    ChangedType { table: String, column: String },
+    RequiredWithoutDefault { table: String, column: String },
+    AddedReference(ForeignKeyName),
+    FilledReference(ForeignKeyName),
     LostEarlierName { renamed: String, earlier: String },
-    ChangedKey(String),
+    ChangedKey { table: String },
 }
-impl std::fmt::Display for Unsupported {
+impl std::fmt::Display for RefusedChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Application => f.write_str("another publisher or application"),
-            Self::ChangedField(field) => write!(f, "field {field} changed type"),
-            Self::RequiredField(field) => write!(
+            Self::ChangedType { table, column } => {
+                write!(f, "field {table}.{column} changed type")
+            }
+            Self::RequiredWithoutDefault { table, column } => write!(
                 f,
-                "required field {field} of an existing table needs a default"
+                "required field {table}.{column} of an existing table needs a default"
             ),
             Self::AddedReference(key) => write!(
                 f,
                 "foreign key {key} would constrain existing rows; declare it on a new optional field"
             ),
-            Self::ChangedKey(table) => write!(
+            Self::ChangedKey { table } => write!(
                 f,
                 "the primary key of {table} changed; a row's key never changes, so declare a new table"
             ),
@@ -51,7 +55,7 @@ impl std::fmt::Display for Unsupported {
         }
     }
 }
-impl std::error::Error for Unsupported {}
+impl std::error::Error for RefusedChange {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Removed {
@@ -83,16 +87,16 @@ pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     removed
 }
 
-pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
+pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, RefusedChange> {
     classify_carrying(old, new, |_, _| true)
 }
 pub fn classify_carrying(
     old: &LogicalSchema,
     new: &LogicalSchema,
     carried: impl Fn(&LogicalTable, Option<&LogicalColumn>) -> bool,
-) -> Result<SchemaChange, Unsupported> {
+) -> Result<SchemaChange, RefusedChange> {
     if old.publisher != new.publisher || old.application != new.application {
-        return Err(Unsupported::Application);
+        return Err(RefusedChange::Application);
     }
     keeps_earlier_names(old, new)?;
     let change = if old == new {
@@ -152,7 +156,9 @@ pub fn classify_carrying(
                         .is_some_and(|counterpart| counterpart.sql_name.eq_ignore_ascii_case(was))
                 });
         if !same_key {
-            return Err(Unsupported::ChangedKey(after.sql_name.clone()));
+            return Err(RefusedChange::ChangedKey {
+                table: after.sql_name.clone(),
+            });
         }
         let held = |name: &str| {
             after
@@ -165,14 +171,14 @@ pub fn classify_carrying(
             .iter()
             .filter(|column| column.class == ColumnClass::Replicated)
         {
-            let field = || format!("{}.{}", after.sql_name, now.sql_name);
+            let (table, column) = (after.sql_name.clone(), now.sql_name.clone());
             match held(&now.sql_name) {
                 Some(was) if was.affinity != now.affinity || was.collation != now.collation => {
-                    return Err(Unsupported::ChangedField(field()));
+                    return Err(RefusedChange::ChangedType { table, column });
                 }
                 Some(was) if was.not_null || !now.not_null || defaulted(now) => {}
                 None if !now.not_null || defaulted(now) => {}
-                _ => return Err(Unsupported::RequiredField(field())),
+                _ => return Err(RefusedChange::RequiredWithoutDefault { table, column }),
             }
         }
         let starts_empty = |name: &String| {
@@ -191,24 +197,16 @@ pub fn classify_carrying(
             if key.columns.iter().any(starts_empty) {
                 continue;
             }
-            let named = || {
-                format!(
-                    "{}({}) -> {}",
-                    after.sql_name,
-                    key.columns.join(","),
-                    key.table
-                )
-            };
             let kept = carried_parent(key)
                 && before.foreign_keys.iter().any(|was| {
                     same_reference((old, before, was), (new, after, key))
                         && key.columns.iter().all(|name| held(name).is_some())
                 });
             if !kept {
-                return Err(Unsupported::AddedReference(named()));
+                return Err(RefusedChange::AddedReference(after.foreign_key_name(key)));
             }
             if key.columns.iter().any(filled) {
-                return Err(Unsupported::FilledReference(named()));
+                return Err(RefusedChange::FilledReference(after.foreign_key_name(key)));
             }
         }
     }
@@ -234,9 +232,9 @@ fn same_reference((old, before, was): Reference<'_>, (new, after, now): Referenc
         && identities(Some(before), &was.columns) == identities(Some(after), &now.columns)
         && identities(was_parent, &was.references) == identities(now_parent, &now.references)
 }
-fn keeps_earlier_names(old: &LogicalSchema, new: &LogicalSchema) -> Result<(), Unsupported> {
+fn keeps_earlier_names(old: &LogicalSchema, new: &LogicalSchema) -> Result<(), RefusedChange> {
     let lost = |renamed: String, earlier: &str| {
-        Err(Unsupported::LostEarlierName {
+        Err(RefusedChange::LostEarlierName {
             renamed,
             earlier: earlier.to_owned(),
         })
@@ -280,6 +278,14 @@ mod tests {
         Affinity, Collation, ColumnClass, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalForeignKey,
         LogicalTable, SchemaSource, TableClass,
     };
+
+    fn tags_key(column: &str, parent: &str) -> ForeignKeyName {
+        ForeignKeyName {
+            table: "tags".into(),
+            columns: vec![column.into()],
+            parent: parent.into(),
+        }
+    }
 
     fn column(name: &str, not_null: bool) -> LogicalColumn {
         LogicalColumn {
@@ -370,7 +376,7 @@ mod tests {
         assert_eq!(classify(&old, &added), Ok(SchemaChange::Replicated));
         let mut renamed = old.clone();
         renamed.application = "other".into();
-        assert_eq!(classify(&old, &renamed), Err(Unsupported::Application));
+        assert_eq!(classify(&old, &renamed), Err(RefusedChange::Application));
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -380,13 +386,19 @@ mod tests {
         retyped.tables[0].columns[1].affinity = Affinity::Integer;
         assert_eq!(
             classify(&old, &retyped),
-            Err(Unsupported::ChangedField("items.name".into()))
+            Err(RefusedChange::ChangedType {
+                table: "items".into(),
+                column: "name".into()
+            })
         );
         for added in [("note", true), ("extra", true)] {
             let new = schema(vec![items(&[("name", true), added])]);
             assert_eq!(
                 classify(&old, &new),
-                Err(Unsupported::RequiredField(format!("items.{}", added.0)))
+                Err(RefusedChange::RequiredWithoutDefault {
+                    table: "items".into(),
+                    column: added.0.into()
+                })
             );
         }
         let mut required = schema(vec![items(&[("name", true), ("note", true)])]);
@@ -401,14 +413,18 @@ mod tests {
         rekeyed.tables[0].primary_key = vec!["name".into()];
         assert_eq!(
             classify(&old, &rekeyed),
-            Err(Unsupported::ChangedKey("items".into())),
+            Err(RefusedChange::ChangedKey {
+                table: "items".into()
+            }),
             "a row's key is its identity on every device"
         );
         let mut respelled = old.clone();
         respelled.tables[0].primary_key = vec!["ID".into()];
         assert_ne!(
             classify(&old, &respelled),
-            Err(Unsupported::ChangedKey("items".into()))
+            Err(RefusedChange::ChangedKey {
+                table: "items".into()
+            })
         );
         let mut keyed = old.clone();
         keyed.tables[0].primary_key = vec!["name".into()];
@@ -423,7 +439,9 @@ mod tests {
         renamed.tables[0].primary_key = vec!["label".into()];
         assert_ne!(
             classify(&keyed, &renamed),
-            Err(Unsupported::ChangedKey("items".into())),
+            Err(RefusedChange::ChangedKey {
+                table: "items".into()
+            }),
             "a renamed key column keeps the identity of its first name, so the key is unchanged"
         );
     }
@@ -457,10 +475,12 @@ mod tests {
     fn a_foreign_key_never_constrains_rows_written_before_it() {
         let unlinked = linked(&["item"], Vec::new());
         let cascade = reference("item", "items", crate::DELETE_CASCADE, false);
-        let refused = |key: &str| Err(Unsupported::AddedReference(key.into()));
+        let refused = |column: &str, parent: &str| {
+            Err(RefusedChange::AddedReference(tags_key(column, parent)))
+        };
         assert_eq!(
             classify(&unlinked, &linked(&["item"], vec![cascade.clone()])),
-            refused("tags(item) -> items"),
+            refused("item", "items"),
             "a reference over a field existing rows already hold is refused"
         );
         let linked_items = linked(&["item"], vec![cascade.clone()]);
@@ -472,7 +492,7 @@ mod tests {
                     vec![reference("item", "lists", crate::DELETE_CASCADE, false)]
                 )
             ),
-            refused("tags(item) -> lists"),
+            refused("item", "lists"),
             "a reference moved to another table is a new reference"
         );
         assert_eq!(
@@ -504,7 +524,7 @@ mod tests {
         defaulted.tables[2].columns[2].default = Some("'x'".into());
         assert_eq!(
             classify(&unlinked, &defaulted),
-            refused("tags(owner) -> items"),
+            refused("owner", "items"),
             "a new field whose default fills existing rows is constrained like an old one"
         );
         let mut filled = linked_items.clone();
@@ -512,7 +532,7 @@ mod tests {
         filled.tables[2].columns[1].default = Some("x'00'".into());
         assert_eq!(
             classify(&linked_items, &filled),
-            Err(Unsupported::FilledReference("tags(item) -> items".into())),
+            Err(RefusedChange::FilledReference(tags_key("item", "items"))),
             "a kept reference never receives a default written into rows that held no value"
         );
         let mut optional_default = linked_items.clone();
@@ -541,7 +561,10 @@ mod tests {
         readded.tables[2].columns[1].affinity = Affinity::Blob;
         assert_eq!(
             classify(&held, &readded),
-            Err(Unsupported::ChangedField("tags.item".into())),
+            Err(RefusedChange::ChangedType {
+                table: "tags".into(),
+                column: "item".into()
+            }),
             "a field held along the whole path keeps its type"
         );
         let item_removed_between = |table: &LogicalTable, column: Option<&LogicalColumn>| {
@@ -560,14 +583,17 @@ mod tests {
         defaulted.tables[2].columns[1].default = Some("x'00'".into());
         assert_eq!(
             classify_carrying(&linked_items, &defaulted, item_removed_between),
-            Err(Unsupported::AddedReference("tags(item) -> items".into())),
+            Err(RefusedChange::AddedReference(tags_key("item", "items"))),
             "a readded field whose default fills every row is constrained like an old one"
         );
         let mut required = held.clone();
         required.tables[2].columns.push(column("label", true));
         assert_eq!(
             classify(&held, &required),
-            Err(Unsupported::RequiredField("tags.label".into()))
+            Err(RefusedChange::RequiredWithoutDefault {
+                table: "tags".into(),
+                column: "label".into()
+            })
         );
         assert_eq!(
             classify_carrying(&held, &required, |table, _| table.sql_name != "tags"),
@@ -588,7 +614,7 @@ mod tests {
             classify(&linked_items, &linked_items),
             Ok(SchemaChange::Unchanged)
         );
-        let refused = Err(Unsupported::AddedReference("tags(item) -> items".into()));
+        let refused = Err(RefusedChange::AddedReference(tags_key("item", "items")));
         assert_eq!(
             classify_carrying(&linked_items, &linked_items, items_removed_between),
             refused,

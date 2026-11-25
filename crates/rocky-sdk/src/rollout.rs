@@ -175,16 +175,8 @@ pub(crate) async fn confirm(
         settings.domain()?.logical().clone(),
         crate::domain::logical(schema, *settings.publisher.as_bytes())?,
     );
-    rocky_core::classify(&current, &target).map_err(|refusal| -> Failure {
-        match refusal {
-            rocky_core::Unsupported::LostEarlierName { renamed, earlier } => Box::new(
-                crate::Error::from(rocky_core::SchemaError::LostEarlierName { renamed, earlier }),
-            ),
-            refusal => {
-                format!("the application schema cannot replace the installed one: {refusal}").into()
-            }
-        }
-    })?;
+    rocky_core::classify(&current, &target)
+        .map_err(|refusal| crate::Error::from(rocky_core::SchemaError::Change(refusal)))?;
     let removed = rocky_core::removed(&current, &target);
     let narrowed_roles = narrowed_roles(&current, &target);
     if removed.is_empty() && narrowed_roles.is_empty() {

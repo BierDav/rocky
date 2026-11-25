@@ -446,6 +446,9 @@ Other kinds an application meets:
   was withdrawn; a retry does not clear it.
 - `Sql { code, message, unsupported }`: SQLite refused the statement, or
   Rocky did for a replayed write when `unsupported` is set.
+- `Schema(SchemaError)`: `build()` refused the schema, or the installed version
+  cannot become it. `SchemaError::Change(RefusedChange)` names the table, field
+  or foreign key a new version may not change that way.
 
 `Invite`, `Join`, `Link`, `Access` and `Service` carry the typed cause of an
 invitation, link, access or network failure, and `Internal` is never
@@ -483,11 +486,16 @@ that was offline during the rollout, is resolved in the schema it was written
 for and lands in `memo` on every device. Renaming again keeps every earlier name,
 oldest first: `Column::new("text", ..).renamed_from("note").renamed_from("memo")`.
 A version that drops an earlier name fails to open with `ErrorKind::Schema`
-and `SchemaError::LostEarlierName`, and an earlier name cannot be used again.
+and `SchemaError::Change(RefusedChange::LostEarlierName { .. })`, and an
+earlier name cannot be used again.
 `cargo run -p rocky-sdk --example renamed_column` walks through it with two
 devices. A primary-key column may be renamed this way, but a table's key never
-changes: a version that adds, drops or swaps a key column fails to open, so
-declare a new table and copy the rows into it with `MigrationStep::insert`.
+changes: a version that adds, drops or swaps a key column fails to open with
+`RefusedChange::ChangedKey`, so declare a new table and copy the rows into it
+with `MigrationStep::insert`. Every other change the installed version cannot
+take fails to open with a `RefusedChange` too, such as a retyped field, a new
+required field without a default, or a foreign key over a field existing rows
+already hold.
 
 An admin device publishes a new version when it opens with it. A version that
 drops tables or fields or narrows a role fails to open with

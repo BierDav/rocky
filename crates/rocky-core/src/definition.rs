@@ -1256,7 +1256,7 @@ mod replayed_tests {
 #[cfg(test)]
 mod rename_tests {
     use super::*;
-    use crate::{Unsupported, classify, removed};
+    use crate::{RefusedChange, classify, removed};
 
     fn version(items: &str, title: serde_json::Value, extra: serde_json::Value) -> LogicalSchema {
         let mut json = serde_json::json!({
@@ -1415,7 +1415,7 @@ mod rename_tests {
         let forgot = version("items", titled("name", &["label"]), serde_json::Value::Null);
         assert_eq!(
             classify(&v2, &forgot),
-            Err(Unsupported::LostEarlierName {
+            Err(RefusedChange::LostEarlierName {
                 renamed: "items.name".into(),
                 earlier: "items.label".into(),
             })

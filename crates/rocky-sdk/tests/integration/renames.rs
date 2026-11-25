@@ -377,7 +377,10 @@ async fn a_rename_that_forgets_an_earlier_name_is_refused_before_it_publishes()
     assert!(
         matches!(
             error.kind(),
-            ErrorKind::Schema(schema) if matches!(**schema, rocky_sdk::SchemaError::LostEarlierName { .. })
+            ErrorKind::Schema(schema) if matches!(
+                **schema,
+                rocky_sdk::SchemaError::Change(rocky_sdk::RefusedChange::LostEarlierName { .. })
+            )
         ),
         "{error}"
     );

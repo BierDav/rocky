@@ -993,3 +993,104 @@ async fn a_role_holding_only_partitioned_tables_opens_and_names_the_missing_gran
     clinic.close([tablet]).await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Result<(), Failure> {
+    const DISPATCHER: RoleName = RoleName::from_static("dispatcher");
+    let schema = Schema::builder("alerts", 1)
+        .table(
+            Table::replayed("alerts")
+                .column(Column::new("title", Affinity::Text).required())
+                .column(Column::new("state", Affinity::Text).required()),
+        )
+        .role(
+            Role::new(DISPATCHER)
+                .append("alerts")
+                .update_columns("alerts", ["state"]),
+        )
+        .build()?;
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let admin = Device::new(
+        open(&root.path().join("admin"), &schema, &hub, "admin")
+            .create()
+            .await?,
+    )?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(DISPATCHER)))
+        .await?;
+    let dispatcher = Device::new(
+        open(&root.path().join("dispatcher"), &schema, &hub, "dispatcher")
+            .join(&invitation.code)
+            .await?,
+    )?;
+    assert_eq!(
+        dispatcher.database.me().await?.tables.get("alerts"),
+        Some(&TableRights {
+            read: true,
+            insert: true,
+            update: true,
+            delete: false,
+        })
+    );
+    let write = |sql: &'static str, params: Vec<SqlValue>| {
+        let database = dispatcher.database.clone();
+        async move {
+            let mut tx = database.transaction().await?;
+            tx.execute(sql, params).await?;
+            tx.commit().await.map(drop)
+        }
+    };
+    let mut tx = dispatcher.database.transaction().await?;
+    let id = tx.next_id("alerts", Vec::new()).await?;
+    tx.execute(
+        "INSERT INTO alerts(id,title,state) VALUES(?,?,?)",
+        vec![id.sql(), SqlValue::Text("Fire".into()), SqlValue::Text("open".into())],
+    )
+    .await?;
+    tx.commit().await?;
+    write(
+        "UPDATE alerts SET state = ? WHERE id = ?",
+        vec![SqlValue::Text("closed".into()), id.sql()],
+    )
+    .await?;
+    let renamed = write(
+        "UPDATE alerts SET title = ? WHERE id = ?",
+        vec![SqlValue::Text("Flood".into()), id.sql()],
+    )
+    .await
+    .err()
+    .ok_or("the role updated a column it was not granted")?;
+    assert!(
+        matches!(
+            renamed.kind(),
+            ErrorKind::Denied {
+                need: Right::Update(column),
+                ..
+            } if column == "title"
+        ),
+        "{renamed:?}"
+    );
+    let deleted = write("DELETE FROM alerts", Vec::new())
+        .await
+        .err()
+        .ok_or("the role deleted a row")?;
+    assert!(
+        matches!(
+            deleted.kind(),
+            ErrorKind::Denied {
+                need: Right::Write,
+                ..
+            }
+        ),
+        "{deleted:?}"
+    );
+    assert_eq!(
+        rows(&dispatcher, "SELECT title || ':' || state FROM alerts").await?,
+        ["Fire:closed"]
+    );
+    dispatcher.close().await;
+    admin.close().await;
+    Ok(())
+}

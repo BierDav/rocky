@@ -69,10 +69,6 @@ pub enum RoleError {
         role: String,
         table: String,
     },
-    DuplicateTable {
-        role: String,
-        table: String,
-    },
     UnknownColumn {
         role: String,
         table: String,
@@ -108,9 +104,6 @@ impl std::fmt::Display for RoleError {
             Self::Empty(role) => write!(f, "role {role} grants no table"),
             Self::UnknownTable { role, table } => {
                 write!(f, "role {role} names unknown table {table}")
-            }
-            Self::DuplicateTable { role, table } => {
-                write!(f, "role {role} names table {table} twice")
             }
             Self::UnknownColumn {
                 role,
@@ -191,7 +184,6 @@ impl LogicalSchema {
             if role.tables.is_empty() {
                 return Err(RoleError::Empty(name()).into());
             }
-            let mut seen = BTreeSet::new();
             for granted in &role.tables {
                 let table = self
                     .typed()
@@ -200,13 +192,6 @@ impl LogicalSchema {
                         role: name(),
                         table: granted.table.clone(),
                     })?;
-                if !seen.insert(table.sql_name.as_str()) {
-                    return Err(RoleError::DuplicateTable {
-                        role: name(),
-                        table: granted.table.clone(),
-                    }
-                    .into());
-                }
                 if let TableAccess::UpdateColumns(columns) = &granted.access {
                     if columns.is_empty() {
                         return Err(RoleError::NoColumns {
@@ -373,14 +358,6 @@ mod tests {
             }
         );
         assert_eq!(
-            refusal(serde_json::json!([{"name": "scanner",
-                "tables": [read("tickets"), {"table": "tickets", "access": "write"}]}])),
-            RoleError::DuplicateTable {
-                role: "scanner".into(),
-                table: "tickets".into()
-            }
-        );
-        assert_eq!(
             refusal(serde_json::json!([{"name": "gatekeeper",
                 "tables": [{"table": "check_ins", "access": {"update_columns": ["absent"]}}]}])),
             RoleError::UnknownColumn {
@@ -420,6 +397,27 @@ mod tests {
                 role: "clinician".into(),
                 group: "ward".into()
             }
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn grants_on_one_table_compose_instead_of_being_refused() {
+        let schema = definition(serde_json::json!([{"name": "dispatcher", "tables": [
+            {"table": "check_ins", "access": "append"},
+            {"table": "check_ins", "access": {"update_columns": ["gate"]}}]}]))
+        .build()
+        .unwrap();
+        let rights: BTreeSet<Right> = schema
+            .role("dispatcher")
+            .unwrap()
+            .tables
+            .iter()
+            .flat_map(|granted| granted.access.grants())
+            .flat_map(|grant| grant.rights)
+            .collect();
+        assert_eq!(
+            rights,
+            BTreeSet::from([Right::Read, Right::Insert, Right::Update, Right::Custody])
         );
     }
 

@@ -225,16 +225,14 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
         .database;
     let mut tx = database.transaction().await?;
     let id = tx.next_id("notes", Vec::new()).await?;
-    tx.execute(
-        "INSERT INTO notes(title,id) VALUES(?,?)",
-        params!["x".repeat(200 * 1024), id],
-    )
-    .await?;
     let refused = tx
-        .commit()
+        .execute(
+            "INSERT INTO notes(title,id) VALUES(?,?)",
+            params!["x".repeat(200 * 1024), id],
+        )
         .await
         .err()
-        .ok_or("an oversized intent committed")?;
+        .ok_or("an oversized intent was recorded")?;
     let ErrorKind::TooLarge {
         limit: rocky_sdk::Limit::Intent,
         size,
@@ -246,6 +244,7 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
     assert_eq!(max, 128 * 1024);
     assert!(size > 200 * 1024, "{refused}");
     assert!(!refused.retryable());
+    tx.rollback().await?;
     note(&database, "after", None).await?;
     assert_eq!(all(&database).await?, ["after:-"]);
     database.close().await?;

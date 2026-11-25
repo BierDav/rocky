@@ -248,7 +248,9 @@ whole, on every device; `observe` reports it in `TableChange::dropped` and
 
 Every replayed table has an `id` primary key holding a `RowIdentity`, which
 `Transaction::next_id(table, partition_values)` allocates without
-coordination; gap-free numbers come from `rocky-coordinator`. `commit` returns
+coordination; gap-free numbers come from `rocky-coordinator`. A `RowIdentity`
+prints as hex and parses back with `str::parse`, and a `Timestamp` column
+value prints as RFC 3339 in UTC. `commit` returns
 `Commit::Recorded(token)`, or `Commit::NoChanges` when the transaction changed
 nothing and nothing syncs. `flush` makes every returned commit durable.
 

@@ -215,7 +215,8 @@ impl FromSqlValue for Timestamp {
     }
 }
 
-/// A point in time as Unix microseconds, stored as an integer column.
+/// A point in time as Unix microseconds, stored as an integer column; it prints as RFC 3339 in UTC,
+/// such as `2026-11-25T09:30:00.000000Z`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(i64);
 impl Timestamp {
@@ -236,6 +237,43 @@ impl Timestamp {
             web_time::UNIX_EPOCH.checked_add(offset)
         }
     }
+}
+impl std::fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const MICROS_PER_DAY: i64 = 86_400_000_000;
+        let days = self.0.div_euclid(MICROS_PER_DAY);
+        let of_day = self.0.rem_euclid(MICROS_PER_DAY);
+        let (year, month, day) = civil_date(days);
+        let (seconds, micros) = (of_day / 1_000_000, of_day % 1_000_000);
+        match year {
+            0..=9999 => write!(f, "{year:04}")?,
+            _ => write!(f, "{year:+05}")?,
+        }
+        write!(
+            f,
+            "-{month:02}-{day:02}T{:02}:{:02}:{:02}.{micros:06}Z",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    }
+}
+fn civil_date(days_since_epoch: i64) -> (i64, u32, u32) {
+    let shifted = days_since_epoch + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month as u32, day as u32)
 }
 impl TryFrom<web_time::SystemTime> for Timestamp {
     type Error = DecodeError;
@@ -539,5 +577,23 @@ impl Transaction {
             .await;
         self.connection.close().await;
         result.map(drop)
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::Timestamp;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_timestamp_prints_as_rfc_3339_in_utc() {
+        let printed = |micros| Timestamp::from_unix_micros(micros).to_string();
+        assert_eq!(printed(0), "1970-01-01T00:00:00.000000Z");
+        assert_eq!(printed(1_795_602_407_448_123), "2026-11-25T10:26:47.448123Z");
+        assert_eq!(printed(951_782_400_000_000), "2000-02-29T00:00:00.000000Z");
+        assert_eq!(printed(-1), "1969-12-31T23:59:59.999999Z");
+        assert_eq!(printed(-62_135_596_800_000_001), "0000-12-31T23:59:59.999999Z");
+        assert_eq!(printed(-62_167_219_200_000_001), "-0001-12-31T23:59:59.999999Z");
+        assert_eq!(printed(253_402_300_800_000_000), "+10000-01-01T00:00:00.000000Z");
+        assert!(!printed(i64::MIN).is_empty() && !printed(i64::MAX).is_empty());
     }
 }

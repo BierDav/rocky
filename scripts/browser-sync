@@ -1,11 +1,12 @@
 #!/bin/sh
-# A browser node syncs with a native node over a local iroh relay.
+# A browser node syncs with a native node over a local iroh relay, and dials a
+# native rocky-tcp WebSocket listener through the browser's own WebSocket.
 #
 #   scripts/browser-sync [CARGO ARGS]
 #                           start the native side (rocky-sdk example browser_peer),
-#                           run rocky-sdk's browser_sync test in a headless browser
-#                           with its relay and invitation, then let the native
-#                           side check the browser's write
+#                           run rocky-sdk's browser_sync tests in a headless browser
+#                           with its relay and invitations, then let the native
+#                           side check the browser's writes
 #
 # scripts/check --wasm runs it after the wasm32 tests, with their packages
 # (`-p ...`, default `-p rocky-sdk`), so the browser test shares their build.
@@ -35,7 +36,7 @@ mkfifo "$work/input" "$work/output"
 peer_pid=$!
 # Holds the native side's stdin open until the browser is done.
 exec 3>"$work/input"
-# The native side's first line names its relay and invitation once both are
+# The native side's first line names its relay and invitations once all are
 # ready. The read waits for that line however loaded the host is, and returns
 # nothing if the native side ends first.
 exec 4<"$work/output"

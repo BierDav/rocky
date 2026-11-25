@@ -1,8 +1,8 @@
 #!/bin/sh
-# Builds rocky-sdk for wasm32 as an application outside this workspace does:
-# without this repository's .cargo/config.toml, with only the setup the README
-# asks of an application (an llvm-ar for C dependencies), and checks that the
-# browser's SQLite is Rocky's.
+# Builds rocky-sdk and rocky-tcp's browser dialer for wasm32 as an application
+# outside this workspace does: without this repository's .cargo/config.toml,
+# with only the setup the README asks of an application (an llvm-ar for C
+# dependencies), and checks that the browser's SQLite is Rocky's.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -19,10 +19,11 @@ publish = false
 
 [dependencies]
 rocky-sdk = { path = "$repo_root/crates/rocky-sdk" }
+rocky-tcp = { path = "$repo_root/crates/rocky-tcp" }
 
 [workspace]
 EOF
-echo 'pub use rocky_sdk;' >"$consumer/src/lib.rs"
+printf 'pub use rocky_sdk;\npub fn browser() -> rocky_sdk::Network {\n    rocky_tcp::Options::browser().into()\n}\n' >"$consumer/src/lib.rs"
 # The workspace's versions, so the check does not follow new releases upstream.
 cp "$repo_root/Cargo.lock" "$consumer/Cargo.lock"
 

@@ -124,7 +124,8 @@ jobs:
     if: ${{ !inputs.release }}
     # wasm32 is the browser target: clippy for it, then each wasm package's
     # tests in a dedicated Worker of the runner image's headless Firefox, and a
-    # browser node syncing with a native one over a local relay.
+    # browser node syncing with a native one over a local relay and over a
+    # native WebSocket listener it dials with rocky_tcp::Options::browser().
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

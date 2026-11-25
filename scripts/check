@@ -82,9 +82,11 @@ fi
 # rocky-secure's tests only compile for wasm32: its replication logic is the
 # same on every target and runs natively, while the browser's seams (files,
 # storage, timers, transport) run in the other packages' browser tests.
+# rocky-tcp's browser dialer runs in rocky-sdk's browser_sync against a native
+# WebSocket listener, so its own tests only compile for wasm32 too.
 browser_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-credentials
     rocky-storage rocky-iroh rocky-coordinator rocky-sdk"
-wasm_packages="$browser_packages rocky-secure"
+wasm_packages="$browser_packages rocky-secure rocky-tcp"
 run_wasm() {
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
@@ -96,8 +98,8 @@ run_wasm() {
     for package in $browser_packages; do set -- "$@" -p "$package"; done
     # The binaries run at once, each in its own browser; large ones in shards.
     # A scope runs its packages' binaries of the same build. Meanwhile a
-    # browser node syncs with a native node over a local relay
-    # (scripts/browser-sync), when the SDK is in scope.
+    # browser node syncs with a native node over a local relay and over a
+    # WebSocket (scripts/browser-sync), when the SDK is in scope.
     only=
     sync=--browser-sync
     if [ "$selection" != 'all()' ]; then

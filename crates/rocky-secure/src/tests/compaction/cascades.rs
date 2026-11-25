@@ -450,6 +450,34 @@ async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateK
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn undoing_a_parent_insert_keeps_the_children_the_undo_does_not_own() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "undo", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "p", "parent").await;
+    tag(&replica, "kept", "p").await;
+    tag(&replica, "undone", "p").await;
+    let read = "SELECT t.key,t.item IS NOT NULL,t.also IS NOT NULL FROM tags t ORDER BY t.key";
+    assert_eq!(
+        replica
+            .read_after_undoing_inserts_for_test(&[("items", "p"), ("tags", "undone")], read)
+            .await
+            .unwrap(),
+        vec![vec![
+            text("kept"),
+            SqlValue::Integer(1),
+            SqlValue::Integer(1)
+        ]],
+        "the parent's delete neither cascades into nor nulls a child the undo does not own"
+    );
+    assert_eq!(
+        tags(&replica).await,
+        tagged(&[("kept", "p"), ("undone", "p")])
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record() {
     let lineage = linked();
     let dir = Scratch::new().await;

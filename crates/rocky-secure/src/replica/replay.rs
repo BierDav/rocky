@@ -4,6 +4,7 @@ use rocky_core::replay::{DropReason, Intent, TransactionOutcome};
 use rocky_storage::partition_sql::{TablePartitions, split_intent};
 
 mod base;
+mod bystanders;
 mod constraints;
 pub(crate) mod outcomes;
 mod rebuild;
@@ -11,6 +12,7 @@ mod references;
 mod restrictions;
 mod sealed;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
+use bystanders::{Bystanders, plan_table};
 pub(super) use constraints::{
     Written, cascades, check_member_order, checked, linked, note, written,
 };
@@ -702,20 +704,14 @@ impl<A: RowApplication> Inner<A> {
         }
         let corrupt = || Error::Corrupt("undo record".into());
         let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
+        let schema = typed.rows.schema();
         for undo in undo {
-            let name = undo.table.to_ascii_lowercase();
-            if plans.contains_key(&name) {
-                continue;
+            plan_table(typed, plans, &undo.table)?.ok_or_else(corrupt)?;
+            for child in cascades(schema, &undo.table) {
+                plan_table(typed, plans, &child)?;
             }
-            let projected = typed.by_name(&undo.table).ok_or_else(corrupt)?;
-            let table = typed
-                .plan(&BTreeSet::from([projected.scope]))?
-                .tables
-                .into_iter()
-                .find(|table| table.name.eq_ignore_ascii_case(&undo.table))
-                .ok_or_else(corrupt)?;
-            plans.insert(name, table);
         }
+        let plans = &*plans;
         let tables = undo
             .iter()
             .map(|undo| {
@@ -724,9 +720,11 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(corrupt)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut bystanders = Bystanders::new(schema, plans, undo);
         self.deferring_foreign_keys(async || {
             for (table, undo) in tables.iter().zip(undo) {
                 if undo.before.is_none() {
+                    bystanders.keep(self, &undo.table, &undo.key).await?;
                     self.conn
                         .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                         .await?;
@@ -744,6 +742,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             for (table, undo, _) in &collided {
+                bystanders.keep(self, &undo.table, &undo.key).await?;
                 self.conn
                     .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                     .await?;
@@ -752,6 +751,9 @@ impl<A: RowApplication> Inner<A> {
                 self.conn
                     .execute(&table.insert_image(), bindings(table.stored(before)))
                     .await?;
+            }
+            for (table, key, image) in bystanders.kept() {
+                self.restore_in_place(table, key, image).await?;
             }
             Ok(())
         })

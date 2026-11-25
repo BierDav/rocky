@@ -732,4 +732,50 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rewound_board_keeps_the_card_a_member_holds_only_in_its_base() -> Result<(), Failure>
+    {
+        holds_at(
+            20307,
+            soak_at(20307, Wall::Moving),
+            vec![
+                Seal(0),
+                Invite(0, 2),
+                Change(
+                    2,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 2,
+                        cap: 8,
+                    },
+                ),
+                InviteTo(0, 3, "l0".into()),
+                Change(
+                    2,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 2,
+                        pinned: Some(4),
+                        name: 3,
+                        points: 4,
+                    },
+                ),
+                Change(
+                    3,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 6,
+                        pinned: None,
+                        name: 4,
+                        points: 0,
+                    },
+                ),
+                Sync(2),
+                Revoke(3),
+                Seal(0),
+            ],
+        )
+        .await
+    }
 }

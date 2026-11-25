@@ -112,6 +112,36 @@ impl<A: RowApplication> Inner<A> {
             .collect()
     }
 
+    async fn follows_a_seal_unverified_here(
+        &self,
+        held: &[(&EncryptedFrame, u16)],
+        position: &ReplayPosition,
+    ) -> Result<bool, Error> {
+        if position.after_seal.is_none() {
+            return Ok(false);
+        }
+        let mut domains = BTreeSet::new();
+        let mut scopes = BTreeSet::new();
+        for (frame, _) in held {
+            let scope = frame.operation_ref()?.header.extensions.scope;
+            let id = self.scope_id(scope).await?;
+            domains.insert(scope.domain);
+            scopes.insert(id);
+            scopes.extend(self.linked_scopes(id).await?);
+        }
+        for domain in domains {
+            if self
+                .unverified_scopes(domain)
+                .await?
+                .iter()
+                .any(|(_, id)| id.is_some_and(|id| scopes.contains(&id)))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn linked_prefixes(
         &self,
         held: &[(&EncryptedFrame, u16)],
@@ -268,6 +298,9 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let position = self.replay_position(held).await?;
+        if self.follows_a_seal_unverified_here(held, &position).await? {
+            return Ok(());
+        }
         let mut replayed = Vec::with_capacity(members.len());
         for (member, id) in members {
             replayed.push((member, self.prefix(id, &position).await?));

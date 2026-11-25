@@ -329,3 +329,109 @@ async fn compaction_signs_a_replayed_base_and_a_later_member_replays_the_frames(
         assert_eq!(state(&f, replica, &expected).await, expected);
     }
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_list_held_after_a_seal_publishes_no_outcome_before_its_sealed_rows_arrive() {
+    let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
+    let root = rocky_platform::fs::Scratch::new().await;
+    let mut owner = Author::open(&f, root.path(), 1).await;
+    let mut writer = Author::open(&f, root.path(), 2).await;
+    follow_main(&f, &owner.replica).await;
+    owner.create(&f, &[("A", "x", 1)], 1).await;
+    let sealed = owner.fresh().await;
+    writer.create(&f, &[("A", "x", 2), ("B", "y", 1)], 1).await;
+    let late = writer.fresh().await;
+    seal_main(&owner.replica, &f.publisher, f.domain).await;
+    owner.replica.finalize_path(f.domain).await.unwrap();
+
+    let node = PrivateKey::new();
+    let granted = f
+        .open(
+            &root.path().join("granted.sqlite"),
+            node.clone(),
+            f.grant(None, &all()),
+        )
+        .await;
+    f.key(&granted, "B", [2; 32]).await;
+    exchange_graphs(&owner.replica, &granted, f.domain).await;
+    granted.follow_bookmark(f.domain, "main").await.unwrap();
+    let credentials = granted
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .credentials
+        .clone();
+    for request in granted.wanted_placements().await.unwrap() {
+        let page = owner
+            .replica
+            .placement_page(node.public_key(), &credentials, request)
+            .await
+            .unwrap();
+        granted.receive_placements(request, page).await.unwrap();
+    }
+    granted.finalize_path(f.domain).await.unwrap();
+    assert!(
+        granted
+            .compaction_status(f.domain)
+            .await
+            .unwrap()
+            .finalized
+            .is_some(),
+        "holding only B, the device finalizes the seal over A's rows it never saw"
+    );
+    f.key(&granted, "A", [1; 32]).await;
+    for status in granted.receive_all(late.clone()).await {
+        assert_ne!(status.unwrap(), ReceiveStatus::Rejected);
+    }
+    let txn = transaction(&late[0], key_of(&f, &late[0]), &f);
+    let published = |name: &'static str| {
+        let (f, granted, node) = (&f, &granted, &node);
+        async move {
+            records(f, granted, node, name)
+                .await
+                .iter()
+                .map(|frame| {
+                    payload(frame, key_of(f, frame), f)
+                        .outcome()
+                        .unwrap()
+                        .dropped
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        published("A").await,
+        vec![],
+        "without the seal's rows of A the device cannot know the transaction's outcome"
+    );
+    for status in granted.receive_all(sealed.clone()).await {
+        assert_ne!(status.unwrap(), ReceiveStatus::Rejected);
+    }
+    granted.finalize_path(f.domain).await.unwrap();
+    assert_eq!(
+        granted.transaction_outcome(txn).await.unwrap(),
+        Some(TransactionOutcome::Dropped {
+            reason: DropReason::Constraint,
+            sealed: false
+        })
+    );
+    for name in ["A", "B"] {
+        assert!(
+            published(name).await.iter().all(Option::is_some),
+            "every record the device published drops the transaction"
+        );
+    }
+    let mut records_of_granted = records(&f, &granted, &node, "A").await;
+    records_of_granted.extend(records(&f, &granted, &node, "B").await);
+    owner.receive(&late).await;
+    owner.receive(&records_of_granted).await;
+    assert!(
+        owner
+            .replica
+            .outcome_divergences()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

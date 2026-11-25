@@ -358,7 +358,7 @@ impl Node {
                     ..self.peer_retry(peer)
                 });
                 if let Some(skip) = self.skip_reason(peer, state, automatic, retry_only) {
-                    Self::add_peer_report(report, Self::skipped_peer(peer.to_hex(), skip));
+                    Self::add_peer_report(report, Self::skipped_peer(peer, skip));
                     return None;
                 }
                 Some(Target {
@@ -541,7 +541,7 @@ impl Node {
             choices.insert(target.peer, crate::PeerChoice::Covered);
             Self::add_peer_report(
                 report,
-                Self::skipped_peer(target.peer.to_hex(), SkipReason::Covered),
+                Self::skipped_peer(target.peer, SkipReason::Covered),
             );
         }
         Ok(owed)

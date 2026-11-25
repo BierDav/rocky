@@ -68,7 +68,7 @@ struct Simulation {
     coverage: BTreeMap<String, usize>,
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
     mesh_watches: BTreeMap<usize, tokio::task::JoinHandle<Result<MeshView, Failure>>>,
-    identities: BTreeMap<String, String>,
+    identities: BTreeMap<crate::PersonId, String>,
 }
 type MeshView = Option<Vec<crate::MeshDevice>>;
 
@@ -305,11 +305,11 @@ impl Simulation {
                     .clone()
                     .ok_or("member 0 holds no root")?;
                 self.database(0)?
-                    .make_admin(crate::PersonId::new(identity.parse()?), root)
+                    .make_admin(identity, root)
                     .await?;
                 let creator = self.database(0)?.status().await?;
                 for (member, identity) in
-                    [(0, creator.authority.principal), (*node, identity.clone())]
+                    [(0, creator.authority.principal), (*node, identity)]
                 {
                     let name = self.members[member].name.clone();
                     self.identities.insert(identity, name);
@@ -338,7 +338,7 @@ impl Simulation {
                     let entry_without_times = |mesh: &Option<Vec<crate::MeshDevice>>| {
                         mesh.iter()
                             .flatten()
-                            .find(|entry| entry.node == device)
+                            .find(|entry| entry.node.to_string() == device)
                             .map(|entry| {
                                 let report = crate::HealthReport {
                                     produced_at_epoch_seconds: 0,
@@ -602,19 +602,15 @@ impl Simulation {
         described.sort();
         format!("mesh {described:?}")
     }
-    fn name(&self, key: &str) -> String {
+    fn name(&self, device: &crate::DeviceId) -> String {
+        let key = device.to_string();
         self.members
             .iter()
-            .find(|member| member.node_key.as_deref() == Some(key))
+            .find(|member| member.node_key.as_deref() == Some(key.as_str()))
             .map_or("?".into(), |member| member.name.clone())
     }
     fn alerts(&self, alerts: &[crate::Alert]) -> String {
-        let name = |key: &str| {
-            self.members
-                .iter()
-                .find(|member| member.node_key.as_deref() == Some(key))
-                .map_or("?".into(), |member| member.name.clone())
-        };
+        let name = |device: &crate::DeviceId| self.name(device);
         let mut described: Vec<String> = alerts
             .iter()
             .map(|alert| match &alert.kind {

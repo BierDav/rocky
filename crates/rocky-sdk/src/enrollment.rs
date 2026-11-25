@@ -232,6 +232,7 @@ pub struct Settings {
     #[serde(skip)]
     pub(crate) delivery_nodes: BTreeMap<rocky_credentials::PeerId, PublicKey>,
     pub(crate) contact_refs: BTreeMap<rocky_credentials::PeerId, StoredContact>,
+    pub(crate) removed_peers: Vec<rocky_credentials::PeerId>,
     #[serde(skip)]
     pub(crate) resolved_refs: BTreeSet<rocky_credentials::PeerId>,
     pub version: u32,
@@ -683,7 +684,7 @@ impl Settings {
                 && revoked.identities.contains(origin)
         }) {
             crate::RevocationReason::Cascade {
-                admin: origin.to_hex(),
+                admin: crate::PersonId::new(origin),
             }
         } else {
             crate::RevocationReason::Capability
@@ -976,6 +977,8 @@ impl Settings {
             return Err("the contact names this device".into());
         }
         let learned = Contact::checked(record.routes)?;
+        self.removed_peers
+            .retain(|id| *id != rocky_credentials::PeerId::of(record.node));
         self.bind_saved_contact(record.node);
         if self.revoked(&record.node) {
             return Err("the contact names a revoked device".into());
@@ -1020,18 +1023,27 @@ impl Settings {
         }
         changed
     }
-    pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
-        let saved = self
-            .contact_refs
-            .remove(&rocky_credentials::PeerId::of(node));
-        self.resolved_refs
-            .remove(&rocky_credentials::PeerId::of(node));
-        if self.peers.remove(&node).is_none() && saved.is_none() {
-            return Err("unknown peer".into());
-        }
+    pub(crate) fn forget_peer(&mut self, node: PublicKey) {
+        let id = rocky_credentials::PeerId::of(node);
+        self.contact_refs.remove(&id);
+        self.resolved_refs.remove(&id);
+        self.peers.remove(&node);
         self.contact_meta.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
-        Ok(())
+    }
+    pub fn remove_peer(&mut self, node: PublicKey) {
+        self.forget_peer(node);
+        let id = rocky_credentials::PeerId::of(node);
+        if !self.removed_peers.contains(&id) {
+            if self.removed_peers.len() >= MAX_CONTACTS {
+                self.removed_peers.remove(0);
+            }
+            self.removed_peers.push(id);
+        }
+    }
+    pub(crate) fn peer_removed(&self, node: &PublicKey) -> bool {
+        self.removed_peers
+            .contains(&rocky_credentials::PeerId::of(*node))
     }
     pub fn expires(&self) -> u64 {
         self.credentials.expires()
@@ -1254,6 +1266,7 @@ impl Settings {
             issuers: Vec::new(),
             delivery_nodes: BTreeMap::new(),
             contact_refs: BTreeMap::new(),
+            removed_peers: Vec::new(),
             resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
@@ -1950,6 +1963,7 @@ impl Settings {
             issuers: vec![enrollment.issuer],
             delivery_nodes: BTreeMap::new(),
             contact_refs: BTreeMap::new(),
+            removed_peers: Vec::new(),
             resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::from([(enrollment.issuer, issuer)]),
@@ -3060,7 +3074,7 @@ impl Settings {
         self.credentials = self.renew_locally(vault)?;
         fault::check(fault::Stage::Renewed)?;
         for node in nodes {
-            let _ = self.remove_peer(node);
+            self.forget_peer(node);
         }
         Ok(Some(keys))
     }
@@ -3233,6 +3247,7 @@ impl Settings {
         let Self {
             delivery_nodes: _,
             contact_refs: _,
+            removed_peers,
             resolved_refs: _,
             version,
             installation,
@@ -3284,6 +3299,7 @@ impl Settings {
             && *device_revocations == other.device_revocations
             && *logged_out == other.logged_out
             && *deliveries == other.deliveries
+            && *removed_peers == other.removed_peers
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

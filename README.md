@@ -274,7 +274,10 @@ off and with `NoPeerReached(report)` when no peer reconciled, which is also
 what an owner with no other device yet gets. Its `SyncReport` prints as one
 line; `complete()` is true when every known peer reconciled or another peer
 covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.
-`add_peer`, `remove_peer` and `contact` manage peers.
+`add_peer`, `remove_peer` and `contact` manage peers, each named by its
+`DeviceId`. `remove_peer` forgets a peer however the device learned it and
+keeps a handover or discovery from bringing it back, also after a restart,
+until `add_peer` adds it again; removing an unknown peer succeeds.
 
 `observe(&["notes"])` streams `TableChange`s for the named tables, or all
 tables for an empty list, with their `causes`: `Local`, `Sync`, `Rebuild` or

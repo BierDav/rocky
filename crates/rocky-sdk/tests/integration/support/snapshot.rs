@@ -201,6 +201,9 @@ pub fn text(value: &impl Scalar) -> String {
 pub fn public_key(value: &impl Scalar) -> sdk::PublicKey {
     text(value).parse().expect("public key")
 }
+pub fn device_id(value: &impl Scalar) -> sdk::DeviceId {
+    sdk::DeviceId::new(public_key(value))
+}
 pub fn schema(json: &str) -> &'static sdk::Schema {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::BTreeMap<String, &'static sdk::Schema>>,

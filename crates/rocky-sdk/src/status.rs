@@ -208,8 +208,8 @@ pub enum RevocationReason {
     Identity,
     /// An admin whose credentials this device's chain depends on was revoked.
     Cascade {
-        /// The revoked admin's key.
-        admin: String,
+        /// The revoked admin.
+        admin: crate::PersonId,
     },
     /// This device's credential was revoked, as when access narrows.
     Capability,
@@ -217,7 +217,7 @@ pub enum RevocationReason {
 /// Where this device can renew its credentials.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewalRoute {
-    /// An admin device.
+    /// An admin device's key, or the hash a saved contact keeps of it until the device is met.
     pub target: String,
     /// Its routes.
     pub routes: Vec<Route>,
@@ -225,10 +225,10 @@ pub struct RenewalRoute {
 /// Who this device is and how long its credentials last.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityStatus {
-    /// The person's key.
-    pub principal: String,
-    /// The device's key.
-    pub node: String,
+    /// The person.
+    pub principal: crate::PersonId,
+    /// The device.
+    pub node: crate::DeviceId,
     /// Whether this is an admin device that issues credentials.
     pub is_issuer: bool,
     /// When the current credentials expire; syncing with an admin device renews them.
@@ -506,8 +506,8 @@ pub enum PeerChoice {
 /// One known peer device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
-    /// Its device key.
-    pub node: String,
+    /// The device.
+    pub node: crate::DeviceId,
     /// Whether it is an admin device.
     pub is_issuer: bool,
     /// Whether the application added it.
@@ -629,46 +629,46 @@ pub enum AlertKind {
     /// An admin signed two conflicting membership changes at the same position.
     MembershipFork {
         /// The admin.
-        identity: String,
+        identity: crate::PersonId,
         /// The position.
         sequence: u64,
     },
     /// This device's clock runs ahead of a peer's.
     ClockAheadOfPeer {
         /// The peer.
-        node: String,
+        node: crate::DeviceId,
         /// By how much.
         seconds: u64,
     },
     /// A peer's clock runs ahead of this device's.
     PeerClockAhead {
         /// The peer.
-        node: String,
+        node: crate::DeviceId,
         /// By how much.
         seconds: u64,
     },
     /// An admin linked a device.
     AdminDeviceLinked {
         /// The admin.
-        identity: String,
+        identity: crate::PersonId,
         /// The device.
-        node: String,
+        node: crate::DeviceId,
         /// When, in Unix seconds.
         linked: u64,
     },
     /// An admin unlinked a device.
     AdminDeviceUnlinked {
         /// The admin.
-        identity: String,
+        identity: crate::PersonId,
         /// The device.
-        node: String,
+        node: crate::DeviceId,
         /// When, in Unix seconds.
         unlinked: u64,
     },
     /// No device of an admin has been heard from within `ADMIN_STALE_AFTER`.
     AdminStale {
         /// The admin.
-        identity: String,
+        identity: crate::PersonId,
         /// When one of its devices was last heard from.
         last_heard_epoch_seconds: u64,
     },
@@ -681,18 +681,18 @@ pub enum AlertKind {
     /// ignored.
     TipStatementsPastCut {
         /// The admin.
-        signer: String,
+        signer: crate::PersonId,
         /// The device.
-        node: String,
+        node: crate::DeviceId,
         /// Statements ignored.
         statements: u64,
     },
     /// An admin device signed two histories at the same position.
     TipChainEquivocation {
         /// The admin.
-        signer: String,
+        signer: crate::PersonId,
         /// The device.
-        node: String,
+        node: crate::DeviceId,
         /// The position.
         sequence: u64,
     },
@@ -700,7 +700,7 @@ pub enum AlertKind {
     /// refuses to write.
     StoreSuperseded {
         /// The peer that reported it.
-        node: String,
+        node: crate::DeviceId,
         /// The position this device holds.
         held: u64,
         /// The position the peer saw.
@@ -709,7 +709,7 @@ pub enum AlertKind {
     /// A peer's data went back to an older position.
     PeerStoreRegressed {
         /// The peer.
-        node: String,
+        node: crate::DeviceId,
         /// The scope.
         scope: String,
         /// The position the peer holds now.
@@ -722,7 +722,7 @@ pub enum AlertKind {
         /// The dropped transaction.
         token: crate::TransactionToken,
         /// The device that wrote it.
-        node: String,
+        node: crate::DeviceId,
         /// Why it was dropped.
         reason: crate::DropReason,
     },
@@ -757,13 +757,13 @@ pub struct BlockerCount {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshDevice {
     /// The device.
-    pub node: String,
+    pub node: crate::DeviceId,
     /// Its report.
     pub report: HealthReport,
     /// When the report arrived.
     pub received_at_epoch_seconds: u64,
     /// The device that relayed it, or `None` when it came directly.
-    pub via: Option<String>,
+    pub via: Option<crate::DeviceId>,
     /// Whether no report arrived within `SILENT_AFTER`.
     pub silent: bool,
 }
@@ -809,7 +809,7 @@ pub struct ScopeReconciliationTransfer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerReconciliation {
     /// The peer.
-    pub node: String,
+    pub node: crate::DeviceId,
     /// The attempts made.
     pub attempts: Vec<AttemptObservation>,
     /// Why the pass skipped the peer, if it did.
@@ -949,7 +949,9 @@ mod sync_report_tests {
 
     fn peer(node: &str, outcome: AttemptOutcome, skip: Option<SkipReason>) -> PeerReconciliation {
         PeerReconciliation {
-            node: node.into(),
+            node: crate::DeviceId::new(
+                rocky_credentials::PrivateKey::from_bytes(&[node.as_bytes()[0]; 32]).public_key(),
+            ),
             attempts: vec![AttemptObservation {
                 id: 1,
                 target: node.into(),

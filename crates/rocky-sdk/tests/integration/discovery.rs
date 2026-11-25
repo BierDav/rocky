@@ -55,7 +55,7 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     assert!(b.titles().await.is_empty());
     let node = issuer.node().await;
     for member in [&a, &b] {
-        snap::ok(member.database.remove_peer(snap::public_key(&(node)))).await;
+        snap::ok(member.database.remove_peer(snap::device_id(&(node)))).await;
         let peers = snap::ok(async {
             let network = member.database.status().await?.network;
             Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))

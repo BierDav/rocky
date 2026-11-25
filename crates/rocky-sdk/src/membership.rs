@@ -160,13 +160,13 @@ impl AdminObservation {
         identity: PublicKey,
         node: PublicKey,
     ) -> impl Iterator<Item = crate::Alert> {
-        let identity = identity.to_hex();
-        let node = node.to_hex();
+        let identity = crate::PersonId::new(identity);
+        let node = crate::DeviceId::new(node);
         (!self.acknowledged)
             .then_some(crate::Alert {
                 kind: crate::AlertKind::AdminDeviceLinked {
-                    identity: identity.clone(),
-                    node: node.clone(),
+                    identity,
+                    node,
                     linked: self.linked,
                 },
                 since: Some(self.linked),

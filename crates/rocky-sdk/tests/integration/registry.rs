@@ -260,7 +260,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     let record = identities(&b).await[&m_identity].clone();
     assert_eq!(record["access"], json!("full"));
 
-    snap::ok(m.database.remove_peer(snap::public_key(&(a_node)))).await;
+    snap::ok(m.database.remove_peer(snap::device_id(&(a_node)))).await;
     assert!(
         !m.database
             .status()
@@ -315,7 +315,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     synced(&r).await?;
     synced(&w).await?;
     let (a_node, _b_node) = (a.node().await, b.node().await);
-    snap::ok(b.database.remove_peer(snap::public_key(&(a_node)))).await;
+    snap::ok(b.database.remove_peer(snap::device_id(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
     let keys = a

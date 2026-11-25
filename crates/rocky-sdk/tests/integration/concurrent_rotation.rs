@@ -133,7 +133,7 @@ async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> R
     snap::ok(
         reader
             .database
-            .remove_peer(snap::public_key(&(revoking.node().await))),
+            .remove_peer(snap::device_id(&(revoking.node().await))),
     )
     .await;
     reader
@@ -390,7 +390,7 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         snap::ok(
             device
                 .database
-                .remove_peer(snap::public_key(&(original.node().await))),
+                .remove_peer(snap::device_id(&(original.node().await))),
         )
         .await;
     }

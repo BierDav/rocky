@@ -69,7 +69,7 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
 
 impl Todos {
     pub async fn node(&self) -> Result<String, Failure> {
-        Ok(self.database.status().await?.authority.node)
+        Ok(self.database.status().await?.authority.node.to_string())
     }
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
         let invitation = self
@@ -118,7 +118,10 @@ impl Todos {
             .execute("DELETE FROM devices WHERE node=?", params![node])
             .await?;
         transaction.commit().await?;
-        let _ = self.database.remove_peer(node_key).await;
+        let _ = self
+            .database
+            .remove_peer(rocky_sdk::DeviceId::new(node_key))
+            .await;
         Ok(())
     }
     pub async fn role(&self) -> Result<Role, Failure> {

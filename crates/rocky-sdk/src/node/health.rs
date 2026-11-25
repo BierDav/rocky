@@ -47,7 +47,7 @@ impl AdminWatch {
             .filter(move |(_, last)| time.saturating_sub(*last) >= self.stale_after)
             .map(|(identity, last)| Alert {
                 kind: AlertKind::AdminStale {
-                    identity: identity.to_hex(),
+                    identity: crate::PersonId::new(identity),
                     last_heard_epoch_seconds: last,
                 },
                 since: Some(last.saturating_add(self.stale_after)),
@@ -149,7 +149,7 @@ impl Node {
             .superseded
             .into_iter()
             .map(|store| AlertKind::StoreSuperseded {
-                node: store.node.to_hex(),
+                node: crate::DeviceId::new(store.node),
                 held: store.held,
                 reported: store.reported,
             });
@@ -157,7 +157,7 @@ impl Node {
             .regressions
             .into_iter()
             .map(|peer| AlertKind::PeerStoreRegressed {
-                node: peer.node.to_hex(),
+                node: crate::DeviceId::new(peer.node),
                 scope: rocky_core::scope_label(&peer.scope),
                 held: peer.held,
                 reported: peer.reported,
@@ -182,7 +182,7 @@ impl Node {
             .map(|drop| Alert {
                 kind: AlertKind::WriteDropped {
                     token: crate::TransactionToken::new(drop.transaction),
-                    node: drop.node.to_hex(),
+                    node: crate::DeviceId::new(drop.node),
                     reason: crate::DropReason::Schema,
                 },
                 since: Some(drop.written),
@@ -204,8 +204,8 @@ impl Node {
         let past =
             past.into_iter().map(
                 |((signer, node), statements)| AlertKind::TipStatementsPastCut {
-                    signer: signer.to_hex(),
-                    node: node.to_hex(),
+                    signer: crate::PersonId::new(signer),
+                    node: crate::DeviceId::new(node),
                     statements,
                 },
             );
@@ -213,8 +213,8 @@ impl Node {
             .equivocations
             .iter()
             .map(|fork| AlertKind::TipChainEquivocation {
-                signer: fork.identity.to_hex(),
-                node: fork.lane.to_hex(),
+                signer: crate::PersonId::new(fork.identity),
+                node: crate::DeviceId::new(fork.lane),
                 sequence: fork.sequence,
             });
         Ok(past
@@ -458,7 +458,7 @@ impl Node {
         let identity = self.settings.lock().await.identity;
         alerts.extend(membership.forks(identity).map(|(sequence, _)| Alert {
             kind: crate::AlertKind::MembershipFork {
-                identity: identity.to_hex(),
+                identity: crate::PersonId::new(identity),
                 sequence,
             },
             since: None,
@@ -722,7 +722,7 @@ impl Node {
             }
             Some(at) => (at.min(time), Some(peer)),
         };
-        if Some(signed.node.to_hex()) == self.node_identity.as_ref().ok().cloned() {
+        if self.node_identity.as_ref().ok() == Some(&signed.node) {
             return Ok(());
         }
         let database = self.settings.lock().await.database_context()?;
@@ -791,10 +791,10 @@ impl Node {
                 .unwrap_or_else(PoisonError::into_inner)
                 .iter()
                 .map(|(node, held)| MeshDevice {
-                    node: node.to_hex(),
+                    node: crate::DeviceId::new(*node),
                     report: held.report.clone(),
                     received_at_epoch_seconds: held.received,
-                    via: held.via.map(|via| via.to_hex()),
+                    via: held.via.map(crate::DeviceId::new),
                     silent: !self.linked(*node) && self.silent(held.received, time),
                 })
                 .collect(),

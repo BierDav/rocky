@@ -97,7 +97,7 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                     tbody {
                         for peer in network.peers.iter() {
                             tr {
-                                td { "{name(&peer.node)}" }
+                                td { "{name(&peer.node.to_string())}" }
                                 td { {format!("{:?}", peer.link.state).to_lowercase()} }
                                 td { {peer.last_authenticated_exchange_at_epoch_seconds.map_or("never".into(), ago)} }
                             }

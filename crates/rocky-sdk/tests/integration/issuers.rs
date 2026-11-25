@@ -55,7 +55,7 @@ fn reconciled_with(report: &SyncReport, node: &str) -> bool {
     report
         .peers
         .iter()
-        .any(|peer| peer.node == node && peer.reconciled())
+        .any(|peer| peer.node.to_string() == node && peer.reconciled())
 }
 async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     for _ in 0..4 {
@@ -113,7 +113,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     let principal = device_info(&b).await.principal;
     a.database
         .make_admin(
-            rocky_sdk::PersonId::new(principal.parse()?),
+            principal,
             a.root_signer()?,
         )
         .await?;
@@ -159,7 +159,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
             .network
             .peers
             .iter()
-            .any(|peer| peer.node == late_node
+            .any(|peer| peer.node.to_string() == late_node
                 && peer.last_authenticated_exchange_at_epoch_seconds.is_some())
     );
     assert_eq!(
@@ -231,7 +231,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .as_ref()
                 .map(|notice| &notice.reason),
             Some(&rocky_sdk::status::RevocationReason::Cascade {
-                admin: a_identity.clone()
+                admin: rocky_sdk::PersonId::new(a_identity.parse()?)
             }),
             "{status:?}"
         );
@@ -248,7 +248,9 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
-            Some(&rocky_sdk::status::RevocationReason::Cascade { admin: a_identity }),
+            Some(&rocky_sdk::status::RevocationReason::Cascade {
+                admin: rocky_sdk::PersonId::new(a_identity.parse()?)
+            }),
             "{status:?}"
         );
         assert!(early.database.renew().await.is_err());
@@ -406,7 +408,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     let t_identity = device_info(&t).await.principal;
     a.database
         .make_admin(
-            rocky_sdk::PersonId::new(t_identity.parse()?),
+            t_identity,
             a.root_signer()?,
         )
         .await?;
@@ -430,7 +432,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
 
     let error = a
         .database
-        .remove(rocky_sdk::PersonId::new(t_identity.parse()?))
+        .remove(t_identity)
         .await
         .err()
         .ok_or("revoked a trusted identity without the root")?;
@@ -441,7 +443,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     );
     a.database
         .revoke_admin(
-            rocky_sdk::PersonId::new(t_identity.parse()?),
+            t_identity,
             rocky_sdk::Removal::Compromised,
             a.root_signer()?,
         )

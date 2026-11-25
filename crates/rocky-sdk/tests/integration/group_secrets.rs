@@ -248,8 +248,8 @@ impl Peer {
         (
             Peer::new(database, store, self.hub.clone()),
             NodeKeys {
-                identity: authority.principal.parse().unwrap(),
-                node: authority.node.parse().unwrap(),
+                identity: authority.principal.key(),
+                node: authority.node.key(),
             },
         )
     }

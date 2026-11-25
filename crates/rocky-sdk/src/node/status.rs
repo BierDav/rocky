@@ -56,7 +56,7 @@ impl Node {
                         link_retry_at_epoch_millis: retry.link_retry.deadline_epoch_millis(),
                     });
                 crate::Peer {
-                    node: node.clone(),
+                    node: crate::DeviceId::new(key),
                     is_issuer: settings.issuers.contains(&key),
                     is_configured: contact.is_some(),
                     source: settings.contact_meta.get(&key).map_or_else(
@@ -105,7 +105,7 @@ impl Node {
                         .last_syncs
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .get(&node)
+                        .get(&key)
                         .cloned(),
                 }
             })
@@ -200,11 +200,12 @@ impl Node {
             token: String::new(),
             observed_at_epoch_millis: epoch_millis(),
             authority: AuthorityStatus {
-                principal: settings.identity.to_hex(),
-                node: self
-                    .node_identity
-                    .clone()
-                    .map_err(|error| -> Failure { error.into() })?,
+                principal: crate::PersonId::new(settings.identity),
+                node: crate::DeviceId::new(
+                    self.node_identity
+                        .clone()
+                        .map_err(|error| -> Failure { error.into() })?,
+                ),
                 is_issuer: settings.issuer(),
                 expires_at_epoch_seconds: settings.expires(),
                 expired: settings.expires() <= self.status_time()?,
@@ -218,8 +219,7 @@ impl Node {
                             .node_identity
                             .as_ref()
                             .ok()
-                            .and_then(|node| node.parse::<PublicKey>().ok())
-                            .map(rocky_credentials::PeerId::of);
+                            .map(|node| rocky_credentials::PeerId::of(*node));
                         Ok::<_, Failure>(VerifiedRevocation {
                             id: HEXLOWER.encode(&notice.id()?),
                             statement: serde_json::to_vec(&notice)?,
@@ -304,8 +304,8 @@ impl Node {
 
 impl Node {
     pub(super) fn observe_peer_clock(&self, peer: PublicKey, offset: i64) {
-        let node = peer.to_hex();
-        let label = node.get(..12).unwrap_or_default().to_owned();
+        let node = crate::DeviceId::new(peer);
+        let label = peer.to_hex().get(..12).unwrap_or_default().to_owned();
         let seconds = offset.unsigned_abs().div_ceil(1_000_000);
         let kind = if offset.unsigned_abs() <= rocky_core::MAX_CLOCK_AHEAD.as_micros() as u64 {
             None
@@ -405,9 +405,9 @@ impl Node {
         blockers.sort();
         Ok(blockers)
     }
-    pub(super) fn skipped_peer(node: String, skip: SkipReason) -> PeerReconciliation {
+    pub(super) fn skipped_peer(node: PublicKey, skip: SkipReason) -> PeerReconciliation {
         PeerReconciliation {
-            node,
+            node: crate::DeviceId::new(node),
             skip: Some(skip),
             attempts: Vec::new(),
             transfers: Vec::new(),
@@ -427,7 +427,7 @@ impl Node {
     ) -> PeerReconciliation {
         let node = peer.to_hex();
         let mut report = PeerReconciliation {
-            node: node.clone(),
+            node: crate::DeviceId::new(peer),
             skip: None,
             attempts: self
                 .observations
@@ -578,7 +578,7 @@ impl Node {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             for peer in report.peers.iter().filter(|peer| peer.skip.is_none()) {
-                last.insert(peer.node.clone(), peer.clone());
+                last.insert(peer.node.key(), peer.clone());
             }
         }
         *self

@@ -93,7 +93,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
-    snap::ok(b.database.remove_peer(snap::public_key(&(c.node().await)))).await;
+    snap::ok(b.database.remove_peer(snap::device_id(&(c.node().await)))).await;
     b.add(4, "Tea").await;
     assert!(
         common::exchange_failed(&b.sync().await),
@@ -115,7 +115,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .renewal_routes
             .is_empty()
     );
-    snap::ok(b.database.remove_peer(snap::public_key(&(creator_node)))).await;
+    snap::ok(b.database.remove_peer(snap::device_id(&(creator_node)))).await;
     assert!(
         b.database
             .status()
@@ -548,7 +548,7 @@ async fn a_pass_that_reaches_no_peer_names_why_each_peer_failed() -> Result<(), 
     let peer = report
         .peers
         .iter()
-        .find(|peer| peer.node == b_node)
+        .find(|peer| peer.node.to_string() == b_node)
         .ok_or("the report names the closed peer")?;
     let failure = peer.failure().ok_or("the closed peer's failure")?;
     assert!(

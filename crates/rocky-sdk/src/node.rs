@@ -294,11 +294,11 @@ pub(crate) struct Node {
     #[cfg(test)]
     pub(crate) discovery_skew: AtomicU64,
     observations: crate::status::Observations,
-    node_identity: Result<String, String>,
+    node_identity: Result<PublicKey, String>,
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::SyncReport>>,
-    last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
+    last_syncs: std::sync::Mutex<BTreeMap<PublicKey, crate::PeerReconciliation>>,
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
@@ -329,7 +329,7 @@ impl Node {
             status_clock: Default::default(),
             node_identity: vault
                 .get("node")
-                .map(|key| PrivateKey::from_bytes(&key).public_key().to_hex())
+                .map(|key| PrivateKey::from_bytes(&key).public_key())
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
             last_syncs: Default::default(),
@@ -784,8 +784,11 @@ impl Node {
     }
 
     async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
-        self.configure(|settings| settings.remove_peer(node))
-            .await?;
+        self.configure(|settings| {
+            settings.remove_peer(node);
+            Ok(())
+        })
+        .await?;
         self.reached()?.remove(&node);
         self.met
             .lock()
@@ -1424,10 +1427,10 @@ impl Node {
         self.wake_sync();
     }
     fn peer_retry(&self, peer: PublicKey) -> PeerRetry {
-        let identity = format!(
-            "{}:{peer}",
-            self.node_identity.as_deref().unwrap_or("unavailable")
-        );
+        let identity = match &self.node_identity {
+            Ok(node) => format!("{}:{peer}", node.to_hex()),
+            Err(_) => format!("unavailable:{peer}"),
+        };
         PeerRetry {
             retry: crate::scheduling::Retry::seeded(self.retry_seed, identity.as_bytes()),
             link_retry: crate::scheduling::Retry::seeded(self.retry_seed, identity.as_bytes()),

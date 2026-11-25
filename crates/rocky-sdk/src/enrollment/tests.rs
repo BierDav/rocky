@@ -697,7 +697,7 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
         "tcp://127.0.0.1:9000"
     );
     assert_eq!(reopened.issuers, [node]);
-    reopened.remove_peer(node)?;
+    reopened.remove_peer(node);
     reopened.save(&path).await?;
     assert!(Settings::load(&path)?.unresolved_contacts().is_empty());
     Ok(())

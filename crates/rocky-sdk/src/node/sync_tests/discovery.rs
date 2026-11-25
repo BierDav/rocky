@@ -78,7 +78,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             a.detach().await;
             for node in [&b, &c] {
                 node.configure(|settings| {
-                    settings.remove_peer(a_key)?;
+                    settings.forget_peer(a_key);
                     settings.contact_meta.remove(&a_key);
                     Ok(())
                 })
@@ -103,7 +103,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                 .observed_peers()
                 .await
                 .into_iter()
-                .find(|peer| peer.node == c_key.to_hex())
+                .find(|peer| peer.node == crate::DeviceId::new(c_key))
                 .ok_or("found peer")?;
             assert_eq!(
                 (found.source, found.is_local, found.choice),

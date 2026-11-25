@@ -184,14 +184,17 @@ impl Database {
     pub async fn contact(&self) -> Result<ContactInfo, crate::Error> {
         self.send(Request::Contact).await
     }
-    /// Adds a peer from its contact and returns its device key.
-    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, crate::Error> {
+    /// Adds a peer from its contact and returns its device; it undoes an earlier `remove_peer`.
+    pub async fn add_peer(&self, contact: &str) -> Result<crate::DeviceId, crate::Error> {
         self.send(|reply| Request::AddPeer(contact.into(), reply))
             .await
+            .map(crate::DeviceId::new)
     }
-    /// Forgets a peer the application added.
-    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), crate::Error> {
-        self.send(|reply| Request::RemovePeer(node, reply)).await
+    /// Forgets a peer however this device learned it and keeps it from being learned again, also
+    /// across restarts, until `add_peer` adds it; removing an unknown peer succeeds.
+    pub async fn remove_peer(&self, device: crate::DeviceId) -> Result<(), crate::Error> {
+        self.send(|reply| Request::RemovePeer(device.key(), reply))
+            .await
     }
     /// Runs one sync pass; fails with `NoPeerReached` when no peer reconciled and with `SyncOff`
     /// when sync is off.

@@ -339,7 +339,13 @@ impl Device {
         self.database.contact().await.expect("contact").uri
     }
     pub async fn node(&self) -> String {
-        self.database.status().await.expect("status").authority.node
+        self.database
+            .status()
+            .await
+            .expect("status")
+            .authority
+            .node
+            .to_string()
     }
     pub async fn identity(&self) -> String {
         self.database
@@ -348,6 +354,7 @@ impl Device {
             .expect("status")
             .authority
             .principal
+            .to_string()
     }
     pub async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
         snap::observe(async {

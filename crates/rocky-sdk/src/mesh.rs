@@ -113,6 +113,7 @@ impl Settings {
         hint.validate()?;
         if hint.node == PrivateKey::from_bytes(&vault.get("node")?).public_key()
             || self.revocations.revokes(&hint.node)
+            || self.peer_removed(&hint.node)
         {
             return Ok(false);
         }
@@ -133,8 +134,7 @@ impl Settings {
             .map(|(node, _)| *node)
             .collect();
         for node in expired {
-            self.remove_peer(node)?;
-            self.contact_meta.remove(&node);
+            self.forget_peer(node);
         }
         if !self.peers.contains_key(&hint.node)
             && self.contact_count() >= crate::enrollment::MAX_CONTACTS
@@ -152,8 +152,7 @@ impl Settings {
             let Some(oldest) = oldest else {
                 return Ok(false);
             };
-            self.remove_peer(oldest)?;
-            self.contact_meta.remove(&oldest);
+            self.forget_peer(oldest);
         }
         self.peers.insert(
             hint.node,
@@ -177,7 +176,7 @@ impl Settings {
         Ok(true)
     }
     pub(crate) fn would_learn(&self, node: PublicKey, address: &str, local: bool) -> bool {
-        if self.revocations.revokes(&node) {
+        if self.revocations.revokes(&node) || self.peer_removed(&node) {
             return false;
         }
         let meta = self.contact_meta.get(&node);

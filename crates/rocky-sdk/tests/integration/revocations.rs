@@ -360,7 +360,9 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
             .verified_revocation
             .as_ref()
             .map(|notice| &notice.reason),
-        Some(&RevocationReason::Cascade { admin: creator }),
+        Some(&RevocationReason::Cascade {
+            admin: rocky_sdk::PersonId::new(creator.parse()?)
+        }),
         "{status:?}"
     );
     for device in [&b, &c, &early] {

@@ -74,7 +74,11 @@ async fn one_contact_hands_over_a_second_and_answers_a_request_for_a_third() -> 
                 "request"
             );
             let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
-            b.configure(|settings| settings.remove_peer(a_key)).await?;
+            b.configure(|settings| {
+                settings.forget_peer(a_key);
+                Ok(())
+            })
+            .await?;
             pass(&b).await?;
             assert!(hub.dials_to("c") > 1);
             assert!(
@@ -83,6 +87,48 @@ async fn one_contact_hands_over_a_second_and_answers_a_request_for_a_third() -> 
                     .is_some_and(|last| last.error.is_none())
             );
             for node in [&a, &b, &c, &d] {
+                node.detach().await;
+            }
+            Ok(())
+        })
+        .await
+}
+#[tokio::test]
+async fn a_removed_peer_is_not_learned_again_until_the_application_adds_it() -> Result<(), Failure>
+{
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
+            let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, writer()))).await?;
+            let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let c_key = PrivateKey::from_bytes(&c.vault.get("node")?).public_key();
+            let handover = || ContactRequest::Handover {
+                contacts: vec![ContactHint {
+                    node: c_key,
+                    routes: vec![("memory".into(), "c".into())],
+                    trusted: false,
+                }],
+            };
+            b.answer(a_key, handover()).await?;
+            assert!(b.settings.lock().await.peers.contains_key(&c_key));
+            b.remove_peer(c_key).await?;
+            b.remove_peer(c_key).await?;
+            b.answer(a_key, handover()).await?;
+            assert!(
+                !b.settings.lock().await.peers.contains_key(&c_key),
+                "a handover does not bring a removed peer back"
+            );
+            let saved = b.settings.lock().await.to_bytes()?;
+            assert!(
+                crate::enrollment::Settings::from_bytes(&saved)?.peer_removed(&c_key),
+                "the removal survives a restart"
+            );
+            contact(&b, &c).await?;
+            assert!(!b.settings.lock().await.peer_removed(&c_key));
+            for node in [&a, &b, &c] {
                 node.detach().await;
             }
             Ok(())
@@ -112,7 +158,7 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
             assert_eq!(
                 peers
                     .iter()
-                    .find(|peer| peer.node == key.to_hex())
+                    .find(|peer| peer.node == crate::DeviceId::new(key))
                     .ok_or("local")?
                     .choice,
                 crate::PeerChoice::SelectedLocal
@@ -478,7 +524,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         a.configure(|settings| {
             for peer in settings.peers.keys().copied().collect::<Vec<_>>() {
                 if peer != custody {
-                    settings.remove_peer(peer)?;
+                    settings.forget_peer(peer);
                 }
             }
             Ok(())
@@ -488,7 +534,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         let d_key = contact(&b, &d).await?;
         let c_key = contact(&b, &c).await?;
         let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
-        b.configure(|settings| { settings.remove_peer(a_key)?; settings.contact_meta.get_mut(&c_key).ok_or("local")?.local = true; Ok(()) }).await?;
+        b.configure(|settings| { settings.forget_peer(a_key); settings.contact_meta.get_mut(&c_key).ok_or("local")?.local = true; Ok(()) }).await?;
         pass(&b).await?;
         pass(&b).await?;
         {

@@ -847,4 +847,45 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_member_granted_a_list_after_its_seal_publishes_the_outcome_its_peers_reached()
+    -> Result<(), Failure> {
+        holds_at(
+            20109,
+            soak_at(20109, Wall::Moving),
+            vec![
+                InviteTo(0, 2, "l1".into()),
+                Invite(0, 3),
+                Change(
+                    1,
+                    Change::DropCard {
+                        list: "l1".into(),
+                        card: 1,
+                    },
+                ),
+                Change(
+                    3,
+                    Change::Pair {
+                        list: "l0".into(),
+                        code: 1,
+                        name: 1,
+                        points: 0,
+                    },
+                ),
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 1,
+                        cap: 8,
+                    },
+                ),
+                Seal(0),
+                Sync(2),
+                Grant("l0".into(), 2),
+            ],
+        )
+        .await
+    }
 }

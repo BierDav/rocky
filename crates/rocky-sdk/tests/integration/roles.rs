@@ -269,7 +269,7 @@ async fn a_person_downgraded_to_read_can_no_longer_write() -> Result<(), Failure
         .database
         .set_access(person(&member).await?, Access::Read)
         .await?;
-    synced(&admin).await?;
+    let _refused_until_the_member_renews = admin.sync_now().await;
     let _ = member.sync().await;
     synced(&member).await?;
     assert_eq!(member.database.me().await?.access, Access::Read);

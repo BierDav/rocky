@@ -348,7 +348,10 @@ covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.
 `add_peer`, `remove_peer` and `contact` manage peers, each named by its
 `DeviceId`. `remove_peer` forgets a peer however the device learned it and
 keeps a handover or discovery from bringing it back, also after a restart,
-until `add_peer` adds it again; removing an unknown peer succeeds.
+until `add_peer` adds it again; removing an unknown peer succeeds. Each sync
+tells the other device this one's current route, so an issuer reaches the
+device that joined with its invitation, and peers follow a device that reopens
+on another port, without `add_peer`; a dial-only device tells none.
 
 `observe(&["notes"])` streams `TableChange`s for the named tables, or all
 tables for an empty list, with their `causes`: `Local`, `Sync`, `Rebuild` or

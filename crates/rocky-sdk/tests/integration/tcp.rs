@@ -111,3 +111,32 @@ async fn known_peers_and_complete(device: &Device) -> Result<(usize, bool), Fail
         },
     }
 }
+
+#[tokio::test]
+async fn the_issuer_reaches_its_joiner_without_add_peer() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let issuer = Device::create(&root.path().join("issuer"), Some(tcp())).await?;
+    let invitation = issuer.invite().await;
+    let joiner = Device::join(&root.path().join("joiner"), &invitation, tcp()).await?;
+
+    joiner.add(1, "Milk").await;
+    let synced = issuer.sync_now().await?;
+    assert!(synced.complete(), "{synced}");
+    assert_eq!(issuer.titles().await, ["Milk"]);
+
+    joiner.close().await;
+    let reopened = Device::open(&root.path().join("joiner"), Some(tcp())).await?;
+    reopened.add(2, "Eggs").await;
+    reopened.sync_now().await?;
+    reopened.add(3, "Bread").await;
+    let synced = issuer.sync_now().await?;
+    assert!(
+        synced.complete(),
+        "the issuer dials the port the joiner advertised after reopening: {synced}"
+    );
+    assert_eq!(issuer.titles().await, ["Bread", "Eggs", "Milk"]);
+
+    reopened.close().await;
+    issuer.close().await;
+    Ok(())
+}

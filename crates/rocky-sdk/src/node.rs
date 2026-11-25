@@ -733,8 +733,7 @@ impl Node {
     }
 
     pub(super) async fn own_routes(&self) -> Vec<crate::Route> {
-        let attached = self.network.read().await;
-        match attached.as_deref() {
+        match self.current() {
             Some(link) => match link.transport.address().await {
                 Ok(Some(address)) => crate::Route::try_from(address).into_iter().collect(),
                 _ => Vec::new(),

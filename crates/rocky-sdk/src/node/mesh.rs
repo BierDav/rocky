@@ -2,29 +2,43 @@ use super::*;
 use rocky_secure::network::{ContactFuture, ContactHandler, ContactRequest, ContactResponse};
 
 impl ContactHandler for Node {
-    fn answer(&self, _peer: PublicKey, request: ContactRequest) -> ContactFuture<'_> {
+    fn answer(&self, peer: PublicKey, request: ContactRequest) -> ContactFuture<'_> {
         Box::pin(async move {
-            self.answer_contacts(request)
+            self.answer_contacts(peer, request)
                 .await
                 .map_err(rocky_secure::Error::Application)
         })
     }
 }
 impl Node {
-    async fn answer_contacts(&self, request: ContactRequest) -> Result<ContactResponse, Failure> {
+    async fn answer_contacts(
+        &self,
+        peer: PublicKey,
+        request: ContactRequest,
+    ) -> Result<ContactResponse, Failure> {
         self.absorb_revocations(None).await?;
+        let own = self.own_contact_hint().await?;
         let mut settings = self.settings.lock().await;
         let mut changed = false;
         let response = match request {
             ContactRequest::Handover { contacts } => {
                 for contact in contacts {
-                    changed |= settings.learn_contact(&self.vault, contact, "handover", now()?)?;
+                    changed |= if contact.node == peer {
+                        settings.learn_advertised(&self.vault, contact, now()?)?
+                    } else {
+                        settings.learn_contact(&self.vault, contact, "handover", now()?)?
+                    };
                 }
                 let pending = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
                 let mut bytes = 0;
-                let contacts = pending
-                    .iter()
-                    .filter_map(|node| settings.contact_hint(*node))
+                let contacts = own
+                    .into_iter()
+                    .chain(
+                        pending
+                            .iter()
+                            .filter(|node| **node != peer)
+                            .filter_map(|node| settings.contact_hint(*node)),
+                    )
                     .filter(|contact| {
                         let size = contact.routes.iter().map(String::len).sum::<usize>() + 256;
                         if bytes + size > 96 * 1024 {
@@ -55,6 +69,22 @@ impl Node {
             settings.save(&self.replica).await?;
         }
         Ok(response)
+    }
+    async fn own_contact_hint(
+        &self,
+    ) -> Result<Option<rocky_secure::network::ContactHint>, Failure> {
+        let routes = self.own_routes().await;
+        if routes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(rocky_secure::network::ContactHint {
+            node: Settings::node_key(&self.vault)?.public_key(),
+            routes: routes
+                .iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            trusted: self.settings.lock().await.issuer(),
+        }))
     }
     pub(super) async fn request_contact(
         &self,

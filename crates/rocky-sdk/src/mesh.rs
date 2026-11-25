@@ -21,6 +21,7 @@ pub struct ContactMeta {
     pub local: bool,
 }
 const AGE: u64 = 30 * 24 * 60 * 60;
+const REFRESH: u64 = 24 * 60 * 60;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Discovery {
@@ -182,6 +183,39 @@ impl Settings {
             },
         );
         Ok(true)
+    }
+    pub(crate) fn learn_advertised(
+        &mut self,
+        vault: &Vault,
+        hint: ContactHint,
+        time: u64,
+    ) -> Result<bool, Failure> {
+        hint.validate()?;
+        let Some(contact) = self.peers.get_mut(&hint.node) else {
+            let unvouched = ContactHint {
+                trusted: false,
+                ..hint
+            };
+            return self.learn_contact(vault, unvouched, "handover", time);
+        };
+        if self.revocations.revokes(&hint.node) {
+            return Ok(false);
+        }
+        let before = contact.routes.clone();
+        contact.learn(
+            hint.routes
+                .into_iter()
+                .map(Route::try_from)
+                .collect::<Result<_, _>>()?,
+        );
+        let moved = contact.routes != before;
+        let refreshed = self
+            .contact_meta
+            .get_mut(&hint.node)
+            .filter(|meta| meta.learned.saturating_add(REFRESH) <= time)
+            .map(|meta| meta.learned = time)
+            .is_some();
+        Ok(moved || refreshed)
     }
     pub(crate) fn would_learn(&self, node: PublicKey, address: &str, local: bool) -> bool {
         if self.revocations.revokes(&node) || self.peer_removed(&node) {

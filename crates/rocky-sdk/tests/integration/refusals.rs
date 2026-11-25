@@ -328,7 +328,8 @@ async fn a_write_into_a_partition_not_held_is_a_final_partition_refusal() -> Res
         .database
         .revoke_partition(person, &ward("C"))
         .await?;
-    for device in [&venue.admin, &clinician, &venue.admin, &clinician] {
+    let _refused_until_the_clinician_renews = venue.admin.database.sync_now().await;
+    for device in [&clinician, &venue.admin, &clinician] {
         crate::support::peerless_ok(device.sync_now().await)?;
     }
     let partition_not_granted = |need: Right| {

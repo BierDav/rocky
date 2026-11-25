@@ -441,6 +441,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
             Ok(())
         })
         .await?;
+    other.online(false).await?;
     let before = a.events("envelopes_delivered").await?.len();
     snap::value(
         a.database
@@ -719,7 +720,7 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     .await?;
     introduce(&mesh.a, &mailbox).await?;
     introduce(&mesh.b, &mailbox).await?;
-    explicit_syncs_only(&[&mesh.a, &mesh.b, &mailbox]).await?;
+    explicit_syncs_only(&[&mesh.a, &mailbox]).await?;
     mesh.custody.online(false).await?;
     let recipient = mesh.b.node().await?;
     let _row_exchange_may_be_refused_without_a_list_grant =

@@ -2,7 +2,7 @@ use crate::{
     Failure,
     enrollment::Settings,
     groups::{GroupPartition, GroupRecord, record_key, secret_role},
-    registry::IdentityRecord,
+    registry::{IdentityRecord, Registry},
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, KeyEpoch, PartitionValue};
@@ -171,6 +171,34 @@ impl Settings {
             self.enqueue(*node, Carries::Rights, &Contents::rights(*node)?, true)?;
         }
         Ok(())
+    }
+    pub(crate) fn rights_lag(
+        &self,
+        registry: &Registry,
+        domain: &crate::domain::Domain,
+        chain: &rocky_credentials::CredentialChain,
+    ) -> Result<bool, Failure> {
+        let Some(identity) = chain.principal() else {
+            return Ok(false);
+        };
+        if self.revoked_identity(&identity, registry) {
+            return Ok(false);
+        }
+        if registry.admins.contains_key(&identity) && !self.revocations.revokes_trusted(&identity) {
+            let holds_admin_grant = chain
+                .capabilities()
+                .trusted_identity(
+                    self.publisher,
+                    domain.scope,
+                    &self.revocations,
+                    crate::enrollment::now()?,
+                )
+                .is_ok_and(|trusted| trusted == identity);
+            return Ok(!holds_admin_grant);
+        }
+        let recorded = registry.get(&identity).and_then(IdentityRecord::access);
+        let held = chain.held().and_then(|held| domain.access_of(held));
+        Ok(matches!((recorded, held), (Some(recorded), Some(held)) if *recorded != held))
     }
     fn enqueue(
         &mut self,

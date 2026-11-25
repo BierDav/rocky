@@ -2316,6 +2316,9 @@ fn typed_cause(
 }
 pub(crate) fn waits_on_blockers(error: &(dyn std::error::Error + 'static)) -> bool {
     matches!(error.downcast_ref::<Error>(), Some(Error::Blocked(_)))
+        || error
+            .downcast_ref::<crate::Error>()
+            .is_some_and(|error| matches!(error.kind(), crate::ErrorKind::Blocked { .. }))
 }
 fn storage_error(error: &Error, detail: String) -> crate::Error {
     use crate::ErrorKind as Kind;

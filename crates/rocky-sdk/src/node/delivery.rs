@@ -68,8 +68,13 @@ impl Deliveries for Port<'_> {
     ) -> DeliveryFuture<'_, ()> {
         Box::pin(async move { self.node.deposited(peer, stored).await.map_err(secure) })
     }
-    fn held(&self, peer: PublicKey, budget: usize) -> DeliveryFuture<'_, Held> {
-        Box::pin(async move { self.node.held(peer, budget).await.map_err(secure) })
+    fn held<'a>(
+        &'a self,
+        peer: PublicKey,
+        chain: &'a CredentialChain,
+        budget: usize,
+    ) -> DeliveryFuture<'a, Held> {
+        Box::pin(async move { self.node.held(peer, chain, budget).await.map_err(secure) })
     }
     fn acknowledged(
         &self,
@@ -193,10 +198,14 @@ impl Node {
         peer: PublicKey,
         chain: &CredentialChain,
     ) -> Result<Outgoing, Failure> {
+        let lags = self.rights_lag(chain).await?;
         let mut settings = self.settings.lock().await;
         let mut outgoing = Outgoing::default();
         if settings.revocations.revokes(&peer) {
             return Ok(outgoing);
+        }
+        if lags {
+            outgoing.direct.push(Contents::rights(peer)?);
         }
         let mailbox = self.mailbox_chain(&settings, peer, chain);
         let mut draft = settings.clone();
@@ -232,6 +241,17 @@ impl Node {
             settings.commit(draft, &self.replica).await?;
         }
         Ok(outgoing)
+    }
+    async fn rights_lag(&self, chain: &CredentialChain) -> Result<bool, Failure> {
+        let settings = self.settings_snapshot().await;
+        if !settings.issuer() {
+            return Ok(false);
+        }
+        match self.registry(&settings).await {
+            Ok(registry) => settings.rights_lag(&registry, &self.domain(), chain),
+            Err(error) if waits_on_blockers(error.as_ref()) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
     async fn receive(
         &self,
@@ -416,13 +436,24 @@ impl Node {
         settings.commit(draft, &self.replica).await?;
         Ok(())
     }
-    async fn held(&self, peer: PublicKey, budget: usize) -> Result<Held, Failure> {
+    async fn held(
+        &self,
+        peer: PublicKey,
+        chain: &CredentialChain,
+        budget: usize,
+    ) -> Result<Held, Failure> {
         let mut held = Held::default();
         let mut bytes = 0;
+        let lags = self.rights_lag(chain).await?;
         let revocations = {
             let settings = self.settings.lock().await;
             if settings.revocations.revokes(&peer) {
                 return Ok(held);
+            }
+            if lags {
+                let notice = Contents::rights(peer)?;
+                bytes += notice.payload_len();
+                held.deliveries.push(notice);
             }
             for pending in settings
                 .deliveries

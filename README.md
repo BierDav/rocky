@@ -209,6 +209,8 @@ and rotates the keys of what they could read. The owner makes and ends admins
 with `make_admin(person, root)` and `revoke_admin(person, removal, root)`, where
 `Removal::Compromised` also removes the people the admin admitted and ends the
 credentials they issued; an admin who should stay a member is invited again.
+A promotion or access change reaches each of the person's devices at its next
+sync with an admin device, including a device still joining when it was made.
 Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
 an admin links or unlinks a device, and `AdminStale` when no device of an admin
 was heard from for 30 days (`set_admin_stale_after`).

@@ -47,7 +47,12 @@ pub trait Deliveries: Send + Sync {
         deposits: Vec<SealedDelivery>,
     ) -> DeliveryFuture<'a, Vec<Option<String>>>;
     fn deposited(&self, peer: PublicKey, stored: Vec<Commitment>) -> DeliveryFuture<'_, ()>;
-    fn held(&self, peer: PublicKey, budget: usize) -> DeliveryFuture<'_, Held>;
+    fn held<'a>(
+        &'a self,
+        peer: PublicKey,
+        chain: &'a CredentialChain,
+        budget: usize,
+    ) -> DeliveryFuture<'a, Held>;
     fn acknowledged(
         &self,
         peer: PublicKey,
@@ -261,7 +266,9 @@ impl NativeSession {
                 self.send(DeliveryMessage::Deposited { refusals }).await
             }
             DeliveryMessage::Collect => {
-                let held = port.held(self.peer, DELIVERY_PAGE).await?;
+                let held = port
+                    .held(self.peer, &self.credentials, DELIVERY_PAGE)
+                    .await?;
                 let held = if port.admits(self.peer).await? {
                     held
                 } else {

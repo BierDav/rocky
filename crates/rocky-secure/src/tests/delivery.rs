@@ -72,7 +72,12 @@ impl Deliveries for Port {
         self.stored.lock().unwrap().extend(stored);
         Box::pin(async { Ok(()) })
     }
-    fn held(&self, peer: PublicKey, budget: usize) -> DeliveryFuture<'_, Held> {
+    fn held<'a>(
+        &'a self,
+        peer: PublicKey,
+        _chain: &'a CredentialChain,
+        budget: usize,
+    ) -> DeliveryFuture<'a, Held> {
         Box::pin(async move {
             let mut deliveries = Vec::new();
             let mut bytes = 0;

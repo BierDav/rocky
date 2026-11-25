@@ -235,3 +235,43 @@ async fn a_crash_between_narrowing_access_and_its_revocation_still_revokes_once(
     assert!(!pending_narrowing(&admin_dir)?);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_promotion_made_while_the_person_joins_reaches_their_device() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = wide()?;
+    let created = configuration(&root.path().join("owner"), &schema, &hub)?
+        .create()
+        .await?;
+    let owner = created.database;
+    let root_key: Arc<dyn crate::IdentityProvider> = Arc::new(created.root);
+    let invitation = owner.invite(Invite::new(Access::Full)).await?;
+    let server = root.path().join("server");
+    let (bootstrapping, finish_join) = crate::pause::arm(&server, crate::pause::Point::Bootstrap);
+    let joining_configuration = configuration(&server, &schema, &hub)?;
+    let mut joining = std::pin::pin!(joining_configuration.join(&invitation.code));
+    tokio::select! {
+        biased;
+        _ = &mut joining => return Err("join returned before its first pull began".into()),
+        reached = bootstrapping => reached.map_err(|_| -> Failure { "the join never reached its first pull".into() })?,
+    }
+    let me = owner.me().await?.person;
+    let joined = owner
+        .people()
+        .await?
+        .into_iter()
+        .find(|person| person.id != me)
+        .ok_or("the redeemed invitation lists no person")?;
+    owner.make_admin(joined.id, root_key).await?;
+    let _ = finish_join.send(());
+    let server = joining.await?.database;
+    server.sync_now().await?;
+    assert!(
+        server.me().await?.admin,
+        "a promotion made while the device joined reaches it at its next sync"
+    );
+    server.close().await?;
+    owner.close().await?;
+    Ok(())
+}

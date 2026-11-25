@@ -38,7 +38,68 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+#[must_use]
+pub(in crate::replica) struct LinkedReplay(Vec<Redo>);
+
 impl<A: RowApplication> Inner<A> {
+    pub(in crate::replica) async fn rewind_linked_replay(
+        &self,
+        id: i64,
+    ) -> Result<LinkedReplay, Error> {
+        let mut group = self.linked_scopes(id).await?;
+        group.push(id);
+        let mut earliest: Option<Order> = None;
+        for scope in group {
+            if let Some(row) = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT era,clock,author,sequence FROM secure_replayed WHERE scope=? AND sealed=0 ORDER BY era,clock,author,sequence LIMIT 1",
+                        [scope],
+                    )
+                    .await?,
+            )
+            .await?
+            .first()
+            {
+                let order = order_of(row)?;
+                if earliest.as_ref().is_none_or(|earliest| order < *earliest) {
+                    earliest = Some(order);
+                }
+            }
+        }
+        let Some(from) = earliest else {
+            return Ok(LinkedReplay(Vec::new()));
+        };
+        let own: BTreeSet<Hash> = collect_rows(
+            self.conn
+                .query(
+                    "SELECT hash FROM secure_replayed WHERE scope=? AND sealed=0",
+                    [id],
+                )
+                .await?,
+        )
+        .await?
+        .iter()
+        .map(|row| match row.as_slice() {
+            [SqlValue::Blob(hash)] => super::super::checkpoint::hash_of(hash),
+            _ => Err(Error::Corrupt("replayed member".into())),
+        })
+        .collect::<Result<_, _>>()?;
+        self.keep_outcomes(id).await?;
+        let mut redo = self.rewind(vec![(id, from)]).await?;
+        for redo in &mut redo {
+            redo.members.retain(|(hash, _)| !own.contains(hash));
+        }
+        redo.retain(|redo| !redo.members.is_empty());
+        Ok(LinkedReplay(redo))
+    }
+    pub(in crate::replica) async fn redo_linked_replay(
+        &self,
+        LinkedReplay(redo): LinkedReplay,
+        time: u64,
+    ) -> Result<(), Error> {
+        self.redo_recorded(redo, time, None, false).await
+    }
     pub(in crate::replica) async fn clear_replayed(
         &mut self,
         scope: ResourceScope,

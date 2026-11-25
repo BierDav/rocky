@@ -450,6 +450,39 @@ async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateK
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_child_import_replays_a_child_once_though_a_later_parent_delete_cascaded_it() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    insert(&a, "p", "parent").await;
+    let child = tag(&a, "t", "p").await;
+    delete(&a, "p").await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    for scope in [items, tag_scope] {
+        sync_scope(&lineage, &a, &b, &keys[1], scope).await;
+    }
+    let applied = Some(TransactionOutcome::Applied { sealed: false });
+    assert_eq!(b.transaction_outcome(child).await.unwrap(), applied);
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    assert_eq!(
+        b.transaction_outcome(child).await.unwrap(),
+        applied,
+        "the import replays the child once, never over the image the delete's undo kept of it"
+    );
+    assert!(tags(&b).await.is_empty());
+    assert!(stored(&b, "SELECT key FROM items").await.is_empty());
+    b.audit(items).await.unwrap();
+    b.audit(tag_scope).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn undoing_a_parent_insert_keeps_the_children_the_undo_does_not_own() {
     let lineage = linked();
     let dir = Scratch::new().await;

@@ -108,7 +108,7 @@ async fn a_removed_peer_is_not_learned_again_until_the_application_adds_it() -> 
             let handover = || ContactRequest::Handover {
                 contacts: vec![ContactHint {
                     node: c_key,
-                    routes: vec![("memory".into(), "c".into())],
+                    routes: vec!["memory:c".into()],
                     trusted: false,
                 }],
             };

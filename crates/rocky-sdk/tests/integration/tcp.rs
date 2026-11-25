@@ -104,7 +104,7 @@ async fn known_peers_and_complete(device: &Device) -> Result<(usize, bool), Fail
     match device.sync_now().await {
         Ok(report) => Ok((report.peers.len(), report.complete())),
         Err(error) => match error.kind() {
-            ErrorKind::Service(ServiceError::NoPeerReached { known }) => Ok((*known, false)),
+            ErrorKind::Service(ServiceError::NoPeerReached(report)) => Ok((report.peers.len(), false)),
             _ => Err(error.into()),
         },
     }

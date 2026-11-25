@@ -235,7 +235,7 @@ async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arri
                 })
                 .ok_or_else(|| format!("no pending-frames blocker in {blockers:?}"))?;
             assert_eq!(pending.clears_by, rocky_core::ClearsBy::AnyPeer);
-            assert_eq!(failure.blockers(), blockers.as_slice());
+            assert_eq!(failure.blockers(), &**blockers);
             assert!(
                 b.observed_status().await?.data.blockers.contains(pending),
                 "status reports the blocker the read names"

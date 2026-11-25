@@ -292,7 +292,9 @@ struct Checker<'a> {
 impl Checker<'_> {
     fn body(&self, body: &SetExpr) -> Result<(), Refusal> {
         match body {
-            SetExpr::Select(select) => self.references(&select.from, select.selection.as_ref()),
+            SetExpr::Select(select) => {
+                self.references(&select.from, select.selection.as_ref(), None)
+            }
             SetExpr::SetOperation { left, right, .. } => {
                 self.body(left)?;
                 self.body(right)
@@ -300,7 +302,13 @@ impl Checker<'_> {
             _ => Ok(()),
         }
     }
-    fn references(&self, from: &[TableWithJoins], selection: Option<&Expr>) -> Result<(), Refusal> {
+    fn references(
+        &self,
+        from: &[TableWithJoins],
+        selection: Option<&Expr>,
+        written: Option<&TableWithJoins>,
+    ) -> Result<(), Refusal> {
+        let written = written.and_then(|written| table(&written.relation));
         let mut references = Vec::new();
         for item in from {
             if let Some(reference) = table(&item.relation) {
@@ -391,7 +399,10 @@ impl Checker<'_> {
                 return Err(incomplete());
             }
             let held = normalized(&rule.held)?;
-            if !self.assertion && tuples.iter().any(|tuple| !held.contains(tuple)) {
+            let writes_here = written
+                .as_ref()
+                .is_some_and(|(_, written)| written == alias);
+            if writes_here && !self.assertion && tuples.iter().any(|tuple| !held.contains(tuple)) {
                 return Err(Refusal::Unavailable {
                     table: name.clone(),
                     reason: crate::sql::Unavailable::NotHeld,
@@ -407,7 +418,7 @@ impl Visitor for Checker<'_> {
         if let TableFactor::NestedJoin {
             table_with_joins, ..
         } = factor
-            && let Err(error) = self.references(std::slice::from_ref(table_with_joins), None)
+            && let Err(error) = self.references(std::slice::from_ref(table_with_joins), None, None)
         {
             return ControlFlow::Break(error);
         }
@@ -429,12 +440,12 @@ impl Visitor for Checker<'_> {
                 {
                     sources.extend(from.iter().cloned());
                 }
-                self.references(&sources, update.selection.as_ref())
+                self.references(&sources, update.selection.as_ref(), Some(&update.table))
             }
             Statement::Delete(delete) => {
                 let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) =
                     &delete.from;
-                self.references(from, delete.selection.as_ref())
+                self.references(from, delete.selection.as_ref(), from.first())
             }
             _ => Ok(()),
         };
@@ -963,7 +974,7 @@ mod tests {
             &rules,
         )
         .unwrap();
-        let other = format!("SELECT * FROM items WHERE list=X'{}'", "08".repeat(40));
+        let other = format!("DELETE FROM items WHERE list=X'{}'", "08".repeat(40));
         assert!(check(&other, &[], &rules).is_err());
         assert_eq!(blob_literal(&hex), Some(id.to_vec()));
         for invalid in ["0", "zz", "0g"] {
@@ -982,26 +993,28 @@ mod tests {
             "SELECT amount FROM items WHERE list='A' UNION ALL SELECT amount FROM items",
             "SELECT a.amount,b.amount FROM items a JOIN items b ON a.list=b.list WHERE a.list='A'",
             "SELECT * FROM items WHERE list='A' OR amount=1",
+            "SELECT * FROM items WHERE list IN ('A','B')",
+            "SELECT a.amount,b.amount FROM items a LEFT JOIN items b ON b.list='B' WHERE a.list='A'",
         ] {
             check(sql, &[], &rules).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
         for sql in [
-            "SELECT * FROM items WHERE list IN ('A','B')",
             "DELETE FROM items WHERE list='B'",
-            "SELECT a.amount,b.amount FROM items a LEFT JOIN items b ON b.list='B' WHERE a.list='A'",
+            "UPDATE items SET amount=1 WHERE list IN ('A','B')",
+            "DELETE FROM items AS held WHERE held.list='B'",
         ] {
             assert!(check(sql, &[], &rules).is_err(), "{sql}");
         }
         check(
-            "SELECT ?2 FROM items WHERE list=?1",
+            "UPDATE items SET amount=?2 WHERE list=?1",
             &[SqlValue::Text("A".into()), SqlValue::Integer(4)],
             &rules,
         )
         .unwrap();
         assert!(
             check(
-                "SELECT ? FROM items WHERE list=?",
-                &[SqlValue::Text("A".into()), SqlValue::Text("B".into())],
+                "UPDATE items SET amount=? WHERE list=?",
+                &[SqlValue::Integer(4), SqlValue::Text("B".into())],
                 &rules
             )
             .is_err()
@@ -1053,6 +1066,32 @@ mod tests {
         );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_read_naming_a_partition_not_held_returns_none_of_its_cached_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items(list TEXT,amount INTEGER); INSERT INTO items VALUES('A',10),('B',20);",
+        )
+        .unwrap();
+        for (read, total) in [
+            (
+                "SELECT COALESCE(SUM(amount),0) FROM items WHERE list='B'",
+                0,
+            ),
+            (
+                "SELECT COALESCE(SUM(amount),0) FROM items WHERE list IN ('A','B')",
+                10,
+            ),
+        ] {
+            let sql = check(read, &[], &rules()).unwrap();
+            assert_eq!(
+                conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                total,
+                "{read}"
+            );
+        }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_a_waiting_partition_a_read_may_reach_is_incomplete() {
         let mut rules = rules();
         rules.get_mut("items").unwrap().waiting = vec![vec![SqlValue::Text("B".into())]];
@@ -1073,9 +1112,8 @@ mod tests {
         ] {
             assert!(incomplete(sql), "{sql}");
         }
-        assert!(check("SELECT * FROM items WHERE list='C'", &[], &rules).is_err());
         assert!(
-            !incomplete("SELECT * FROM items WHERE list='C'"),
+            check("SELECT * FROM items WHERE list='C'", &[], &rules).is_ok(),
             "a partition neither held nor waiting is not here at all"
         );
     }

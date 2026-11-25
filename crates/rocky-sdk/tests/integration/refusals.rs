@@ -7,6 +7,7 @@ use std::{path::Path, sync::Arc};
 
 const SCANNER: RoleName = RoleName::from_static("scanner");
 const CLINICIAN: RoleName = RoleName::from_static("clinician");
+const AUDITOR: RoleName = RoleName::from_static("auditor");
 
 fn schema() -> Result<Schema, Failure> {
     Ok(Schema::builder("refusals", 1)
@@ -15,12 +16,14 @@ fn schema() -> Result<Schema, Failure> {
         .table(
             Table::replayed("charts")
                 .column(Column::new("ward", Affinity::Text).required())
+                .column(Column::new("note", Affinity::Text))
                 .primary_key(["ward", "id"])
                 .partition_by(["ward"])
                 .partition_group("ward"),
         )
         .role(Role::new(SCANNER).read("tickets").append("check_ins"))
         .role(Role::new(CLINICIAN).write("charts").per_partition("ward"))
+        .role(Role::new(AUDITOR).read("charts").per_partition("ward"))
         .build()?)
 }
 fn ward(name: &str) -> Partition {
@@ -80,6 +83,37 @@ impl Venue {
         crate::support::peerless_ok(device.sync_now().await)?;
         Ok(device)
     }
+    async fn holding(&self, role: RoleName, wards: &[&str]) -> Result<Device, Failure> {
+        let device = self.invited(role).await?;
+        let person = device.database.me().await?.person;
+        for name in wards {
+            self.admin
+                .database
+                .grant_partition(person, &ward(name))
+                .await?;
+        }
+        for device in [&self.admin, &device, &device] {
+            crate::support::peerless_ok(device.sync_now().await)?;
+        }
+        Ok(device)
+    }
+    async fn chart(&self, name: &str, note: &str) -> Result<(), Failure> {
+        let mut tx = self.admin.database.transaction().await?;
+        let id = tx
+            .next_id("charts", vec![SqlValue::Text(name.into())])
+            .await?;
+        tx.execute(
+            "INSERT INTO charts(ward,id,note) VALUES(?,?,?)",
+            vec![
+                SqlValue::Text(name.into()),
+                id.sql(),
+                SqlValue::Text(note.into()),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn close(self, devices: impl IntoIterator<Item = Device>) {
         for device in devices {
             device.close().await;
@@ -122,6 +156,17 @@ async fn read(device: &Device, sql: &str) -> Result<(), rocky_sdk::Error> {
         .collect()
         .await?;
     Ok(())
+}
+async fn notes(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
+    device
+        .database
+        .query(sql, Vec::new())
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|row| Ok(row.get_at::<String>(0)?))
+        .collect()
 }
 fn refused(result: Result<(), rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
     let error = result.err().ok_or("the call was refused")?;
@@ -233,31 +278,142 @@ async fn allocating_a_row_id_names_the_right_or_the_partition_it_needs() -> Resu
 }
 
 #[tokio::test]
-async fn reading_a_partition_not_held_names_the_group() -> Result<(), Failure> {
+async fn a_missing_table_right_is_not_reported_as_a_missing_partition() -> Result<(), Failure> {
     let venue = Venue::new().await?;
-    for name in ["A", "B"] {
+    venue.admin.database.create_partition(&ward("A")).await?;
+    venue.chart("A", "admitted").await?;
+    let auditor = venue.holding(AUDITOR, &["A"]).await?;
+    assert_eq!(
+        notes(&auditor, "SELECT note FROM charts WHERE ward = 'A'").await?,
+        ["admitted"]
+    );
+    let updated = write(
+        &auditor,
+        "UPDATE charts SET note='discharged' WHERE ward='A'",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        refused(updated)?,
+        denied(
+            Some("charts"),
+            Right::Update("note".into()),
+            DenyReason::NotGranted
+        )
+    );
+    assert_eq!(
+        refused(allocate(&auditor, "charts", vec![SqlValue::Text("A".into())]).await)?,
+        denied(Some("charts"), Right::Allocate, DenyReason::NotGranted)
+    );
+    let deleted = write(&auditor, "DELETE FROM charts WHERE ward='A'", Vec::new()).await;
+    assert_eq!(
+        refused(deleted)?,
+        denied(Some("charts"), Right::Write, DenyReason::NotGranted)
+    );
+    venue.close([auditor]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_write_into_a_partition_not_held_is_a_final_partition_refusal() -> Result<(), Failure> {
+    let venue = Venue::new().await?;
+    for name in ["A", "B", "C"] {
         venue.admin.database.create_partition(&ward(name)).await?;
+        venue.chart(name, "admitted").await?;
     }
-    let clinician = venue.invited(CLINICIAN).await?;
+    let clinician = venue.holding(CLINICIAN, &["A", "C"]).await?;
     let person = clinician.database.me().await?.person;
     venue
         .admin
         .database
-        .grant_partition(person, &ward("A"))
+        .revoke_partition(person, &ward("C"))
         .await?;
-    for device in [&venue.admin, &clinician, &clinician] {
+    for device in [&venue.admin, &clinician, &venue.admin, &clinician] {
         crate::support::peerless_ok(device.sync_now().await)?;
     }
-    read(&clinician, "SELECT ward FROM charts WHERE ward = 'A'").await?;
-    assert_eq!(
-        refused(read(&clinician, "SELECT ward FROM charts WHERE ward = 'B'").await)?,
+    let partition_not_granted = |need: Right| {
         denied(
             Some("charts"),
-            Right::Read,
+            need,
             DenyReason::PartitionNotGranted {
-                group: "ward".into()
-            }
+                group: "ward".into(),
+            },
         )
+    };
+    for never_or_no_longer_held in ["B", "C"] {
+        assert_eq!(
+            refused(
+                allocate(
+                    &clinician,
+                    "charts",
+                    vec![SqlValue::Text(never_or_no_longer_held.into())]
+                )
+                .await
+            )?,
+            partition_not_granted(Right::Allocate),
+            "ward {never_or_no_longer_held}"
+        );
+    }
+    let mut tx = clinician.database.transaction().await?;
+    let id = tx
+        .next_id("charts", vec![SqlValue::Text("A".into())])
+        .await?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO charts(ward,id,note) VALUES('B',?,'moved')",
+            vec![id.sql()],
+        )
+        .await;
+    tx.rollback().await?;
+    assert_eq!(refused(inserted)?, partition_not_granted(Right::Append));
+    let updated = write(
+        &clinician,
+        "UPDATE charts SET note='discharged' WHERE ward='B'",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        refused(updated)?,
+        partition_not_granted(Right::Update("note".into()))
+    );
+    write(
+        &clinician,
+        "UPDATE charts SET note='discharged' WHERE ward='A'",
+        Vec::new(),
+    )
+    .await?;
+    venue.close([clinician]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_holds_only_the_rows_of_partitions_held_whether_filtered_or_not()
+-> Result<(), Failure> {
+    let venue = Venue::new().await?;
+    for name in ["A", "B"] {
+        venue.admin.database.create_partition(&ward(name)).await?;
+        venue.chart(name, &format!("chart in {name}")).await?;
+    }
+    let clinician = venue.holding(CLINICIAN, &["A"]).await?;
+    assert_eq!(
+        notes(&clinician, "SELECT note FROM charts").await?,
+        ["chart in A"]
+    );
+    assert_eq!(
+        notes(&clinician, "SELECT note FROM charts WHERE ward = 'A'").await?,
+        ["chart in A"]
+    );
+    assert_eq!(
+        notes(&clinician, "SELECT note FROM charts WHERE ward = 'B'").await?,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        notes(
+            &clinician,
+            "SELECT note FROM charts WHERE ward IN ('A', 'B') ORDER BY ward"
+        )
+        .await?,
+        ["chart in A"]
     );
     venue.close([clinician]).await;
     Ok(())

@@ -335,7 +335,7 @@ impl<A: RowApplication> Inner<A> {
             || (self.engine_matches() && self.pending_leaves_incomplete(scope).await?)
         {
             Unavailable::Incomplete {
-                blockers: self.incomplete_blockers(readiness, scope).await?,
+                blockers: self.incomplete_blockers(readiness, &[scope]).await?,
             }
         } else {
             return Ok(());

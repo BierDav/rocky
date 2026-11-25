@@ -72,7 +72,7 @@ fn blocked_table(node: &Node, sql: &str, error: &crate::Error) -> Option<crate::
             .filter(|blocker| blocker.scope == label || blocker.scope == whole)
             .cloned()
             .collect();
-        (!own.is_empty()).then(|| (referenced.clone(), own))
+        crate::Blockers::new(own).map(|own| (referenced.clone(), own))
     })?;
     let detail = format!(
         "{table} is not available: {}",
@@ -118,7 +118,7 @@ async fn explained(
     }
     Box::new(match explained {
         Some(explained) => explained,
-        None => node.partition_refusal(typed).await,
+        None => node.partition_refusal(typed, sql).await,
     })
 }
 pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
@@ -181,21 +181,24 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
 fn unavailable(table: &str, reason: &Unavailable, detail: String) -> crate::Error {
     use crate::ErrorKind as Kind;
     match reason {
-        Unavailable::Incomplete { blockers } => crate::Error::new(
-            Kind::Blocked {
-                table: Some(table.to_owned()),
-                blockers: blockers.clone(),
-            },
-            detail,
-        ),
-        Unavailable::KeyMissing => crate::Error::new(
-            Kind::Blocked {
-                table: Some(table.to_owned()),
-                blockers: Vec::new(),
-            },
-            detail,
-        ),
-        Unavailable::NotHeld => crate::Error::denied(
+        Unavailable::Incomplete { blockers } => match crate::Blockers::new(blockers.clone()) {
+            Some(named) => crate::Error::new(
+                Kind::Blocked {
+                    table: Some(table.to_owned()),
+                    blockers: named,
+                },
+                format!(
+                    "{table} is not available: {}",
+                    rocky_core::describe_blockers(blockers)
+                ),
+            ),
+            None => crate::Error::denied(
+                Some(table.to_owned()),
+                crate::Right::Read,
+                crate::DenyReason::NotGranted,
+            ),
+        },
+        Unavailable::KeyMissing | Unavailable::NotHeld => crate::Error::denied(
             Some(table.to_owned()),
             crate::Right::Read,
             crate::DenyReason::NotGranted,

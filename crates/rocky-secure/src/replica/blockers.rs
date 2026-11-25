@@ -236,9 +236,9 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn incomplete_blockers(
         &self,
         readiness: &DomainReadiness,
-        scope: ResourceScope,
+        scopes: &[ResourceScope],
     ) -> Result<Vec<Blocker>, Error> {
-        let label = scope_label(&scope);
+        let labels: BTreeSet<String> = scopes.iter().map(scope_label).collect();
         let mut pending = PendingCounts::default();
         let mut after = (Vec::new(), Vec::new());
         while let Some(last) = self
@@ -247,22 +247,29 @@ impl<A: RowApplication> Inner<A> {
         {
             after = last;
         }
-        let mut blockers = readiness.of(scope);
+        let mut blockers: Vec<Blocker> = scopes
+            .iter()
+            .flat_map(|scope| readiness.of(*scope))
+            .collect();
         blockers.extend(
             pending
                 .blockers()
                 .into_iter()
-                .filter(|blocker| blocker.scope == label),
+                .filter(|blocker| labels.contains(&blocker.scope)),
         );
+        if blockers.is_empty() {
+            for scope in scopes {
+                if self.restoring(*scope).await? {
+                    blockers.push(blocker(
+                        scope_label(scope),
+                        BlockerKind::RestorationGuard,
+                        ClearsBy::AnyPeer,
+                    ));
+                }
+            }
+        }
         blockers.sort();
         blockers.dedup();
-        if blockers.is_empty() && self.restoring(scope).await? {
-            blockers.push(blocker(
-                label,
-                BlockerKind::RestorationGuard,
-                ClearsBy::AnyPeer,
-            ));
-        }
         Ok(blockers)
     }
     pub(super) async fn readable_blockers(

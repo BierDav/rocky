@@ -338,11 +338,13 @@ impl<A: RowApplication> SecureSql<A> {
                     && !self.session.status.scopes.contains(&scope));
             if may_become_writable {
                 let readiness = inner.readiness(scope.domain).await?;
+                let blockers = inner.incomplete_blockers(&readiness, &[scope]).await?;
+                if blockers.is_empty() {
+                    return Err(not_held(&table.table.sql_name));
+                }
                 return Err(Error::Sql(SqlError::Unavailable {
                     table: table.table.sql_name.clone(),
-                    reason: crate::sql::Unavailable::Incomplete {
-                        blockers: inner.incomplete_blockers(&readiness, scope).await?,
-                    },
+                    reason: crate::sql::Unavailable::Incomplete { blockers },
                 }));
             }
             return Err(Error::Sql(SqlError::Denied));

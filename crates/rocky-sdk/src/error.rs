@@ -26,8 +26,8 @@ pub enum ErrorKind {
     Blocked {
         /// The table, when one read was refused.
         table: Option<String>,
-        /// What the data waits for and what clears each.
-        blockers: Vec<Blocker>,
+        /// What the data waits for and what clears each; never empty.
+        blockers: Blockers,
     },
     /// The device's credentials changed during the call; retry.
     AuthorityChanged,
@@ -136,12 +136,30 @@ pub enum Right {
     Sign,
 }
 
+/// What a `Blocked` call waits for; it holds at least one blocker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blockers(Vec<Blocker>);
+
+impl Blockers {
+    pub(crate) fn new(blockers: Vec<Blocker>) -> Option<Self> {
+        (!blockers.is_empty()).then_some(Self(blockers))
+    }
+}
+
+impl std::ops::Deref for Blockers {
+    type Target = [Blocker];
+
+    fn deref(&self) -> &[Blocker] {
+        &self.0
+    }
+}
+
 /// Why a device lacks a right.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DenyReason {
-    /// The person's access does not include it.
+    /// The person's access does not include it, whatever partitions they hold.
     NotGranted,
-    /// The person holds no partition with these values; an admin grants one with `grant_partition`.
+    /// The role grants it, but the person holds no partition with these values; an admin grants one with `grant_partition`.
     PartitionNotGranted {
         /// The partition group.
         group: String,

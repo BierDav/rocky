@@ -84,9 +84,11 @@ impl Node {
         Ok(tables)
     }
 
-    pub(crate) async fn statement_refusal(&self, sql: &str) -> Option<crate::Error> {
+    fn statement_needs(&self, sql: &str) -> Vec<(String, crate::Right)> {
         use rocky_storage::statement::Kind;
-        let analyzed = rocky_storage::statement::analyze(sql, |_| None).ok()?;
+        let Ok(analyzed) = rocky_storage::statement::analyze(sql, |_| None) else {
+            return Vec::new();
+        };
         let domain = self.domain();
         let written = match analyzed.kind {
             Kind::Read => None,
@@ -116,7 +118,11 @@ impl Node {
                 })
                 .map(|table| (table, crate::Right::Read)),
         );
-        self.refusal(needed).await
+        needed
+    }
+
+    pub(crate) async fn statement_refusal(&self, sql: &str) -> Option<crate::Error> {
+        self.refusal(self.statement_needs(sql)).await
     }
 
     pub(crate) async fn allocation_refusal(
@@ -151,15 +157,12 @@ impl Node {
         let definition = domain.logical().table(table)?;
         let settings = self.settings_snapshot().await;
         let reason = match definition.group() {
-            Some(group) if Self::per_partition(&domain, &settings, group) => {
-                crate::DenyReason::PartitionNotGranted {
+            Some(group) if !Self::per_partition(&domain, &settings, group) => {
+                crate::DenyReason::PartitionNotCreated {
                     group: group.to_owned(),
                 }
             }
-            Some(group) => crate::DenyReason::PartitionNotCreated {
-                group: group.to_owned(),
-            },
-            None => crate::DenyReason::NotGranted,
+            _ => Self::denial(&domain, &settings, definition, &crate::Right::Allocate),
         };
         Some(crate::Error::denied(
             Some(definition.sql_name.clone()),
@@ -168,7 +171,7 @@ impl Node {
         ))
     }
 
-    pub(crate) async fn partition_refusal(&self, error: crate::Error) -> crate::Error {
+    pub(crate) async fn partition_refusal(&self, error: crate::Error, sql: &str) -> crate::Error {
         let crate::ErrorKind::Denied {
             table: Some(table),
             need,
@@ -178,24 +181,36 @@ impl Node {
             return error;
         };
         let domain = self.domain();
-        let Some(group) = domain
-            .logical()
-            .table(table)
-            .and_then(|table| table.group())
-        else {
+        let Some(definition) = domain.logical().table(table) else {
             return error;
         };
+        let need = self
+            .statement_needs(sql)
+            .into_iter()
+            .find(|(named, _)| named.eq_ignore_ascii_case(table))
+            .map_or_else(|| need.clone(), |(_, need)| need);
         let settings = self.settings_snapshot().await;
-        if !Self::per_partition(&domain, &settings, group) {
-            return error;
+        let reason = Self::denial(&domain, &settings, definition, &need);
+        crate::Error::denied(Some(definition.sql_name.clone()), need, reason)
+    }
+
+    fn denial(
+        domain: &crate::domain::Domain,
+        settings: &crate::enrollment::Settings,
+        table: &rocky_core::LogicalTable,
+        need: &crate::Right,
+    ) -> crate::DenyReason {
+        match table.group() {
+            Some(group)
+                if Self::per_partition(domain, settings, group)
+                    && Self::access_grants(domain, settings, &table.sql_name, need) =>
+            {
+                crate::DenyReason::PartitionNotGranted {
+                    group: group.to_owned(),
+                }
+            }
+            _ => crate::DenyReason::NotGranted,
         }
-        crate::Error::denied(
-            Some(table.clone()),
-            need.clone(),
-            crate::DenyReason::PartitionNotGranted {
-                group: group.to_owned(),
-            },
-        )
     }
 
     fn per_partition(
@@ -212,12 +227,13 @@ impl Node {
             .is_some_and(|definition| definition.per_partition.iter().any(|named| named == group))
     }
 
-    fn column_updatable(
+    fn access_grants(
         domain: &crate::domain::Domain,
         settings: &crate::enrollment::Settings,
         table: &str,
-        column: &str,
+        need: &crate::Right,
     ) -> bool {
+        use rocky_core::TableAccess;
         let crate::Access::Role(role) = &settings.access else {
             return true;
         };
@@ -229,12 +245,17 @@ impl Node {
                     .tables
                     .iter()
                     .filter(|entry| entry.table.eq_ignore_ascii_case(table))
-                    .any(|entry| match &entry.access {
-                        rocky_core::TableAccess::Write => true,
-                        rocky_core::TableAccess::UpdateColumns(columns) => columns
-                            .iter()
-                            .any(|allowed| allowed.eq_ignore_ascii_case(column)),
-                        rocky_core::TableAccess::Read | rocky_core::TableAccess::Append => false,
+                    .any(|entry| match (need, &entry.access) {
+                        (crate::Right::Read, _)
+                        | (_, TableAccess::Write)
+                        | (crate::Right::Append | crate::Right::Allocate, TableAccess::Append)
+                        | (crate::Right::Administer | crate::Right::Sign, _) => true,
+                        (crate::Right::Update(column), TableAccess::UpdateColumns(columns)) => {
+                            columns
+                                .iter()
+                                .any(|allowed| allowed.eq_ignore_ascii_case(column))
+                        }
+                        _ => false,
                     })
             })
     }
@@ -264,22 +285,15 @@ impl Node {
                 crate::Right::Read => held.read,
                 crate::Right::Append | crate::Right::Allocate => held.insert,
                 crate::Right::Write => held.delete,
-                crate::Right::Update(column) => {
-                    held.update && Self::column_updatable(&domain, &settings, &name, column)
+                crate::Right::Update(_) => {
+                    held.update && Self::access_grants(&domain, &settings, &name, &need)
                 }
                 crate::Right::Administer | crate::Right::Sign => true,
             };
             if holds {
                 continue;
             }
-            let reason = match definition.group() {
-                Some(group) if Self::per_partition(&domain, &settings, group) => {
-                    crate::DenyReason::PartitionNotGranted {
-                        group: group.to_owned(),
-                    }
-                }
-                _ => crate::DenyReason::NotGranted,
-            };
+            let reason = Self::denial(&domain, &settings, definition, &need);
             return Some(crate::Error::denied(Some(name), need, reason));
         }
         None

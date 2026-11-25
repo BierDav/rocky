@@ -65,18 +65,9 @@ impl<A: RowApplication> Inner<A> {
                 if let IntentRefusal::Unavailable {
                     table,
                     reason: crate::sql::Unavailable::Incomplete { .. },
-                } = &refusal
-                    && let Some(projected) = typed.by_name(table)
+                } = refusal
                 {
-                    let mut blocked = self.scope_blockers(projected.scope).await?;
-                    for scope in self
-                        .partitions
-                        .keys()
-                        .filter(|scope| scope.table == projected.table.id)
-                    {
-                        blocked.extend(self.scope_blockers(*scope).await?);
-                    }
-                    blockers::refuse(blocked)?;
+                    return Err(self.incomplete(typed, table).await);
                 }
                 return Err(Error::Sql(SqlError::Refused(refusal)));
             }

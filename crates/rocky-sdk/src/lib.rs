@@ -78,7 +78,7 @@ pub use connection::{ChangeCause, DroppedTransaction, TableChange, TableEvents};
 pub use database::{Created, Database};
 #[cfg(any(test, feature = "test-support"))]
 pub use delivery::State as DeliveryState;
-pub use error::{DenyReason, Error, ErrorKind, Limit, Right, Unsupported};
+pub use error::{Blockers, DenyReason, Error, ErrorKind, Limit, Right, Unsupported};
 pub use extension::DeviceCredential;
 pub(crate) use inspection::*;
 pub use invitation::{

@@ -2331,9 +2331,12 @@ fn storage_error(error: &Error, detail: String) -> crate::Error {
         }
         Error::Application(cause) => return typed_cause(cause.as_ref(), detail),
         Error::Rejected(_) | Error::Protocol(_) => Kind::Rejected,
-        Error::Blocked(blockers) => Kind::Blocked {
-            table: None,
-            blockers: blockers.clone(),
+        Error::Blocked(blockers) => match crate::Blockers::new(blockers.clone()) {
+            Some(blockers) => Kind::Blocked {
+                table: None,
+                blockers,
+            },
+            None => Kind::Internal,
         },
         Error::Incompatible(_) => Kind::UnsupportedGeneration,
         Error::Conflict => Kind::Conflict,

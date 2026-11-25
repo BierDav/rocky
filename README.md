@@ -187,8 +187,11 @@ invitations, and `cancel_invitation` ends an unused one.
 `SchemaBuilder::role`. A role reads, writes, appends to or updates named
 columns of the tables it lists. A role declared `per_partition` holds no
 partition of that group until an admin calls `grant_partition(person,
-&partition)`; until then a read is `Denied` with `PartitionNotGranted` and
-`status` lists a matching blocker. Grants reach every device of the person,
+&partition)`; until then a read of its tables is `Denied` with
+`PartitionNotGranted` and `status` lists a matching blocker. Once it holds one,
+a read returns the rows of the partitions it holds, also when its filter names
+others, and a write into a partition it does not hold is `Denied` with
+`PartitionNotGranted`. Grants reach every device of the person,
 including devices that join or link later, and `revoke_partition` takes them
 back and rotates the key. `Full` and `Read` reach every partition.
 
@@ -326,8 +329,8 @@ why the device lacks it:
 
 | `DenyReason` | Cause | What clears it |
 | --- | --- | --- |
-| `NotGranted` | The person's access does not include the right | An admin's `set_access` |
-| `PartitionNotGranted { group }` | The person holds no partition with these values | An admin's `grant_partition` |
+| `NotGranted` | The person's access does not include the right, whatever partitions they hold | An admin's `set_access` |
+| `PartitionNotGranted { group }` | The role grants the right, but the person holds no partition with these values | An admin's `grant_partition` |
 | `PartitionNotCreated { group }` | No partition with these values exists | `create_partition` on an admin device |
 | `StoreOnly` | A store-only device holds no readable data | Nothing; it is a relay |
 | `AdminRequired` | Only an admin may do this | An admin device |
@@ -338,7 +341,7 @@ Other kinds an application meets:
 
 - `Removed`: the person or device was removed; nothing clears it.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
-  named blockers clear.
+  named blockers clear. It always names at least one.
 - `TooLarge { limit, size, max }`: a write exceeds a size limit.
 - `UpgradeRequired { current, declared }`: the database is at a schema version
   that removed something this application declares; upgrade the application.

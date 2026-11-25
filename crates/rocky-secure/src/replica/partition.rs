@@ -634,7 +634,46 @@ impl<A: RowApplication> Inner<A> {
         if rules.is_empty() && schema.views.is_empty() {
             return Ok(unchanged());
         }
-        prepared.check(params, &rules).map_err(refused)
+        match prepared.check(params, &rules) {
+            Err(rocky_storage::partition_sql::Refusal::Unavailable {
+                table,
+                reason: crate::sql::Unavailable::Incomplete { .. },
+            }) => Err(self.incomplete(typed, table).await),
+            checked => checked.map_err(refused),
+        }
+    }
+    pub(super) async fn incomplete(&self, typed: &typed::Typed, table: String) -> Error {
+        let blockers = match self.table_blockers(typed, &table).await {
+            Ok(blockers) => blockers,
+            Err(error) => return error,
+        };
+        let reason = if blockers.is_empty() {
+            crate::sql::Unavailable::NotHeld
+        } else {
+            crate::sql::Unavailable::Incomplete { blockers }
+        };
+        Error::Sql(crate::sql::SqlError::Unavailable { table, reason })
+    }
+    async fn table_blockers(
+        &self,
+        typed: &typed::Typed,
+        table: &str,
+    ) -> Result<Vec<rocky_core::Blocker>, Error> {
+        let Some(projected) = typed.by_name(table) else {
+            return Ok(Vec::new());
+        };
+        let scopes: Vec<ResourceScope> = std::iter::once(projected.scope)
+            .chain(
+                self.partitions
+                    .keys()
+                    .filter(|scope| {
+                        scope.table == projected.table.id && scope.domain == typed.domain
+                    })
+                    .copied(),
+            )
+            .collect();
+        let readiness = self.readiness(typed.domain).await?;
+        self.incomplete_blockers(&readiness, &scopes).await
     }
 }
 

@@ -482,7 +482,10 @@ async fn partition_frames_keys_sql_and_checkpoints_are_isolated() {
             vec![SqlValue::Text("B".into())]
         )
         .await
-        .is_err()
+        .unwrap()
+        .rows
+        .is_empty(),
+        "a read naming a partition not held finds none of its rows, as an unfiltered read does"
     );
     assert_eq!(
         sql.run("SELECT SUM(amount) FROM items", vec![])

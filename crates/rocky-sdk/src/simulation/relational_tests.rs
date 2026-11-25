@@ -24,12 +24,8 @@ fn soak_size(seed: u64) -> Scenario {
         Ok("frozen") => Wall::Frozen,
         _ => Wall::Moving,
     };
-    let invites = match std::env::var_os("ROCKY_SIM_PARTIAL") {
-        Some(_) => Invites::Partial,
-        None => Invites::Full,
-    };
     Scenario {
-        invites,
+        invites: Invites::Partial,
         ..soak_at(seed, wall)
     }
 }
@@ -151,7 +147,7 @@ async fn shrink() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "the relational soak of ROCKY_SIM_SEEDS seeds (200) from ROCKY_SIM_FIRST, ROCKY_SIM_WALL=frozen stopping the wall clock and ROCKY_SIM_PARTIAL=1 drawing per-list invites and grants: ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture"]
+#[ignore = "the relational soak of ROCKY_SIM_SEEDS seeds (200) from ROCKY_SIM_FIRST, with per-list invites and grants, ROCKY_SIM_WALL=frozen stopping the wall clock: ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture"]
 async fn relational_soak() -> Result<(), Failure> {
     let read = |name: &str, default: u64| {
         std::env::var(name)

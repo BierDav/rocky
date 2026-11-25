@@ -172,10 +172,7 @@ impl Node {
         let work = async {
             let (report, _) = self.sync_optional(transport).await?;
             if report.reconciled() == 0 {
-                return Err(ServiceError::NoPeerReached {
-                    known: report.peers.len(),
-                }
-                .into());
+                return Err(ServiceError::NoPeerReached(Box::new(report)).into());
             }
             Ok(report)
         };

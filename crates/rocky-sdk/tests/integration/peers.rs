@@ -522,3 +522,40 @@ async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_outside
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_pass_that_reaches_no_peer_names_why_each_peer_failed() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let devices = enroll(root.path(), &hub, &["b"]).await?;
+    let [a, b] = &devices[..] else {
+        return Err("devices".into());
+    };
+    introduce(a, b).await;
+    let b_node = b.node().await;
+    b.close().await;
+    let error = a
+        .database
+        .sync_now()
+        .await
+        .err()
+        .ok_or("a pass reached a closed peer")?;
+    let rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached(report)) =
+        error.kind()
+    else {
+        return Err(format!("expected NoPeerReached, got {error:?}").into());
+    };
+    let peer = report
+        .peers
+        .iter()
+        .find(|peer| peer.node == b_node)
+        .ok_or("the report names the closed peer")?;
+    let failure = peer.failure().ok_or("the closed peer's failure")?;
+    assert!(
+        error.to_string().contains(&failure.detail),
+        "the message carries the peer's cause: {error}"
+    );
+    assert!(error.retryable(), "an unreachable peer may answer later");
+    a.close().await;
+    Ok(())
+}

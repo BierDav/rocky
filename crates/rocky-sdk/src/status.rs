@@ -830,6 +830,24 @@ pub struct PeerReconciliation {
     pub timeouts: Vec<TimeoutCount>,
 }
 impl PeerReconciliation {
+    /// Why the latest failed attempt with the peer failed, if one did.
+    pub fn failure(&self) -> Option<&AttemptFailure> {
+        self.attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| attempt.failure.as_ref())
+    }
+    /// Whether a later pass may reconcile with the peer: it is not refused for good by a newer
+    /// Rocky, a refusal, missing credentials or a protocol fault.
+    pub fn retryable(&self) -> bool {
+        !self.upgrade_required
+            && self.failure().is_none_or(|failure| {
+                matches!(
+                    failure.kind,
+                    FailureKind::Timeout | FailureKind::Transport | FailureKind::Other
+                )
+            })
+    }
     /// Whether a reconciliation with the peer completed.
     pub fn reconciled(&self) -> bool {
         self.attempts.iter().any(|attempt| {

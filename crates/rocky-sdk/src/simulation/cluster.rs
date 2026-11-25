@@ -114,10 +114,10 @@ impl Member {
                 of: report.peers.len(),
             }),
             Err(error) => match error.kind() {
-                crate::ErrorKind::Service(crate::ServiceError::NoPeerReached { known }) => {
+                crate::ErrorKind::Service(crate::ServiceError::NoPeerReached(report)) => {
                     Ok(Reconciled {
                         peers: 0,
-                        of: *known,
+                        of: report.peers.len(),
                     })
                 }
                 _ => Err(error),

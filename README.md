@@ -270,7 +270,7 @@ changes it:
 | `Off` | No | Never |
 
 `sync_now` runs one pass and fails with `ServiceError::SyncOff` when sync is
-off and with `NoPeerReached { known }` when no peer reconciled, which is also
+off and with `NoPeerReached(report)` when no peer reconciled, which is also
 what an owner with no other device yet gets. Its `SyncReport` prints as one
 line; `complete()` is true when every known peer reconciled or another peer
 covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.

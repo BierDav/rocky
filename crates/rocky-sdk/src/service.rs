@@ -62,11 +62,8 @@ pub enum ServiceError {
     /// Sync is `Off`.
     SyncOff,
     /// A sync pass reconciled with no peer, as when every peer is offline or an owner has no other
-    /// device yet.
-    NoPeerReached {
-        /// Peers the pass knew.
-        known: usize,
-    },
+    /// device yet; the pass's report says why each known peer failed.
+    NoPeerReached(Box<SyncReport>),
 }
 impl ServiceError {
     pub(crate) fn no_route(peer: &'static str, transport: &dyn Transport) -> Self {
@@ -84,17 +81,21 @@ impl ServiceError {
         match self {
             Self::NetworkRequired(_) | Self::CredentialsExpired => "network_required",
             Self::NetworkAttached | Self::NoRoute { .. } => "rejected",
-            Self::Unreachable(_) | Self::TimedOut(_) | Self::NoPeerReached { .. } => "unreachable",
+            Self::Unreachable(_) | Self::TimedOut(_) | Self::NoPeerReached(_) => "unreachable",
             Self::Closed(_) => "closed",
             Self::SyncOff => "sync_off",
         }
     }
-    /// Whether a retry may succeed.
+    /// Whether a retry may succeed; a pass that reached no peer may succeed later unless every
+    /// known peer refused for a reason a retry does not clear.
     pub fn retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Unreachable(_) | Self::TimedOut(_) | Self::NoPeerReached { .. }
-        )
+        match self {
+            Self::Unreachable(_) | Self::TimedOut(_) => true,
+            Self::NoPeerReached(report) => {
+                report.peers.is_empty() || report.peers.iter().any(|peer| peer.retryable())
+            }
+            _ => false,
+        }
     }
 }
 impl std::fmt::Display for ServiceError {
@@ -116,9 +117,17 @@ impl std::fmt::Display for ServiceError {
             }
             Self::Closed(handle) => write!(f, "{handle} closed"),
             Self::SyncOff => f.write_str("sync is off; set the sync mode to Manual or Live"),
-            Self::NoPeerReached { known: 0 } => f.write_str("no peer is known to sync with"),
-            Self::NoPeerReached { known } => {
-                write!(f, "none of the {known} known peers reconciled")
+            Self::NoPeerReached(report) if report.peers.is_empty() => {
+                f.write_str("no peer is known to sync with")
+            }
+            Self::NoPeerReached(report) => {
+                write!(f, "none of the {} known peers reconciled", report.peers.len())?;
+                for peer in &report.peers {
+                    if let Some(failure) = peer.failure() {
+                        write!(f, "; {}: {}", peer.node, failure.detail)?;
+                    }
+                }
+                Ok(())
             }
         }
     }

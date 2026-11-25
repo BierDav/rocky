@@ -121,7 +121,11 @@ impl std::fmt::Display for ServiceError {
                 f.write_str("no peer is known to sync with")
             }
             Self::NoPeerReached(report) => {
-                write!(f, "none of the {} known peers reconciled", report.peers.len())?;
+                write!(
+                    f,
+                    "none of the {} known peers reconciled",
+                    report.peers.len()
+                )?;
                 for peer in &report.peers {
                     if let Some(failure) = peer.failure() {
                         write!(f, "; {}: {}", peer.node, failure.detail)?;

@@ -96,10 +96,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     let pending = owner.database.invitations().await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].label.as_deref(), Some("Alice"));
-    assert_eq!(
-        pending[0].redeemed_by,
-        Some(PersonId::of(&minted))
-    );
+    assert_eq!(pending[0].redeemed_by, Some(PersonId::of(&minted)));
     let recorded = owner
         .database
         .people()
@@ -513,7 +510,8 @@ async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> R
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn open_tells_a_directory_without_a_database_from_one_with_a_database() -> Result<(), Failure> {
+async fn open_tells_a_directory_without_a_database_from_one_with_a_database() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let empty = root.path().join("empty");
@@ -555,7 +553,10 @@ async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
         .await
         .err()
         .ok_or("a join reached an issuer that is offline")?;
-    assert_eq!(failed.kind(), &ErrorKind::Join(JoinError::IssuerUnreachable));
+    assert_eq!(
+        failed.kind(),
+        &ErrorKind::Join(JoinError::IssuerUnreachable)
+    );
     let unfinished = joining(&member, &hub, None)?
         .open()
         .await
@@ -565,7 +566,10 @@ async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
     let owner = reopened(&root.path().join("issuer"), &hub).await?;
     owner.add(1, "Milk").await;
     let joined = join(&member, &hub, None, &invitation.code).await?;
-    assert!(joined.identity.is_some(), "the resumed join keeps its minted key");
+    assert!(
+        joined.identity.is_some(),
+        "the resumed join keeps its minted key"
+    );
     let member = Device::new(joined)?;
     assert_eq!(member.titles().await, ["Milk"]);
     member.close().await;

@@ -589,12 +589,24 @@ mod timestamp_tests {
     fn a_timestamp_prints_as_rfc_3339_in_utc() {
         let printed = |micros| Timestamp::from_unix_micros(micros).to_string();
         assert_eq!(printed(0), "1970-01-01T00:00:00.000000Z");
-        assert_eq!(printed(1_795_602_407_448_123), "2026-11-25T10:26:47.448123Z");
+        assert_eq!(
+            printed(1_795_602_407_448_123),
+            "2026-11-25T10:26:47.448123Z"
+        );
         assert_eq!(printed(951_782_400_000_000), "2000-02-29T00:00:00.000000Z");
         assert_eq!(printed(-1), "1969-12-31T23:59:59.999999Z");
-        assert_eq!(printed(-62_135_596_800_000_001), "0000-12-31T23:59:59.999999Z");
-        assert_eq!(printed(-62_167_219_200_000_001), "-0001-12-31T23:59:59.999999Z");
-        assert_eq!(printed(253_402_300_800_000_000), "+10000-01-01T00:00:00.000000Z");
+        assert_eq!(
+            printed(-62_135_596_800_000_001),
+            "0000-12-31T23:59:59.999999Z"
+        );
+        assert_eq!(
+            printed(-62_167_219_200_000_001),
+            "-0001-12-31T23:59:59.999999Z"
+        );
+        assert_eq!(
+            printed(253_402_300_800_000_000),
+            "+10000-01-01T00:00:00.000000Z"
+        );
         assert!(!printed(i64::MIN).is_empty() && !printed(i64::MAX).is_empty());
     }
 }

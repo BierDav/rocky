@@ -111,12 +111,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     )
     .await?;
     let principal = device_info(&b).await.principal;
-    a.database
-        .make_admin(
-            principal,
-            a.root_signer()?,
-        )
-        .await?;
+    a.database.make_admin(principal, a.root_signer()?).await?;
     b.database.renew().await?;
     a.database.add_peer(&b.contact().await).await?;
     let root_key = a.root_signer()?;
@@ -406,12 +401,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     )
     .await?;
     let t_identity = device_info(&t).await.principal;
-    a.database
-        .make_admin(
-            t_identity,
-            a.root_signer()?,
-        )
-        .await?;
+    a.database.make_admin(t_identity, a.root_signer()?).await?;
     t.database.renew().await?;
     let (a_node, t_node) = (a.node().await, t.node().await);
     a.add(1, "Milk").await;

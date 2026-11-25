@@ -304,13 +304,9 @@ impl Simulation {
                     .root
                     .clone()
                     .ok_or("member 0 holds no root")?;
-                self.database(0)?
-                    .make_admin(identity, root)
-                    .await?;
+                self.database(0)?.make_admin(identity, root).await?;
                 let creator = self.database(0)?.status().await?;
-                for (member, identity) in
-                    [(0, creator.authority.principal), (*node, identity)]
-                {
+                for (member, identity) in [(0, creator.authority.principal), (*node, identity)] {
                     let name = self.members[member].name.clone();
                     self.identities.insert(identity, name);
                 }

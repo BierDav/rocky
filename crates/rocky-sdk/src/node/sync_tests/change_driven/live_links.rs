@@ -450,9 +450,13 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
                 .remove(&peer);
             let observed = a.observed_network().await?;
             assert_eq!(observed.connected_peer_count, 1);
-            assert!(observed.peers.iter().any(
-                |node| node.node == crate::DeviceId::new(peer) && node.link.state == crate::LinkState::Open
-            ));
+            assert!(
+                observed
+                    .peers
+                    .iter()
+                    .any(|node| node.node == crate::DeviceId::new(peer)
+                        && node.link.state == crate::LinkState::Open)
+            );
             if let Some(contact) = contact {
                 a.settings.lock().await.peers.insert(peer, contact);
             }

@@ -106,7 +106,10 @@ async fn an_over_budget_publication_sends_nothing_and_native_repair_recovers_lar
         insert(
             &writer,
             "INSERT INTO items VALUES(?,?,0)",
-            vec![text(&format!("{n}")), text(&"x".repeat(TITLE_BYTES_OVER_ONE_LINK_FRAME))],
+            vec![
+                text(&format!("{n}")),
+                text(&"x".repeat(TITLE_BYTES_OVER_ONE_LINK_FRAME)),
+            ],
         )
         .await
         .unwrap();

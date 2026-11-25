@@ -1046,7 +1046,11 @@ async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Resu
     let id = tx.next_id("alerts", Vec::new()).await?;
     tx.execute(
         "INSERT INTO alerts(id,title,state) VALUES(?,?,?)",
-        vec![id.sql(), SqlValue::Text("Fire".into()), SqlValue::Text("open".into())],
+        vec![
+            id.sql(),
+            SqlValue::Text("Fire".into()),
+            SqlValue::Text("open".into()),
+        ],
     )
     .await?;
     tx.commit().await?;

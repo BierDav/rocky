@@ -208,7 +208,10 @@ async fn the_owner_is_the_person_the_root_derives_and_an_arc_shares_its_key() ->
         .identity(shared.clone())
         .open()
         .await?;
-    assert_eq!(reopened.me().await?.person, rocky_sdk::PersonId::of(&shared));
+    assert_eq!(
+        reopened.me().await?.person,
+        rocky_sdk::PersonId::of(&shared)
+    );
     reopened.close().await?;
     Ok(())
 }

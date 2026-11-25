@@ -1,7 +1,5 @@
 use super::*;
-use crate::status::{
-    Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER,
-};
+use crate::status::{Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER};
 use live_links::io::Writer;
 use rocky_credentials::Signature;
 use rocky_secure::network::link::{self, Frame, HEALTH_BYTES};

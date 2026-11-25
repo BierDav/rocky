@@ -299,18 +299,22 @@ fn an_invalid_name_in_a_schema_names_its_path_and_the_rule_it_breaks() {
 #[tokio::test]
 async fn only_a_transaction_without_a_write_statement_commits_no_writes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let database = crate::common::configuration(&root.path().join("a"), &schema()?, None, None, None)
-        .create()
-        .await?
-        .database;
+    let database =
+        crate::common::configuration(&root.path().join("a"), &schema()?, None, None, None)
+            .create()
+            .await?
+            .database;
     let tx = database.transaction().await?;
     assert_eq!(tx.commit().await?, rocky_sdk::Commit::NoWrites);
     let mut tx = database.transaction().await?;
     tx.execute("SELECT count(*) FROM notes", Vec::new()).await?;
     assert_eq!(tx.commit().await?, rocky_sdk::Commit::NoWrites);
     let mut tx = database.transaction().await?;
-    tx.execute("UPDATE notes SET tag = 'none' WHERE title = 'absent'", Vec::new())
-        .await?;
+    tx.execute(
+        "UPDATE notes SET tag = 'none' WHERE title = 'absent'",
+        Vec::new(),
+    )
+    .await?;
     assert!(
         matches!(tx.commit().await?, rocky_sdk::Commit::Recorded(_)),
         "a write that matches no row still records an intent, which every device replays"

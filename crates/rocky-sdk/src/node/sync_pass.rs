@@ -539,10 +539,7 @@ impl Node {
                 continue;
             }
             choices.insert(target.peer, crate::PeerChoice::Covered);
-            Self::add_peer_report(
-                report,
-                Self::skipped_peer(target.peer, SkipReason::Covered),
-            );
+            Self::add_peer_report(report, Self::skipped_peer(target.peer, SkipReason::Covered));
         }
         Ok(owed)
     }

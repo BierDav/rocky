@@ -1364,6 +1364,12 @@ impl Options {
         }
         Ok(builder.bind().await?)
     }
+    /// Binds under a fresh random key and serves no protocol, for a client such as a coordinator
+    /// connection; the application keeps the attachment and closes its transport.
+    pub async fn client(&self) -> Result<Attachment, Failure> {
+        let endpoint = self.bind(rocky_platform::entropy::random()).await?;
+        Ok(Attachment::serving(endpoint, Vec::new()))
+    }
     /// Binds and serves every Rocky protocol, returning an attachment the application keeps.
     pub async fn start(&self, route_secret: [u8; 32]) -> Result<Attachment, Failure> {
         self.start_serving(route_secret, Protocol::ALL.to_vec())

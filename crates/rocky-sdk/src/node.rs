@@ -539,7 +539,10 @@ impl Node {
             served: AtomicU64::new(0),
             refused: AtomicU64::new(0),
         });
-        link.transport.listen(Some(self.domain().scope), true)?;
+        let accepts = !link.transport.dial_only();
+        if accepts {
+            link.transport.listen(Some(self.domain().scope), true)?;
+        }
         let publisher = crate::reactor::spawn_local(
             "publish_links",
             self.signed(self.clone().publish_links(link.clone())),
@@ -556,9 +559,13 @@ impl Node {
             .synchronizer
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(synchronizer);
-        let server =
-            crate::reactor::spawn_local("accept", self.signed(self.clone().accept(link.clone())));
-        *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
+        if accepts {
+            let server = crate::reactor::spawn_local(
+                "accept",
+                self.signed(self.clone().accept(link.clone())),
+            );
+            *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
+        }
         if let Some(discovery) = link.discovery.clone() {
             let discoverer = crate::reactor::spawn_local(
                 "discover",
@@ -717,14 +724,11 @@ impl Node {
         }
     }
 
-    pub(super) async fn own_routes(&self) -> Vec<crate::enrollment::Route> {
+    pub(super) async fn own_routes(&self) -> Vec<crate::Route> {
         let attached = self.network.read().await;
         match attached.as_deref() {
             Some(link) => match link.transport.address().await {
-                Ok(address) if !address.is_empty() => vec![crate::enrollment::Route {
-                    transport: link.transport.kind().into(),
-                    address,
-                }],
+                Ok(Some(address)) => crate::Route::try_from(address).into_iter().collect(),
                 _ => Vec::new(),
             },
             None => Vec::new(),
@@ -750,17 +754,7 @@ impl Node {
                 .transport;
             let settings = self.settings.lock().await.clone();
             let (uri, node, routes) = settings.contact(&self.vault, transport).await?;
-            Ok(crate::ContactInfo {
-                uri,
-                node,
-                routes: routes
-                    .into_iter()
-                    .map(|route| crate::Route {
-                        transport: route.transport,
-                        address: route.address,
-                    })
-                    .collect(),
-            })
+            Ok(crate::ContactInfo { uri, node, routes })
         };
         Self::networked(attached.as_deref(), work).await
     }
@@ -2013,16 +2007,12 @@ impl Node {
         contact: &Contact,
         attempt: &mut Option<crate::status::Attempt>,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
-        let addresses = contact.addresses(transport.kind());
+        let addresses = contact.addresses(transport);
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         if addresses.is_empty() && !service.live.contains(peer) {
-            return Err(ServiceError::NoRoute {
-                peer: "the peer",
-                network: transport.kind().into(),
-            }
-            .into());
+            return Err(ServiceError::no_route("the peer", transport).into());
         }
         for _ in 0..4 {
             service.live.wait_inbound_short(peer).await?;

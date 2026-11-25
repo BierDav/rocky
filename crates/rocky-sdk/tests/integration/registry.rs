@@ -561,10 +561,13 @@ impl Transport for FaultyTransport {
             })
         })
     }
-    fn kind(&self) -> &str {
-        self.inner.kind()
+    fn schemes(&self) -> &[&str] {
+        self.inner.schemes()
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+    fn dial_only(&self) -> bool {
+        self.inner.dial_only()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
         self.inner.address()
     }
     fn connect<'a>(

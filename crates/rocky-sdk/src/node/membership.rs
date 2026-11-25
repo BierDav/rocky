@@ -241,7 +241,7 @@ impl Node {
             )
             .collect();
         contacts.retain(|peer, contact| {
-            pending.contains(peer) && !contact.addresses(link.transport.kind()).is_empty()
+            pending.contains(peer) && !contact.addresses(&*link.transport).is_empty()
         });
         use futures_util::StreamExt;
         let mut known = snapshot.revocations.clone();
@@ -271,7 +271,7 @@ impl Node {
         let request = &request;
         let deliveries =
             futures_util::stream::iter(contacts.into_iter().map(|(peer, contact)| async move {
-                let addresses = contact.addresses(transport.kind());
+                let addresses = contact.addresses(transport);
                 let answer = exchange(transport, &addresses, scope, request).await.ok();
                 (peer, answer)
             }))

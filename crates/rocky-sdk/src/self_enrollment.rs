@@ -172,15 +172,11 @@ impl Settings {
         let addresses = record
             .routes
             .iter()
-            .filter(|route| route.transport == transport.kind())
-            .map(|route| route.address.clone())
+            .filter(|route| transport.claims(route.as_str()))
+            .map(|route| route.as_str().to_owned())
             .collect::<Vec<_>>();
         if addresses.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer: "the identity's node",
-                network: transport.kind().into(),
-            }
-            .into());
+            return Err(ServiceError::no_route("the identity's node", transport).into());
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let pending = match confirmed.as_ref() {

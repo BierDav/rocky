@@ -62,8 +62,8 @@ async fn titles(database: &Database) -> Vec<String> {
 async fn sync(database: &Database) -> Result<Value, Value> {
     snap::observe(database.sync_now()).await
 }
-async fn transport(database: &Database) -> Option<String> {
-    database.status().await.expect("status").network.kind
+async fn transport(database: &Database) -> Vec<String> {
+    database.status().await.expect("status").network.schemes
 }
 
 fn memory(hub: &Arc<Hub>, name: &'static str) -> Arc<Memory> {
@@ -108,7 +108,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     let directory = root.path().join("a");
     let database = open(&directory, None).create().await?.database;
     assert!(database.status().await?.authority.is_issuer);
-    assert_eq!(transport(&database).await, None);
+    assert!(transport(&database).await.is_empty());
     add(&database, 1, "Milk").await;
     assert_eq!(titles(&database).await, ["Milk"]);
     snap::ok(async {
@@ -189,9 +189,8 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
         let directory = root.path().join(directory);
         for round in 0..2 {
             let database = open(&directory, None).open().await?;
-            assert_eq!(
-                transport(&database).await,
-                None,
+            assert!(
+                transport(&database).await.is_empty(),
                 "a domain opened without a network is bound to none"
             );
             add(&database, handle + 10 * round, &format!("{handle}.{round}")).await;
@@ -274,9 +273,9 @@ async fn borrowed_networks_outlive_a_detach_and_owned_ones_are_released() -> Res
         .ok_or("one network at a time")?;
     assert_eq!(service(&error), Some(&ServiceError::NetworkAttached));
     assert_eq!(
-        transport(&creator).await.as_deref(),
-        Some("memory"),
-        "the status names the attached network's kind"
+        transport(&creator).await,
+        ["memory"],
+        "the status names the attached network's schemes"
     );
     let invitation = creator
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
@@ -291,8 +290,8 @@ async fn borrowed_networks_outlive_a_detach_and_owned_ones_are_released() -> Res
     .await?
     .database;
     assert_eq!(
-        transport(&member).await.as_deref(),
-        Some("memory"),
+        transport(&member).await,
+        ["memory"],
         "the joining network stays attached"
     );
     add(&creator, 1, "Milk").await;

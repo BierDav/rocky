@@ -119,8 +119,7 @@ impl Service {
                         .iter()
                         .map(|v| ClientEndpoint {
                             voter: v.id,
-                            kind: "iroh".into(),
-                            address: format!("voter-{}", v.id),
+                            route: format!("memory:voter-{}", v.id),
                         })
                         .collect(),
                     admission: admission.then(|| provider.public_key()),

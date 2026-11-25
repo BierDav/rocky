@@ -17,6 +17,11 @@ pub enum Network {
     /// owns.
     Attached(Connected),
 }
+impl<C: Connector + 'static> From<C> for Network {
+    fn from(connector: C) -> Self {
+        Self::Owned(Arc::new(connector))
+    }
+}
 impl Network {
     pub(crate) async fn start(
         self,
@@ -38,13 +43,13 @@ pub enum ServiceError {
     NetworkRequired(&'static str),
     /// A network is already attached.
     NetworkAttached,
-    /// No route to the peer on the attached transport; attach its transport or add a current
-    /// contact.
+    /// No route to the peer has a scheme the attached transport claims; attach its transport or
+    /// add a current contact.
     NoRoute {
         /// The kind of peer.
         peer: &'static str,
-        /// The attached transport kind.
-        network: String,
+        /// The route schemes the attached transport claims.
+        schemes: Vec<String>,
     },
     /// The peer did not answer; retry.
     Unreachable(String),
@@ -64,6 +69,16 @@ pub enum ServiceError {
     },
 }
 impl ServiceError {
+    pub(crate) fn no_route(peer: &'static str, transport: &dyn Transport) -> Self {
+        Self::NoRoute {
+            peer,
+            schemes: transport
+                .schemes()
+                .iter()
+                .map(|scheme| (*scheme).to_owned())
+                .collect(),
+        }
+    }
     /// A stable snake-case code.
     pub fn code(&self) -> &'static str {
         match self {
@@ -89,9 +104,10 @@ impl std::fmt::Display for ServiceError {
                 write!(f, "{operation} needs an attached network service")
             }
             Self::NetworkAttached => f.write_str("a network service is already attached"),
-            Self::NoRoute { peer, network } => write!(
+            Self::NoRoute { peer, schemes } => write!(
                 f,
-                "{peer} has no {network} route; attach its transport or add a current contact"
+                "{peer} has no {} route; attach its transport or add a current contact",
+                schemes.join(", ")
             ),
             Self::Unreachable(cause) => write!(f, "peer unreachable: {cause}"),
             Self::TimedOut(cause) => write!(f, "dial timed out: {cause}"),

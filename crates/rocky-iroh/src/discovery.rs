@@ -405,7 +405,7 @@ impl Finder {
         }
     }
     fn report(&self, claimed_node: [u8; 32], address: &EndpointAddr, path: &str, local: bool) {
-        if let Ok(address) = serde_json::to_string(address) {
+        if let Ok(address) = super::route(address) {
             let _ = self.0.sender.try_send(Found {
                 claimed_node,
                 address,

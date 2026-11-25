@@ -5,8 +5,6 @@ use rocky_core::MeshId;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-pub const CLIENT_TRANSPORT: &str = "iroh";
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
@@ -75,8 +73,7 @@ impl Plan {
                         .iter()
                         .map(|v| ClientEndpoint {
                             voter: v.id,
-                            kind: CLIENT_TRANSPORT.into(),
-                            address: v.client.clone(),
+                            route: v.client.clone(),
                         })
                         .collect(),
                     admission: self.admission,
@@ -154,7 +151,7 @@ pub fn client_endpoint(secret: &[u8; 32], address: Option<SocketAddr>) -> Result
     if let Some(address) = address {
         endpoint = endpoint.with_ip_addr(address);
     }
-    Ok(serde_json::to_string(&endpoint)?)
+    rocky_iroh::route(&endpoint)
 }
 pub fn load(configuration: &Configuration) -> Result<CertifiedGenesis, Failure> {
     let genesis = CertifiedGenesis::from_bytes(&std::fs::read(&configuration.genesis)?)?;

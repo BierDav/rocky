@@ -11,7 +11,7 @@ use rocky_core::net::{BoxFuture, Failure, Stream};
 use rocky_credentials::Publisher;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub(crate) const KIND: &str = "memory";
+pub(crate) const SCHEME: &str = "memory";
 
 pub(crate) struct Memory {
     genesis: Commitment,
@@ -75,11 +75,14 @@ impl Transport for Lane {
     fn session<'a>(&'a self, _: &'a [String], _: Scope) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async { Err("the test voter serves coordination only".into()) })
     }
-    fn kind(&self) -> &str {
-        self.1
+    fn schemes(&self) -> &[&str] {
+        std::slice::from_ref(&self.1)
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-        Box::pin(async { Err("a client lane does not accept".into()) })
+    fn dial_only(&self) -> bool {
+        true
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
+        Box::pin(async { Ok(None) })
     }
     fn connect<'a>(
         &'a self,
@@ -128,8 +131,7 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
             public: Some(PublicService {
                 endpoints: vec![ClientEndpoint {
                     voter: 1,
-                    kind: KIND.into(),
-                    address: "voter-1".into(),
+                    route: format!("{SCHEME}:voter-1"),
                 }],
                 admission: None,
                 limits: crate::Limits::default(),
@@ -212,7 +214,7 @@ impl Service {
         let owner = NetworkCoordinator::connect(
             &bundle,
             tenant.clone(),
-            Arc::new(Lane(memory.clone(), KIND)),
+            Arc::new(Lane(memory.clone(), SCHEME)),
         )
         .unwrap();
         owner
@@ -253,7 +255,7 @@ impl Service {
         }
     }
     fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
-        self.client_on(key, Arc::new(Lane(self.voter.clone(), KIND)))
+        self.client_on(key, Arc::new(Lane(self.voter.clone(), SCHEME)))
     }
     pub(crate) fn client_on(
         &self,
@@ -396,7 +398,7 @@ async fn only_admin_nodes_claim() {
     let uncertified = NetworkCoordinator::connect(
         &service.bundle,
         service.node.clone(),
-        Arc::new(Lane(service.voter.clone(), KIND)),
+        Arc::new(Lane(service.voter.clone(), SCHEME)),
     )
     .unwrap();
     assert_eq!(
@@ -516,7 +518,7 @@ async fn an_observer_sees_every_voter_answer_and_refusal() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_client_needs_an_endpoint_of_its_transport_kind() {
+fn a_client_needs_an_endpoint_its_transport_claims() {
     let genesis = genesis(&PrivateKey::new());
     let memory = Arc::new(Memory {
         genesis: genesis.id().unwrap(),
@@ -553,10 +555,13 @@ impl CallerOwned {
     }
 }
 impl Transport for CallerOwned {
-    fn kind(&self) -> &str {
-        self.lane.kind()
+    fn schemes(&self) -> &[&str] {
+        self.lane.schemes()
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+    fn dial_only(&self) -> bool {
+        self.lane.dial_only()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
         self.lane.address()
     }
     fn connect<'a>(
@@ -600,7 +605,7 @@ impl Transport for CallerOwned {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn connecting_never_closes_the_callers_transport() {
     let service = Service::start().await;
-    let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
+    let transport = CallerOwned::new(Lane(service.voter.clone(), SCHEME));
     let invoices = Name::new("invoices").unwrap();
     {
         let client = service.client_on(&service.node, transport.clone());

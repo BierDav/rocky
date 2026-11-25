@@ -146,7 +146,7 @@ async fn unreachable(root: &std::path::Path, hub: &Arc<Hub>) -> Result<Arc<Node>
             &a.vault,
             ContactHint {
                 node: key,
-                routes: vec![("memory".into(), "gone".into())],
+                routes: vec!["memory:gone".into()],
                 trusted: false,
             },
             "handover",
@@ -234,7 +234,7 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .as_ref()
                 .ok_or("link")?
                 .transport
-                .connect("a", Protocol::Link, None)
+                .connect("memory:a", Protocol::Link, None)
                 .await?;
             let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             assert!(
@@ -250,14 +250,14 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
             );
             drop(link);
             assert!(c.vault.load_bytes("discovery")?.is_none());
-            let route = "route-learned-in-admitted-session-never-replicated";
+            let route = "memory:route-learned-in-admitted-session-never-replicated";
             let hinted = PrivateKey::new().public_key();
             a.configure(|settings| {
                 settings.learn_contact(
                     &a.vault,
                     ContactHint {
                         node: hinted,
-                        routes: vec![("memory".into(), route.into())],
+                        routes: vec![route.into()],
                         trusted: false,
                     },
                     "handover",
@@ -271,7 +271,7 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .insert(hinted);
             pass(&b).await?;
             assert_eq!(
-                b.settings.lock().await.peers[&hinted].routes[0].address,
+                b.settings.lock().await.peers[&hinted].routes[0].as_str(),
                 route
             );
             let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
@@ -386,7 +386,7 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
                 Ok(ContactResponse::Contact {
                     contact: Some(ContactHint {
                         node: self.0,
-                        routes: vec![("memory".into(), "false-hint".into())],
+                        routes: vec!["memory:false-hint".into()],
                         trusted: false,
                     }),
                 })

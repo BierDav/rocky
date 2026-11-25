@@ -276,10 +276,9 @@ async fn unreachable_idle_peers_have_no_retry_timer_for_an_hour() -> Result<(), 
                 settings.peers.insert(
                     peer,
                     Contact {
-                        routes: vec![crate::enrollment::Route {
-                            transport: "memory".into(),
-                            address: "b".into(),
-                        }],
+                        routes: vec![
+                            crate::Route::try_from(String::from("memory:b")).expect("a route"),
+                        ],
                     },
                 );
                 Ok(())
@@ -362,10 +361,9 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
                 settings.peers.insert(
                     peer,
                     Contact {
-                        routes: vec![crate::enrollment::Route {
-                            transport: "memory".into(),
-                            address: "b".into(),
-                        }],
+                        routes: vec![
+                            crate::Route::try_from(String::from("memory:b")).expect("a route"),
+                        ],
                     },
                 );
                 Ok(())

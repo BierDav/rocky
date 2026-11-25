@@ -6,15 +6,16 @@ use std::{future::Future, pin::Pin};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContactHint {
     pub node: PublicKey,
-    pub routes: Vec<(String, String)>,
+    pub routes: Vec<String>,
     pub trusted: bool,
 }
 impl ContactHint {
     pub fn validate(&self) -> Result<(), Error> {
         if self.routes.len() > 4
-            || self.routes.iter().any(|(kind, address)| {
-                !(1..=32).contains(&kind.len()) || !(1..=2048).contains(&address.len())
-            })
+            || self
+                .routes
+                .iter()
+                .any(|route| route.len() > 2048 || rocky_core::net::scheme(route).is_none())
         {
             return Err(denied("invalid contact routes"));
         }

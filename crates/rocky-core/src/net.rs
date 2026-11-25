@@ -111,9 +111,29 @@ impl Protocol {
     pub const ALL: [Self; 2] = [Self::Rpc, Self::Link];
 }
 
+pub fn scheme(route: &str) -> Option<&str> {
+    let (scheme, _) = route.split_once(':')?;
+    let mut characters = scheme.chars();
+    let valid = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then_some(scheme)
+}
+
 pub trait Transport: Send + Sync {
-    fn kind(&self) -> &str;
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>>;
+    fn schemes(&self) -> &[&str];
+    fn claims(&self, route: &str) -> bool {
+        scheme(route).is_some_and(|scheme| {
+            self.schemes()
+                .iter()
+                .any(|claimed| claimed.eq_ignore_ascii_case(scheme))
+        })
+    }
+    fn dial_only(&self) -> bool {
+        false
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>>;
     fn connect<'a>(
         &'a self,
         address: &'a str,
@@ -228,3 +248,31 @@ impl std::fmt::Display for ScopeRefusal {
 impl std::error::Error for ScopeRefusal {}
 
 pub mod framing;
+
+#[cfg(test)]
+mod tests {
+    use super::scheme;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_route_is_matched_by_the_scheme_before_its_first_colon() {
+        assert_eq!(scheme("tcp://10.0.0.2:4000"), Some("tcp"));
+        assert_eq!(scheme("wss://sync.example/rocky"), Some("wss"));
+        assert_eq!(scheme("iroh:eyJpZCI6IiJ9"), Some("iroh"));
+        assert_eq!(scheme("memory:a"), Some("memory"));
+        assert_eq!(scheme("web+rocky://x"), Some("web+rocky"));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_address_without_a_scheme_is_no_route() {
+        for address in [
+            "10.0.0.2",
+            ":4000",
+            "1tcp://host",
+            "{\"id\":1}",
+            "tc p://x",
+            "",
+        ] {
+            assert_eq!(scheme(address), None, "{address}");
+        }
+    }
+}

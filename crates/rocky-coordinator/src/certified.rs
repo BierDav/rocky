@@ -117,10 +117,9 @@ impl ControlCertificate {
 pub struct ClientEndpoint {
     /// The voter's id.
     pub voter: u64,
-    /// The transport kind, such as `iroh` or `tcp`.
-    pub kind: String,
-    /// The route on that transport.
-    pub address: String,
+    /// The URL clients dial, such as an `iroh:` route; a client dials it over the transport that
+    /// claims its scheme.
+    pub route: String,
 }
 /// Terms on which a coordinator accepts registrations from any tenant.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,10 +153,8 @@ impl PublicService {
                 != self.endpoints.len()
             || self.endpoints.iter().any(|e| {
                 !voters.iter().any(|v| v.id == e.voter)
-                    || e.kind.is_empty()
-                    || e.kind.len() > 16
-                    || e.address.is_empty()
-                    || e.address.len() > 1024
+                    || rocky_core::net::scheme(&e.route).is_none()
+                    || e.route.len() > 1024
             })
             || self.tenants == 0
             || !self.every_tenant_budget_fits()
@@ -229,7 +226,7 @@ impl CertifiedGenesis {
     /// Signs and checks a genesis.
     pub fn sign(genesis: Genesis, root: &PrivateKey) -> Result<Self, CoordinationError> {
         let result = Self {
-            signature: root.sign(&bytes("rocky.genesis.v2", &genesis)?),
+            signature: root.sign(&bytes("rocky.genesis.v3", &genesis)?),
             genesis,
             root: root.public_key(),
         };
@@ -269,7 +266,7 @@ impl CertifiedGenesis {
                 .collect::<BTreeSet<_>>()
                 .len()
                 != g.authorities.len()
-            || !root.verify(&bytes("rocky.genesis.v2", g)?, &self.signature)
+            || !root.verify(&bytes("rocky.genesis.v3", g)?, &self.signature)
         {
             return Err(CoordinationError::Denied(Refusal::Signature));
         }
@@ -341,7 +338,7 @@ pub struct TrustBundle {
     pub genesis: String,
 }
 /// The bundle format this version reads.
-pub const BUNDLE_FORMAT: u32 = 2;
+pub const BUNDLE_FORMAT: u32 = 3;
 impl TrustBundle {
     /// The bundle for a certified genesis.
     pub fn new(genesis: &CertifiedGenesis) -> Result<Self, CoordinationError> {

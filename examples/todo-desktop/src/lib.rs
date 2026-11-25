@@ -34,7 +34,7 @@ impl Workspace {
     fn configuration(&self, name: &str) -> Result<Configuration, Failure> {
         let network = match &self.link {
             Link::Demo(hub) => Network::Owned(hub.connector(name)),
-            Link::Iroh(options) => Network::Owned(Arc::new(options.clone())),
+            Link::Iroh(options) => options.clone().into(),
         };
         Ok(configuration(self.root.join(name))?.network(network))
     }

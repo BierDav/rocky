@@ -1,8 +1,6 @@
 use crate::{
-    Access, Failure, Partition, PersonId, Timestamp,
-    enrollment::{
-        Contact, EnrollingIssuer, Enrollment, Intent, NodeKeys, Route, Settings, exchange, now,
-    },
+    Access, Failure, Partition, PersonId, Route, Timestamp,
+    enrollment::{Contact, EnrollingIssuer, Enrollment, Intent, NodeKeys, Settings, exchange, now},
     partitions::StoredPartition,
     peer::{PeerError, PeerReply, PeerRequest},
     registry::{Changes, Registry, RegistryFull},
@@ -23,7 +21,7 @@ use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, tim
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
 const BOOK_VERSION: u32 = 3;
-const INVITE_VERSION: u32 = 4;
+const INVITE_VERSION: u32 = 5;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const SKEW: u64 = 300;
 const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
@@ -796,8 +794,8 @@ impl Settings {
         let addresses = invite
             .routes
             .iter()
-            .filter(|route| route.transport == transport.kind())
-            .map(|route| route.address.clone())
+            .filter(|route| transport.claims(route.as_str()))
+            .map(|route| route.as_str().to_owned())
             .collect::<Vec<_>>();
         if addresses.is_empty() {
             return Err(Box::new(JoinError::IssuerUnreachable));
@@ -1063,10 +1061,7 @@ mod tests {
             publisher: key(3),
             database: database(),
             issuer: key(4),
-            routes: vec![Route {
-                transport: "memory".into(),
-                address: "issuer".into(),
-            }],
+            routes: vec![Route::try_from(String::from("memory:issuer")).expect("a route")],
             holder,
             access: Access::Full,
             application: "shopping".into(),

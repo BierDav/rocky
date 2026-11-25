@@ -38,11 +38,11 @@ impl CallerOwned {
     }
 }
 impl Transport for CallerOwned {
-    fn kind(&self) -> &str {
-        "memory"
+    fn schemes(&self) -> &[&str] {
+        &["memory"]
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-        Box::pin(async { Ok("voter-1".into()) })
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
+        Box::pin(async { Ok(Some("memory:voter-1".into())) })
     }
     fn connect<'a>(
         &'a self,
@@ -132,8 +132,7 @@ async fn public_voter() -> PublicVoter {
             public: Some(PublicService {
                 endpoints: vec![ClientEndpoint {
                     voter: 1,
-                    kind: "memory".into(),
-                    address: "voter-1".into(),
+                    route: "memory:voter-1".into(),
                 }],
                 admission: None,
                 limits: rocky_coordinator::Limits::default(),

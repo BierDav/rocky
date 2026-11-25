@@ -104,10 +104,7 @@ async fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopen
         publisher: issuer.publisher,
         database: issuer.database_context()?,
         node,
-        routes: vec![Route {
-            transport: "tcp".into(),
-            address: "127.0.0.1:9000".into(),
-        }],
+        routes: vec![Route::try_from(String::from("tcp://127.0.0.1:9000")).expect("a route")],
         issuer: false,
     };
     let uri = format!(
@@ -160,7 +157,7 @@ fn contact_records_of_other_versions_are_refused() {
         )
     };
     assert!(ContactRecord::parse(&uri(&record)).is_ok());
-    for version in [0, 1, 2, 3, 5, u32::MAX] {
+    for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
         record.v = version;
         assert_eq!(
             ContactRecord::parse(&uri(&record))
@@ -670,10 +667,7 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
         publisher: settings.publisher,
         database: settings.database_context()?,
         node,
-        routes: vec![Route {
-            transport: "tcp".into(),
-            address: "127.0.0.1:9000".into(),
-        }],
+        routes: vec![Route::try_from(String::from("tcp://127.0.0.1:9000")).expect("a route")],
         issuer: true,
     };
     let uri = format!(
@@ -698,7 +692,10 @@ async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Res
     reopened.bind_saved_contact(PrivateKey::new().public_key());
     assert!(reopened.peers.is_empty());
     reopened.bind_saved_contact(node);
-    assert_eq!(reopened.peers[&node].routes[0].address, "127.0.0.1:9000");
+    assert_eq!(
+        reopened.peers[&node].routes[0].as_str(),
+        "tcp://127.0.0.1:9000"
+    );
     assert_eq!(reopened.issuers, [node]);
     reopened.remove_peer(node)?;
     reopened.save(&path).await?;

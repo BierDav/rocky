@@ -79,7 +79,7 @@ impl NetworkCoordinator {
             .public
             .as_ref()
             .ok_or(CoordinationError::Configuration)?;
-        if !public.endpoints.iter().any(|e| e.kind == transport.kind()) {
+        if !public.endpoints.iter().any(|e| transport.claims(&e.route)) {
             return Err(CoordinationError::Configuration);
         }
         Self::new(genesis, bundle.root, bundle.mesh, key, Some(transport))
@@ -101,11 +101,11 @@ impl NetworkCoordinator {
                     for endpoint in public
                         .endpoints
                         .iter()
-                        .filter(|e| e.voter == voter.id && e.kind == transport.kind())
+                        .filter(|e| e.voter == voter.id && transport.claims(&e.route))
                     {
                         reply = timeout(attempt_deadline, async {
                             let mut stream = transport
-                                .connect(&endpoint.address, Protocol::Coordinate, None)
+                                .connect(&endpoint.route, Protocol::Coordinate, None)
                                 .await
                                 .map_err(|_| CoordinationError::Unavailable)?;
                             conversed.store(true, Ordering::Relaxed);

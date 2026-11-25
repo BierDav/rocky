@@ -139,13 +139,46 @@ pub struct AttemptObservation {
     /// Why it failed, if it did.
     pub failure: Option<AttemptFailure>,
 }
-/// A way to reach a peer on one transport.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Route {
-    /// The transport kind, such as `iroh` or `tcp`.
-    pub transport: String,
-    /// The address on that transport.
-    pub address: String,
+/// A URL a peer is dialed at, such as `tcp://10.0.0.2:4000`, `wss://sync.example/rocky` or an
+/// `iroh:` route; the transport that claims its scheme dials it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Route(String);
+impl Route {
+    pub(crate) const MAX_LEN: usize = 2048;
+    /// The URL.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Its scheme, which names the transport that dials it.
+    pub fn scheme(&self) -> &str {
+        rocky_core::net::scheme(&self.0).unwrap_or_default()
+    }
+}
+impl TryFrom<String> for Route {
+    type Error = crate::Failure;
+    fn try_from(url: String) -> Result<Self, Self::Error> {
+        if url.len() > Self::MAX_LEN || rocky_core::net::scheme(&url).is_none() {
+            return Err(format!("a route is a URL of at most {} bytes", Self::MAX_LEN).into());
+        }
+        Ok(Self(url))
+    }
+}
+impl std::str::FromStr for Route {
+    type Err = crate::Failure;
+    fn from_str(url: &str) -> Result<Self, Self::Err> {
+        url.to_owned().try_into()
+    }
+}
+impl From<Route> for String {
+    fn from(route: Route) -> Self {
+        route.0
+    }
+}
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 /// The revocations this device holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,8 +557,11 @@ pub struct InboundStatus {
 pub struct NetworkStatus {
     /// Whether a network is attached.
     pub attachment: AttachmentState,
-    /// The transport kind, such as `iroh` or `tcp`.
-    pub kind: Option<String>,
+    /// The route schemes the attached transport dials, such as `iroh` or `tcp`, `ws` and `wss`;
+    /// empty when detached.
+    pub schemes: Vec<String>,
+    /// Whether the attached transport only dials out and names no route of its own.
+    pub dial_only: bool,
     /// Who owns the transport.
     pub ownership: Option<NetworkOwnership>,
     /// The sync mode.

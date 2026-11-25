@@ -1,5 +1,5 @@
 use crate::{
-    Access, Failure,
+    Access, Failure, Route,
     access::HeldPartition,
     domain::Domain,
     groups::{GroupPartition, GroupRecord, Member, secret_role},
@@ -31,17 +31,16 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 46;
+pub const VERSION: u32 = 47;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
 pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
-const CONTACT_VERSION: u32 = 4;
+const CONTACT_VERSION: u32 = 5;
 pub const MAX_CONTACTS: usize = 64;
 pub const MAX_DIALED: usize = 16;
 const MAX_ISSUERS: usize = crate::registry::MAX_ADMINS;
 const MAX_ROUTES: usize = 4;
-const MAX_ADDRESS: usize = 2048;
 pub(crate) const DEFAULT_TTL: u64 = 180 * 24 * 60 * 60;
 pub(crate) const MAX_EPOCHS: usize = 256;
 pub(crate) const SKEW: u64 = 300;
@@ -378,23 +377,13 @@ impl Revoking {
         })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Route {
-    pub transport: String,
-    pub address: String,
-}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
     pub routes: Vec<Route>,
 }
 impl Contact {
     pub(crate) fn checked(routes: Vec<Route>) -> Result<Self, Failure> {
-        let valid = |route: &Route| {
-            (1..=32).contains(&route.transport.len())
-                && (1..=MAX_ADDRESS).contains(&route.address.len())
-        };
-        if routes.len() > MAX_ROUTES || !routes.iter().all(valid) {
+        if routes.len() > MAX_ROUTES {
             return Err("invalid contact routes".into());
         }
         let mut contact = Self::default();
@@ -403,18 +392,17 @@ impl Contact {
     }
     pub(crate) fn learn(&mut self, routes: Vec<Route>) {
         for route in routes {
-            self.routes
-                .retain(|known| known.transport != route.transport);
+            self.routes.retain(|known| known.scheme() != route.scheme());
             self.routes.push(route);
         }
         let excess = self.routes.len().saturating_sub(MAX_ROUTES);
         self.routes.drain(..excess);
     }
-    pub fn addresses(&self, kind: &str) -> Vec<String> {
+    pub fn addresses(&self, transport: &dyn Transport) -> Vec<String> {
         self.routes
             .iter()
-            .filter(|route| route.transport == kind)
-            .map(|route| route.address.clone())
+            .filter(|route| transport.claims(route.as_str()))
+            .map(|route| route.as_str().to_owned())
             .collect()
     }
 }
@@ -965,11 +953,10 @@ impl Settings {
         transport: &dyn Transport,
     ) -> Result<(String, PublicKey, Vec<Route>), Failure> {
         let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        let routes = vec![Route {
-            transport: transport.kind().into(),
-            address: transport.address().await?,
-        }];
-        Contact::checked(routes.clone())?;
+        let routes = match transport.address().await? {
+            Some(address) => vec![Route::try_from(address)?],
+            None => Vec::new(),
+        };
         let record = ContactRecord {
             v: CONTACT_VERSION,
             publisher: self.publisher,
@@ -1149,16 +1136,7 @@ impl Settings {
         Ok(vault.get("transport")?)
     }
     pub(crate) fn renewal_routes(&self) -> Vec<crate::RenewalRoute> {
-        let routes = |contact: &Contact| {
-            contact
-                .routes
-                .iter()
-                .map(|route| crate::Route {
-                    transport: route.transport.clone(),
-                    address: route.address.clone(),
-                })
-                .collect::<Vec<_>>()
-        };
+        let routes = |contact: &Contact| contact.routes.clone();
         let mut candidates: Vec<_> = self
             .issuers
             .iter()
@@ -2104,11 +2082,7 @@ impl Settings {
         first: Option<PublicKey>,
     ) -> Result<Renewed, Failure> {
         let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let mut failure: Failure = ServiceError::NoRoute {
-            peer: "an issuer",
-            network: transport.kind().into(),
-        }
-        .into();
+        let mut failure: Failure = ServiceError::no_route("an issuer", transport).into();
         let sources = self.epoch_sources();
         for issuer in sources
             .iter()
@@ -2117,7 +2091,7 @@ impl Settings {
             let addresses = self
                 .peers
                 .get(issuer)
-                .map(|contact| contact.addresses(transport.kind()))
+                .map(|contact| contact.addresses(transport))
                 .unwrap_or_default();
             if addresses.is_empty() {
                 continue;
@@ -2232,18 +2206,14 @@ impl Settings {
         transport: &dyn Transport,
         first: Option<PublicKey>,
     ) -> Result<Renewed, Failure> {
-        let mut failure: Failure = ServiceError::NoRoute {
-            peer: "an issuer",
-            network: transport.kind().into(),
-        }
-        .into();
+        let mut failure: Failure = ServiceError::no_route("an issuer", transport).into();
         let mut issuers = self.issuers.clone();
         issuers.sort_by_key(|issuer| Some(*issuer) != first);
         for issuer in &issuers {
             let addresses = self
                 .peers
                 .get(issuer)
-                .map(|contact| contact.addresses(transport.kind()))
+                .map(|contact| contact.addresses(transport))
                 .unwrap_or_default();
             if addresses.is_empty() {
                 continue;
@@ -3366,7 +3336,7 @@ impl Settings {
         let Some(entry) = self.contact_refs.get(&id) else {
             return Ok(None);
         };
-        let addresses = entry.contact.addresses(transport.kind());
+        let addresses = entry.contact.addresses(transport);
         if addresses.is_empty() {
             return Ok(None);
         }

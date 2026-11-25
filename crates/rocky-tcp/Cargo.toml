@@ -1,6 +1,6 @@
 [package]
 name = "rocky-tcp"
-description = "Rocky's network port on plain TCP for networks that already route and encrypt between peers, such as a WireGuard mesh"
+description = "Rocky's network port on TCP and WebSocket: plain TCP for networks that already route and encrypt between peers, such as a WireGuard mesh, and WebSocket for browsers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,20 +14,29 @@ rocky-core.workspace = true
 rocky-credentials.workspace = true
 rocky-platform.workspace = true
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros", "net"] }
+tokio = { version = "1", features = ["net"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"], optional = true }
 webpki-roots = { version = "1", optional = true }
 
+# A browser dials through its own WebSocket, whose handles ws_stream_wasm keeps
+# Send for the transport's futures.
+[target.'cfg(target_family = "wasm")'.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+ws_stream_wasm = "0.7"
+
 [features]
 websocket = ["dep:futures-util", "dep:rustls", "dep:tokio-rustls", "dep:tokio-tungstenite", "dep:webpki-roots"]
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# A private CA for the wss test of root_certificates.
+rcgen = "0.14"
 
 [lints]
 workspace = true

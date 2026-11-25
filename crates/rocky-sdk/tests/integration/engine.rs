@@ -546,10 +546,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
         async move { Db::start(&directory, mode, &application("shopping"), network, None).await }
     };
     let creator = open("a", OpenMode::Create, "a").await?;
-    assert_eq!(
-        creator.engine.status().await?.network.kind.as_deref(),
-        Some("memory")
-    );
+    assert_eq!(creator.engine.status().await?.network.schemes, ["memory"]);
     let invitation = creator.invite().await;
     let member = open(
         "b",

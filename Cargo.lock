@@ -6098,6 +6098,9 @@ version = "0.1.0"
 dependencies = [
  "data-encoding",
  "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iroh-relay",
  "p2panda-core",
  "rand 0.8.8",
@@ -6194,6 +6197,7 @@ name = "rocky-tcp"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "rcgen",
  "rocky-core",
  "rocky-credentials",
  "rocky-platform",
@@ -6204,6 +6208,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "webpki-roots",
+ "ws_stream_wasm",
 ]
 
 [[package]]

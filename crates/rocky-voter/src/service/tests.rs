@@ -52,8 +52,7 @@ impl Cluster {
                 public: Some(PublicService {
                     endpoints: vec![ClientEndpoint {
                         voter: 1,
-                        kind: "memory".into(),
-                        address: "voter-1".into(),
+                        route: "memory:voter-1".into(),
                     }],
                     admission: None,
                     limits: rocky_coordinator::Limits::default(),

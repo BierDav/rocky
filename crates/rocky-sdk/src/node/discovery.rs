@@ -38,17 +38,17 @@ impl Node {
         let announced = discovery.announce(node, &topics).await.is_ok() && !topics.is_empty();
         self.announcing.store(announced, Ordering::SeqCst);
     }
-    pub(super) async fn learn_found(&self, kind: &str, found: Found) -> Result<(), Failure> {
+    pub(super) async fn learn_found(&self, found: Found) -> Result<(), Failure> {
         let node = PublicKey::from_bytes(&found.claimed_node)?;
         {
             let settings = self.settings.lock().await;
-            if !settings.would_learn(node, kind, &found.address, found.local) {
+            if !settings.would_learn(node, &found.address, found.local) {
                 return Ok(());
             }
         }
         let learned = self
             .configure(|settings| {
-                settings.learn_found(&self.vault, node, kind, found.address, found.local, now()?)
+                settings.learn_found(&self.vault, node, found.address, found.local, now()?)
             })
             .await?;
         if learned {
@@ -94,7 +94,7 @@ impl Node {
                     }
                     found = discovery.found(), if open => match found {
                         Some(found) => {
-                            let _ = self.learn_found(link.transport.kind(), found).await;
+                            let _ = self.learn_found(found).await;
                         }
                         None => open = false,
                     },
@@ -116,8 +116,10 @@ impl Node {
                 .to_vec(),
             Some((link, None)) => [LOCAL_PATH, TOPIC_PATH]
                 .map(|path| {
-                    let reason =
-                        format!("the {} transport has no discovery", link.transport.kind());
+                    let reason = format!(
+                        "the {} transport has no discovery",
+                        link.transport.schemes().join("/")
+                    );
                     (path.to_owned(), PathState::Unavailable(reason))
                 })
                 .to_vec(),

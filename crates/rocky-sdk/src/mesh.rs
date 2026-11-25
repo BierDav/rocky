@@ -1,6 +1,6 @@
 use crate::{
-    Failure,
-    enrollment::{Contact, Route, Settings, now},
+    Failure, Route,
+    enrollment::{Contact, Settings, now},
     secrets::Vault,
 };
 use data_encoding::HEXLOWER;
@@ -161,8 +161,8 @@ impl Settings {
                 routes: hint
                     .routes
                     .into_iter()
-                    .map(|(transport, address)| Route { transport, address })
-                    .collect(),
+                    .map(Route::try_from)
+                    .collect::<Result<_, _>>()?,
             },
         );
         self.contact_meta.insert(
@@ -176,13 +176,7 @@ impl Settings {
         );
         Ok(true)
     }
-    pub(crate) fn would_learn(
-        &self,
-        node: PublicKey,
-        kind: &str,
-        address: &str,
-        local: bool,
-    ) -> bool {
+    pub(crate) fn would_learn(&self, node: PublicKey, address: &str, local: bool) -> bool {
         if self.revocations.revokes(&node) {
             return false;
         }
@@ -190,10 +184,7 @@ impl Settings {
         let marked = !local || meta.is_some_and(|meta| meta.local);
         let known = self.peers.get(&node).is_some_and(|contact| {
             meta.is_some_and(|meta| meta.source == "application")
-                || contact
-                    .routes
-                    .iter()
-                    .any(|route| route.transport == kind && route.address == address)
+                || contact.routes.iter().any(|route| route.as_str() == address)
         });
         !(known && marked)
     }
@@ -201,18 +192,17 @@ impl Settings {
         &mut self,
         vault: &Vault,
         node: PublicKey,
-        kind: &str,
         address: String,
         local: bool,
         time: u64,
     ) -> Result<bool, Failure> {
+        let route = Route::try_from(address)?;
         let hint = ContactHint {
             node,
-            routes: vec![(kind.to_owned(), address.clone())],
+            routes: vec![route.as_str().to_owned()],
             trusted: false,
         };
-        hint.validate()?;
-        if !self.would_learn(node, kind, &address, local)
+        if !self.would_learn(node, route.as_str(), local)
             || node == PrivateKey::from_bytes(&vault.get("node")?).public_key()
         {
             return Ok(false);
@@ -235,10 +225,7 @@ impl Settings {
             });
         meta.local |= local;
         if meta.source != "application" {
-            contact.learn(vec![Route {
-                transport: kind.to_owned(),
-                address,
-            }]);
+            contact.learn(vec![route]);
         }
         Ok(true)
     }
@@ -255,7 +242,7 @@ impl Settings {
             routes: contact
                 .routes
                 .iter()
-                .map(|route| (route.transport.clone(), route.address.clone()))
+                .map(|route| route.as_str().to_owned())
                 .collect(),
             trusted: self.issuers.contains(&node)
                 || self
@@ -921,10 +908,7 @@ mod tests {
         settings.peers.insert(
             configured,
             Contact {
-                routes: vec![Route {
-                    transport: "memory".into(),
-                    address: "configured".into(),
-                }],
+                routes: vec![Route::try_from(String::from("memory:configured")).expect("a route")],
             },
         );
         settings.contact_meta.insert(
@@ -939,7 +923,7 @@ mod tests {
         let oldest = PrivateKey::new().public_key();
         let hint = |node| ContactHint {
             node,
-            routes: vec![("memory".into(), "learned".into())],
+            routes: vec!["memory:learned".into()],
             trusted: false,
         };
         settings.learn_contact(&vault, hint(oldest), "handover", 1)?;
@@ -952,7 +936,10 @@ mod tests {
         assert!(!settings.peers.contains_key(&oldest));
         assert!(settings.contact_meta.values().any(|meta| meta.learned == 2));
         assert!(settings.peers.contains_key(&newest));
-        assert_eq!(settings.peers[&configured].routes[0].address, "configured");
+        assert_eq!(
+            settings.peers[&configured].routes[0].as_str(),
+            "memory:configured"
+        );
         assert!(!settings.learn_contact(&vault, hint(configured), "handover", 65)?);
         settings.learn_contact(
             &vault,

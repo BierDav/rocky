@@ -14,8 +14,8 @@ come from the optional `rocky-coordinator` crate.
 ## Install
 
 Depend on Rocky by git tag. `rocky-sdk` has no networking of its own; add
-`rocky-tcp` for plain TCP or WebSocket, or `rocky-iroh` for peer-to-peer QUIC
-with relays and discovery.
+`rocky-tcp` for plain TCP or WebSocket, including a browser's WebSocket, or
+`rocky-iroh` for peer-to-peer QUIC with relays and discovery.
 
 ```toml
 [dependencies]
@@ -94,11 +94,11 @@ Alice writes, and Bob syncs and reads Alice's note.
 
 ```rust crates/rocky-sdk/examples/two_devices.rs
 use rocky_sdk::{Access, Affinity, Column, Configuration, Invite, Network, Schema, Table, params};
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
 fn loopback() -> Network {
     let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
-    Network::Owned(Arc::new(rocky_tcp::Options::new(any_port)))
+    rocky_tcp::Options::new(any_port).into()
 }
 
 #[tokio::main]
@@ -400,30 +400,64 @@ applications; see `cargo run -p rocky-sdk --example relay`.
 ## Transports
 
 A database attaches its network at open (`Configuration::network`) or later
-with `attach`; `detach` closes only a transport the database started.
+with `attach`; `detach` closes only a transport the database started. Any
+transport's options convert into a `Network` that Rocky starts and closes, as
+in `.network(rocky_tcp::Options::new(bind).into())`.
 
-- **iroh**: `Network::Owned(Arc::new(rocky_iroh::Options::default()))` uses
-  n0's public relays and lookup service, finds the database's other devices by
-  topic and on the local network, and runs in the browser through relays. An
+A route is a URL: `tcp://10.0.0.2:4000`, `wss://sync.example/rocky` or an
+`iroh:` route. Each transport claims URL schemes, and a device dials only the
+routes whose scheme its transport claims. A device names at most one route of
+its own, its transport's address, and hands it out in invitations, contacts and
+syncs.
+
+- **iroh**: `rocky_iroh::Options::default()` uses n0's public relays and
+  lookup service, finds the database's other devices by topic and on the local
+  network, and runs in the browser through relays. It claims `iroh:` routes. An
   application with its own iroh endpoint registers
   `rocky_iroh::Attachment::new(endpoint)` on its router and passes
   `attachment.transport()` as `Network::Borrowed`. On iOS, also copy the
   `[patch.crates-io]` entries for `netdev` and `netwatch` from Rocky's root
   `Cargo.toml`.
-- **TCP**: `rocky_tcp::Options::new(bind)` through `Network::Owned`, for
-  networks that already route and encrypt between peers, such as a WireGuard
-  mesh. `advertise("host:port")` names a route other than the bound address.
-  It is native only and has no discovery or relays.
-- **WebSocket**: the `rocky-tcp` feature `websocket` dials `ws://` and `wss://`
-  routes and accepts handshakes with `Options::websocket`. Behind an HTTPS
-  reverse proxy, `rocky_tcp::Attachment::external(url)` with
-  `admit_websocket` serves connections the application's HTTP server upgraded.
-- **Custom**: implement `rocky_sdk::transport::Transport` and pass it as
-  `Network::Borrowed`; `Network::Attached` also supplies discovery and
-  network-change events. The application keeps and closes a borrowed or
-  attached transport.
+- **TCP**: `rocky_tcp::Options::new(bind)`, for networks that already route
+  and encrypt between peers, such as a WireGuard mesh. It claims `tcp://`
+  routes; `advertise("tcp://host:port")` names a route other than the bound
+  address. It has no discovery or relays.
+- **WebSocket**: with the `rocky-tcp` feature `websocket`, a native device also
+  dials `ws://` and `wss://` routes, and `Options::websocket` accepts
+  WebSocket handshakes on the listener. A `wss://` dial trusts the public web
+  roots, plus the DER certificates of a private CA passed to
+  `root_certificates`. Behind an HTTPS reverse proxy, or beside an
+  application's own HTTP routes, `rocky_tcp::Attachment::external(url)` with
+  `admit_websocket` serves connections the application's HTTP server upgraded;
+  `cargo run -p rocky-sdk --example websocket_server` shows it with hyper.
+- **Browser**: `rocky_tcp::Options::browser()` dials `ws://` and `wss://`
+  routes through the browser's own WebSocket and trust store.
+- **Dial-only**: `rocky_tcp::Options::dialer()` natively, and every browser
+  transport, listen nowhere and name no route. Such a device syncs over the
+  connections it opens itself; its peers never dial it and keep no route to it,
+  so their syncs stay complete without it. Its `status().network.dial_only` is
+  true.
+- **Custom**: implement `rocky_sdk::transport::Transport`, claiming its
+  schemes, and pass it as `Network::Borrowed`; `Network::Attached` also
+  supplies discovery and network-change events. The application keeps and
+  closes a borrowed or attached transport.
 
 Rocky's encryption and authorization apply on top of every transport.
+
+### Who can reach whom
+
+- A joiner must reach its issuer. `join` dials only the routes the invitation
+  carries, which is the issuer's own route when it invited. An issuer with no
+  route, such as a dial-only device, issues invitations nobody can redeem.
+- Peers sync with the devices they can dial. With `rocky-tcp`, a device that
+  cannot be dialed, because it is dial-only or behind a NAT or firewall, is
+  reached by nobody: it syncs only when it dials out, and two such devices meet
+  only through a device both can dial.
+- So a browser either joins an always-on admin device that listens for
+  WebSockets, such as a server behind an HTTPS proxy, or uses `rocky-iroh`:
+  both ends dial out to a relay, so a browser reaches an admin on a desktop
+  with no open port, and the relay forwards only end-to-end-encrypted
+  traffic.
 
 ## Coordinator
 
@@ -470,7 +504,9 @@ reach them through `cluster.bundle()`.
 The same crates build for `wasm32-unknown-unknown`. Rocky must run in a
 dedicated Worker, where it keeps each database in the origin's private file
 system (OPFS); the directory you pass to `Configuration` names it there. In the
-browser, use `rocky-iroh` through its relays.
+browser, a database dials a WebSocket server with
+`rocky_tcp::Options::browser()`, or reaches any peer through `rocky-iroh`'s
+relays; see [who can reach whom](#who-can-reach-whom).
 
 Building compiles C (SQLite, ring), so it needs a clang that targets wasm32 and
 an `llvm-ar` that indexes wasm objects, which Apple's `ar` does not (`rustup
@@ -489,8 +525,53 @@ AR_wasm32_unknown_unknown = "<rustc --print sysroot>/lib/rustlib/<host>/bin/llvm
 Rocky links its own SQLite build in the browser (`rocky-sqlite`, see
 [vendor/README.md](vendor/README.md)). An application that uses rusqlite itself
 depends on it with `default-features = false`, since rusqlite's default
-`ffi-sqlite-wasm-rs` links another SQLite and the link fails. Browser tests run
-with `WASM_BINDGEN_USE_DEDICATED_WORKER=1`.
+`ffi-sqlite-wasm-rs` links another SQLite and the link fails.
+
+### Testing in a browser
+
+Browser tests are `wasm-bindgen-test` tests in a dedicated Worker:
+
+1. Install the `wasm-bindgen-test-runner` of the `wasm-bindgen` version in
+   your `Cargo.lock` (`cargo install wasm-bindgen-cli --version <it>`) and set
+   it as the runner under `[target.wasm32-unknown-unknown]`.
+2. Install headless Firefox with `geckodriver`, or a Chrome with the
+   `chromedriver` of its major version, and name the driver in `GECKODRIVER`
+   or `CHROMEDRIVER`.
+3. Run `WASM_BINDGEN_USE_DEDICATED_WORKER=1 cargo test --target
+   wasm32-unknown-unknown`.
+
+Rocky's own `scripts/wasm-runner` does this with pinned drivers:
+`ROCKY_BROWSER=firefox` or `ROCKY_BROWSER=chrome ROCKY_CHROME=<a
+chrome-headless-shell of chromedriver's major version>`, and
+`scripts/browser-sync` starts a native peer (`examples/browser_peer.rs`) with
+a relay and a WebSocket listener that rocky-sdk's `browser_sync` tests join.
+
+### Size
+
+A browser app that joins and syncs with `rocky-sdk` and
+`rocky_tcp::Options::browser()` measured, before `wasm-bindgen`, with Rust 1.99
+on wasm32 (each row adds to the one above):
+
+| Release profile | `.wasm` | gzip -9 |
+| --- | --- | --- |
+| Cargo's defaults | 55.5 MB | 14.6 MB |
+| `strip = true` | 47.8 MB | 13.8 MB |
+| `lto = true`, `codegen-units = 1` | 27.0 MB | 8.0 MB |
+| `opt-level = "z"`, `panic = "abort"` | 13.6 MB | 4.7 MB |
+| then `wasm-opt -Oz` | 12.2 MB | 4.6 MB |
+
+Link-time optimization removes the most, and `opt-level = "z"` halves the
+rest; its cost in speed is not measured. Panics already abort in a browser, so
+`panic = "abort"` changes no behavior. Serve the file compressed.
+
+```toml
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = true
+```
 
 ## Developing Rocky
 

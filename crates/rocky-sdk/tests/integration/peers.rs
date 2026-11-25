@@ -89,7 +89,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert_ne!(creators[0]["node"], creator["node"]);
     let network = snap::ok(async { c.database.status().await.map(|status| status.network) }).await;
     assert_eq!(network["attachment"], "attached");
-    assert_eq!(network["kind"], "memory");
+    assert_eq!(network["schemes"], json!(["memory"]));
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
@@ -261,8 +261,8 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         (before_a, before_b)
     );
     assert_eq!(
-        snap::ok(async { a.database.status().await.map(|status| status.network) }).await["kind"],
-        "iroh"
+        snap::ok(async { a.database.status().await.map(|status| status.network) }).await["schemes"],
+        json!(["iroh"])
     );
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
@@ -374,8 +374,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer"))).await?;
     let invite = decode(&a.invite().await.to_string(), "rocky://invite/")?;
-    assert_eq!(invite["v"], 4);
-    for version in [0, 3, 5, u32::MAX] {
+    assert_eq!(invite["v"], 5);
+    for version in [0, 4, 6, u32::MAX] {
         let mut other = invite.clone();
         other["v"] = json!(version);
         let directory = root.path().join(format!("join-{version}"));
@@ -406,8 +406,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 46);
-    for version in (0..46).chain([47, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 47);
+    for version in (0..47).chain([48, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

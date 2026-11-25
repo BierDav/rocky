@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 37;
+pub(super) const HANDSHAKE_VERSION: u32 = 38;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -777,7 +777,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v37",
+            "rocky.link.v38",
             "the cryptographic handshake accepts one current version"
         );
     }

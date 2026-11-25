@@ -531,10 +531,7 @@ impl Node {
                     let result = async {
                         let stream = service
                             .transport
-                            .session(
-                                &contact.addresses(service.transport.kind()),
-                                node.domain().scope,
-                            )
+                            .session(&contact.addresses(&*service.transport), node.domain().scope)
                             .await?;
                         attempt.stage(crate::AttemptStage::Admission);
                         node.admit_link(service.clone(), stream, Some(peer), settings, None)

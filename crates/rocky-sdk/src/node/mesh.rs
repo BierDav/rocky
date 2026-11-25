@@ -26,12 +26,7 @@ impl Node {
                     .iter()
                     .filter_map(|node| settings.contact_hint(*node))
                     .filter(|contact| {
-                        let size = contact
-                            .routes
-                            .iter()
-                            .map(|(kind, route)| kind.len() + route.len())
-                            .sum::<usize>()
-                            + 256;
+                        let size = contact.routes.iter().map(String::len).sum::<usize>() + 256;
                         if bytes + size > 96 * 1024 {
                             return false;
                         }

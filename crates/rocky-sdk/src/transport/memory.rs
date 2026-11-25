@@ -38,6 +38,11 @@ struct Listener {
     closed: tokio::sync::watch::Sender<bool>,
 }
 const RPC_INBOUND: usize = 32;
+const SCHEME: &str = "memory";
+
+fn route(name: &str) -> String {
+    format!("{SCHEME}:{name}")
+}
 /// How many requests a node serves and has refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RpcAdmission {
@@ -699,7 +704,7 @@ impl Discovery for Finder {
             }
             let hint = |claimed_node, name: &str| Found {
                 claimed_node,
-                address: name.to_owned(),
+                address: route(name),
                 path: LOCAL_PATH.into(),
                 local: true,
             };
@@ -803,11 +808,11 @@ impl Transport for Node {
         Box::pin(dial_routes(self, addresses, Protocol::Link, scope))
     }
 
-    fn kind(&self) -> &str {
-        "memory"
+    fn schemes(&self) -> &[&str] {
+        &[SCHEME]
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-        Box::pin(async { Ok(self.name.clone()) })
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
+        Box::pin(async { Ok(Some(route(&self.name))) })
     }
     fn connect<'a>(
         &'a self,
@@ -816,6 +821,10 @@ impl Transport for Node {
         scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
+            let address = address
+                .strip_prefix(SCHEME)
+                .and_then(|name| name.strip_prefix(':'))
+                .ok_or("not a memory: route")?;
             if *self.closed.borrow() {
                 return Err("memory transport is closed".into());
             }
@@ -1054,10 +1063,13 @@ impl Transport for Wrapped {
         Box::pin(dial_routes(self, addresses, Protocol::Link, scope))
     }
 
-    fn kind(&self) -> &str {
-        self.transport.kind()
+    fn schemes(&self) -> &[&str] {
+        self.transport.schemes()
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+    fn dial_only(&self) -> bool {
+        self.transport.dial_only()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
         self.transport.address()
     }
     fn connect<'a>(
@@ -1181,7 +1193,7 @@ mod tests {
         let server = hub.connector("server").start(true, [1; 32]).await?;
         let caller = hub.connector("caller").start(false, [2; 32]).await?;
         server.listen(None, true)?;
-        let _partial = caller.connect("server", Protocol::Rpc, None).await?;
+        let _partial = caller.connect("memory:server", Protocol::Rpc, None).await?;
         let accept = server.accept();
         tokio::pin!(accept);
         tokio::select! {
@@ -1213,7 +1225,11 @@ mod tests {
         server.listen(Some(scope), true)?;
         hub.stall_peer("first", true);
         hub.stall_peer("second", true);
-        let routes = ["first".into(), "second".into(), "third".into()];
+        let routes = [
+            "memory:first".into(),
+            "memory:second".into(),
+            "memory:third".into(),
+        ];
         let answer = async {
             let Some(Incoming::Request(request)) = server.accept().await else {
                 return Err("request expected".into());
@@ -1240,7 +1256,7 @@ mod tests {
         server.listen(Some(scope), true)?;
         hub.stall_peer("stalled", true);
         let _stream = caller
-            .session(&["stalled".into(), "server".into()], scope)
+            .session(&["memory:stalled".into(), "memory:server".into()], scope)
             .await?;
         assert!(matches!(
             server.accept().await,
@@ -1266,7 +1282,7 @@ mod tests {
             domain: rocky_core::DomainId([4; 16]),
             ..scope
         };
-        let routes = ["server".into()];
+        let routes = ["memory:server".into()];
         let error = caller
             .request(&routes, wrong, b"request")
             .await
@@ -1327,7 +1343,7 @@ mod tests {
             drop(held);
             result
         };
-        let routes = ["silent".into(), "server".into()];
+        let routes = ["memory:silent".into(), "memory:server".into()];
         let (reply, ()) = tokio::try_join!(caller.request(&routes, scope, b"request"), answer)?;
         assert_eq!(reply, b"answer");
         tokio::join!(caller.close(), silent.close(), server.close());

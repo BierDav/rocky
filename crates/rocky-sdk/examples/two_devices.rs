@@ -1,9 +1,9 @@
 use rocky_sdk::{Access, Affinity, Column, Configuration, Invite, Network, Schema, Table, params};
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 
 fn loopback() -> Network {
     let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
-    Network::Owned(Arc::new(rocky_tcp::Options::new(any_port)))
+    rocky_tcp::Options::new(any_port).into()
 }
 
 #[tokio::main]

@@ -11,12 +11,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 mod native {
     use iroh_relay::server::{RelayConfig, Server, ServerConfig};
     use rocky_sdk::{
-        Access, Affinity, Column, Configuration, Database, Network, Schema, Table, params,
+        Access, Affinity, Column, Configuration, Database, Invitation, Network, Schema, Table,
+        params,
     };
 
     type Failure = Box<dyn std::error::Error + Send + Sync>;
     use serde_json::json;
-    use std::{net::Ipv4Addr, sync::Arc};
+    use std::net::{Ipv4Addr, SocketAddr};
 
     pub async fn main() -> Result<(), Failure> {
         let mut config = ServerConfig::default();
@@ -31,18 +32,56 @@ mod native {
         let schema = Schema::builder("browser_sync", 1)
             .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
             .build()?;
-        let network = rocky_iroh::Options {
-            relay: Some(url.clone()),
-            lookup: Some("disabled".into()),
-            topic: false,
-            local: false,
-            bind: None,
-        };
-        let created = Configuration::new(directory.path().join("owner"), &schema)?
-            .network(Network::Owned(Arc::new(network)))
+        let relayed = owner(
+            &directory.path().join("relayed"),
+            &schema,
+            rocky_iroh::Options {
+                relay: Some(url.clone()),
+                lookup: Some("disabled".into()),
+                topic: false,
+                local: false,
+                bind: None,
+            }
+            .into(),
+        )
+        .await?;
+        let websocket = owner(
+            &directory.path().join("websocket"),
+            &schema,
+            rocky_tcp::Options::new(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .websocket()
+                .into(),
+        )
+        .await?;
+        println!(
+            "{}",
+            json!({
+                "relay": url,
+                "invitation": relayed.1.code.to_string(),
+                "websocket_invitation": websocket.1.code.to_string(),
+            })
+        );
+
+        tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;
+        let checked = (check(&relayed.0).await, check(&websocket.0).await);
+        relayed.0.close().await?;
+        websocket.0.close().await?;
+        checked.0?;
+        checked.1?;
+        eprintln!("browser-peer: the browser's writes arrived over the relay and the WebSocket");
+        Ok(())
+    }
+
+    async fn owner(
+        path: &std::path::Path,
+        schema: &Schema,
+        network: Network,
+    ) -> Result<(Database, Invitation), Failure> {
+        let db = Configuration::new(path, schema)?
+            .network(network)
             .create()
-            .await?;
-        let db = created.database;
+            .await?
+            .database;
         let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -52,17 +91,7 @@ mod native {
         .await?;
         tx.commit().await?;
         let invitation = db.invite(rocky_sdk::Invite::new(Access::Full)).await?;
-        println!(
-            "{}",
-            json!({ "relay": url, "invitation": invitation.code.to_string() })
-        );
-
-        tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;
-        let checked = check(&db).await;
-        db.close().await?;
-        checked?;
-        eprintln!("browser-peer: the browser's write arrived over the relay");
-        Ok(())
+        Ok((db, invitation))
     }
 
     async fn check(db: &Database) -> Result<(), Failure> {

@@ -195,11 +195,11 @@ async fn hub_transcript(seed: u64) -> Result<(Vec<u8>, Vec<String>), Failure> {
     for stream in 0..12u8 {
         if stream == 6 {
             hub.set_down("x", "y", true);
-            assert!(x.connect("y", Protocol::Link, None).await.is_err());
+            assert!(x.connect("memory:y", Protocol::Link, None).await.is_err());
             tokio::time::sleep(Duration::from_secs(1)).await;
             hub.set_down("x", "y", false);
         }
-        let Ok(link) = x.connect("y", Protocol::Link, None).await else {
+        let Ok(link) = x.connect("memory:y", Protocol::Link, None).await else {
             continue;
         };
         let (mut reader, mut writer) = tokio::io::split(link);

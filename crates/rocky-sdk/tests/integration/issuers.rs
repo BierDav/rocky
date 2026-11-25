@@ -125,8 +125,8 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     assert_issuers(root, "a", &[&b_node])?;
     assert_issuers(root, "b", &[&a_node])?;
     assert_eq!(
-        identity(root, "a")?["contact_refs"][peer_id(&b_node)?]["contact"]["routes"][0]["address"],
-        "b"
+        identity(root, "a")?["contact_refs"][peer_id(&b_node)?]["contact"]["routes"][0],
+        "memory:b"
     );
     assert_ne!(
         device_info(&a).await.principal,

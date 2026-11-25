@@ -34,10 +34,6 @@ pub fn accept_key(key: &[u8]) -> String {
     derive_accept_key(key)
 }
 
-pub(crate) fn is_url(address: &str) -> bool {
-    address.starts_with("ws://") || address.starts_with("wss://")
-}
-
 pub(crate) async fn accept(stream: TcpStream) -> Result<Io<TcpStream>, Failure> {
     Ok(Io::new(
         tokio_tungstenite::accept_async_with_config(stream, Some(config())).await?,
@@ -52,7 +48,7 @@ where
     Io::new(WebSocketStream::from_raw_socket(io, Role::Server, Some(config())).await)
 }
 
-pub(crate) async fn dial(address: &str) -> Result<Box<dyn SessionStream>, Failure> {
+pub(crate) async fn dial(address: &str, tls: &Tls) -> Result<Box<dyn SessionStream>, Failure> {
     let request = address.into_client_request()?;
     let uri = request.uri();
     let secure = match uri.scheme_str() {
@@ -75,7 +71,7 @@ pub(crate) async fn dial(address: &str) -> Result<Box<dyn SessionStream>, Failur
         return Ok(Box::new(Io::new(socket)));
     }
     let name = rustls::pki_types::ServerName::try_from(host)?;
-    let tls = tokio_rustls::TlsConnector::from(client_config()?)
+    let tls = tokio_rustls::TlsConnector::from(tls.config()?)
         .connect(name, tcp)
         .await?;
     let (socket, _) =
@@ -83,14 +79,39 @@ pub(crate) async fn dial(address: &str) -> Result<Box<dyn SessionStream>, Failur
     Ok(Box::new(Io::new(socket)))
 }
 
-fn client_config() -> Result<Arc<rustls::ClientConfig>, Failure> {
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    if let Some(config) = CONFIG.get() {
-        return Ok(config.clone());
+#[derive(Default)]
+pub(crate) struct Tls(Option<Arc<rustls::ClientConfig>>);
+impl Tls {
+    pub(crate) fn new(roots: &[Vec<u8>]) -> Result<Self, Failure> {
+        if roots.is_empty() {
+            return Ok(Self(None));
+        }
+        let mut store = public_roots();
+        for root in roots {
+            store.add(rustls::pki_types::CertificateDer::from(root.as_slice()))?;
+        }
+        Ok(Self(Some(client_config(store)?)))
     }
-    let roots = rustls::RootCertStore {
+    fn config(&self) -> Result<Arc<rustls::ClientConfig>, Failure> {
+        if let Some(config) = &self.0 {
+            return Ok(config.clone());
+        }
+        static PUBLIC: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+        if let Some(config) = PUBLIC.get() {
+            return Ok(config.clone());
+        }
+        let config = client_config(public_roots())?;
+        Ok(PUBLIC.get_or_init(|| config).clone())
+    }
+}
+
+fn public_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
+    }
+}
+
+fn client_config(roots: rustls::RootCertStore) -> Result<Arc<rustls::ClientConfig>, Failure> {
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -98,7 +119,7 @@ fn client_config() -> Result<Arc<rustls::ClientConfig>, Failure> {
     .with_root_certificates(roots)
     .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(CONFIG.get_or_init(|| Arc::new(config)).clone())
+    Ok(Arc::new(config))
 }
 
 /// A WebSocket connection read and written as a byte stream, in binary messages of at most 64 KiB.

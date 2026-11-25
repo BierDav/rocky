@@ -64,8 +64,27 @@ pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
         .find(|protocol| alpn(*protocol) == name)
 }
 
-/// The transport kind this crate reports in peer routes and diagnostics.
-pub const KIND: &str = "iroh";
+/// The route scheme this crate claims: its routes are `iroh:` URLs that name an endpoint and its
+/// relay and direct addresses.
+pub const SCHEME: &str = "iroh";
+
+/// The `iroh:` route that names an endpoint, its relay and its direct addresses.
+pub fn route(address: &EndpointAddr) -> Result<String, Failure> {
+    Ok(format!(
+        "{SCHEME}:{}",
+        data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(address)?)
+    ))
+}
+
+fn endpoint_addr(route: &str) -> Result<EndpointAddr, Failure> {
+    let encoded = route
+        .strip_prefix(SCHEME)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .ok_or("not an iroh: route")?;
+    Ok(serde_json::from_slice(
+        &data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?,
+    )?)
+}
 /// How long a dial or a connection's opening handshake may take before it fails.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
 /// Incoming streams a database scope queues before new ones are refused as busy.
@@ -754,7 +773,7 @@ impl Attachment {
                     if self.endpoint().is_closed() {
                         self.revive().await?;
                     }
-                    let address: EndpointAddr = serde_json::from_str(address)?;
+                    let address = endpoint_addr(address)?;
                     let key = (address.id, protocol);
                     let cached = self.0.connections.lock().await.get(&key).cloned();
                     if protocol != Protocol::Link
@@ -875,7 +894,7 @@ impl Attachment {
     }
     /// The network paths to a peer at a route Rocky printed, with their statistics.
     pub async fn paths(&self, address: &str) -> Result<Vec<NetworkPath>, Failure> {
-        let address: EndpointAddr = serde_json::from_str(address)?;
+        let address = endpoint_addr(address)?;
         let connections: Vec<_> = self
             .0
             .connections
@@ -905,10 +924,10 @@ impl Attachment {
     }
 }
 impl Transport for Attachment {
-    fn kind(&self) -> &str {
-        KIND
+    fn schemes(&self) -> &[&str] {
+        &[SCHEME]
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
         Box::pin(async move { self.default_port().address().await })
     }
     fn connect<'a>(
@@ -956,16 +975,16 @@ impl std::ops::Deref for Port {
     }
 }
 impl Transport for Port {
-    fn kind(&self) -> &str {
-        KIND
+    fn schemes(&self) -> &[&str] {
+        &[SCHEME]
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
         Box::pin(async {
             if self.0.relays {
                 let _ =
                     rocky_platform::time::timeout(HOME_RELAY_WAIT, self.endpoint().online()).await;
             }
-            Ok(serde_json::to_string(&self.endpoint().addr())?)
+            Ok(Some(route(&self.endpoint().addr())?))
         })
     }
     fn connect<'a>(
@@ -1116,7 +1135,7 @@ impl Transport for Port {
 }
 impl Attachment {
     fn forget_route(&self, address: &str, protocol: Protocol, scope: Scope) {
-        let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
+        let Ok(address) = endpoint_addr(address) else {
             return;
         };
         if protocol == Protocol::Link {
@@ -1140,7 +1159,7 @@ impl Attachment {
     }
     /// Closes every connection to the peer at a route, so the next dial starts afresh.
     pub fn forget(&self, address: &str) {
-        let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
+        let Ok(address) = endpoint_addr(address) else {
             return;
         };
         for link in self
@@ -1416,7 +1435,11 @@ mod tests {
 
     async fn coordinate(client: &Attachment, server: &Attachment) -> Result<(), Failure> {
         let mut near = client
-            .connect(&server.address().await?, Protocol::Coordinate, None)
+            .connect(
+                &server.address().await?.ok_or("no route")?,
+                Protocol::Coordinate,
+                None,
+            )
             .await?;
         near.write_u8(7).await?;
         let Some(Incoming::Stream(Protocol::Coordinate, mut far)) = server.accept().await else {
@@ -1464,7 +1487,11 @@ mod tests {
             );
 
             let mut near = client
-                .connect(&server.address().await?, Protocol::Coordinate, None)
+                .connect(
+                    &server.address().await?.ok_or("no route")?,
+                    Protocol::Coordinate,
+                    None,
+                )
                 .await?;
             assert_eq!(
                 client.0.connections.lock().await[&key]
@@ -1479,7 +1506,11 @@ mod tests {
             };
             assert_eq!(far.read_u8().await?, 7);
             let mut healthy = client
-                .connect(&server.address().await?, Protocol::Coordinate, None)
+                .connect(
+                    &server.address().await?.ok_or("no route")?,
+                    Protocol::Coordinate,
+                    None,
+                )
                 .await?;
             healthy.write_u8(11).await?;
             let Some(Incoming::Stream(Protocol::Coordinate, mut healthy_far)) =

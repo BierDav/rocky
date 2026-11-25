@@ -38,7 +38,7 @@ impl Node {
         let providers: Vec<_> = settings
             .targets()
             .into_iter()
-            .filter(|(_, contact)| !contact.addresses(transport.kind()).is_empty())
+            .filter(|(_, contact)| !contact.addresses(transport).is_empty())
             .collect();
         let work: Vec<_> = missing
             .iter()
@@ -101,7 +101,7 @@ impl Node {
             let request = PeerRequest::TipSchema {
                 manifest: *manifest,
             };
-            let addresses = contact.addresses(transport.kind());
+            let addresses = contact.addresses(transport);
             let response = tokio::select! {
                 biased;
                 _ = authority.changed() => None,

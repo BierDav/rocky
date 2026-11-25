@@ -81,10 +81,7 @@ impl Node {
                     routes: contact
                         .into_iter()
                         .flat_map(|contact| &contact.routes)
-                        .map(|route| crate::Route {
-                            transport: route.transport.clone(),
-                            address: route.address.clone(),
-                        })
+                        .cloned()
                         .collect(),
                     is_local: settings
                         .contact_meta
@@ -130,9 +127,16 @@ impl Node {
                 }
                 Some(_) => AttachmentState::Attached,
             },
-            kind: service
+            schemes: service
                 .as_ref()
-                .map(|service| service.transport.kind().into()),
+                .map(|service| service.transport.schemes())
+                .unwrap_or_default()
+                .iter()
+                .map(|scheme| (*scheme).to_owned())
+                .collect(),
+            dial_only: service
+                .as_ref()
+                .is_some_and(|service| service.transport.dial_only()),
             ownership: service.as_ref().map(|service| {
                 if service.owned {
                     NetworkOwnership::Rocky

@@ -79,8 +79,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
     let status = snap::ok(async { a.database.status().await.map(|status| status.network) }).await;
     assert_eq!(
-        (&status["kind"], &status["ownership"]),
-        (&json!("iroh"), &json!("application"))
+        (&status["schemes"], &status["ownership"]),
+        (&json!(["iroh"]), &json!("application"))
     );
 
     a.database.detach().await?;
@@ -174,7 +174,7 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
 
     let mut missing = *a.scope();
     missing.domain = rocky_core::DomainId([255; 16]);
-    let routes = [left_harness.address().await?];
+    let routes = [left_harness.address().await?.ok_or("no route")?];
     let refusal = right_harness
         .request(&routes, missing, b"never dispatched")
         .await

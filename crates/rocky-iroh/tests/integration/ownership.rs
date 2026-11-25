@@ -40,7 +40,7 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     Ok(reply)
 }
 async fn rocky(from: &dyn Transport, to: &dyn Transport) -> Result<(), Failure> {
-    let address = to.address().await?;
+    let address = to.address().await?.ok_or("no route")?;
     let exchange = from.request(std::slice::from_ref(&address), TEST_SCOPE, b"ping");
     let answering = async {
         let Incoming::Request(request) = to.accept().await.ok_or("closed")? else {
@@ -71,7 +71,7 @@ async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Re
     let other = local().start([8; 32]).await?;
     let dialing = other.transport();
     assert!(
-        refused(&*dialing, &served.address().await?).await,
+        refused(&*dialing, &served.address().await?.ok_or("no route")?).await,
         "Rocky's ALPNs are refused until a service listens"
     );
     assert_eq!(attachment.refused(), 1);
@@ -93,7 +93,7 @@ async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Re
         served.accept().await.is_none(),
         "closing ends Rocky's streams"
     );
-    let address = served.address().await?;
+    let address = served.address().await?.ok_or("no route")?;
     let (on_earlier_connection, fresh_dial) = (
         refused(&*dialing, &address).await,
         refused(&*dialing, &address).await,
@@ -133,9 +133,13 @@ async fn the_starter_shuts_down_everything_it_bound() -> Result<(), Failure> {
     far.close().await;
     assert!(first.endpoint().is_closed() && second.endpoint().is_closed());
     assert!(
-        near.connect(&far.address().await?, Protocol::Rpc, None)
-            .await
-            .is_err()
+        near.connect(
+            &far.address().await?.ok_or("no route")?,
+            Protocol::Rpc,
+            None
+        )
+        .await
+        .is_err()
     );
     Ok(())
 }
@@ -175,7 +179,17 @@ async fn a_dial_rebinds_a_dead_starter_on_its_fixed_port() -> Result<(), Failure
     rocky(&first, &second).await?;
     rocky(&second, &first).await?;
     assert!(
-        first.address().await?.contains(&format!(":{port}")),
+        String::from_utf8(
+            data_encoding::BASE64URL_NOPAD.decode(
+                first
+                    .address()
+                    .await?
+                    .ok_or("no route")?
+                    .trim_start_matches("iroh:")
+                    .as_bytes(),
+            )?
+        )?
+        .contains(&format!(":{port}")),
         "the next dial heals the starter on its fixed port without a foreground"
     );
     first.endpoint().close().await;
@@ -239,7 +253,10 @@ async fn relay_notifications_preserve_an_existing_direct_stream() -> Result<(), 
     assert_eq!(attachment.initial_relay_configuration(), None);
     let other = local().start([61; 32]).await?;
     let mut near = other
-        .session(&[attachment.address().await?], TEST_SCOPE)
+        .session(
+            &[attachment.address().await?.ok_or("no route")?],
+            TEST_SCOPE,
+        )
         .await?;
     near.write_all(b"init").await?;
     let Incoming::Stream(_, mut far) = attachment.accept().await.ok_or("closed")? else {
@@ -249,7 +266,7 @@ async fn relay_notifications_preserve_an_existing_direct_stream() -> Result<(), 
     far.read_exact(&mut initial).await?;
     assert!(
         other
-            .paths(&attachment.address().await?)
+            .paths(&attachment.address().await?.ok_or("no route")?)
             .await?
             .iter()
             .any(|path| path.selected && path.kind == "direct")
@@ -287,7 +304,9 @@ async fn a_link_has_four_request_streams_and_an_independent_control_stream() -> 
     let b = local().start([52; 32]).await?;
     let (a, b) = (a.transport(), b.transport());
     b.listen(Some(TEST_SCOPE), true).expect("listen");
-    let mut near = a.session(&[b.address().await?], TEST_SCOPE).await?;
+    let mut near = a
+        .session(&[b.address().await?.ok_or("no route")?], TEST_SCOPE)
+        .await?;
     let Incoming::Stream(protocol, mut far) = b.accept().await.ok_or("closed")? else {
         return Err("stream expected".into());
     };
@@ -334,7 +353,9 @@ async fn closing_a_borrowed_attachment_ends_its_link_lanes_and_keeps_the_endpoin
     let other = local().start([54; 32]).await?;
     let b = other.transport();
     b.listen(Some(TEST_SCOPE), true).expect("listen");
-    let _near = a.session(&[b.address().await?], TEST_SCOPE).await?;
+    let _near = a
+        .session(&[b.address().await?.ok_or("no route")?], TEST_SCOPE)
+        .await?;
     let Incoming::Stream(_, mut far) = b.accept().await.ok_or("closed")? else {
         return Err("stream expected".into());
     };
@@ -383,7 +404,7 @@ async fn an_unknown_scope_keeps_another_databases_link_open() -> Result<(), Fail
     };
     let port = server.transport();
     port.listen(Some(scope), true)?;
-    let routes = [server.address().await?];
+    let routes = [server.address().await?.ok_or("no route")?];
     let mut near = client.session(&routes, scope).await?;
     let Incoming::Stream(Protocol::Link, mut far) = port.accept().await.ok_or("closed")? else {
         return Err("link expected".into());

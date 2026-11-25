@@ -319,10 +319,13 @@ impl rocky_sdk::transport::Transport for Gate {
             )))
         })
     }
-    fn kind(&self) -> &str {
-        self.inner.kind()
+    fn schemes(&self) -> &[&str] {
+        self.inner.schemes()
     }
-    fn address(&self) -> rocky_sdk::transport::BoxFuture<'_, Result<String, Failure>> {
+    fn dial_only(&self) -> bool {
+        self.inner.dial_only()
+    }
+    fn address(&self) -> rocky_sdk::transport::BoxFuture<'_, Result<Option<String>, Failure>> {
         self.inner.address()
     }
     fn connect<'a>(

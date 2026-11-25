@@ -1,4 +1,4 @@
-use rocky_sdk::{Configuration, Database, IdentityKey, IdentityProvider, Network};
+use rocky_sdk::{Configuration, Database, IdentityKey, IdentityProvider};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ async fn open_tenants(
             None => (tenant.as_str(), None),
         };
         let configuration = Configuration::store_only(directory)
-            .network(Network::Owned(Arc::new(rocky_iroh::Options::default())))
+            .network(rocky_iroh::Options::default().into())
             .identity(identity.clone());
         let database = match invitation {
             Some(invitation) => configuration.join(&invitation.parse()?).await?.database,

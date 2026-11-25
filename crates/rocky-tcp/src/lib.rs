@@ -1,12 +1,12 @@
-//! Rocky's plain-TCP transport, for networks that already route and encrypt between peers.
-#![cfg(not(target_family = "wasm"))]
+//! Rocky's TCP and WebSocket transport: plain TCP for networks that already route and encrypt
+//! between peers, and WebSocket for servers that browsers and proxies reach.
 #![deny(missing_docs)]
 
 use rocky_core::{
     Scope,
     net::{
-        BoxFuture, Connected, Connector, Failure, Incoming, Protocol, ScopeRefusal, SessionStream,
-        Stream, Transport, framing,
+        BoxFuture, Connected, Connector, Failure, Incoming, Protocol, ScopeRefusal, Stream,
+        Transport, framing,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -21,12 +21,9 @@ use std::{
 };
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{Mutex, Semaphore, mpsc, watch},
 };
 
-/// The transport kind this crate reports in peer routes and diagnostics.
-pub const KIND: &str = "tcp";
 /// How long a dial or a connection's opening handshake may take before it fails.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
 /// Incoming connections a database scope queues before new ones are refused as busy.
@@ -35,6 +32,17 @@ pub const PENDING: usize = 32;
 pub const RPC_REQUESTS: usize = 32;
 const VERSION: u32 = 1;
 const MAX_HEADER: usize = 512;
+#[cfg(not(target_family = "wasm"))]
+const TCP: &str = "tcp";
+const WS: &str = "ws";
+const WSS: &str = "wss";
+
+#[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
+const SCHEMES: &[&str] = &[TCP, WS, WSS];
+#[cfg(all(not(target_family = "wasm"), not(feature = "websocket")))]
+const SCHEMES: &[&str] = &[TCP];
+#[cfg(target_family = "wasm")]
+const SCHEMES: &[&str] = &[WS, WSS];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Wire {
@@ -76,14 +84,18 @@ struct Accepted {
     result: Result<(), ScopeRefusal>,
 }
 
-struct Route {
+struct Inbox {
     scope: std::sync::Mutex<Option<Scope>>,
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(dead_code, reason = "a browser attachment admits no connections")
+    )]
     sender: mpsc::Sender<Incoming>,
     incoming: Mutex<mpsc::Receiver<Incoming>>,
     listening: AtomicBool,
     closed: watch::Sender<bool>,
 }
-impl Route {
+impl Inbox {
     fn new() -> Self {
         let (sender, incoming) = mpsc::channel(PENDING);
         Self {
@@ -99,84 +111,32 @@ impl Route {
 struct Shared {
     local: Option<SocketAddr>,
     advertise: Option<String>,
-    accepts: bool,
     owned: bool,
-    routes: std::sync::Mutex<HashMap<Option<Scope>, Weak<Route>>>,
+    dialer: platform::Dialer,
+    inboxes: std::sync::Mutex<HashMap<Option<Scope>, Weak<Inbox>>>,
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(dead_code, reason = "a browser attachment admits no connections")
+    )]
     rpc: Arc<Semaphore>,
     refused: AtomicU64,
     closed: watch::Sender<bool>,
 }
 
-/// Where a TCP attachment listens and the route it tells peers to dial; pass it to `Network::Owned`
-/// or call `start`.
+/// Where a TCP attachment listens, the route it tells peers to dial and whom it trusts when it
+/// dials; pass it to `Network::from` or call `start`.
 #[derive(Clone, Debug)]
 pub struct Options {
-    bind: SocketAddr,
-    advertise: Option<String>,
-    websocket: bool,
+    #[cfg(not(target_family = "wasm"))]
+    listener: Option<platform::Listener>,
+    #[cfg(not(target_family = "wasm"))]
+    roots: Vec<Vec<u8>>,
 }
 impl Options {
-    /// Listens on `bind`, a loopback, LAN or mesh address; port 0 picks a free port.
-    pub fn new(bind: SocketAddr) -> Self {
-        Self {
-            bind,
-            advertise: None,
-            websocket: false,
-        }
-    }
-    /// The `host:port` or WebSocket URL peers dial, as when the bound address is not reachable
-    /// from them; without it, peers dial the bound address.
-    pub fn advertise(mut self, address: impl Into<String>) -> Self {
-        self.advertise = Some(address.into());
-        self
-    }
-    /// Also accepts WebSocket handshakes on the listener, advertising `ws://` with the bound
-    /// address unless `advertise` names another route.
-    #[cfg(feature = "websocket")]
-    pub fn websocket(mut self) -> Self {
-        self.websocket = true;
-        self
-    }
     /// Binds and returns an attachment the application keeps, for `Network::Borrowed`; closing a
     /// database never closes it.
     pub async fn start(&self) -> Result<Attachment, Failure> {
         self.serve(false).await
-    }
-    /// An attachment that only dials out and accepts no connections.
-    pub fn dialer() -> Attachment {
-        Attachment::build(None, None, false, false)
-    }
-    async fn serve(&self, owned: bool) -> Result<Attachment, Failure> {
-        let listener = TcpListener::bind(self.bind).await?;
-        let local = listener.local_addr()?;
-        let advertise = match (&self.advertise, self.websocket) {
-            (Some(advertise), _) => Some(advertise.clone()),
-            (None, true) => Some(format!("ws://{local}")),
-            (None, false) => None,
-        };
-        let attachment = Attachment::build(Some(local), advertise, true, owned);
-        let websocket = self.websocket;
-        let shared = Arc::downgrade(&attachment.0);
-        let mut closed = attachment.0.closed.subscribe();
-        rocky_platform::task::spawn(async move {
-            loop {
-                let accepted = tokio::select! {
-                    biased;
-                    _ = closed.wait_for(|closed| *closed) => break,
-                    accepted = listener.accept() => accepted,
-                };
-                let Ok((stream, _)) = accepted else {
-                    continue;
-                };
-                let Some(shared) = shared.upgrade() else {
-                    break;
-                };
-                rocky_platform::task::spawn(async move {
-                    let _ = accepted_tcp(shared, stream, websocket).await;
-                });
-            }
-        });
-        Ok(attachment)
     }
 }
 impl Connector for Options {
@@ -196,42 +156,21 @@ impl Attachment {
     fn build(
         local: Option<SocketAddr>,
         advertise: Option<String>,
-        accepts: bool,
         owned: bool,
+        dialer: platform::Dialer,
     ) -> Self {
         Self(Arc::new(Shared {
             local,
             advertise,
-            accepts,
             owned,
-            routes: Default::default(),
+            dialer,
+            inboxes: Default::default(),
             rpc: Arc::new(Semaphore::new(RPC_REQUESTS)),
             refused: AtomicU64::new(0),
             closed: watch::channel(false).0,
         }))
     }
-    /// An attachment with no listener of its own, for connections an application's HTTP server
-    /// upgrades and hands to `admit_websocket`; `advertise` is the public `ws://` or `wss://` URL.
-    #[cfg(feature = "websocket")]
-    pub fn external(advertise: impl Into<String>) -> Self {
-        Self::build(None, Some(advertise.into()), true, false)
-    }
-    #[cfg(feature = "websocket")]
-    async fn admit(&self, stream: impl SessionStream + 'static) -> Result<(), Failure> {
-        if *self.0.closed.borrow() {
-            return Err("the TCP attachment is closed".into());
-        }
-        admit(self.0.clone(), stream).await
-    }
-    /// Serves a connection the application's HTTP server already upgraded to WebSocket.
-    #[cfg(feature = "websocket")]
-    pub async fn admit_websocket(
-        &self,
-        upgraded: impl SessionStream + 'static,
-    ) -> Result<(), Failure> {
-        self.admit(websocket::stream(upgraded).await).await
-    }
-    /// The bound listener address, or `None` for a dialer or external attachment.
+    /// The bound listener address, or `None` for a dial-only or external attachment.
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.0.local
     }
@@ -243,7 +182,7 @@ impl Attachment {
     pub fn transport(&self) -> Arc<dyn Transport> {
         Arc::new(Port {
             attachment: self.clone(),
-            route: Arc::new(Route::new()),
+            inbox: Arc::new(Inbox::new()),
         })
     }
     /// This attachment as a started connector, for `Network::Attached`.
@@ -254,17 +193,17 @@ impl Attachment {
     pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             self.0.closed.send_replace(true);
-            let routes: Vec<_> = self
+            let inboxes: Vec<_> = self
                 .0
-                .routes
+                .inboxes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .drain()
-                .filter_map(|(_, route)| route.upgrade())
+                .filter_map(|(_, inbox)| inbox.upgrade())
                 .collect();
-            for route in routes {
-                route.closed.send_replace(true);
-                route.incoming.lock().await.close();
+            for inbox in inboxes {
+                inbox.closed.send_replace(true);
+                inbox.incoming.lock().await.close();
             }
         })
     }
@@ -281,7 +220,8 @@ impl Attachment {
             Protocol::Coordinate => None,
             Protocol::Rpc | Protocol::Link => Some(scope.ok_or(ScopeRefusal::UnknownScope)?),
         };
-        let mut stream = rocky_platform::time::timeout(TIMEOUT, open(address)).await??;
+        let mut stream =
+            rocky_platform::time::timeout(TIMEOUT, self.0.dialer.open(address)).await??;
         rocky_platform::time::timeout(TIMEOUT, async {
             framing::write(
                 &mut stream,
@@ -306,143 +246,28 @@ impl Attachment {
     }
 }
 
-enum Admitted {
-    Rpc(Arc<Route>, OwnedSemaphorePermit),
-    Stream(Arc<Route>, Protocol),
-}
-
-fn route_for(shared: &Shared, hello: &Hello) -> Result<Admitted, ScopeRefusal> {
-    if hello.version != VERSION {
-        return Err(ScopeRefusal::UnsupportedVersion);
-    }
-    let key = match hello.protocol {
-        Wire::Coordinate => None,
-        Wire::Rpc | Wire::Link => Some(hello.scope.ok_or(ScopeRefusal::UnknownScope)?),
-    };
-    let route = shared
-        .routes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-        .and_then(Weak::upgrade)
-        .ok_or(ScopeRefusal::UnknownScope)?;
-    if !route.listening.load(Ordering::SeqCst) || *route.closed.borrow() {
-        return Err(ScopeRefusal::NotListening);
-    }
-    if route.sender.capacity() == 0 {
-        return Err(ScopeRefusal::Busy);
-    }
-    match hello.protocol {
-        Wire::Rpc => {
-            let permit = shared
-                .rpc
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| ScopeRefusal::Busy)?;
-            Ok(Admitted::Rpc(route, permit))
-        }
-        Wire::Link | Wire::Coordinate => Ok(Admitted::Stream(route, hello.protocol.into())),
-    }
-}
-
-async fn open(address: &str) -> Result<Box<dyn SessionStream>, Failure> {
-    #[cfg(feature = "websocket")]
-    if websocket::is_url(address) {
-        return websocket::dial(address).await;
-    }
-    if address.starts_with("ws://") || address.starts_with("wss://") {
-        return Err("rocky-tcp was built without the websocket feature".into());
-    }
-    let stream = TcpStream::connect(address).await?;
-    stream.set_nodelay(true)?;
-    Ok(Box::new(stream))
-}
-
-async fn accepted_tcp(
-    shared: Arc<Shared>,
-    stream: TcpStream,
-    websocket: bool,
-) -> Result<(), Failure> {
-    stream.set_nodelay(true)?;
-    if websocket {
-        #[cfg(feature = "websocket")]
-        {
-            let stream =
-                rocky_platform::time::timeout(TIMEOUT, websocket::accept(stream)).await??;
-            return admit(shared, stream).await;
-        }
-    }
-    admit(shared, stream).await
-}
-
-async fn admit(
-    shared: Arc<Shared>,
-    mut stream: impl SessionStream + 'static,
-) -> Result<(), Failure> {
-    let hello: Hello = rocky_platform::time::timeout(TIMEOUT, async {
-        rocky_credentials::decode_bounded(
-            &framing::read_bounded(&mut stream, MAX_HEADER).await?,
-            MAX_HEADER,
-        )
-        .map_err(Failure::from)
-    })
-    .await??;
-    let admitted = route_for(&shared, &hello);
-    framing::write(
-        &mut stream,
-        &rocky_credentials::encode(&Accepted {
-            version: VERSION,
-            result: admitted.as_ref().map(|_| ()).map_err(Clone::clone),
-        })?,
-    )
-    .await?;
-    let admitted = match admitted {
-        Ok(admitted) => admitted,
-        Err(refusal) => {
-            shared.refused.fetch_add(1, Ordering::Relaxed);
-            stream.shutdown().await?;
-            return Err(refusal.into());
-        }
-    };
-    match admitted {
-        Admitted::Rpc(route, permit) => {
-            let _permit = permit;
-            let mut closed = route.closed.subscribe();
-            tokio::select! {
-                served = rocky_platform::time::timeout(2 * TIMEOUT, framing::serve(Stream::new(stream), &route.sender)) => served??,
-                _ = closed.wait_for(|closed| *closed) => {},
-            }
-        }
-        Admitted::Stream(route, protocol) => {
-            if route
-                .sender
-                .try_send(Incoming::Stream(protocol, Stream::new(stream)))
-                .is_err()
-            {
-                shared.refused.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-    Ok(())
+fn unsupported(address: &str) -> Failure {
+    let schemes = SCHEMES
+        .iter()
+        .map(|scheme| format!("{scheme}://"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("rocky-tcp here dials only {schemes} routes, not {address}").into()
 }
 
 struct Port {
     attachment: Attachment,
-    route: Arc<Route>,
+    inbox: Arc<Inbox>,
 }
 impl Transport for Port {
-    fn kind(&self) -> &str {
-        KIND
+    fn schemes(&self) -> &[&str] {
+        SCHEMES
     }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-        Box::pin(async {
-            let shared = &self.attachment.0;
-            shared
-                .advertise
-                .clone()
-                .or_else(|| shared.local.map(|local| local.to_string()))
-                .ok_or_else(|| "this TCP attachment does not accept connections".into())
-        })
+    fn dial_only(&self) -> bool {
+        self.attachment.0.advertise.is_none()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<Option<String>, Failure>> {
+        Box::pin(async { Ok(self.attachment.0.advertise.clone()) })
     }
     fn connect<'a>(
         &'a self,
@@ -505,11 +330,11 @@ impl Transport for Port {
     }
     fn accept(&self) -> BoxFuture<'_, Option<Incoming>> {
         Box::pin(async {
-            let mut closed = self.route.closed.subscribe();
+            let mut closed = self.inbox.closed.subscribe();
             let mut incoming = tokio::select! {
                 biased;
                 _ = closed.wait_for(|closed| *closed) => return None,
-                incoming = self.route.incoming.lock() => incoming,
+                incoming = self.inbox.incoming.lock() => incoming,
             };
             tokio::select! {
                 biased;
@@ -520,52 +345,55 @@ impl Transport for Port {
     }
     fn listen(&self, scope: Option<Scope>, listening: bool) -> Result<(), Failure> {
         let shared = &self.attachment.0;
-        let mut routes = shared.routes.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut inboxes = shared
+            .inboxes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut bound = self
-            .route
+            .inbox
             .scope
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        routes.retain(|_, route| route.strong_count() > 0);
+        inboxes.retain(|_, inbox| inbox.strong_count() > 0);
         if listening {
-            if !shared.accepts {
-                return Err("this TCP attachment does not accept connections".into());
+            if self.dial_only() {
+                return Err("this TCP attachment only dials and accepts no connections".into());
             }
-            if *self.route.closed.borrow() || *shared.closed.borrow() {
+            if *self.inbox.closed.borrow() || *shared.closed.borrow() {
                 return Err(ScopeRefusal::NotListening.into());
             }
-            if self.route.listening.load(Ordering::SeqCst) && *bound != scope {
+            if self.inbox.listening.load(Ordering::SeqCst) && *bound != scope {
                 return Err(ScopeRefusal::AlreadyAttached.into());
             }
-            if routes
+            if inboxes
                 .get(&scope)
                 .and_then(Weak::upgrade)
-                .is_some_and(|route| !Arc::ptr_eq(&route, &self.route))
+                .is_some_and(|inbox| !Arc::ptr_eq(&inbox, &self.inbox))
             {
                 return Err(ScopeRefusal::AlreadyAttached.into());
             }
             *bound = scope;
-            routes.insert(scope, Arc::downgrade(&self.route));
-        } else if routes
+            inboxes.insert(scope, Arc::downgrade(&self.inbox));
+        } else if inboxes
             .get(&scope)
             .and_then(Weak::upgrade)
-            .is_some_and(|route| Arc::ptr_eq(&route, &self.route))
+            .is_some_and(|inbox| Arc::ptr_eq(&inbox, &self.inbox))
         {
-            routes.remove(&scope);
+            inboxes.remove(&scope);
         }
-        self.route.listening.store(listening, Ordering::SeqCst);
+        self.inbox.listening.store(listening, Ordering::SeqCst);
         Ok(())
     }
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let scope = *self
-                .route
+                .inbox
                 .scope
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             let _ = self.listen(scope, false);
-            self.route.closed.send_replace(true);
-            self.route.incoming.lock().await.close();
+            self.inbox.closed.send_replace(true);
+            self.inbox.incoming.lock().await.close();
             if self.attachment.0.owned {
                 self.attachment.close().await;
             }
@@ -573,12 +401,16 @@ impl Transport for Port {
     }
 }
 
-#[cfg(feature = "websocket")]
+#[cfg_attr(not(target_family = "wasm"), path = "native.rs")]
+#[cfg_attr(target_family = "wasm", path = "browser.rs")]
+mod platform;
+
+#[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
 mod websocket;
-#[cfg(feature = "websocket")]
+#[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
 pub use websocket::{
     Io as WebSocketIo, accept_key as websocket_accept_key, stream as websocket_stream,
 };
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests;

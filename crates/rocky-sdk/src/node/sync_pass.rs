@@ -239,13 +239,9 @@ impl Node {
         if saved
             .unresolved_contacts()
             .iter()
-            .all(|(_, contact)| contact.addresses(transport.kind()).is_empty())
+            .all(|(_, contact)| contact.addresses(transport).is_empty())
         {
-            return Err(ServiceError::NoRoute {
-                peer: "a saved peer",
-                network: transport.kind().into(),
-            }
-            .into());
+            return Err(ServiceError::no_route("a saved peer", transport).into());
         }
         Ok(ControlFlow::Break(PassOutcome::new(
             SyncStatus::failed(

@@ -123,11 +123,16 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
     let stranger = hub.connector("x").start(false, [0; 32]).await?;
     let mut held_without_speaking = Vec::new();
     for open in 1..=limit {
-        held_without_speaking.push(stranger.connect("a", Protocol::Rpc, None).await?);
+        held_without_speaking.push(stranger.connect("memory:a", Protocol::Rpc, None).await?);
         assert_eq!(hub.rpc_admission("a").ok_or("RPC listener")?.active, open);
     }
     for dropped in 1..=3 {
-        assert!(stranger.connect("a", Protocol::Rpc, None).await.is_err());
+        assert!(
+            stranger
+                .connect("memory:a", Protocol::Rpc, None)
+                .await
+                .is_err()
+        );
         assert_eq!(
             hub.rpc_admission("a").ok_or("RPC listener")?.refused,
             dropped
@@ -166,7 +171,7 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
         }
     })
     .await??;
-    drop(stranger.connect("a", Protocol::Rpc, None).await?);
+    drop(stranger.connect("memory:a", Protocol::Rpc, None).await?);
     stranger.close().await;
     a.close().await;
     b.close().await;

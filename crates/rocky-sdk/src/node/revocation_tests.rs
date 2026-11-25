@@ -856,12 +856,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let settings = node.settings.lock().await.clone();
     let registry = node.registry(&settings).await?;
     let profile = crate::Access::Full;
-    let routes = || {
-        vec![crate::enrollment::Route {
-            transport: "memory".into(),
-            address: "issuer".into(),
-        }]
-    };
+    let routes = || vec![crate::Route::try_from(String::from("memory:issuer")).expect("a route")];
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
     let invite = |profile: crate::Access| {
@@ -980,10 +975,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
         settings.invite(
             (
                 &node.vault,
-                vec![crate::enrollment::Route {
-                    transport: "memory".into(),
-                    address: "issuer".into(),
-                }],
+                vec![crate::Route::try_from(String::from("memory:issuer")).expect("a route")],
             ),
             &mut book,
             &crate::Invite::new(profile)

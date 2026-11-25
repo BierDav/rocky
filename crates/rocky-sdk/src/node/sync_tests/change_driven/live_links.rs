@@ -120,10 +120,10 @@ async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
                 settings.peers.insert(
                     requested,
                     Contact {
-                        routes: vec![crate::enrollment::Route {
-                            transport: "memory".into(),
-                            address: "contact-only".into(),
-                        }],
+                        routes: vec![
+                            crate::Route::try_from(String::from("memory:contact-only"))
+                                .expect("a route"),
+                        ],
                     },
                 );
                 Ok(())
@@ -523,7 +523,7 @@ async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failur
                 .clone()
                 .try_acquire_many_owned(u32::try_from(remaining)?)?;
             let transport = transport(&b).await?;
-            let stream = transport.connect("a", Protocol::Link, None).await?;
+            let stream = transport.connect("memory:a", Protocol::Link, None).await?;
             let settings = b.settings.lock().await.clone();
             let mut refused = rocky_secure::network::link::Link::open(
                 stream,
@@ -542,7 +542,7 @@ async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failur
             let before = service.served.load(Ordering::Relaxed);
             let reply = exchange(
                 &*transport,
-                &["a".into()],
+                &["memory:a".into()],
                 a.domain().scope,
                 &PeerRequest::Policy,
             )
@@ -578,8 +578,8 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
             let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let (ab, ba) = tokio::join!(
-                sa.transport.connect("b", Protocol::Link, None),
-                sb.transport.connect("a", Protocol::Link, None)
+                sa.transport.connect("memory:b", Protocol::Link, None),
+                sb.transport.connect("memory:a", Protocol::Link, None)
             );
             let ca = a.settings.lock().await.clone();
             let cb = b.settings.lock().await.clone();
@@ -709,10 +709,13 @@ impl Transport for EofLinks {
             self.connect(address, Protocol::Link, Some(scope)).await
         })
     }
-    fn kind(&self) -> &str {
-        self.0.kind()
+    fn schemes(&self) -> &[&str] {
+        self.0.schemes()
     }
-    fn address(&self) -> crate::transport::BoxFuture<'_, Result<String, Failure>> {
+    fn dial_only(&self) -> bool {
+        self.0.dial_only()
+    }
+    fn address(&self) -> crate::transport::BoxFuture<'_, Result<Option<String>, Failure>> {
         self.0.address()
     }
     fn connect<'a>(
@@ -836,9 +839,9 @@ async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<
             let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let (lower, higher, lower_key, higher_key, lower_address, higher_address) = if ka < kb {
-                (&a, &b, ka, kb, "a", "b")
+                (&a, &b, ka, kb, "memory:a", "memory:b")
             } else {
-                (&b, &a, kb, ka, "b", "a")
+                (&b, &a, kb, ka, "memory:b", "memory:a")
             };
             let low_service = lower.current().ok_or("service")?;
             let high_service = higher.current().ok_or("service")?;
@@ -918,8 +921,8 @@ async fn real_pair(
     let tb = connector
         .start(true, Settings::route_secret(&b.vault)?)
         .await?;
-    let aa = ta.address().await?;
-    let ab = tb.address().await?;
+    let aa = ta.address().await?.ok_or("no route")?;
+    let ab = tb.address().await?.ok_or("no route")?;
     a.link(hub.wrap("a", ta), true).await?;
     b.link(hub.wrap("b", tb), true).await?;
     targets(&a, std::slice::from_ref(&b)).await?;

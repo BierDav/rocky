@@ -59,7 +59,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             );
             let mut links = Vec::new();
             for (node, chain) in strangers {
-                let stream = dialer.connect("a", Protocol::Link, None).await?;
+                let stream = dialer.connect("memory:a", Protocol::Link, None).await?;
                 let mut opened = Link::open(stream, &replica, node, chain, Some(own)).await?;
                 links.push(opened.ready(false).await.map(|_| opened));
             }
@@ -128,7 +128,7 @@ async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), F
             .await?;
             let impostor = hub.connector("impostor").start(false, route_secret).await?;
             let own = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
-            let stream = impostor.connect("a", Protocol::Link, None).await?;
+            let stream = impostor.connect("memory:a", Protocol::Link, None).await?;
             let presented = match Link::open(
                 stream,
                 &replica,
@@ -145,7 +145,7 @@ async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), F
                 presented.is_err(),
                 "b's transport secret with b's own chain signs as no member"
             );
-            let stream = impostor.connect("a", Protocol::Link, None).await?;
+            let stream = impostor.connect("memory:a", Protocol::Link, None).await?;
             let mut admitted = Link::open(stream, &replica, node, chain, Some(own)).await?;
             admitted.ready(false).await?;
             drop(admitted);

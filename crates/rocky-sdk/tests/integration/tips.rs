@@ -523,7 +523,7 @@ mod races {
             .sync()
             .await
             .expect_err("the member ends with the creator");
-        assert!(ended.to_string().contains("revoked"), "{ended}");
+        assert_eq!(ended["code"], "removed", "{ended}");
         t0.add(3, "after").await;
         settle(&rest).await;
         let next = snap::ok(t1.database.seal()).await["tip"].clone();

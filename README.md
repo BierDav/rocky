@@ -346,7 +346,7 @@ why the device lacks it:
 
 Other kinds an application meets:
 
-- `Removed`: the person or device was removed; nothing clears it.
+- `Removed`: the person was removed or the device unlinked; nothing clears it.
 - `NoDatabase`, `DatabaseExists` and `JoinUnfinished`: the directory holds no
   database, already holds one, or holds a join to repeat.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the

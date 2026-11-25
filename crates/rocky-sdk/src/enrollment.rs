@@ -72,7 +72,7 @@ pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Fai
 pub(crate) struct Revoked(pub SignedRevocation);
 impl std::fmt::Display for Revoked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("this device has been revoked")
+        f.write_str("this device's person was removed or the device was unlinked")
     }
 }
 impl std::error::Error for Revoked {}

@@ -20,7 +20,8 @@ pub enum ErrorKind {
         /// Why the device lacks it.
         reason: DenyReason,
     },
-    /// The person or device was removed; it no longer reads, writes or syncs, even after reopening.
+    /// The person was removed or the device unlinked; it no longer reads, writes or syncs, even
+    /// after reopening, and its unreadable data stays until `logout(Logout::PurgeOnClose)`.
     Removed,
     /// The data has not arrived or cannot be decrypted yet; `blockers` say what clears it.
     Blocked {
@@ -29,7 +30,7 @@ pub enum ErrorKind {
         /// What the data waits for and what clears each; never empty.
         blockers: Blockers,
     },
-    /// The device's credentials changed during the call; retry.
+    /// The device's credentials changed or expired during the call; retry.
     AuthorityChanged,
     /// A concurrent change conflicted; retry.
     Conflict,
@@ -337,7 +338,14 @@ impl Error {
     pub(crate) fn removed() -> Self {
         Self::new(
             ErrorKind::Removed,
-            "the person or device was removed from this database",
+            "this device's person was removed or the device was unlinked: it no longer reads, writes or syncs, and its unreadable data stays in its directory until logout(Logout::PurgeOnClose)",
+        )
+    }
+
+    pub(crate) fn authority_changed() -> Self {
+        Self::new(
+            ErrorKind::AuthorityChanged,
+            "this device's credentials changed or expired during the call; retry it",
         )
     }
 

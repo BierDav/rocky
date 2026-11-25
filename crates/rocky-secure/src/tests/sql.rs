@@ -1678,10 +1678,7 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     assert!(
         matches!(
             cursor.next().await,
-            Err(Error::Sql(SqlError::Unavailable {
-                reason: crate::sql::Unavailable::Revoked,
-                ..
-            }))
+            Err(Error::Sql(SqlError::AuthorityChanged))
         ),
         "losing the key revokes the session and discards undelivered pages"
     );

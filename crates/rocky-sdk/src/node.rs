@@ -494,10 +494,7 @@ impl Node {
             return Err(refused("this device logged out of the domain"));
         }
         if self.own_revocation().await?.is_some() {
-            return Err(Box::new(crate::Error::new(
-                crate::ErrorKind::Removed,
-                "this device was removed or unlinked; its data is purged",
-            )));
+            return Err(Box::new(crate::Error::removed()));
         }
         Ok(())
     }
@@ -2249,7 +2246,7 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         return crate::peer::remote(peer);
     }
     if error.is::<crate::enrollment::Revoked>() || revoked_by(error).is_some() {
-        return crate::Error::new(crate::ErrorKind::Removed, error.to_string());
+        return crate::Error::removed();
     }
     if error.is::<crate::enrollment::PublisherRequired>() {
         return crate::Error::refused(Right::Administer, DenyReason::OwnerRequired);

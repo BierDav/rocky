@@ -45,7 +45,6 @@ pub enum Unavailable {
     NotHeld,
     KeyMissing,
     Incomplete { blockers: Vec<rocky_core::Blocker> },
-    Revoked,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbortReason {
@@ -64,7 +63,7 @@ pub enum SqlError {
     Unavailable { table: String, reason: Unavailable },
     Aborted(AbortReason),
     Capture(String),
-    Stale,
+    AuthorityChanged,
 }
 impl std::fmt::Display for SqlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -78,7 +77,7 @@ impl std::fmt::Display for SqlError {
             }
             Self::Aborted(reason) => write!(f, "transaction was rolled back: {reason:?}"),
             Self::Capture(reason) => write!(f, "transaction cannot be published: {reason}"),
-            Self::Stale => write!(f, "statement was prepared under another binding"),
+            Self::AuthorityChanged => write!(f, "the session's credentials changed or expired"),
         }
     }
 }

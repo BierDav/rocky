@@ -133,3 +133,35 @@ async fn an_offline_removed_device_commits_until_it_syncs_then_purges() -> Resul
     household.owner.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_device_gives_one_explanation_on_sync_read_and_commit() -> Result<(), Failure> {
+    let household = household().await?;
+    remove(&household).await?;
+    let synced = household
+        .member
+        .database
+        .sync_now()
+        .await
+        .err()
+        .ok_or("a removed device synced")?;
+    let read = read(&household.member)
+        .await
+        .err()
+        .ok_or("a removed device read")?;
+    let committed = commit(&household.member, "Bread")
+        .await
+        .err()
+        .ok_or("a removed device committed")?;
+    for error in [&synced, &read, &committed] {
+        assert_eq!(error.kind(), &rocky_sdk::ErrorKind::Removed, "{error}");
+        assert_eq!(error.to_string(), synced.to_string());
+    }
+    assert!(
+        synced.to_string().contains("logout(Logout::PurgeOnClose)"),
+        "the message says the data stays until a purging logout: {synced}"
+    );
+    household.member.close().await;
+    household.owner.close().await;
+    Ok(())
+}

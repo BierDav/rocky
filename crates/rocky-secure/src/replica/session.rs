@@ -206,10 +206,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn check_authority(&self, authority: Option<u64>) -> Result<(), Error> {
         match authority {
             Some(authority) if authority != self.authority => {
-                Err(Error::Sql(crate::sql::SqlError::Unavailable {
-                    table: "session".into(),
-                    reason: crate::sql::Unavailable::Revoked,
-                }))
+                Err(Error::Sql(crate::sql::SqlError::AuthorityChanged))
             }
             _ => Ok(()),
         }

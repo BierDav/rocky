@@ -46,10 +46,7 @@ struct ReadState {
 impl ReadAccess {
     fn snapshot(&self) -> Result<ReadState, Error> {
         if self.current.load(Ordering::SeqCst) != self.authority || now()? >= self.status.expires {
-            return Err(Error::Sql(SqlError::Unavailable {
-                table: String::new(),
-                reason: Unavailable::Revoked,
-            }));
+            return Err(Error::Sql(SqlError::AuthorityChanged));
         }
         let state = self.state.read().map_err(|_| Error::Closed)?;
         state.as_ref().map(Clone::clone).map_err(group::shared)
@@ -478,10 +475,7 @@ impl<A: RowApplication> SecureSql<A> {
                     if current && now().is_ok_and(|time| time < expires) {
                         Ok(())
                     } else {
-                        Err(Error::Sql(SqlError::Unavailable {
-                            table: String::new(),
-                            reason: Unavailable::Revoked,
-                        }))
+                        Err(Error::Sql(SqlError::AuthorityChanged))
                     }
                 }),
             }

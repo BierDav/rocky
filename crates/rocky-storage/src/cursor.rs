@@ -1252,10 +1252,7 @@ mod tests {
         let flag = revoked.clone();
         let guard: Guard = Arc::new(move || {
             if flag.load(Ordering::SeqCst) {
-                Err(Error::Sql(SqlError::Unavailable {
-                    table: "items".into(),
-                    reason: crate::sql::Unavailable::Revoked,
-                }))
+                Err(Error::Sql(SqlError::AuthorityChanged))
             } else {
                 Ok(())
             }
@@ -1272,7 +1269,7 @@ mod tests {
         assert!(
             matches!(
                 cursor.next().await,
-                Err(Error::Sql(SqlError::Unavailable { .. }))
+                Err(Error::Sql(SqlError::AuthorityChanged))
             ),
             "the guard discards a stepped page once authority is gone"
         );

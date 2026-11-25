@@ -139,7 +139,7 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
         SqlError::Denied => sql(code::AUTH, Some(crate::Unsupported::Statement)),
         SqlError::Unsupported(_) => sql(code::ERROR, Some(crate::Unsupported::Statement)),
         SqlError::Refused(IntentRefusal::Unavailable { table, reason }) => {
-            unavailable(table, reason, detail)
+            unavailable(table, reason)
         }
         SqlError::Refused(refusal) => {
             let unsupported = match refusal {
@@ -169,16 +169,16 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
                 message,
             )
         }
-        SqlError::Unavailable { table, reason } => unavailable(table, reason, detail),
+        SqlError::Unavailable { table, reason } => unavailable(table, reason),
         SqlError::Aborted(AbortReason::Timeout | AbortReason::Preempted) => {
             crate::Error::new(Kind::Busy, detail)
         }
         SqlError::Aborted(_) => sql(code::ABORT, None),
         SqlError::Capture(_) => sql(code::ERROR, None),
-        SqlError::Stale => crate::Error::new(Kind::AuthorityChanged, detail),
+        SqlError::AuthorityChanged => crate::Error::authority_changed(),
     }
 }
-fn unavailable(table: &str, reason: &Unavailable, detail: String) -> crate::Error {
+fn unavailable(table: &str, reason: &Unavailable) -> crate::Error {
     use crate::ErrorKind as Kind;
     match reason {
         Unavailable::Incomplete { blockers } => match crate::Blockers::new(blockers.clone()) {
@@ -203,7 +203,6 @@ fn unavailable(table: &str, reason: &Unavailable, detail: String) -> crate::Erro
             crate::Right::Read,
             crate::DenyReason::NotGranted,
         ),
-        Unavailable::Revoked => crate::Error::new(Kind::AuthorityChanged, detail),
     }
 }
 
@@ -727,10 +726,7 @@ impl State {
                         .is_some_and(|reading| reading.snapshot.is_none());
                     if needs_snapshot {
                         let snapshot = match opened.snapshot(limits).await {
-                            Err(Error::Sql(SqlError::Unavailable {
-                                reason: Unavailable::Revoked,
-                                ..
-                            })) => {
+                            Err(Error::Sql(SqlError::AuthorityChanged)) => {
                                 self.opened = None;
                                 self.sql().await?.snapshot(limits).await
                             }
@@ -754,10 +750,7 @@ impl State {
                     return Ok(Pending::rows(columns, rows.rows));
                 }
                 let cursor = match opened.cursor(sql, params.clone(), limits).await {
-                    Err(Error::Sql(SqlError::Unavailable {
-                        reason: Unavailable::Revoked,
-                        ..
-                    })) => {
+                    Err(Error::Sql(SqlError::AuthorityChanged)) => {
                         self.opened = None;
                         self.sql().await?.cursor(sql, params, limits).await
                     }

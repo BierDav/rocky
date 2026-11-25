@@ -227,11 +227,11 @@ fn clinic() -> Result<Schema, rocky_sdk::Error> {
         .append("charts")
         .update_columns("charts", ["note"])
         .per_partition("charts");
-    Ok(Schema::builder("clinic", 1)
+    Schema::builder("clinic", 1)
         .table(Table::replayed("wards").column(Column::new("name", Affinity::Text).required()))
         .table(charts)
         .role(doctor)
-        .build()?)
+        .build()
 }
 ```
 

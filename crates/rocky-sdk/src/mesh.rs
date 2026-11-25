@@ -128,8 +128,10 @@ impl Settings {
         let expired: Vec<_> = self
             .contact_meta
             .iter()
-            .filter(|(_, meta)| {
-                meta.source != "application" && meta.learned.saturating_add(AGE) < time
+            .filter(|(node, meta)| {
+                meta.source != "application"
+                    && !self.issuers.contains(node)
+                    && meta.learned.saturating_add(AGE) < time
             })
             .map(|(node, _)| *node)
             .collect();
@@ -143,11 +145,17 @@ impl Settings {
                 .peers
                 .keys()
                 .filter(|node| {
+                    !self.issuers.contains(node)
+                        && self
+                            .contact_meta
+                            .get(node)
+                            .is_none_or(|meta| meta.source != "application")
+                })
+                .min_by_key(|node| {
                     self.contact_meta
                         .get(node)
-                        .is_none_or(|meta| meta.source != "application")
+                        .map_or((false, 0), |meta| (meta.trusted, meta.learned))
                 })
-                .min_by_key(|node| self.contact_meta.get(node).map_or(0, |meta| meta.learned))
                 .copied();
             let Some(oldest) = oldest else {
                 return Ok(false);
@@ -948,6 +956,59 @@ mod tests {
         )?;
         assert_eq!(settings.peers.len(), 2);
         assert!(settings.peers.contains_key(&configured));
+        Ok(())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn learned_hints_never_drop_an_issuers_contact() -> Result<(), Failure> {
+        let dir = rocky_platform::fs::Scratch::new().await;
+        let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
+        let mut settings = Settings::create_owned(
+            &Schema::parse(SCHEMA)?,
+            &store,
+            crate::enrollment::DEFAULT_TTL,
+        )?;
+        let vault = settings.vault(&store);
+        let hint = |node, trusted| ContactHint {
+            node,
+            routes: vec!["memory:learned".into()],
+            trusted,
+        };
+        let issuer = PrivateKey::new().public_key();
+        settings.learn_contact(&vault, hint(issuer, true), "handover", 1)?;
+        settings.issuers.push(issuer);
+        let trusted = PrivateKey::new().public_key();
+        settings.learn_contact(&vault, hint(trusted, true), "handover", 2)?;
+        for at in 3..=64 {
+            settings.learn_contact(
+                &vault,
+                hint(PrivateKey::new().public_key(), false),
+                "handover",
+                at,
+            )?;
+        }
+        assert_eq!(settings.peers.len(), 64);
+        settings.learn_contact(
+            &vault,
+            hint(PrivateKey::new().public_key(), false),
+            "handover",
+            65,
+        )?;
+        assert!(settings.peers.contains_key(&issuer));
+        assert!(
+            settings.peers.contains_key(&trusted),
+            "an untrusted contact goes before a trusted one"
+        );
+        settings.learn_contact(
+            &vault,
+            hint(PrivateKey::new().public_key(), false),
+            "handover",
+            AGE + 66,
+        )?;
+        assert!(
+            settings.peers.contains_key(&issuer),
+            "an issuer's contact outlives the age that ends learned ones"
+        );
+        assert!(settings.issuers.contains(&issuer));
         Ok(())
     }
 }

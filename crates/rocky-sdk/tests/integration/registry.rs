@@ -779,7 +779,12 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     a.database.add_peer(&b.contact().await).await?;
     settle(&b).await;
     let reader = rocky_sdk::Access::Read;
-    let invitation = a.invite_as(reader.clone()).await;
+    let outlasts_any_fill = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    let invitation = a
+        .database
+        .invite(rocky_sdk::Invite::new(reader.clone()).valid_for(outlasts_any_fill))
+        .await?
+        .code;
     let filled = Instant::now();
     let a_b_and_the_pending_invitation = 3;
     for index in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {

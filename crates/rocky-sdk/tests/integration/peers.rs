@@ -208,6 +208,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
         a.add_peer(&c.contact().await).await.is_err(),
         "a revoked device's contact is refused again"
     );
+    hub.set_down("b", "c", true);
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
         snap::ok(snap::device(&b.database)).await["revocations"]["statements"],
@@ -217,7 +218,12 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.close().await;
 
     b.add(1, "Fresh").await;
+    assert!(
+        !c.purged().await,
+        "the revoked device has not heard of its revocation while its link to the member is down"
+    );
     c.add(2, "Late").await;
+    hub.set_down("b", "c", false);
     assert!(common::exchange_failed(&c.sync().await));
     assert!(
         common::exchange_failed(&b.sync().await),

@@ -19,8 +19,8 @@ Depend on Rocky by git tag. `rocky-sdk` has no networking of its own; add
 
 ```toml
 [dependencies]
-rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.2" }
-rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.2" }
+rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.3" }
+rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.3" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

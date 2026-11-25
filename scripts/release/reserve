@@ -11,6 +11,8 @@ import urllib.request
 
 
 RESERVATIONS = "refs/tags/release-reservations/v"
+README = Path(__file__).resolve().parents[2] / "README.md"
+README_PIN = re.compile(r'tag = "v([^"]+)"')
 VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc|nightly)\.(\d+)(?:\.(\d+))?)?")
 
 
@@ -37,6 +39,13 @@ def published_versions():
         if error.code != 404:
             raise
         return []
+
+
+def require_readme_pin(version, readme=README):
+    pins = set(README_PIN.findall(readme.read_text()))
+    if pins != {version}:
+        found = ", ".join(sorted(f"v{pin}" for pin in pins)) or "none"
+        raise SystemExit(f"README.md must pin tag v{version} before releasing it (found {found})")
 
 
 def reserve(repository, revision, channel, retry_last=False):
@@ -70,6 +79,8 @@ def reserve(repository, revision, channel, retry_last=False):
                                       input="\n".join(sorted(tags)), text=True).strip()
     if version_key(version, channel) is None or f"v{version}" in tags:
         raise SystemExit(f"Allocator returned an invalid or occupied version: {version}")
+    if channel != "nightly":
+        require_readme_pin(version)
     # Ref creation is atomic: a collision or API failure stops all downstream jobs.
     gh_api(repository, "git/refs", "--method", "POST",
            "-f", f"ref={RESERVATIONS}{version}", "-f", f"sha={revision}")

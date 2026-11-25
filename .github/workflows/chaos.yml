@@ -25,6 +25,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   ROCKY_CRANELIFT: '0'
+  # Fresh builds gain nothing from incremental state, and sccache caches only
+  # crates built without it.
+  CARGO_PROFILE_DEV_INCREMENTAL: 'false'
 
 jobs:
   soak:

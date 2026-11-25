@@ -60,6 +60,10 @@
 - Use `#[expect(lint, reason = "...")]`; `allow` attributes are forbidden.
 - Develop with `./scripts/check --unit` and `cargo test -p <package>`; finish
   with `./scripts/lint` and `./scripts/check`. `./scripts/lint --fix` formats.
+- Build in this worktree and let the scripts and `cargo` choose the target
+  directory. Don't set `CARGO_TARGET_DIR` or `CARGO_BUILD_BUILD_DIR`, and don't
+  copy the repository to `/tmp` to build: a target directory of your own
+  compiles every dependency again and loses the incremental state.
 - Test behavior, invariants and regressions deterministically, separate from
   benchmarks: fault injection instead of sleeps, no timing assertions.
 - Check supported feature combinations, not blindly `--all-features`.

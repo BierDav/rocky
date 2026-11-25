@@ -267,82 +267,99 @@ pub(crate) async fn bootstrap(
     use futures_util::{StreamExt, stream};
     let settling = tokio::sync::Mutex::new((pending, expected));
     let (progress, totals) = (&settling, &totals);
-    let mut imports = stream::iter(planned.into_iter().map(|plan| {
+    let chains = replica
+        .in_dependency_chains(planned, |plan| plan.scope)
+        .await?;
+    let import = |plan: Planned, mut first: Option<NativeSession>| async move {
+        let (scope, checkpoint) = (plan.scope, plan.checkpoint);
+        let mut moved = Transfer::default();
+        let imported = async {
+            let mut imported = false;
+            for _ in 0..SESSIONS {
+                let mut session = match first.take() {
+                    Some(session) => session,
+                    None => session(replica, upstream).await?,
+                };
+                let (catch_up, checkpoint) = if imported {
+                    (
+                        session.sync_scope(replica, scope, QUOTA).await?.catch_up,
+                        None,
+                    )
+                } else {
+                    let report = session
+                        .bootstrap_scope(replica, scope, QUOTA)
+                        .await?
+                        .ok_or("the peer withdrew its checkpoint")?;
+                    imported = report.rebootstrap.is_some();
+                    (
+                        report.catch_up,
+                        report.rebootstrap.map(|r| (r.checkpoint, r.superseded)),
+                    )
+                };
+                moved.add(
+                    scope,
+                    Moved {
+                        pulled: catch_up.frames,
+                        bytes: catch_up.bytes,
+                        checkpoint,
+                        ..Moved::default()
+                    },
+                );
+                session.close().await?;
+                if !catch_up.exhausted {
+                    replica.flush().await?;
+                    return Ok::<_, Failure>(());
+                }
+            }
+            Err(Box::new(Unfinished) as Failure)
+        }
+        .await;
+        let settled = match &imported {
+            Ok(()) => {
+                async {
+                    let mut progress = progress.lock().await;
+                    let (pending, expected) = &mut *progress;
+                    pending.retain(|known| *known != scope);
+                    *expected = file.record_progress(expected, pending, totals).await?;
+                    replica
+                        .set_importing(pending.iter().copied().collect())
+                        .await;
+                    Ok::<_, Failure>(())
+                }
+                .await
+            }
+            Err(error) if counts_against_import(error) => replica
+                .import_failed(scope, checkpoint)
+                .await
+                .map(drop)
+                .map_err(Failure::from),
+            Err(_) => Ok(()),
+        };
+        (scope, moved, imported, settled)
+    };
+    let mut imports = stream::iter(chains.into_iter().map(|chain| {
         let mut first = first.take();
         async move {
-            let (scope, checkpoint) = (plan.scope, plan.checkpoint);
-            let mut moved = Transfer::default();
-            let imported = async {
-                let mut imported = false;
-                for _ in 0..SESSIONS {
-                    let mut session = match first.take() {
-                        Some(session) => session,
-                        None => session(replica, upstream).await?,
-                    };
-                    let (catch_up, checkpoint) = if imported {
-                        (
-                            session.sync_scope(replica, scope, QUOTA).await?.catch_up,
-                            None,
-                        )
-                    } else {
-                        let report = session
-                            .bootstrap_scope(replica, scope, QUOTA)
-                            .await?
-                            .ok_or("the peer withdrew its checkpoint")?;
-                        imported = report.rebootstrap.is_some();
-                        (
-                            report.catch_up,
-                            report.rebootstrap.map(|r| (r.checkpoint, r.superseded)),
-                        )
-                    };
-                    moved.add(
-                        scope,
-                        Moved {
-                            pulled: catch_up.frames,
-                            bytes: catch_up.bytes,
-                            checkpoint,
-                            ..Moved::default()
-                        },
-                    );
-                    session.close().await?;
-                    if !catch_up.exhausted {
-                        replica.flush().await?;
-                        return Ok::<_, Failure>(());
-                    }
+            let mut done = Vec::with_capacity(chain.len());
+            for plan in chain {
+                let outcome = import(plan, first.take()).await;
+                let unsettled = outcome.2.is_err() || outcome.3.is_err();
+                done.push(outcome);
+                if unsettled {
+                    break;
                 }
-                Err(Box::new(Unfinished) as Failure)
             }
-            .await;
-            let settled = match &imported {
-                Ok(()) => {
-                    async {
-                        let mut progress = progress.lock().await;
-                        let (pending, expected) = &mut *progress;
-                        pending.retain(|known| *known != scope);
-                        *expected = file.record_progress(expected, pending, totals).await?;
-                        replica
-                            .set_importing(pending.iter().copied().collect())
-                            .await;
-                        Ok::<_, Failure>(())
-                    }
-                    .await
-                }
-                Err(error) if counts_against_import(error) => replica
-                    .import_failed(scope, checkpoint)
-                    .await
-                    .map(drop)
-                    .map_err(Failure::from),
-                Err(_) => Ok(()),
-            };
-            (scope, moved, imported, settled)
+            done
         }
     }))
     .buffer_unordered(PARALLEL);
-    while let Some((scope, moved, imported, settled)) = imports.next().await {
-        transfer.extend(moved);
-        settled?;
-        if let Err(error) = imported {
-            transfer.request_failed(scope, &error);
+    while let Some(done) = imports.next().await {
+        for (scope, moved, imported, settled) in done {
+            transfer.extend(moved);
+            settled?;
+            if let Err(error) = imported {
+                transfer.request_failed(scope, &error);
+            }
         }
     }
     drop(imports);

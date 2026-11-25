@@ -849,6 +849,134 @@ mod regressions {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_joiner_never_shows_a_card_of_a_compacted_list_before_its_board()
+    -> Result<(), Failure> {
+        let board = |node, code, cap| {
+            Change(
+                node,
+                Change::Board {
+                    list: "l0".into(),
+                    code,
+                    cap,
+                },
+            )
+        };
+        holds_at(
+            20044,
+            soak_at(20044, Wall::Moving),
+            vec![
+                Partition("l0".into()),
+                board(1, 2, 4),
+                Sync(0),
+                board(0, 3, 11),
+                Change(
+                    0,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 2,
+                        pinned: None,
+                        name: 4,
+                        points: 2,
+                    },
+                ),
+                Seal(0),
+                Compact(0),
+                Invite(0, 2),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_joiner_never_shows_a_pin_of_a_compacted_list_before_its_board() -> Result<(), Failure>
+    {
+        holds_at(
+            20365,
+            soak_at(20365, Wall::Moving),
+            vec![
+                Seal(1),
+                SyncPair(2, 3),
+                Advance(std::time::Duration::from_secs(60)),
+                Sync(1),
+                Seal(0),
+                Change(
+                    0,
+                    Change::Raise {
+                        list: "l0".into(),
+                        card: 4,
+                        by: 2,
+                    },
+                ),
+                SyncPair(1, 0),
+                Sync(1),
+                Change(
+                    1,
+                    Change::MoveCard {
+                        from: "l0".into(),
+                        to: "l0".into(),
+                        card: 0,
+                        board: 4,
+                    },
+                ),
+                Compact(0),
+                SyncPair(3, 1),
+                Online(0),
+                Change(
+                    1,
+                    Change::MoveBoard {
+                        from: "l0".into(),
+                        to: "l0".into(),
+                        board: 2,
+                    },
+                ),
+                Change(
+                    1,
+                    Change::MoveCard {
+                        from: "l1".into(),
+                        to: "l0".into(),
+                        card: 6,
+                        board: 0,
+                    },
+                ),
+                Sync(0),
+                Change(
+                    1,
+                    Change::Recode {
+                        list: "l0".into(),
+                        board: 2,
+                        code: 1,
+                    },
+                ),
+                Advance(std::time::Duration::from_secs(60)),
+                Sync(0),
+                Change(
+                    0,
+                    Change::Recode {
+                        list: "l1".into(),
+                        board: 6,
+                        code: 3,
+                    },
+                ),
+                Crash(1, Some(rocky_secure::CrashPoint::GroupAfterCommit)),
+                Crash(0, Some(rocky_secure::CrashPoint::Redo)),
+                Change(
+                    0,
+                    Change::Pair {
+                        list: "l1".into(),
+                        code: 1,
+                        name: 0,
+                        points: 4,
+                    },
+                ),
+                Seal(0),
+                Compact(0),
+                Invite(0, 2),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_member_granted_a_list_after_its_seal_publishes_the_outcome_its_peers_reached()
     -> Result<(), Failure> {
         holds_at(

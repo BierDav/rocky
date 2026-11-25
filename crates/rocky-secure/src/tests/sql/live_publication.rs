@@ -1,7 +1,7 @@
 use super::*;
 use crate::network::{PublicationOutcome, link};
 
-const TITLE_BYTES_DOUBLED_BY_THE_SIGNED_INTENT: usize = 36 * 1024;
+const TITLE_BYTES_OVER_ONE_LINK_FRAME: usize = 72 * 1024;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn publication_delivers_an_individual_operation_above_64_kib() {
@@ -15,7 +15,7 @@ async fn publication_delivers_an_individual_operation_above_64_kib() {
         .open(&dir.path().join("b.db"), &bob, f.full(), &[f.items])
         .await;
     let cursor = b.frontier(f.items).await.unwrap();
-    let title = "x".repeat(TITLE_BYTES_DOUBLED_BY_THE_SIGNED_INTENT);
+    let title = "x".repeat(TITLE_BYTES_OVER_ONE_LINK_FRAME);
     insert(
         &sql(&a, &[f.items]).await,
         "INSERT INTO items VALUES('large',?,0)",
@@ -71,7 +71,7 @@ async fn publication_delivers_an_individual_operation_above_64_kib() {
     let rejected = insert(
         &sql(&a, &[f.items]).await,
         "INSERT INTO items VALUES('unsupported',?,0)",
-        vec![text(&"x".repeat(70 * 1024))],
+        vec![text(&"x".repeat(crate::network::MAX_PAGE_BYTES + 1))],
     )
     .await;
     assert!(matches!(
@@ -106,7 +106,7 @@ async fn an_over_budget_publication_sends_nothing_and_native_repair_recovers_lar
         insert(
             &writer,
             "INSERT INTO items VALUES(?,?,0)",
-            vec![text(&format!("{n}")), text(&"x".repeat(36 * 1024))],
+            vec![text(&format!("{n}")), text(&"x".repeat(TITLE_BYTES_OVER_ONE_LINK_FRAME))],
         )
         .await
         .unwrap();

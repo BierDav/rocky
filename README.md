@@ -262,7 +262,12 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
   value as a parameter instead;
 - a `WITH` clause is `Unsupported::With`;
 - `IS ?` and `IS NOT` comparisons are accepted;
-- an intent over 128 KiB is `ErrorKind::TooLarge` with `Limit::Intent`.
+- a statement whose intent is over 128 KiB fails at `execute` with
+  `ErrorKind::TooLarge` and `Limit::Intent`, and a transaction whose
+  statements fit alone but not together fails the same way at `commit`. A
+  parameter takes its own size plus a few bytes, so a blob of about 120 KiB
+  is the largest one statement carries, and an `INSERT … SELECT` records the
+  rows it read.
 
 ## Sync
 

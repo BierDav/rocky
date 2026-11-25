@@ -487,39 +487,66 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     }
     run(&writer, "END TRANSACTION").await?;
     let seeded = published(root.path())?;
+    let over_the_intent_limit = |refused: &crate::Error| {
+        matches!(
+            refused.kind(),
+            &crate::ErrorKind::TooLarge {
+                limit: crate::Limit::Intent,
+                size,
+                max: 131_072,
+            } if size > 131_072
+        )
+    };
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    all(
-        &writer,
-        "INSERT INTO lists(key,title) SELECT x.key || y.key, 'list' FROM lists x, lists y \
-         WHERE x.title = 'a' AND y.title IN ('a','b')",
-        Vec::new(),
-    )
-    .await?;
     let refused = code(
-        all(&writer, "END TRANSACTION", Vec::new())
-            .await
-            .err()
-            .ok_or("rows")?,
+        all(
+            &writer,
+            "INSERT INTO lists(key,title) SELECT x.key || y.key, 'list' FROM lists x, lists y \
+             WHERE x.title = 'a' AND y.title IN ('a','b')",
+            Vec::new(),
+        )
+        .await
+        .err()
+        .ok_or("rows")?,
     )
     .map_err(|_| "code")?;
-    assert_eq!(
-        refused.kind(),
-        &crate::ErrorKind::Quota,
-        "a statement replaying more rows than a bundle holds fails the commit: {refused}"
+    assert!(
+        over_the_intent_limit(&refused),
+        "a statement whose recorded rows exceed an intent fails where it executes: {refused}"
     );
-    assert!(!writer.in_transaction().await?);
+    run(&writer, "ROLLBACK").await?;
     assert_eq!(
         count(&writer, "lists").await?,
         all_seeds,
-        "a commit over the limit fails as a whole"
+        "a refused statement leaves nothing behind"
     );
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    all(
-        &writer,
-        "INSERT INTO lists(key,title) VALUES(?,?)",
-        vec![text("big"), text(&"x".repeat(256 * 1024))],
+    let refused = code(
+        all(
+            &writer,
+            "INSERT INTO lists(key,title) VALUES(?,?)",
+            vec![text("big"), text(&"x".repeat(256 * 1024))],
+        )
+        .await
+        .err()
+        .ok_or("one statement over the limit")?,
     )
-    .await?;
+    .map_err(|_| "code")?;
+    assert!(
+        over_the_intent_limit(&refused),
+        "a statement whose intent is over the limit fails where it executes: {refused}"
+    );
+    run(&writer, "ROLLBACK").await?;
+    assert_eq!(count(&writer, "lists").await?, all_seeds);
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    for key in ["big-a", "big-b"] {
+        all(
+            &writer,
+            "INSERT INTO lists(key,title) VALUES(?,?)",
+            vec![text(key), text(&"x".repeat(80 * 1024))],
+        )
+        .await?;
+    }
     let refused = code(
         all(&writer, "END TRANSACTION", Vec::new())
             .await
@@ -528,15 +555,8 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     )
     .map_err(|_| "code")?;
     assert!(
-        matches!(
-            refused.kind(),
-            &crate::ErrorKind::TooLarge {
-                limit: crate::Limit::Intent,
-                size,
-                max: 131_072,
-            } if size > 131_072
-        ),
-        "an intent frame over a range page's bytes fails the commit: {refused}"
+        over_the_intent_limit(&refused),
+        "statements that fit alone but not together fail the commit: {refused}"
     );
     assert_eq!(count(&writer, "lists").await?, all_seeds);
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;

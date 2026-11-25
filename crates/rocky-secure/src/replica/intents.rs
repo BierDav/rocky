@@ -102,13 +102,19 @@ impl<A: RowApplication> Inner<A> {
                 if !status.writable.contains(&scope) {
                     return Err(Error::Sql(SqlError::Denied));
                 }
-                Ok(Recorded {
-                    scope,
-                    statement: IntentStatement {
-                        sql: copy.statement.sql,
-                        params: copy.statement.params,
-                    },
-                })
+                let statement = IntentStatement {
+                    sql: copy.statement.sql,
+                    params: copy.statement.params,
+                };
+                let size = crate::encode(&statement)?.len();
+                if size > crate::network::MAX_PAGE_BYTES {
+                    return Err(Error::TooLarge {
+                        limit: rocky_storage::Limit::Intent,
+                        size,
+                        max: crate::network::MAX_PAGE_BYTES,
+                    });
+                }
+                Ok(Recorded { scope, statement })
             })
             .collect::<Result<_, _>>()
             .map(Some)

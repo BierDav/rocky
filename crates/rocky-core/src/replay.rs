@@ -17,12 +17,12 @@ mod values {
         values: &[SqlValue],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let encoded: Vec<Vec<u8>> = values
+        let encoded: Vec<serde_bytes::ByteBuf> = values
             .iter()
             .map(|value| {
                 let mut bytes = Vec::new();
                 value.encode(&mut bytes);
-                bytes
+                serde_bytes::ByteBuf::from(bytes)
             })
             .collect();
         encoded.serialize(serializer)
@@ -30,7 +30,7 @@ mod values {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Vec<SqlValue>, D::Error> {
-        Vec::<Vec<u8>>::deserialize(deserializer)?
+        Vec::<serde_bytes::ByteBuf>::deserialize(deserializer)?
             .into_iter()
             .map(|bytes| {
                 let mut rest = bytes.as_slice();

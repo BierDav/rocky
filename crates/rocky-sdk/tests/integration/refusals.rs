@@ -463,3 +463,44 @@ async fn a_call_that_signs_for_the_person_without_their_identity_is_denied() -> 
     venue.close([]).await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_statement_over_the_intent_limit_fails_at_execute_and_a_blob_counts_its_own_size()
+-> Result<(), Failure> {
+    let schema = Schema::builder("files", 1)
+        .table(Table::replayed("files").column(Column::new("data", Affinity::Blob).required()))
+        .build()?;
+    let root = tempfile::tempdir()?;
+    let database = Configuration::new(root.path().join("files"), &schema)?
+        .create()
+        .await?
+        .database;
+    let insert = "INSERT INTO files(id, data) VALUES(?, ?)";
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("files", vec![]).await?;
+    transaction
+        .execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 100 * 1024])])
+        .await?;
+    transaction.commit().await?;
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("files", vec![]).await?;
+    let refused = transaction
+        .execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 200 * 1024])])
+        .await
+        .err()
+        .ok_or("a 200 KiB blob fit in one intent")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::TooLarge {
+                limit: rocky_sdk::Limit::Intent,
+                max: 131_072,
+                size,
+            } if *size > 200 * 1024 && *size < 201 * 1024
+        ),
+        "{refused:?}"
+    );
+    transaction.rollback().await?;
+    database.close().await?;
+    Ok(())
+}

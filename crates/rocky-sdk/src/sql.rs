@@ -486,8 +486,9 @@ impl Database {
 /// What a commit recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Commit {
-    /// The transaction changed nothing, so nothing syncs.
-    NoChanges,
+    /// No write statement ran, so no intent was recorded and nothing syncs; a write that matched
+    /// no row still records one.
+    NoWrites,
     /// The transaction was recorded and syncs under this token.
     Recorded(TransactionToken),
 }
@@ -566,7 +567,7 @@ impl Transaction {
         self.connection.close().await;
         Ok(match result? {
             Some(token) => Commit::Recorded(token),
-            None => Commit::NoChanges,
+            None => Commit::NoWrites,
         })
     }
     /// Discards the transaction.

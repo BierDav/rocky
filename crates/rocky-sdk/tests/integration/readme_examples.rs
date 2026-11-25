@@ -1,5 +1,26 @@
 use crate::common::Failure;
+use rocky_sdk::{Affinity, Column, Role, RoleName, Schema, Table};
 use std::path::Path;
+
+const DOCTOR: RoleName = RoleName::from_static("doctor");
+
+fn clinic() -> Result<Schema, rocky_sdk::Error> {
+    let charts = Table::replayed("charts")
+        .column(Column::new("ward", Affinity::Text).required())
+        .column(Column::new("note", Affinity::Text).required())
+        .primary_key(["ward", "id"])
+        .partition_by(["ward"]);
+    let doctor = Role::new(DOCTOR)
+        .read("wards")
+        .append("charts")
+        .update_columns("charts", ["note"])
+        .per_partition("charts");
+    Ok(Schema::builder("clinic", 1)
+        .table(Table::replayed("wards").column(Column::new("name", Affinity::Text).required()))
+        .table(charts)
+        .role(doctor)
+        .build()?)
+}
 
 mod one_device {
     include!("../../examples/one_device.rs");
@@ -63,6 +84,12 @@ fn every_rust_block_in_the_readme_appears_verbatim_in_its_example_file() -> Resu
         checked.len() >= 2,
         "the README shows the one- and two-device examples: {checked:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn the_readme_role_recipe_names_its_partition_group_after_the_table() -> Result<(), Failure> {
+    clinic()?;
     Ok(())
 }
 

@@ -397,7 +397,7 @@ pub async fn mutate(
     let committed = tx.commit().await?;
     let frames = match committed {
         sdk::Commit::Recorded(_) => Some(1usize),
-        sdk::Commit::NoChanges => None,
+        sdk::Commit::NoWrites => None,
     };
     Ok(json!({"id":id,"handle":key,"frames":frames}))
 }

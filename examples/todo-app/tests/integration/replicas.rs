@@ -163,6 +163,6 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
 fn published(commit: Commit) -> Result<TransactionToken, Failure> {
     match commit {
         Commit::Recorded(token) => Ok(token),
-        Commit::NoChanges => Err("published".into()),
+        Commit::NoWrites => Err("published".into()),
     }
 }

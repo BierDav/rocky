@@ -40,13 +40,24 @@ opt-level = 3
 ```
 
 Rocky needs Rust 1.99 or later and edition 2024; every published crate sets
-`rust-version`, so an older toolchain fails with a clear message. On a host
-with less than 8 GB of memory, build with `cargo build -j2`.
+`rust-version`, so an older toolchain fails with a clear message. Pin the
+toolchain with a `rust-toolchain.toml` next to your `Cargo.toml`:
+
+```toml
+[toolchain]
+channel = "1.99.0"
+```
+
+On a host with less than 8 GB of memory, build with `cargo build -j2`.
 
 ## One device
 
 Create a database, declare a table, write in a transaction and read it back.
 `Transaction::next_id` fills the `id` primary key every replayed table has.
+The application name in `Schema::builder(application, version)`, like every
+table, column and role name, is 1 to 64 ASCII letters, digits or underscores,
+not starting with a digit; `build()` checks it and fails with
+`SchemaError::InvalidName`.
 
 ```rust crates/rocky-sdk/examples/one_device.rs
 use rocky_sdk::{Affinity, Column, Configuration, Schema, Table, params};
@@ -177,8 +188,9 @@ its key. The owner's person key is derived from the root, so
 `RootKey::identity` recovers it from the root phrase. `PersonId::of(&key)`
 names the person a key signs for, as `Invite::for_identity` and `remove` take
 it. An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
-`Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later opens get the person key from `Configuration::identity`, and a
-call that needs it without one is `Denied` with `IdentityRequired`.
+`Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later
+opens get the person key from `Configuration::identity`, and a call that needs
+it without one is `Denied` with `IdentityRequired`.
 `create_with_root(root, owner)` takes signers the application keeps
 elsewhere, such as passkey-backed ones, and `FileIdentityProvider` keeps a
 person key in a native file.
@@ -187,24 +199,56 @@ person key in a native file.
 
 `Database::invite(Invite::new(access))` issues an `Invitation` whose `code` a
 joiner redeems with `Configuration::join`; admin devices invite, and the joiner
-needs the issuing device online. An invite can add `partition`s, a `label` for
-the device and, on the first invitation, the person, and a validity from one
-minute to 30 days (`Invite::valid_for`, ten minutes by default). A default code
-admits whoever holds it once, as a person key Rocky mints and returns in
-`Opened::identity`. `Database::invitations` lists open and redeemed
+needs the issuing device online when it redeems the code. An invite can add
+`partition`s, a `label` for the device and, on the first invitation, the
+person, and a validity from one minute to 30 days (`Invite::valid_for`, ten
+minutes by default). Every code admits one device once. A default code admits
+whoever holds it, as a person key Rocky mints and returns in
+`Opened::identity`. A device's credentials last 180 days and renew at every
+sync with an admin device; a device that meets none for 180 days holds expired
+credentials (`status().authority.expired`) until it does. `Database::invitations` lists open and redeemed
 invitations, and `cancel_invitation` ends an unused one.
 
 `Access` is `Full`, `Read`, `Store` or a `Role` the schema declares with
 `SchemaBuilder::role`. A role reads, writes, appends to or updates named
-columns of the tables it lists. A role declared `per_partition` holds no
+columns of the tables it lists, and grants on one table compose: this doctor
+reads wards, adds charts and edits only their notes, in the wards they are
+granted.
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+fn clinic() -> Result<Schema, rocky_sdk::Error> {
+    let charts = Table::replayed("charts")
+        .column(Column::new("ward", Affinity::Text).required())
+        .column(Column::new("note", Affinity::Text).required())
+        .primary_key(["ward", "id"])
+        .partition_by(["ward"]);
+    let doctor = Role::new(DOCTOR)
+        .read("wards")
+        .append("charts")
+        .update_columns("charts", ["note"])
+        .per_partition("charts");
+    Ok(Schema::builder("clinic", 1)
+        .table(Table::replayed("wards").column(Column::new("name", Affinity::Text).required()))
+        .table(charts)
+        .role(doctor)
+        .build()?)
+}
+```
+
+A partitioned table's partition group is its own name unless
+`Table::partition_group` names one that several tables share. A role declared
+`per_partition` holds no
 partition of that group until an admin calls `grant_partition(person,
 &partition)`; until then a read of its tables is `Denied` with
 `PartitionNotGranted` and `status` lists a matching blocker. Once it holds one,
 a read returns the rows of the partitions it holds, also when its filter names
 others, and a write into a partition it does not hold is `Denied` with
 `PartitionNotGranted`. Grants reach every device of the person,
-including devices that join or link later, and `revoke_partition` takes them
-back and rotates the key. `Full` and `Read` reach every partition.
+including devices that join or link later. `revoke_partition` takes one back
+like any narrowing of access: it rotates the partition's key and revokes the
+credentials of each of the person's devices, which get new ones without the
+partition at their next sync with an admin device. `Full` and `Read` reach
+every partition.
 
 A person links another device with `Configuration::link(contact)` on the new
 device, configured with their person key, where `contact` is
@@ -236,6 +280,22 @@ until `logout(Logout::PurgeOnClose)` deletes the directory at close. A
 device that is offline cannot know yet: it keeps reading and committing
 locally until it syncs, and those commits never reach anyone else.
 
+## Unattended hosts
+
+A fleet of headless hosts, such as kiosks or servers, joins without anyone at
+each host:
+
+1. Provision each host with its own person key, for example
+   `FileIdentityProvider::open(dir)`, which creates one on first use, and read
+   its `PersonId` there.
+2. On an admin device that stays online, issue one invitation per host with
+   `Invite::new(access).for_identity(person).valid_for(..)`. Such a code
+   carries no secret and admits only that person, so it can travel with the
+   host's configuration.
+3. At boot, the host configures `Configuration::identity` with that provider
+   and calls `open`; on `NoDatabase` or `JoinUnfinished` it calls `join` with
+   its code instead, which needs the issuing admin device online.
+
 ## How merging works
 
 A transaction is recorded as SQL intents: its statements and their
@@ -251,8 +311,8 @@ Every replayed table has an `id` primary key holding a `RowIdentity`, which
 coordination; gap-free numbers come from `rocky-coordinator`. A `RowIdentity`
 prints as hex and parses back with `str::parse`, and a `Timestamp` column
 value prints as RFC 3339 in UTC. `commit` returns
-`Commit::Recorded(token)`, or `Commit::NoChanges` when the transaction changed
-nothing and nothing syncs. `flush` makes every returned commit durable.
+`Commit::Recorded(token)`, or `Commit::NoWrites` when no write statement ran
+and nothing syncs; a write that matched no row still records an intent. `flush` makes every returned commit durable.
 
 A write must replay identically everywhere, so Rocky refuses some SQL in a
 transaction with `ErrorKind::Sql { unsupported, .. }`:

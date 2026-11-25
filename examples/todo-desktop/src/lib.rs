@@ -568,7 +568,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                                 submit(busy, error, own, async move {
                                     todos.share(list, &[node]).await?;
                                     revision += 1;
-                                    Ok(Commit::NoChanges)
+                                    Ok(Commit::NoWrites)
                                 });
                             },
                             "Share with partial device"

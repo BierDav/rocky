@@ -45,7 +45,7 @@ async fn write(
     tx.execute(sql, params).await?;
     match tx.commit().await? {
         rocky_sdk::Commit::Recorded(token) => Ok(token),
-        rocky_sdk::Commit::NoChanges => Err("a replayed write publishes".into()),
+        rocky_sdk::Commit::NoWrites => Err("a replayed write publishes".into()),
     }
 }
 

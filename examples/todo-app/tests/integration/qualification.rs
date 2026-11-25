@@ -70,7 +70,7 @@ fn dropped(outcome: &Option<TransactionOutcome>) -> Option<(DropReason, bool)> {
 fn token(commit: Commit) -> Result<TransactionToken, Failure> {
     match commit {
         Commit::Recorded(token) => Ok(token),
-        Commit::NoChanges => Err("a replayed write publishes a transaction".into()),
+        Commit::NoWrites => Err("a replayed write publishes a transaction".into()),
     }
 }
 

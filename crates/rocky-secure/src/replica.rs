@@ -1908,6 +1908,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.quiet_pause = Some((reached, resume));
         inner.workspace.queries.cursors.held_opens()
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn preempt_reader_opens(&self, count: usize) {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .workspace
+            .queries
+            .cursors
+            .preempt_opens(count);
+    }
     #[cfg(test)]
     pub(crate) async fn checkpoints(&self) -> usize {
         self.inner

@@ -157,6 +157,8 @@ pub struct CursorHost {
     quiet: watch::Sender<usize>,
     #[cfg(any(test, feature = "test-support"))]
     held_opens: watch::Sender<usize>,
+    #[cfg(any(test, feature = "test-support"))]
+    preempted_opens: AtomicUsize,
 }
 
 pub struct Quiet {
@@ -246,6 +248,18 @@ impl CursorHost {
     pub fn held_opens(&self) -> watch::Receiver<usize> {
         self.held_opens.subscribe()
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn preempt_opens(&self, count: usize) {
+        self.preempted_opens.store(count, Ordering::SeqCst);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn preempts_open(&self) -> bool {
+        self.preempted_opens
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
     async fn reopened(&self, quiet: &mut watch::Receiver<usize>) {
         let reopened = |quiet: &usize| *quiet == 0 || self.closed.load(Ordering::SeqCst);
         if reopened(&quiet.borrow_and_update()) {
@@ -321,6 +335,10 @@ impl SnapshotCursor {
             host.reopened(&mut quiet).await;
             if host.closed.load(Ordering::SeqCst) {
                 return Err(Error::Closed);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if host.preempts_open() {
+                return Err(Error::Sql(SqlError::Aborted(AbortReason::Preempted)));
             }
             if count.fetch_add(1, Ordering::SeqCst) >= MAX_SESSION_CURSORS {
                 count.fetch_sub(1, Ordering::SeqCst);

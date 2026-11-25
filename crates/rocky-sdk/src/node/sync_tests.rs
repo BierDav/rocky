@@ -623,6 +623,85 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
 }
 
 #[tokio::test]
+async fn a_read_preempted_before_its_first_page_reopens_but_a_read_transaction_does_not()
+-> Result<(), Failure> {
+    use crate::connection::{
+        Call, ConnectionOptions, REOPENS_OF_A_PREEMPTED_READ, Registry, Reply, serve,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let node = enrolled(root.path(), &Arc::new(Hub::default()), "a", None).await?;
+            add(&node, 1).await?;
+            let connections = Registry::default();
+            let query =
+                || connections.query_once(node.clone(), "SELECT key FROM items".into(), Vec::new());
+            let busy = |error: Failure| {
+                let error = crate::Error::from_failure(&error);
+                assert_eq!(error.kind(), &crate::ErrorKind::Busy, "{error}");
+                assert!(error.retryable(), "{error}");
+                assert!(error.to_string().contains("Preempted"), "{error}");
+            };
+
+            node.replica
+                .preempt_reader_opens(REOPENS_OF_A_PREEMPTED_READ)
+                .await;
+            let (page, _) = query().await?;
+            assert_eq!(
+                page.rows,
+                vec![vec![SqlValue::Text("1".into())]],
+                "a read that delivered no row yet reopens on a fresh snapshot"
+            );
+
+            node.replica
+                .preempt_reader_opens(REOPENS_OF_A_PREEMPTED_READ + 1)
+                .await;
+            busy(
+                query()
+                    .await
+                    .err()
+                    .ok_or("a read preempted on every reopen succeeded")?,
+            );
+            query().await?;
+
+            let reader = connections.get(
+                connections
+                    .connect(
+                        node.clone(),
+                        ConnectionOptions {
+                            read_only: true,
+                            transaction_timeout: None,
+                        },
+                    )
+                    .await?,
+            )?;
+            let execute = |sql: &str| {
+                serve(
+                    reader.clone(),
+                    Call::Execute {
+                        statement: 1,
+                        sql: sql.into(),
+                        params: Vec::new(),
+                    },
+                )
+            };
+            execute("BEGIN").await?;
+            node.replica.preempt_reader_opens(1).await;
+            let Err(error) = execute("SELECT key FROM items").await else {
+                return Err("a read transaction replaced its preempted snapshot".into());
+            };
+            assert_eq!(error.kind(), &crate::ErrorKind::Busy, "{error}");
+            assert!(error.retryable(), "{error}");
+            let Reply::Page(_) = execute("ROLLBACK").await? else {
+                return Err("a rollback answers with a page".into());
+            };
+            node.detach().await;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(async {

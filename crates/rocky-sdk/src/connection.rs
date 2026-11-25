@@ -17,6 +17,7 @@ const PAGE_ROWS: usize = 256;
 const PAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULTS: usize = 64;
 const MAX_EXPLAINED_WRITES: usize = 64;
+pub(crate) const REOPENS_OF_A_PREEMPTED_READ: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionOptions {
@@ -404,6 +405,17 @@ impl Pending {
         }
     }
 }
+async fn first_page(pending: Result<Pending, Failure>) -> Result<(Pending, Page), Failure> {
+    let mut pending = pending?;
+    let page = pending.page().await?;
+    Ok((pending, page))
+}
+fn preempted(error: &Failure) -> bool {
+    matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::Sql(SqlError::Aborted(AbortReason::Preempted)))
+    )
+}
 fn weight(row: &[SqlValue]) -> usize {
     row.iter()
         .map(|value| match value {
@@ -500,20 +512,14 @@ impl State {
         }
         let allocation = next_id(sql, &params)?;
         let allocated = allocation.as_ref().map(|(table, _)| table.as_str());
-        let dispatched = match (query_only(sql), &allocation) {
-            (Some(set), _) => self.query_only(set),
-            (None, Some((table, values))) => self.next_id(table, values).await,
-            (None, None) if self.read_only => self.read(sql, params).await,
-            (None, None) => self.write(sql, params).await,
+        let first = match (query_only(sql), &allocation) {
+            (Some(set), _) => first_page(self.query_only(set)).await,
+            (None, Some((table, values))) => first_page(self.next_id(table, values).await).await,
+            (None, None) if self.read_only => self.read_first_page(sql, &params).await,
+            (None, None) => first_page(self.write(sql, params).await).await,
         };
-        let mut pending = match dispatched {
-            Ok(pending) => pending,
-            Err(error) => {
-                return Err(explained(&self.node, sql, allocated, &self.writes, error).await);
-            }
-        };
-        let page = match pending.page().await {
-            Ok(page) => page,
+        let (pending, page) = match first {
+            Ok(first) => first,
             Err(error) => {
                 return Err(explained(&self.node, sql, allocated, &self.writes, error).await);
             }
@@ -522,6 +528,26 @@ impl State {
             self.results.insert(statement, pending);
         }
         Ok(page)
+    }
+    async fn read_first_page(
+        &mut self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<(Pending, Page), Failure> {
+        let mut reopened = 0;
+        loop {
+            let outside_a_read_transaction = self.reading.is_none();
+            match first_page(self.read(sql, params).await).await {
+                Err(error)
+                    if outside_a_read_transaction
+                        && reopened < REOPENS_OF_A_PREEMPTED_READ
+                        && preempted(&error) =>
+                {
+                    reopened += 1;
+                }
+                first => return first,
+            }
+        }
     }
     pub(crate) async fn next(&mut self, statement: u64) -> Result<Page, Failure> {
         let mut pending = self
@@ -662,7 +688,7 @@ impl State {
         Ok(Pending::rows(rows.columns, rows.rows))
     }
 
-    async fn read(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
+    async fn read(&mut self, sql: &str, params: &[SqlValue]) -> Result<Pending, Failure> {
         let control = classify(sql).map_err(Error::Sql)?;
         let none = || Ok(Pending::rows(Vec::new(), Vec::new()));
         let no_transaction = || -> Result<Pending, Failure> {
@@ -752,16 +778,16 @@ impl State {
                         .and_then(|reading| reading.snapshot.as_mut())
                         .ok_or("no snapshot")?;
                     let rows = opened
-                        .snapshot_rows(snapshot, sql, params)
+                        .snapshot_rows(snapshot, sql, params.to_vec())
                         .await
                         .map_err(readonly)?;
                     let columns = rows.columns.into_iter().map(|column| column.name).collect();
                     return Ok(Pending::rows(columns, rows.rows));
                 }
-                let cursor = match opened.cursor(sql, params.clone(), limits).await {
+                let cursor = match opened.cursor(sql, params.to_vec(), limits).await {
                     Err(Error::Sql(SqlError::AuthorityChanged)) => {
                         self.opened = None;
-                        self.sql().await?.cursor(sql, params, limits).await
+                        self.sql().await?.cursor(sql, params.to_vec(), limits).await
                     }
                     other => other,
                 }

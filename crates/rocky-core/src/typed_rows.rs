@@ -161,11 +161,14 @@ impl TypedRows {
             .schema
             .table(&table.sql_name)
             .ok_or("unknown typed table")?;
+        if !logical.generated_id() {
+            return Ok(None);
+        }
         let id_index = logical
             .columns
             .iter()
-            .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
-            .ok_or("missing identity column")?;
+            .position(|column| column.sql_name.eq_ignore_ascii_case(crate::GENERATED_ID))
+            .ok_or("missing generated id column")?;
         let mut identity = None;
         for fields in change.before.iter().chain(change.after.iter()) {
             let values = self.values(table, fields)?;
@@ -342,9 +345,6 @@ mod tests {
             class: ColumnClass::Replicated,
         }
     }
-    fn identity() -> crate::RowIdentity {
-        crate::RowIdentity::new(crate::WriterId::from_bytes([7; 32]), 1).unwrap()
-    }
     fn rows() -> TypedRows {
         let schema = LogicalSchema {
             format: LOGICAL_SCHEMA_FORMAT,
@@ -360,17 +360,16 @@ mod tests {
                 sql_name: "items".into(),
             explicit_access_only: false,
                 class: TableClass::Replayed,
-                create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id BLOB NOT NULL)".into(),
+                create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL)".into(),
                 auto_generate: false,
                 columns: vec![
                     column("key", Affinity::Text, Collation::Nocase),
                     column("n", Affinity::Integer, Collation::Binary),
-                    column("id", Affinity::Blob, Collation::Binary),
                 ],
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
             partition_group: None,
-                indexes: vec![crate::LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![crate::IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), expressions: Vec::new(), predicate: None }],
+                indexes: Vec::new(),
                 foreign_keys: Vec::new(),
             }],
             views: Vec::new(),
@@ -394,13 +393,7 @@ mod tests {
             encryption: [4; 32],
             table: table.id,
         };
-        let image = |id: &str, n: i64| {
-            vec![
-                SqlValue::Text(id.into()),
-                SqlValue::Integer(n),
-                identity().sql(),
-            ]
-        };
+        let image = |id: &str, n: i64| vec![SqlValue::Text(id.into()), SqlValue::Integer(n)];
         let row = |id: &str| {
             rows.row_id(DomainId([2; 16]), &table, &image(id, 1))
                 .unwrap()
@@ -419,7 +412,11 @@ mod tests {
             before: None,
             after: Some(fields("a", 1)),
         };
-        assert_eq!(rows.row_identity(&change).unwrap(), Some(identity()));
+        assert_eq!(
+            rows.row_identity(&change).unwrap(),
+            None,
+            "a declared key names the row; no generated id is born"
+        );
         assert!(
             rows.validate_changes(std::slice::from_ref(&change))
                 .is_err(),
@@ -442,18 +439,14 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_values_bind_a_row_to_its_scope() {
-        let definition = serde_json::json!({"format":8,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let definition = serde_json::json!({"format":9,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         let schema = crate::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()
             .unwrap();
         let rows = TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap();
         let table = rows.tables().next().unwrap();
-        let values = vec![
-            SqlValue::Text("A".into()),
-            SqlValue::Text("key".into()),
-            super::tests::identity().sql(),
-        ];
+        let values = vec![SqlValue::Text("A".into()), SqlValue::Text("key".into())];
         let domain = Scope {
             mesh: MeshId([3; 16]),
             app: rows.manifest().app,

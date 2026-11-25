@@ -7,6 +7,7 @@ use crate::{
     storage,
 };
 use rocky_core::TableClass;
+use rocky_storage::partition_sql::SplitError;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::OwnedMutexGuard;
 use web_time::Instant;
@@ -249,6 +250,15 @@ impl<A: RowApplication> SecureSql<A> {
         partition_values: Option<&[SqlValue]>,
     ) -> Result<rocky_core::RowIdentity, Error> {
         let mut lease = self.lease.lock().await;
+        self.reserve_id_in(&mut lease, table, partition_values)
+            .await
+    }
+    async fn reserve_id_in(
+        &self,
+        lease: &mut Lease<A>,
+        table: &str,
+        partition_values: Option<&[SqlValue]>,
+    ) -> Result<rocky_core::RowIdentity, Error> {
         let held = lease
             .held
             .as_ref()
@@ -267,6 +277,17 @@ impl<A: RowApplication> SecureSql<A> {
             })
         };
         let table = typed.by_name(table).ok_or_else(|| not_held(table))?;
+        if !typed
+            .rows
+            .schema()
+            .table(&table.table.sql_name)
+            .is_some_and(rocky_core::LogicalTable::generated_id)
+        {
+            return Err(refused(format!(
+                "{} is keyed by its declared primary key and has no generated id",
+                table.table.sql_name
+            )));
+        }
         let author = inner
             .node_author
             .as_ref()
@@ -522,59 +543,95 @@ impl<A: RowApplication> SecureSql<A> {
                 Ok(empty(&lease, SqlState::Active))
             }
             Control::Statement => {
-                let original = (sql, params.clone());
-                let checked = match &lease.held {
-                    Some(held) => {
-                        held.inner
-                            .partition_statement(sql, &params, &self.session.status)
-                            .await?
-                    }
-                    None => {
-                        self.session
-                            .replica
-                            .inner
-                            .lock(statement_class(sql))
-                            .await
-                            .partition_statement(sql, &params, &self.session.status)
-                            .await?
-                    }
-                };
-                let (sql, params) = (checked.sql.as_str(), checked.params);
-                if let Ok(analyzed) = crate::statement::analyze(sql, |_| None)
-                    && analyzed.kind == crate::statement::Kind::Read
-                {
-                    match &lease.held {
-                        Some(held) => {
-                            held.inner
-                                .availability(&analyzed.tables, &self.session.status)
-                                .await?
-                        }
-                        None => {
-                            self.session
-                                .replica
-                                .inner
-                                .lock(crate::replica::Class::Background)
-                                .await
-                                .availability(&analyzed.tables, &self.session.status)
-                                .await?
-                        }
-                    }
-                }
-                if active {
-                    let copies = match self.intent_copies(&lease, original).await {
-                        Ok(copies) => copies,
-                        Err(error) => {
-                            lease.held = None;
-                            lease.aborted = Some(AbortReason::Poisoned(error.to_string()));
-                            return Err(error);
-                        }
-                    };
-                    self.statement(&mut lease, sql, params, false, copies)
-                } else {
-                    self.autocommit(&mut lease, (sql, params), original, target)
+                let implicit = !active
+                    && self
+                        .session
+                        .replica
+                        .inner
+                        .lock(statement_class(sql))
                         .await
+                        .generates_ids(sql, &params)?;
+                if implicit {
+                    self.begin(&mut lease, "BEGIN IMMEDIATE").await?;
+                }
+                let ran = self
+                    .user_statement(&mut lease, (sql, params), active, implicit, target)
+                    .await;
+                if implicit && ran.is_err() {
+                    lease.held = None;
+                }
+                ran
+            }
+        }
+    }
+    async fn user_statement(
+        &self,
+        lease: &mut Lease<A>,
+        (sql, params): (&str, Vec<SqlValue>),
+        active: bool,
+        implicit: bool,
+        target: Target,
+    ) -> Result<SecureRows, Error> {
+        let filled = self.fill_generated_ids(lease, sql, &params).await?;
+        let (sql, params) = match &filled {
+            Some(filled) => (filled.sql.as_str(), filled.params.clone()),
+            None => (sql, params),
+        };
+        let original = (sql, params.clone());
+        let checked = match &lease.held {
+            Some(held) => {
+                held.inner
+                    .partition_statement(sql, &params, &self.session.status)
+                    .await?
+            }
+            None => {
+                self.session
+                    .replica
+                    .inner
+                    .lock(statement_class(sql))
+                    .await
+                    .partition_statement(sql, &params, &self.session.status)
+                    .await?
+            }
+        };
+        let (sql, params) = (checked.sql.as_str(), checked.params);
+        if let Ok(analyzed) = crate::statement::analyze(sql, |_| None)
+            && analyzed.kind == crate::statement::Kind::Read
+        {
+            match &lease.held {
+                Some(held) => {
+                    held.inner
+                        .availability(&analyzed.tables, &self.session.status)
+                        .await?
+                }
+                None => {
+                    self.session
+                        .replica
+                        .inner
+                        .lock(crate::replica::Class::Background)
+                        .await
+                        .availability(&analyzed.tables, &self.session.status)
+                        .await?
                 }
             }
+        }
+        if implicit {
+            let copies = self.intent_copies(lease, original).await?;
+            let rows = self.statement(lease, sql, params, true, copies)?;
+            self.finish(lease, target, Some(rows)).await
+        } else if active {
+            let copies = match self.intent_copies(lease, original).await {
+                Ok(copies) => copies,
+                Err(error) => {
+                    lease.held = None;
+                    lease.aborted = Some(AbortReason::Poisoned(error.to_string()));
+                    return Err(error);
+                }
+            };
+            self.statement(lease, sql, params, false, copies)
+        } else {
+            self.autocommit(lease, (sql, params), original, target)
+                .await
         }
     }
     async fn autocommit(
@@ -1218,6 +1275,56 @@ impl<A: RowApplication> SecureSql<A> {
 }
 
 impl<A: RowApplication> SecureSql<A> {
+    async fn fill_generated_ids(
+        &self,
+        lease: &mut Lease<A>,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<Option<rocky_storage::partition_sql::Checked>, Error> {
+        let Some(held) = &lease.held else {
+            return Ok(None);
+        };
+        let Some((views, generated)) = held.inner.generated_tables() else {
+            return Ok(None);
+        };
+        let shape = |name: &str| generated.get(name).cloned();
+        let mut wanted = Vec::new();
+        let probed = rocky_storage::partition_sql::fill_generated_ids(
+            sql,
+            params,
+            &views,
+            shape,
+            |partition| {
+                wanted.push(partition.to_vec());
+                Ok::<_, Error>(Vec::new())
+            },
+        );
+        match probed {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(None),
+            Err(SplitError::Refused(refusal)) => {
+                return Err(Error::Sql(SqlError::Refused(refusal)));
+            }
+            Err(SplitError::Evaluate(error)) => return Err(error),
+        }
+        let table = rocky_storage::partition_sql::written_table(sql, &views)
+            .ok_or_else(|| Error::Corrupt("a generated id has no target".into()))?;
+        let mut ids = Vec::with_capacity(wanted.len());
+        for partition in &wanted {
+            let values = (!partition.is_empty()).then_some(partition.as_slice());
+            let id = self.reserve_id_in(lease, &table, values).await?;
+            ids.push(id.to_bytes().to_vec());
+        }
+        let mut ids = ids.into_iter();
+        match rocky_storage::partition_sql::fill_generated_ids(sql, params, &views, shape, |_| {
+            ids.next()
+                .ok_or_else(|| Error::Corrupt("generated id count".into()))
+        }) {
+            Ok(filled) => Ok(filled),
+            Err(SplitError::Refused(refusal)) => Err(Error::Sql(SqlError::Refused(refusal))),
+            Err(SplitError::Evaluate(error)) => Err(error),
+        }
+    }
     async fn intent_copies(
         &self,
         lease: &Lease<A>,

@@ -36,14 +36,9 @@ fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuratio
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<TransactionToken, Failure> {
     let mut tx = database.transaction().await?;
-    let id = tx.next_id("counters", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO counters(key,amount,id) VALUES(?,?,?)",
-        vec![
-            SqlValue::Text(key.into()),
-            SqlValue::Integer(amount),
-            id.sql(),
-        ],
+        "INSERT INTO counters(key,amount) VALUES(?,?)",
+        vec![SqlValue::Text(key.into()), SqlValue::Integer(amount)],
     )
     .await?;
     match tx.commit().await? {

@@ -82,17 +82,15 @@ async fn revocations(device: &Device) -> RevocationStatus {
         .authority
         .revocations
 }
-const INSERT_ITEM: &str = "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)";
-const INSERT_NOTE: &str = "INSERT INTO notes(key,id,text) VALUES(?,?,?)";
-async fn create_row(device: &Device, handle: u8, table: &str, sql: &str, text: &str) {
+const INSERT_ITEM: &str = "INSERT INTO items(key,title,completed) VALUES(?,?,0)";
+const INSERT_NOTE: &str = "INSERT INTO notes(key,text) VALUES(?,?)";
+async fn create_row(device: &Device, handle: u8, sql: &str, text: &str) {
     let handle = [handle; 32];
     let mut tx = device.database.transaction().await.expect("begin");
-    let id = tx.next_id(table, Vec::new()).await.expect("id");
     tx.execute(
         sql,
         vec![
             SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
-            id.sql(),
             SqlValue::Text(text.into()),
         ],
     )
@@ -134,8 +132,8 @@ impl Domain {
         let m = join(root, hub, "m", &a, writer.clone()).await?;
         let n = join(root, hub, "n", &b, writer).await?;
         common::introduce(&m, &n).await;
-        create_row(&a, 1, "items", INSERT_ITEM, "before").await;
-        create_row(&b, 2, "notes", INSERT_NOTE, "before").await;
+        create_row(&a, 1, INSERT_ITEM, "before").await;
+        create_row(&b, 2, INSERT_NOTE, "before").await;
         for device in [&b, &a, &x, &y, &m, &n] {
             device.sync().await.map_err(|error| error.to_string())?;
         }
@@ -229,8 +227,8 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         );
         assert!(!device.database.status().await?.data.bootstrap_pending);
     }
-    create_row(&m, 3, "items", INSERT_ITEM, "after").await;
-    create_row(&n, 4, "notes", INSERT_NOTE, "after").await;
+    create_row(&m, 3, INSERT_ITEM, "after").await;
+    create_row(&n, 4, INSERT_NOTE, "after").await;
     for device in [&m, &n, &m] {
         device.sync().await.map_err(|error| error.to_string())?;
     }

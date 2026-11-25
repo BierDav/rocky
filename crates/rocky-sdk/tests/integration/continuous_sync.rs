@@ -19,14 +19,9 @@ async fn replace_row(database: &Database, key: &str, title: &str) -> Result<(), 
         vec![SqlValue::Text(key.into())],
     )
     .await?;
-    let id = tx.next_id("items", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
-        vec![
-            SqlValue::Text(key.into()),
-            id.sql(),
-            SqlValue::Text(title.into()),
-        ],
+        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+        vec![SqlValue::Text(key.into()), SqlValue::Text(title.into())],
     )
     .await?;
     tx.commit().await?;

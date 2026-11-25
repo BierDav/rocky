@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 8;
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 9;
 pub const TYPED_RULE: &str = "rocky.sdk.typed.v2";
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -639,25 +639,25 @@ impl LogicalTable {
             .iter()
             .all(|name| self.column(name).is_some_and(|column| !column.not_null))
     }
-    pub fn identity_columns(&self) -> Vec<String> {
-        let mut columns = self.partition_by.clone();
-        if !columns.iter().any(|name| name.eq_ignore_ascii_case("id")) {
-            columns.push("id".into());
-        }
-        columns
+    pub fn generated_id(&self) -> bool {
+        self.primary_key
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(crate::GENERATED_ID))
     }
-    pub fn is_identity_index(&self, index: &LogicalIndex) -> bool {
-        index.unique
-            && index.expressions.is_empty()
-            && index.predicate.is_none()
-            && index.columns.iter().all(|column| !column.descending)
-            && index
-                .columns
-                .iter()
-                .map(|column| &column.name)
-                .zip(self.identity_columns())
-                .all(|(column, identity)| column.eq_ignore_ascii_case(&identity))
-            && index.columns.len() == self.identity_columns().len()
+    pub fn is_key_column(&self, name: &str) -> bool {
+        self.primary_key
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(name))
+    }
+    fn generated_key(&self) -> Vec<String> {
+        let mut key = self.partition_by.clone();
+        if !key
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(crate::GENERATED_ID))
+        {
+            key.push(crate::GENERATED_ID.into());
+        }
+        key
     }
 
     pub fn column(&self, sql_name: &str) -> Option<&LogicalColumn> {
@@ -738,9 +738,10 @@ impl LogicalTable {
         if self.primary_key.len() > usize::from(u8::MAX)
             || self.primary_key.iter().any(|column| {
                 !key.insert(column.to_ascii_lowercase())
-                    || self
-                        .column(column)
-                        .is_none_or(|column| column.class != ColumnClass::Replicated)
+                    || self.column(column).is_none_or(|column| {
+                        column.class != ColumnClass::Replicated
+                            || (self.class == TableClass::Replayed && !column.not_null)
+                    })
             })
         {
             return invalid(format!("{name} primary key"));
@@ -1007,16 +1008,15 @@ impl LogicalSchema {
                         table.sql_name, key.table
                     ));
                 };
-                let identity = parent.identity_columns();
-                if key.references.len() != identity.len()
+                if key.references.len() != parent.primary_key.len()
                     || key
                         .references
                         .iter()
-                        .zip(&identity)
+                        .zip(&parent.primary_key)
                         .any(|(name, column)| !name.eq_ignore_ascii_case(column))
                 {
                     return invalid(format!(
-                        "{}({}) must reference the identity of {}",
+                        "{}({}) must reference the primary key of {}",
                         table.sql_name,
                         key.columns.join(","),
                         parent.sql_name
@@ -1043,38 +1043,29 @@ impl LogicalSchema {
                     table.sql_name
                 ));
             }
-            {
-                let name = "id";
-                let column = table.column(name).ok_or_else(|| {
-                    SchemaError::Invalid(format!(
-                        "{}.{} is required by descriptor format {LOGICAL_SCHEMA_FORMAT}",
-                        table.sql_name, name
-                    ))
-                })?;
-                if column.sql_name != name
+            if let Some(column) = table.column(crate::GENERATED_ID) {
+                if column.sql_name != crate::GENERATED_ID
                     || column.affinity != Affinity::Blob
                     || !column.not_null
                     || column.collation != Collation::Binary
                     || column.class != ColumnClass::Replicated
                 {
                     return invalid(format!(
-                        "{}.{} must be a non-null BLOB identity column",
-                        table.sql_name, name
+                        "{}.{} must be a non-null BLOB generated id",
+                        table.sql_name,
+                        crate::GENERATED_ID
                     ));
                 }
-                if !(table.primary_key.len() == table.identity_columns().len()
-                    && table
+                let key = table.generated_key();
+                if table.primary_key.len() != key.len()
+                    || table
                         .primary_key
                         .iter()
-                        .zip(table.identity_columns())
-                        .all(|(name, identity)| name.eq_ignore_ascii_case(&identity)))
-                    && !table
-                        .indexes
-                        .iter()
-                        .any(|index| table.is_identity_index(index))
+                        .zip(&key)
+                        .any(|(name, column)| !name.eq_ignore_ascii_case(column))
                 {
                     return invalid(format!(
-                        "{} needs its unique identity index",
+                        "{} is keyed by its generated id, so its primary key is its partition columns and id",
                         table.sql_name
                     ));
                 }
@@ -1462,15 +1453,14 @@ mod tests {
                 sql_name: "items".into(),
             explicit_access_only: false,
                 class: TableClass::Replayed,
-                create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` BLOB NOT NULL, PRIMARY KEY(`key`))".into(),
+                create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, PRIMARY KEY(`key`))".into(),
                 auto_generate: false,
-                columns: vec![column("key", Affinity::Text), column("title", Affinity::Text), column("id", Affinity::Blob)],
+                columns: vec![column("key", Affinity::Text), column("title", Affinity::Text)],
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
             partition_group: None,
-                indexes: vec![LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), expressions: Vec::new(), predicate: None }],
+                indexes: Vec::new(),
                 foreign_keys: Vec::new(),
-
             }],
             views: Vec::new(),
             assertions: Vec::new(),
@@ -1479,11 +1469,11 @@ mod tests {
         }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_foreign_key_references_exactly_the_identity_of_a_known_parent() {
+    fn a_foreign_key_references_exactly_the_primary_key_of_a_known_parent() {
         let refused = |table: &str, references: &[&str]| {
             let mut schema = schema();
             let items = &mut schema.tables[0];
-            items.columns.push(column("link", Affinity::Blob));
+            items.columns.push(column("link", Affinity::Text));
             items.foreign_keys.push(LogicalForeignKey {
                 columns: ["link", "title"][..references.len()]
                     .iter()
@@ -1497,40 +1487,28 @@ mod tests {
             });
             schema.validate().err()
         };
-        assert_eq!(refused("ITEMS", &["ID"]), None);
-        let not_identity = Some(SchemaError::Invalid(
-            "items(link) must reference the identity of items".into(),
+        assert_eq!(refused("ITEMS", &["KEY"]), None);
+        let not_key = Some(SchemaError::Invalid(
+            "items(link) must reference the primary key of items".into(),
         ));
-        assert_eq!(refused("items", &["title"]), not_identity);
-        assert_eq!(refused("items", &["key"]), not_identity);
+        assert_eq!(refused("items", &["title"]), not_key);
         assert_eq!(
-            refused("items", &["id", "title"]),
+            refused("items", &["id"]),
+            not_key,
+            "a declared-key parent has no id"
+        );
+        assert_eq!(
+            refused("items", &["key", "title"]),
             Some(SchemaError::Invalid(
-                "items(link,title) must reference the identity of items".into(),
+                "items(link,title) must reference the primary key of items".into(),
             ))
         );
         assert_eq!(
-            refused("missing", &["id"]),
+            refused("missing", &["key"]),
             Some(SchemaError::Invalid(
                 "items references unknown table missing".into()
             ))
         );
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn an_identity_index_covers_every_row_by_its_identity_columns_alone() {
-        let identity = schema().tables[0].indexes[0].clone();
-        let table = &schema().tables[0];
-        assert!(table.is_identity_index(&identity));
-        let partial = LogicalIndex {
-            predicate: Some("title IS NOT NULL".into()),
-            ..identity.clone()
-        };
-        let widened = LogicalIndex {
-            expressions: vec!["lower(title)".into()],
-            ..identity
-        };
-        assert!(!table.is_identity_index(&partial));
-        assert!(!table.is_identity_index(&widened));
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn sql_column_and_reference_names_use_ascii_case_insensitive_lookup() {
@@ -1543,12 +1521,12 @@ mod tests {
         let key = LogicalForeignKey {
             columns: vec!["link".into()],
             table: "ITEMS".into(),
-            references: vec!["ID".into()],
+            references: vec!["KEY".into()],
             on_delete: DELETE_CASCADE.into(),
             on_update: "NO ACTION".into(),
             deferred: false,
         };
-        table.columns.push(column("link", Affinity::Blob));
+        table.columns.push(column("link", Affinity::Text));
         table.create_sql.pop();
         table
             .create_sql
@@ -1699,8 +1677,8 @@ mod tests {
             items.class = child;
             let key = LogicalForeignKey {
                 table: "parents".into(),
-                columns: vec!["id".into()],
-                references: vec!["id".into()],
+                columns: vec!["key".into()],
+                references: vec!["key".into()],
                 on_delete: DELETE_CASCADE.into(),
                 on_update: "NO ACTION".into(),
                 deferred: false,
@@ -1717,7 +1695,7 @@ mod tests {
             }
         };
         use TableClass::{LocalOnly, Replayed};
-        let mixed = Some(Incompatibility::ClassReference("id".into()));
+        let mixed = Some(Incompatibility::ClassReference("key".into()));
         assert_eq!(reason(Replayed, LocalOnly), mixed);
         assert_eq!(reason(LocalOnly, Replayed), mixed);
         assert_eq!(reason(Replayed, Replayed), None);
@@ -1749,7 +1727,7 @@ mod tests {
             reason(&|table| table.foreign_keys.push(LogicalForeignKey {
                 table: "items".into(),
                 columns: vec!["title".into()],
-                references: vec!["id".into()],
+                references: vec!["key".into()],
                 on_delete: "NO ACTION".into(),
                 on_update: "NO ACTION".into(),
                 deferred: false,

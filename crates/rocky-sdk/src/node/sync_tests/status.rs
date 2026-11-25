@@ -168,10 +168,9 @@ async fn committed_frames(
 ) -> Result<Vec<rocky_secure::EncryptedFrame>, Failure> {
     let sql = node.sql_session(SqlOptions::default()).await?;
     sql.run("BEGIN", Vec::new()).await?;
-    let id = sql.next_id("items").await?;
     sql.run(
-        "INSERT INTO items(key,title,id) VALUES(?,'Milk',?)",
-        vec![SqlValue::Text(key.into()), id.sql()],
+        "INSERT INTO items(key,title) VALUES(?,'Milk')",
+        vec![SqlValue::Text(key.into())],
     )
     .await?;
     let committed = sql

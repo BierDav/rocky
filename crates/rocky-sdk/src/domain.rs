@@ -196,10 +196,10 @@ mod tests {
     use rocky_core::Affinity;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
-        let json = r#"{"format":8,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
+        let json = r#"{"format":9,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]);
         let descriptor = definition.build().unwrap();
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
             definition.format = format;
             assert!(
                 definition
@@ -208,7 +208,7 @@ mod tests {
                     .to_string()
                     .contains("unsupported schema definition format")
             );
-            let input = json.replace("\"format\":8", &format!("\"format\":{format}"));
+            let input = json.replace("\"format\":9", &format!("\"format\":{format}"));
             let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
@@ -228,7 +228,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":8,"application":"measurements","version":1,"tables":[{
+            r#"{"format":9,"application":"measurements","version":1,"tables":[{
             "name":"samples","class":"replayed",
             "columns":[{"name":"sensor","type":"text","not_null":true},
                        {"name":"sequence","type":"integer","not_null":true},
@@ -269,7 +269,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":8,"application":"references","version":1,"tables":[
+            r#"{"format":9,"application":"references","version":1,"tables":[
             {"name":"parents","class":"replayed","columns":[{"name":"next","type":"blob"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
             {"name":"children","class":"replayed","columns":[{"name":"parent","type":"blob"}],"primary_key":["id"],
@@ -302,7 +302,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_command_definitions_are_refused() {
-        let json = r#"{"format":8,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
+        let json = r#"{"format":9,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         assert!(Schema::parse(json).is_err());
         let confirmed = json.replace("command_controlled", "confirmed_read_only");
         assert!(Schema::parse(&confirmed).is_err());

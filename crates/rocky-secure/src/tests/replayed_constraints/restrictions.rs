@@ -3,7 +3,7 @@ use super::*;
 
 fn ledger() -> Constrained {
     let json = serde_json::json!({
-        "format": 8,
+        "format": 9,
         "application": "restricted-ledger",
         "tables": [
             {"name": "batches", "class": "replayed",

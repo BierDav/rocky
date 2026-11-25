@@ -392,8 +392,8 @@ fn reads_are_not_writes() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn partition_column_writes_refuse_as_moves() {
-    let moved = IntentRefusal::PartitionMove {
+fn partition_column_writes_refuse_as_key_updates() {
+    let moved = IntentRefusal::KeyUpdate {
         table: "items".into(),
         column: "list".into(),
     };
@@ -639,4 +639,140 @@ fn more_than_sixty_four_partitions_refuse_the_statement() {
         ),
         IntentRefusal::TooManyPartitions(MAX_INTENT_PARTITIONS + 1)
     );
+}
+
+fn notes(name: &str) -> Option<GeneratedTable> {
+    (name == "notes").then(|| GeneratedTable {
+        partition_by: vec!["list".into()],
+        insertable: vec!["list".into(), "body".into()],
+    })
+}
+fn filled(sql: &str, params: &[SqlValue]) -> Result<Option<Checked>, SplitError<String>> {
+    let mut next = 0u8;
+    fill_generated_ids(sql, params, &[], notes, |partition| {
+        next += 1;
+        let SqlValue::Text(list) = &partition[0] else {
+            return Err("partition".to_string());
+        };
+        Ok(vec![list.as_bytes()[0], next])
+    })
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_insert_without_id_into_a_keyless_table_gets_a_generated_id_per_row() {
+    let checked = filled(
+        "INSERT INTO notes(list, body) VALUES (?, 'one'), ('B', ?) RETURNING id",
+        &[text("A"), text("two")],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        checked.sql,
+        "INSERT INTO notes (list, body, \"id\") VALUES (?, 'one', X'4101'), ('B', ?, X'4202') RETURNING id"
+    );
+    assert_eq!(checked.params, [text("A"), text("two")]);
+    let unlisted = filled("INSERT INTO notes VALUES ('A', 'one')", &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unlisted.sql,
+        "INSERT INTO notes (\"list\", \"body\", \"id\") VALUES ('A', 'one', X'4101')"
+    );
+    for kept in [
+        "INSERT INTO notes(list, body, id) VALUES ('A', 'one', ?)",
+        "INSERT INTO tickets(code) VALUES ('A1')",
+        "UPDATE notes SET body = 'x'",
+    ] {
+        assert!(filled(kept, &[SqlValue::Null]).unwrap().is_none(), "{kept}");
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_insert_select_without_id_is_refused_and_a_partition_needs_a_value() {
+    assert!(matches!(
+        filled("INSERT INTO notes(list, body) SELECT list, body FROM notes", &[]),
+        Err(SplitError::Refused(IntentRefusal::GeneratedIdFromSelect { table })) if table == "notes"
+    ));
+    assert!(matches!(
+        filled(
+            "INSERT INTO notes(list, body) VALUES (lower('A'), 'x')",
+            &[]
+        ),
+        Err(SplitError::Refused(IntentRefusal::Unsupported(_)))
+    ));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_table_partitioned_by_its_own_id_names_the_id_it_allocated() {
+    let lists = |name: &str| {
+        (name == "lists").then(|| GeneratedTable {
+            partition_by: vec!["id".into()],
+            insertable: vec!["title".into()],
+        })
+    };
+    let fill = |sql: &str| {
+        fill_generated_ids(sql, &[], &[], lists, |_| {
+            Err::<Vec<u8>, _>("no id is allocated for an own-id partition".to_string())
+        })
+    };
+    assert!(matches!(
+        fill("INSERT INTO lists(title) VALUES ('groceries')"),
+        Err(SplitError::Refused(IntentRefusal::Unsupported(reason)))
+            if reason.contains("partitioned by its own id")
+    ));
+    assert!(
+        fill("INSERT INTO lists(id, title) VALUES (X'01', 'groceries')")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn updating_a_key_column_is_refused() {
+    let key = |table: &str| (table == "tickets").then(|| vec!["code".to_string()]);
+    for sql in [
+        "UPDATE tickets SET code = 'B' WHERE code = 'A'",
+        "UPDATE tickets AS t SET (holder, CODE) = ('x', 'B')",
+        "INSERT INTO tickets(code, holder) VALUES ('A', 'x') ON CONFLICT(code) DO UPDATE SET code = 'B'",
+    ] {
+        assert_eq!(
+            check_key_writes(sql, &[], key),
+            Err(IntentRefusal::KeyUpdate {
+                table: "tickets".into(),
+                column: "code".into()
+            }),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "UPDATE tickets SET holder = 'x' WHERE code = 'A'",
+        "INSERT INTO tickets(code, holder) VALUES ('A', 'x') ON CONFLICT(code) DO UPDATE SET holder = excluded.holder",
+        "UPDATE other SET code = 'B'",
+        "DELETE FROM tickets WHERE code = 'A'",
+    ] {
+        assert_eq!(check_key_writes(sql, &[], key), Ok(()), "{sql}");
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_recorded_intent_leaves_out_the_rows_its_statement_returns() {
+    for sql in [
+        "INSERT INTO items(list, title) VALUES ('A', 'x') RETURNING title",
+        "UPDATE items SET title = 'y' WHERE list = 'A' RETURNING title",
+        "DELETE FROM items WHERE list = 'B' RETURNING *",
+    ] {
+        let copies = split(sql, &[], &held()).unwrap();
+        assert!(!copies.is_empty(), "{sql}");
+        for copy in copies {
+            assert!(
+                !copy
+                    .statement
+                    .sql
+                    .to_ascii_uppercase()
+                    .contains("RETURNING"),
+                "a replica replays the write, never the rows the author read back: {}",
+                copy.statement.sql
+            );
+        }
+    }
 }

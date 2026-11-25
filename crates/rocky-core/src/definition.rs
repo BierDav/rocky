@@ -6,8 +6,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 8;
+pub const DEFINITION_FORMAT: u32 = 9;
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
+pub const GENERATED_ID: &str = "id";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,7 +174,7 @@ impl SchemaDefinition {
             .collect::<Result<Vec<_>, _>>()?;
         let built_identities: Vec<(String, Vec<String>)> = tables
             .iter()
-            .map(|table| (table.sql_name.clone(), table.identity_columns()))
+            .map(|table| (table.sql_name.clone(), table.primary_key.clone()))
             .collect();
         for (table, definition) in tables.iter_mut().zip(&self.tables) {
             let mut keys_in_column_order: Vec<_> = definition.foreign_keys.iter().collect();
@@ -233,13 +234,59 @@ impl SchemaDefinition {
     }
 }
 impl TableDefinition {
+    fn key(&self) -> Result<Vec<String>, SchemaError> {
+        let name = &self.name;
+        let generated = |column: &String| column.eq_ignore_ascii_case(GENERATED_ID);
+        if self.primary_key.is_empty() {
+            return invalid(format!(
+                "{name} needs a primary key: its own columns, or id for a generated one"
+            ));
+        }
+        if !self.primary_key.iter().any(generated) {
+            if let Some(column) = self.primary_key.iter().find(|key| {
+                self.class == TableClass::Replayed
+                    && self
+                        .columns
+                        .iter()
+                        .any(|column| &column.name == *key && !column.not_null)
+            }) {
+                return invalid(format!(
+                    "{name}.{column} is part of the primary key and must be required"
+                ));
+            }
+            if let Some(column) = self
+                .partition_by
+                .iter()
+                .find(|column| !self.primary_key.contains(column))
+            {
+                return invalid(format!(
+                    "{name}: partition column {column} must be part of the primary key"
+                ));
+            }
+            return Ok(self.primary_key.clone());
+        }
+        if let Some(column) = self
+            .primary_key
+            .iter()
+            .find(|column| !generated(column) && !self.partition_by.contains(column))
+        {
+            return invalid(format!(
+                "{name}: a generated id is keyed by the partition columns and id alone, not by {column}"
+            ));
+        }
+        let mut key = self.partition_by.clone();
+        if !key.iter().any(generated) {
+            key.push(GENERATED_ID.into());
+        }
+        Ok(key)
+    }
     fn build(&self) -> Result<LogicalTable, SchemaError> {
         let name = &self.name;
         crate::logical::sql_name("tables", name)?;
         let mut columns = Vec::new();
         let mut parts = Vec::new();
         for column in &self.columns {
-            if column.name == "id" {
+            if column.name.eq_ignore_ascii_case(GENERATED_ID) {
                 return invalid(format!(
                     "{name}.{} is supplied by Rocky; do not declare it",
                     column.name
@@ -284,30 +331,27 @@ impl TableDefinition {
                 earlier_names: column.renamed_from.clone(),
             });
         }
-        parts.push(format!("{} BLOB NOT NULL", quoted("id")));
-        columns.push(LogicalColumn {
-            sql_name: "id".into(),
-            affinity: Affinity::Blob,
-            not_null: true,
-            default: None,
-            collation: Collation::Binary,
-            class: ColumnClass::Replicated,
-            earlier_names: Vec::new(),
-        });
+        let primary_key = self.key()?;
+        if primary_key.iter().any(|column| column == GENERATED_ID) {
+            parts.push(format!("{} BLOB NOT NULL", quoted(GENERATED_ID)));
+            columns.push(LogicalColumn {
+                sql_name: GENERATED_ID.into(),
+                affinity: Affinity::Blob,
+                not_null: true,
+                default: None,
+                collation: Collation::Binary,
+                class: ColumnClass::Replicated,
+                earlier_names: Vec::new(),
+            });
+        }
         for check in &self.checks {
             if !crate::logical::single_expression(check) {
                 return invalid(format!("{name} check constraint"));
             }
             parts.push(format!("CHECK ({check})"));
         }
-        let key: Vec<String> = self
-            .primary_key
-            .iter()
-            .map(|column| quoted(column))
-            .collect();
-        if !key.is_empty() {
-            parts.push(format!("PRIMARY KEY({})", key.join(",")));
-        }
+        let key: Vec<String> = primary_key.iter().map(|column| quoted(column)).collect();
+        parts.push(format!("PRIMARY KEY({})", key.join(",")));
         let mut indexes = Vec::new();
         for index in &self.indexes {
             crate::logical::sql_name(format!("tables.{name}.indexes"), &index.name)?;
@@ -351,46 +395,6 @@ impl TableDefinition {
                 predicate: index.predicate.clone(),
             });
         }
-        let mut identity = self.partition_by.clone();
-        if !identity.iter().any(|name| name == "id") {
-            identity.push("id".into());
-        }
-        if self.primary_key != identity {
-            if indexes.iter().any(|index| {
-                index.unique
-                    && index
-                        .columns
-                        .iter()
-                        .map(|column| &column.name)
-                        .eq(identity.iter())
-            }) {
-                return invalid(format!("{name}: Rocky supplies the identity index"));
-            }
-            let index_name = format!("{}_identity", self.name);
-            indexes.push(LogicalIndex {
-                name: index_name.clone(),
-                unique: true,
-                columns: identity
-                    .iter()
-                    .map(|name| IndexColumn {
-                        name: name.clone(),
-                        descending: false,
-                    })
-                    .collect(),
-                create_sql: format!(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({})",
-                    quoted(&index_name),
-                    quoted(name),
-                    identity
-                        .iter()
-                        .map(|name| quoted(name))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-                expressions: Vec::new(),
-                predicate: None,
-            });
-        }
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(LogicalTable {
             sql_name: name.clone(),
@@ -400,7 +404,7 @@ impl TableDefinition {
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
             auto_generate: false,
             columns,
-            primary_key: self.primary_key.clone(),
+            primary_key,
             partition_by: self.partition_by.clone(),
             partition_group: self.partition_group.clone(),
             indexes,
@@ -415,7 +419,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":8,
+        "format":9,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -457,7 +461,7 @@ mod tests {
         let notes = schema.table("notes").unwrap();
         assert_eq!(
             notes.create_sql,
-            "CREATE TABLE \"notes\" (\"key\" TEXT NOT NULL, \"folder\" TEXT NOT NULL DEFAULT 'inbox' COLLATE NOCASE, \"body\" TEXT, \"pinned\" INTEGER NOT NULL DEFAULT 0, \"id\" BLOB NOT NULL, PRIMARY KEY(\"key\"))"
+            "CREATE TABLE \"notes\" (\"key\" TEXT NOT NULL, \"folder\" TEXT NOT NULL DEFAULT 'inbox' COLLATE NOCASE, \"body\" TEXT, \"pinned\" INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(\"key\"))"
         );
         assert_eq!(notes.column("folder").unwrap().collation, Collation::Nocase);
         assert_eq!(
@@ -478,7 +482,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -487,7 +491,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -519,56 +523,176 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+    use crate::{RowChange, RowIdentity, SqlValue, TypedRows, WriterId};
+
+    fn tickets() -> SchemaDefinition {
+        SchemaDefinition::parse(
+            serde_json::json!({
+                "format": DEFINITION_FORMAT,
+                "publisher": "11".repeat(32),
+                "application": "events",
+                "tables": [
+                    {"name": "tickets", "class": "replayed",
+                     "columns": [{"name": "code", "type": "text", "not_null": true},
+                                 {"name": "holder", "type": "text"}],
+                     "primary_key": ["code"]},
+                    {"name": "check_ins", "class": "replayed",
+                     "columns": [{"name": "gate", "type": "text", "not_null": true},
+                                 {"name": "ticket", "type": "text", "not_null": true}],
+                     "primary_key": ["id"],
+                     "foreign_keys": [{"columns": ["ticket"], "table": "tickets", "on_delete": "cascade"}]}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn identity_columns_are_implicit_on_every_table_and_fingerprinted() {
-        let mut definition = SchemaDefinition::parse(super::tests::DEFINITION.as_bytes()).unwrap();
-        definition.format = DEFINITION_FORMAT;
-        for table in &mut definition.tables {
-            table.columns[0].name = "key".into();
-            table.primary_key = vec!["key".into()];
-        }
-        let schema = definition.build().unwrap();
-        assert_eq!(schema.format, crate::LOGICAL_SCHEMA_FORMAT);
-        for table in &schema.tables {
-            assert_eq!(table.column("id").unwrap().affinity, Affinity::Blob);
-            assert!(
-                table
-                    .indexes
-                    .iter()
-                    .any(|index| table.is_identity_index(index))
-            );
-        }
+    fn a_table_with_a_declared_key_has_no_id_column() {
+        let schema = tickets().build().unwrap();
         schema.supported_on(crate::Profile::Secure).unwrap();
-        let mut invalid = schema.clone();
-        invalid.tables[0].indexes.clear();
+        let tickets = schema.table("tickets").unwrap();
+        assert!(tickets.column("id").is_none());
+        assert!(!tickets.generated_id());
+        assert_eq!(tickets.primary_key, ["code"]);
         assert!(
-            invalid
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("identity index")
+            tickets.indexes.is_empty(),
+            "the primary key is the identity"
         );
-        let mut reserved = definition.clone();
-        reserved.tables[0].columns[0].name = "id".into();
+        assert_eq!(
+            tickets.create_sql,
+            "CREATE TABLE \"tickets\" (\"code\" TEXT NOT NULL, \"holder\" TEXT, PRIMARY KEY(\"code\"))"
+        );
+        let rows = TypedRows::new(schema.clone(), vec![crate::DomainId([2; 16])]).unwrap();
+        let table = rows
+            .tables()
+            .find(|table| table.sql_name == "tickets")
+            .unwrap();
+        let image = [SqlValue::Text("A1".into()), SqlValue::Null];
+        let change = RowChange {
+            scope: crate::ResourceScope {
+                domain: crate::Scope {
+                    mesh: crate::MeshId([3; 16]),
+                    app: schema.app_id(),
+                    domain: crate::DomainId([2; 16]),
+                },
+                encryption: [4; 32],
+                table: table.id,
+            },
+            row: rows
+                .row_id(crate::DomainId([2; 16]), table, &image)
+                .unwrap(),
+            before: None,
+            after: Some(rows.fields(table, &image).unwrap()),
+        };
+        assert_eq!(
+            rows.identity(&change),
+            Ok(None),
+            "a declared key carries no generated id, so no birth"
+        );
+        let mut reserved = super::identity_tests::tickets();
+        reserved.tables[0].columns[0].name = "ID".into();
         assert!(
             reserved
                 .build()
                 .unwrap_err()
                 .to_string()
-                .contains("do not declare")
+                .contains("supplied by Rocky")
         );
-        definition.tables[0].primary_key = vec!["id".into()];
-        let id_key = definition.build().unwrap();
-        let notes = id_key.table("notes").unwrap();
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_table_without_a_declared_key_is_keyed_by_its_generated_id() {
+        let schema = tickets().build().unwrap();
+        let check_ins = schema.table("check_ins").unwrap();
+        assert!(check_ins.generated_id());
+        assert_eq!(check_ins.primary_key, ["id"]);
+        assert_eq!(check_ins.column("id").unwrap().affinity, Affinity::Blob);
+        assert!(check_ins.create_sql.contains("\"id\" BLOB NOT NULL"));
+        let rows = TypedRows::new(schema.clone(), vec![crate::DomainId([2; 16])]).unwrap();
+        let table = rows
+            .tables()
+            .find(|table| table.sql_name == "check_ins")
+            .unwrap();
+        let id = RowIdentity::new(WriterId::from_bytes([7; 32]), 1).unwrap();
+        let image = [
+            SqlValue::Text("north".into()),
+            SqlValue::Text("A1".into()),
+            id.sql(),
+        ];
+        let change = RowChange {
+            scope: crate::ResourceScope {
+                domain: crate::Scope {
+                    mesh: crate::MeshId([3; 16]),
+                    app: schema.app_id(),
+                    domain: crate::DomainId([2; 16]),
+                },
+                encryption: [4; 32],
+                table: table.id,
+            },
+            row: rows
+                .row_id(crate::DomainId([2; 16]), table, &image)
+                .unwrap(),
+            before: None,
+            after: Some(rows.fields(table, &image).unwrap()),
+        };
+        assert_eq!(rows.identity(&change), Ok(Some(id)));
+        let mut hidden = schema.clone();
+        let tickets = hidden
+            .tables
+            .iter_mut()
+            .find(|table| table.sql_name == "tickets")
+            .unwrap();
+        tickets.columns.push(tickets.columns[0].clone());
+        tickets.columns[2].sql_name = "id".into();
+        tickets.columns[2].affinity = Affinity::Blob;
         assert!(
-            !notes
-                .indexes
-                .iter()
-                .any(|index| index.name == "notes_identity")
+            hidden
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("keyed by its generated id"),
+            "a declared-key table holds no hidden id"
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_foreign_key_references_a_declared_key() {
+        let schema = tickets().build().unwrap();
+        schema.supported_on(crate::Profile::Secure).unwrap();
+        let check_ins = schema.table("check_ins").unwrap();
+        assert_eq!(check_ins.foreign_keys[0].references, ["code"]);
+        assert!(check_ins.create_sql.contains(
+            "FOREIGN KEY(\"ticket\") REFERENCES \"tickets\"(\"code\") ON DELETE CASCADE"
+        ));
+        let mut by_id = schema.clone();
+        by_id
+            .tables
+            .iter_mut()
+            .find(|table| table.sql_name == "check_ins")
+            .unwrap()
+            .foreign_keys[0]
+            .references = vec!["id".into()];
+        assert_eq!(
+            by_id.validate(),
+            Err(SchemaError::Invalid(
+                "check_ins(ticket) must reference the primary key of tickets".into()
+            ))
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_declared_key_and_a_generated_id_change_the_replicated_fingerprint() {
+        let declared = tickets().build().unwrap();
+        let mut definition = tickets();
+        definition.tables[0].primary_key = vec!["id".into()];
+        let generated = definition.build().unwrap();
+        assert!(generated.table("tickets").unwrap().generated_id());
         assert_ne!(
-            schema.replicated_fingerprint(),
-            id_key.replicated_fingerprint()
+            declared.replicated_fingerprint(),
+            generated.replicated_fingerprint()
         );
     }
 }
@@ -577,24 +701,16 @@ mod identity_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_shape_identity_and_manifest_are_bound() {
         let schema = definition().build().unwrap();
         let table = schema.table("items").unwrap();
         assert_eq!(table.partition_by, ["list"]);
-        assert_eq!(table.identity_columns(), ["list", "id"]);
-        assert!(
-            table
-                .indexes
-                .iter()
-                .any(|index| table.is_identity_index(index))
-        );
-        assert_eq!(
-            table.indexes[0].create_sql,
-            "CREATE UNIQUE INDEX IF NOT EXISTS \"items_identity\" ON \"items\" (\"list\",\"id\")"
-        );
+        assert_eq!(table.primary_key, ["list", "key"]);
+        assert!(table.column("id").is_none());
+        assert!(table.indexes.is_empty());
         schema.supported_on(crate::Profile::Secure).unwrap();
         assert_eq!(
             LogicalSchema::parse(&schema.canonical().unwrap()).unwrap(),
@@ -609,9 +725,9 @@ mod partition_tests {
         let mut legacy = schema.clone();
         legacy.format = 2;
         assert!(legacy.validate().is_err());
-        let mut wrong_index = schema.clone();
-        wrong_index.tables[0].indexes[0].columns.remove(0);
-        assert!(wrong_index.validate().is_err());
+        let mut outside_the_key = schema.clone();
+        outside_the_key.tables[0].primary_key.remove(0);
+        assert!(outside_the_key.validate().is_err());
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partitioned_tables_refuse_incomplete_indexes_and_references() {
@@ -626,7 +742,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -649,7 +765,7 @@ mod partition_tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
-        let json = r#"{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
+        let json = r#"{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -671,13 +787,35 @@ mod partition_tests {
     fn removed_table_classes_are_refused() {
         let json = |class: &str| {
             format!(
-                r#"{{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
+                r#"{{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
             )
         };
         SchemaDefinition::parse(json("replayed").as_bytes()).unwrap();
         for class in ["mergeable", "command_controlled", "confirmed_read_only"] {
             assert!(SchemaDefinition::parse(json(class).as_bytes()).is_err());
         }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_partition_column_outside_the_declared_key_names_its_table() {
+        let mut outside = definition();
+        outside.tables[0].primary_key = vec!["key".into()];
+        assert_eq!(
+            outside.build(),
+            Err(SchemaError::Invalid(
+                "items: partition column list must be part of the primary key".into()
+            ))
+        );
+        let mut generated = definition();
+        generated.tables[0].primary_key = vec!["id".into()];
+        let schema = generated.build().unwrap();
+        assert_eq!(
+            schema.table("items").unwrap().primary_key,
+            ["list", "id"],
+            "a generated id is keyed within its partition"
+        );
+        let mut mixed = definition();
+        mixed.tables[0].primary_key = vec!["key".into(), "id".into()];
+        assert!(mixed.build().is_err());
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn invalid_and_legacy_partition_declarations_are_refused() {
@@ -708,7 +846,7 @@ mod replayed_tests {
 
     fn definition(extra: serde_json::Value) -> SchemaDefinition {
         let mut json = serde_json::json!({
-            "format": 8,
+            "format": 9,
             "publisher": "1111111111111111111111111111111111111111111111111111111111111111",
             "application": "replayed",
             "tables": [
@@ -820,7 +958,7 @@ mod replayed_tests {
     fn replayed_tables_declare_generated_columns_and_index_terms() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 8, "publisher": "00".repeat(32), "application": "terms",
+                "format": 9, "publisher": "00".repeat(32), "application": "terms",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true},
                                 {"name": "cap", "type": "integer", "not_null": true},
@@ -908,7 +1046,7 @@ mod replayed_tests {
     fn conflict_policies_existence_logs_and_update_policies_are_refused() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 8, "publisher": "00".repeat(32), "application": "removed",
+                "format": 9, "publisher": "00".repeat(32), "application": "removed",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true}],
                     "indexes": [{"name": "by_name", "unique": true,
@@ -1122,11 +1260,11 @@ mod rename_tests {
 
     fn version(items: &str, title: serde_json::Value, extra: serde_json::Value) -> LogicalSchema {
         let mut json = serde_json::json!({
-            "format": 8, "publisher": "11".repeat(32), "application": "budget",
+            "format": 9, "publisher": "11".repeat(32), "application": "budget",
             "tables": [
                 {"name": "lists", "class": "replayed", "primary_key": ["id"],
                  "columns": [{"name": "name", "type": "text"}]},
-                {"name": items, "class": "replayed", "primary_key": ["list", "key", "id"],
+                {"name": items, "class": "replayed", "primary_key": ["list", "key"],
                  "partition_by": ["list"],
                  "columns": [{"name": "list", "type": "text", "not_null": true},
                              {"name": "key", "type": "text", "not_null": true},
@@ -1238,7 +1376,7 @@ mod rename_tests {
                 "/tables/1/columns/0/renamed_from": ["list"],
                 "/tables/1/columns/0/name": "household",
                 "/tables/1/partition_by": ["household"],
-                "/tables/1/primary_key": ["household", "key", "id"],
+                "/tables/1/primary_key": ["household", "key"],
             }),
         );
         assert_eq!(
@@ -1246,6 +1384,10 @@ mod rename_tests {
             field(&v2, "items", "household")
         );
         assert!(removed(&v1, &v2).is_empty());
+        assert!(
+            classify(&v1, &v2).is_ok(),
+            "renaming a column of the declared key keeps the key"
+        );
         let manifest = v2.manifest(&[]);
         let items = manifest
             .entities
@@ -1294,7 +1436,7 @@ mod rename_tests {
     fn an_earlier_name_is_never_reused_or_the_row_identity() {
         let parse = |title: serde_json::Value| {
             let json = serde_json::json!({
-                "format": 8, "publisher": "11".repeat(32), "application": "budget",
+                "format": 9, "publisher": "11".repeat(32), "application": "budget",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "key", "type": "text"}, title]}]
             });

@@ -26,8 +26,14 @@ impl Fixture {
     fn build_with(constrained: bool, publisher: PrivateKey) -> Self {
         Self::build_class(constrained, publisher, "replayed")
     }
+    fn generated() -> Self {
+        Self::build_keyed(false, PrivateKey::new(), "replayed", &["id"])
+    }
     fn build_class(constrained: bool, publisher: PrivateKey, class: &str) -> Self {
-        let mut definition = serde_json::json!({"format":8,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        Self::build_keyed(constrained, publisher, class, &["list", "key"])
+    }
+    fn build_keyed(constrained: bool, publisher: PrivateKey, class: &str, key: &[&str]) -> Self {
+        let mut definition = serde_json::json!({"format":9,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":key,"partition_by":["list"]}]});
         if constrained {
             definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
             definition["tables"][0]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true}]);
@@ -208,17 +214,12 @@ async fn insert(
     let sql = sql_on(f, replica, names).await;
     sql.run("BEGIN", vec![]).await.unwrap();
     for (list, key, amount) in rows {
-        let id = sql
-            .next_id_partition("items", &[SqlValue::Text((*list).into())])
-            .await
-            .unwrap();
         sql.run(
-            "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
+            "INSERT INTO items(list,key,amount) VALUES(?,?,?)",
             vec![
                 SqlValue::Text((*list).into()),
                 SqlValue::Text((*key).into()),
                 SqlValue::Integer(*amount),
-                id.sql(),
             ],
         )
         .await
@@ -675,13 +676,9 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
         .unwrap();
     sql.run("BEGIN", vec![]).await.unwrap();
     for name in ["A", "B"] {
-        let id = sql
-            .next_id_partition("items", &[SqlValue::Text(name.into())])
-            .await
-            .unwrap();
         sql.run(
-            "INSERT INTO items(list,key,amount,title,id) VALUES(?, 'one',10,'milk',?)",
-            vec![SqlValue::Text(name.into()), id.sql()],
+            "INSERT INTO items(list,key,amount,title) VALUES(?, 'one',10,'milk')",
+            vec![SqlValue::Text(name.into())],
         )
         .await
         .unwrap();
@@ -695,14 +692,10 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
     };
     let before_b = b_rows().await;
     sql.run("BEGIN", vec![]).await.unwrap();
-    let id = sql
-        .next_id_partition("items", &[SqlValue::Text("A".into())])
-        .await
-        .unwrap();
     assert!(matches!(
         sql.run(
-            "INSERT INTO items(list,key,amount,title,id) VALUES('A','two',10,'MILK',?)",
-            vec![id.sql()]
+            "INSERT INTO items(list,key,amount,title) VALUES('A','two',10,'MILK')",
+            vec![]
         )
         .await,
         Err(Error::Sql(crate::sql::SqlError::Statement {
@@ -718,6 +711,50 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
         .unwrap();
     sql.commit([2; 32]).await.unwrap();
     assert_eq!(b_rows().await, before_b);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_statement_refused_after_its_id_is_filled_leaves_no_transaction_open() {
+    let root = rocky_platform::fs::Scratch::new().await;
+    let f = Fixture::generated();
+    let a = f
+        .open(
+            &root.path().join("a.sqlite"),
+            PrivateKey::new(),
+            f.grant(Some(&["A"]), &all()),
+        )
+        .await;
+    f.key(&a, "A", [1; 32]).await;
+    let sql = a
+        .session([f.scope("A")].into())
+        .await
+        .unwrap()
+        .sql(Default::default())
+        .await
+        .unwrap();
+    let refused = sql
+        .run(
+            "INSERT INTO items(list,key,amount) VALUES('A','one',(SELECT amount FROM items AS other WHERE other.list=?))",
+            vec![SqlValue::Null],
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Sql(crate::sql::SqlError::Unsupported(_)))
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        !sql.in_transaction().await,
+        "the implicit transaction that filled the id ends with the refused statement"
+    );
+    sql.run(
+        "INSERT INTO items(list,key,amount) VALUES('A','one',1) RETURNING id",
+        vec![],
+    )
+    .await
+    .unwrap();
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

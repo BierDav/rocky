@@ -17,16 +17,12 @@ async fn insert(
         .await
         .unwrap();
     sql.run("BEGIN", vec![]).await.unwrap();
-    let id = sql
-        .next_id_partition("items", &[SqlValue::Text(partition.into())])
-        .await
-        .unwrap();
     sql.run(
-        "INSERT INTO items(list,key,amount,title,id) VALUES(?,'shared',1,?,?)",
+        "INSERT INTO items(list,key,amount,title) VALUES(?,?,1,?)",
         vec![
             SqlValue::Text(partition.into()),
             SqlValue::Text(title.into()),
-            id.sql(),
+            SqlValue::Text(title.into()),
         ],
     )
     .await
@@ -48,7 +44,7 @@ async fn b_rows(replica: &EncryptedReplica<TypedRows>, f: &Fixture) -> Vec<Vec<S
         .await
         .unwrap()
         .run(
-            "SELECT list,key,title,id,rank FROM items WHERE list='B'",
+            "SELECT list,key,title,rank FROM items WHERE list='B'",
             vec![],
         )
         .await
@@ -57,7 +53,7 @@ async fn b_rows(replica: &EncryptedReplica<TypedRows>, f: &Fixture) -> Vec<Vec<S
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_partition() {
+async fn an_additive_sql_delete_covers_every_live_row_and_preserves_the_other_partition() {
     let dir = Scratch::new().await;
     let f = Fixture::build_with(true, PrivateKey::from_bytes(&[210; 32]));
     let mut schema = f.schema.clone();
@@ -157,14 +153,14 @@ async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_par
         .await
         .unwrap();
     let deletion = sql
-        .run("DELETE FROM items WHERE list='A' AND key='shared'", vec![])
+        .run("DELETE FROM items WHERE list='A'", vec![])
         .await
         .unwrap()
         .committed
         .unwrap()
         .frames;
     let [frame] = deletion.as_slice() else {
-        panic!("one intent frame deletes both live ids: {deletion:?}")
+        panic!("one intent frame deletes both live rows: {deletion:?}")
     };
     assert_eq!(
         frame.scope().unwrap(),

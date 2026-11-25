@@ -6,11 +6,6 @@ use crate::{
 };
 use rocky_credentials::testing::MemoryKeys;
 use serde_json::{Value, json};
-use sqlparser::{
-    ast::{Expr, Ident, SelectItem, SetExpr, Statement},
-    dialect::SQLiteDialect,
-    parser::Parser,
-};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -32,7 +27,7 @@ const SQLITE_READONLY: i32 = 8;
 const SQLITE_AUTH: i32 = 23;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 
-const SHOPPING: &str = r#"{"format":8,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":9,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},
@@ -40,8 +35,9 @@ const SHOPPING: &str = r#"{"format":8,"application":"shopping","version":3,"tabl
    {"name":"key","type":"text","not_null":true},{"name":"list","type":"text","not_null":true},
    {"name":"title","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},
    {"name":"note","type":"blob"}],
-  "primary_key":["key"],
-  "indexes":[{"name":"items_by_list","columns":[{"name":"list","descending":false},{"name":"title","descending":true}]}]}
+  "primary_key":["id"],
+  "indexes":[{"name":"items_by_list","columns":[{"name":"list","descending":false},{"name":"title","descending":true}]},
+   {"name":"items_key","unique":true,"columns":[{"name":"key","descending":false}]}]}
 ]}"#;
 
 static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
@@ -63,87 +59,10 @@ fn open(directory: &Path, network: Option<Network>) -> Result<Configuration, Fai
 async fn create(configuration: Configuration) -> Result<Database, Failure> {
     let database = configuration.create().await?.database;
     let mut tx = database.transaction().await?;
-    for table in ["lists", "items"] {
-        let id = tx.next_id(table, Vec::new()).await?;
-        assert_eq!(id.sequence(), 1, "{table}");
-    }
+    let id = tx.next_id("items", Vec::new()).await?;
+    assert_eq!(id.sequence(), 1);
     tx.rollback().await?;
     Ok(database)
-}
-fn expression(sql: &str) -> Expr {
-    let Statement::Query(query) = Parser::parse_sql(&SQLiteDialect {}, &format!("SELECT {sql}"))
-        .unwrap()
-        .remove(0)
-    else {
-        panic!("fixture expression")
-    };
-    let SetExpr::Select(select) = *query.body else {
-        panic!("fixture select")
-    };
-    let SelectItem::UnnamedExpr(expr) = select.projection.into_iter().next().unwrap() else {
-        panic!("fixture expression")
-    };
-    expr
-}
-async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, Failure> {
-    let Ok(mut statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
-        return Ok(sql.into());
-    };
-    if statements.len() != 1 {
-        return Ok(sql.into());
-    }
-    let statement = match &mut statements[0] {
-        Statement::Query(query) => match query.body.as_mut() {
-            SetExpr::Insert(statement) => statement,
-            _ => return Ok(sql.into()),
-        },
-        statement => statement,
-    };
-    let Statement::Insert(insert) = statement else {
-        return Ok(sql.into());
-    };
-    let table = insert.table.to_string();
-    if !["lists", "items"].contains(&table.as_str()) {
-        return Ok(sql.into());
-    }
-    insert.columns.push(Ident::new("id").into());
-    let source = insert.source.as_mut().unwrap();
-    let query = source.to_string();
-    match source.body.as_mut() {
-        SetExpr::Values(values) => {
-            for row in &mut values.rows {
-                let id = allocated_identity(connection, &table).await?;
-                row.push(expression(&format!("X'{id}'")));
-            }
-        }
-        SetExpr::Select(select) => {
-            let statement = connection.statement();
-            let sql = format!("SELECT count(*) FROM ({query})");
-            let mut page = connection.execute(statement, sql, vec![]).await?;
-            let rows = match page.rows.first().map(Vec::as_slice) {
-                Some([SqlValue::Integer(rows)]) => *rows,
-                _ => return Err("fixture row count".into()),
-            };
-            while !page.done {
-                page = connection.next(statement).await?;
-            }
-            let mut arms = String::new();
-            for row in 1..=rows {
-                let id = allocated_identity(connection, &table).await?;
-                arms.push_str(&format!(" WHEN {row} THEN X'{id}'"));
-            }
-            let id = if arms.is_empty() {
-                "NULL".to_owned()
-            } else {
-                format!("CASE row_number() OVER (){arms} END")
-            };
-            select
-                .projection
-                .push(SelectItem::UnnamedExpr(expression(&id)));
-        }
-        _ => panic!("fixture insert"),
-    }
-    Ok(statements[0].to_string())
 }
 fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
@@ -163,36 +82,13 @@ async fn all(
     params: Vec<SqlValue>,
 ) -> Result<Vec<Vec<SqlValue>>, Failure> {
     let statement = connection.statement();
-    let mut page: Page = connection
-        .execute(statement, identity_insert(connection, sql).await?, params)
-        .await?;
+    let mut page: Page = connection.execute(statement, sql.into(), params).await?;
     let mut rows = std::mem::take(&mut page.rows);
     while !page.done {
         page = connection.next(statement).await?;
         rows.append(&mut page.rows);
     }
     Ok(rows)
-}
-async fn allocated_identity(
-    connection: &Connection,
-    table: &str,
-) -> Result<rocky_sdk::RowIdentity, Failure> {
-    let statement = connection.statement();
-    let mut page = connection
-        .execute(
-            statement,
-            format!("SELECT rocky_next_id('{table}')"),
-            vec![],
-        )
-        .await?;
-    let id = match page.rows.first().and_then(|row| row.first()) {
-        Some(SqlValue::Blob(id)) => rocky_sdk::RowIdentity::from_bytes(id)?,
-        _ => return Err("allocator returned no identity".into()),
-    };
-    while !page.done {
-        page = connection.next(statement).await?;
-    }
-    Ok(id)
 }
 async fn run(connection: &Connection, sql: &str) -> Result<(), Failure> {
     all(connection, sql, Vec::new()).await.map(drop)
@@ -497,29 +393,6 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
             } if size > 131_072
         )
     };
-    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    let refused = code(
-        all(
-            &writer,
-            "INSERT INTO lists(key,title) SELECT x.key || y.key, 'list' FROM lists x, lists y \
-             WHERE x.title = 'a' AND y.title IN ('a','b')",
-            Vec::new(),
-        )
-        .await
-        .err()
-        .ok_or("rows")?,
-    )
-    .map_err(|_| "code")?;
-    assert!(
-        over_the_intent_limit(&refused),
-        "a statement whose recorded rows exceed an intent fails where it executes: {refused}"
-    );
-    run(&writer, "ROLLBACK").await?;
-    assert_eq!(
-        count(&writer, "lists").await?,
-        all_seeds,
-        "a refused statement leaves nothing behind"
-    );
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     let refused = code(
         all(

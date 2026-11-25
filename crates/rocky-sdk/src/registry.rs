@@ -429,22 +429,26 @@ pub async fn write(
                 SqlValue::Text(change.entry.clone()),
             ];
             let select =
-                format!("SELECT id, value FROM {REGISTRY} WHERE identity = ? AND entry = ?");
+                format!("SELECT value FROM {REGISTRY} WHERE identity = ? AND entry = ?");
             let found = sql.run(&select, key.clone()).await?;
             match (found.rows.first(), change.mode) {
                 (None, Mode::Delete) | (Some(_), Mode::Keep) => {}
-                (Some(row), Mode::Delete) => {
+                (Some(_), Mode::Delete) => {
                     sql.run(
-                        &format!("DELETE FROM {REGISTRY} WHERE id = ?"),
-                        vec![row[0].clone()],
+                        &format!("DELETE FROM {REGISTRY} WHERE identity = ? AND entry = ?"),
+                        key,
                     )
                     .await?;
                 }
                 (Some(row), Mode::Replace) => {
-                    if text(&row[1])? != change.value {
+                    if text(&row[0])? != change.value {
+                        let mut values = vec![SqlValue::Text(change.value.clone())];
+                        values.extend(key);
                         sql.run(
-                            &format!("UPDATE {REGISTRY} SET value = ? WHERE id = ?"),
-                            vec![SqlValue::Text(change.value.clone()), row[0].clone()],
+                            &format!(
+                                "UPDATE {REGISTRY} SET value = ? WHERE identity = ? AND entry = ?"
+                            ),
+                            values,
                         )
                         .await?;
                     }
@@ -453,18 +457,14 @@ pub async fn write(
                     if change.entry == IDENTITY && count(&sql, IDENTITY).await? >= MAX_IDENTITIES {
                         return Err(Box::new(RegistryFull) as Failure);
                     }
-                    let id = sql.next_id(REGISTRY).await?;
                     let mut values = key;
-                    values.extend([
-                        SqlValue::Text(change.value.clone()),
-                        id.sql(),
-                    ]);
+                    values.push(SqlValue::Text(change.value.clone()));
                     let conflict = match change.mode {
                         Mode::Replace => "DO UPDATE SET value = excluded.value",
                         _ => "DO NOTHING",
                     };
                     let insert = format!(
-                        "INSERT INTO {REGISTRY}(identity, entry, value, id) VALUES(?, ?, ?, ?) ON CONFLICT(identity, entry) {conflict}"
+                        "INSERT INTO {REGISTRY}(identity, entry, value) VALUES(?, ?, ?) ON CONFLICT(identity, entry) {conflict}"
                     );
                     sql.run(&insert, values).await?;
                 }

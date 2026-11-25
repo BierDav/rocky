@@ -196,7 +196,7 @@ fn checked_orders() -> Constrained {
     let integer =
         |name: &str| serde_json::json!({"name": name, "type": "integer", "not_null": true});
     let definition = serde_json::json!({
-        "format": 8,
+        "format": 9,
         "application": "replayed-orders",
         "tables": [
             replayed(
@@ -285,7 +285,7 @@ fn complex_checks_converge_in_all_120_orders() {
 
 fn indexed_seats() -> Constrained {
     let definition = serde_json::json!({
-        "format": 8,
+        "format": 9,
         "application": "replayed-seats",
         "tables": [replayed(
             "seats",

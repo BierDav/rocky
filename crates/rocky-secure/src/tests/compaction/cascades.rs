@@ -537,9 +537,14 @@ async fn undoing_a_parent_insert_keeps_the_children_the_undo_does_not_own() {
     tag(&replica, "kept", "p").await;
     tag(&replica, "undone", "p").await;
     let read = "SELECT t.key,t.item IS NOT NULL,t.also IS NOT NULL FROM tags t ORDER BY t.key";
+    let parent = item_id(&replica, "p").await;
+    let undone = select(&replica, "SELECT id FROM tags WHERE key='undone'")
+        .await
+        .remove(0)
+        .remove(0);
     assert_eq!(
         replica
-            .read_after_undoing_inserts_for_test(&[("items", "p"), ("tags", "undone")], read)
+            .read_after_undoing_inserts_for_test(&[("items", parent), ("tags", undone)], read)
             .await
             .unwrap(),
         vec![vec![

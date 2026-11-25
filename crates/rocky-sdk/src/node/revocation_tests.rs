@@ -2,7 +2,7 @@ use super::*;
 use crate::{enrollment::fault, schema::Schema};
 use rocky_credentials::ProviderError;
 
-const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":8,"tables":[
+const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":9,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},

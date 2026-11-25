@@ -409,10 +409,10 @@ mod regressions {
                 Sync(1),
                 Change(
                     0,
-                    Change::Recode {
+                    Change::Upsert {
                         list: "l0".into(),
-                        board: 5,
                         code: 1,
+                        cap: 5,
                     },
                 ),
                 Change(
@@ -672,10 +672,10 @@ mod regressions {
                 board(0, "l1", 3, 8),
                 Change(
                     1,
-                    Change::Recode {
+                    Change::Upsert {
                         list: "l0".into(),
-                        board: 6,
                         code: 2,
+                        cap: 9,
                     },
                 ),
                 Sync(1),
@@ -937,20 +937,20 @@ mod regressions {
                 Sync(0),
                 Change(
                     1,
-                    Change::Recode {
+                    Change::Upsert {
                         list: "l0".into(),
-                        board: 2,
                         code: 1,
+                        cap: 5,
                     },
                 ),
                 Advance(std::time::Duration::from_secs(60)),
                 Sync(0),
                 Change(
                     0,
-                    Change::Recode {
+                    Change::Upsert {
                         list: "l1".into(),
-                        board: 6,
                         code: 3,
+                        cap: 9,
                     },
                 ),
                 Crash(1, Some(rocky_secure::CrashPoint::GroupAfterCommit)),

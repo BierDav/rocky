@@ -54,10 +54,9 @@ async fn seed(database: &Database, keys: &[&str]) -> Result<(), Failure> {
     for table in TABLES {
         let mut tx = database.transaction().await?;
         for key in keys {
-            let id = tx.next_id(table, Vec::new()).await?;
             tx.execute(
-                &format!("INSERT INTO {table}(key,amount,id) VALUES(?,0,?)"),
-                vec![SqlValue::Text((*key).into()), id.sql()],
+                &format!("INSERT INTO {table}(key,amount) VALUES(?,0)"),
+                vec![SqlValue::Text((*key).into())],
             )
             .await?;
         }

@@ -476,18 +476,6 @@ struct SetAside<'a> {
 fn set_aside_name(name: &str) -> String {
     format!("secure_rebuild_{name}")
 }
-fn keys_a_reference(
-    schema: &rocky_core::LogicalSchema,
-    parent: &rocky_core::LogicalTable,
-    index: &rocky_core::LogicalIndex,
-) -> bool {
-    parent.is_identity_index(index)
-        && schema
-            .tables
-            .iter()
-            .flat_map(|child| &child.foreign_keys)
-            .any(|key| key.table.eq_ignore_ascii_case(&parent.sql_name))
-}
 fn reason_named(name: &str) -> Result<DropReason, Error> {
     Ok(match name {
         "constraint" => DropReason::Constraint,
@@ -871,21 +859,16 @@ impl<A: RowApplication> Inner<A> {
             self.release_index_names(&set_aside_name(&copy.installed.sql_name))
                 .await?;
         }
-        let (parent_keys, other_indexes): (Vec<_>, Vec<_>) = tables
+        let indexes: Vec<_> = tables
             .iter()
             .flat_map(|table| table.indexes.iter().map(move |index| (*table, index)))
-            .partition(|(table, index)| keys_a_reference(schema, table, index));
+            .collect();
         for table in tables {
             self.conn.execute(table.create_sql.clone(), ()).await?;
             self.touch(&table.sql_name);
         }
-        for (_, index) in parent_keys {
-            self.conn.execute(index.create_sql.clone(), ()).await?;
-        }
-        self.deferring_foreign_keys(async || {
-            self.refill_rebuilt(tables, &copies, other_indexes).await
-        })
-        .await
+        self.deferring_foreign_keys(async || self.refill_rebuilt(tables, &copies, indexes).await)
+            .await
     }
     async fn refill_rebuilt(
         &self,
@@ -1872,6 +1855,9 @@ impl<A: RowApplication> Inner<A> {
             let Ok(sql) = renames.apply(&statement.sql) else {
                 return Ok(Err(DropReason::Schema.into()));
             };
+            if self.check_key_writes(&sql).is_err() {
+                return Ok(Err(DropReason::Schema.into()));
+            }
             match split_intent(&sql, &statement.params, &schema.views, &rules, |_| {
                 Err::<Vec<Vec<SqlValue>>, _>(())
             }) {

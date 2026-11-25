@@ -4,15 +4,10 @@ use std::sync::Arc;
 
 async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
     let mut transaction = device.database.transaction().await?;
-    let id = transaction.next_id("items", Vec::new()).await?;
     transaction
         .execute(
-            "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
-            vec![
-                SqlValue::Text(title.into()),
-                id.sql(),
-                SqlValue::Text(title.into()),
-            ],
+            "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+            vec![SqlValue::Text(title.into()), SqlValue::Text(title.into())],
         )
         .await?;
     transaction.commit().await?;

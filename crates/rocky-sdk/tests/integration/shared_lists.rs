@@ -144,6 +144,12 @@ impl Peer {
         tx.commit().await?;
         Ok(id.to_string())
     }
+    async fn execute(&self, sql: &str) -> Result<(), Failure> {
+        let mut tx = self.database.transaction().await?;
+        tx.execute(sql, Vec::new()).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn column(&self, sql: &str) -> Result<Vec<Value>, Failure> {
         let page = snap::read(&self.database, sql, Vec::new()).await?;
         Ok(page["rows"]
@@ -1028,11 +1034,9 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .await?;
     let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
     writer
-        .insert(
-            "item_categories",
-            Some(&list),
-            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
-        )
+        .execute(&format!(
+            "INSERT INTO item_categories(list,item,category) VALUES(X'{list}',X'{bread}',X'{dairy}')"
+        ))
         .await?;
     writer.sync_now().await?;
     assert_eq!(
@@ -1137,11 +1141,9 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .await?;
     let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
     writer
-        .insert(
-            "item_categories",
-            Some(&list),
-            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
-        )
+        .execute(&format!(
+            "INSERT INTO item_categories(list,item,category) VALUES(X'{list}',X'{bread}',X'{dairy}')"
+        ))
         .await?;
     writer.sync_now().await?;
     assert_eq!(

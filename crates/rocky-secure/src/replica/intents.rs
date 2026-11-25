@@ -10,6 +10,67 @@ pub(crate) struct Recorded {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) fn generated_tables(
+        &self,
+    ) -> Option<(
+        Vec<rocky_core::LogicalView>,
+        BTreeMap<String, rocky_storage::partition_sql::GeneratedTable>,
+    )> {
+        let schema = self.workspace.typed.as_ref()?.rows.schema();
+        let generated = schema
+            .tables
+            .iter()
+            .filter(|table| table.class == TableClass::Replayed && table.generated_id())
+            .map(|table| {
+                (
+                    table.sql_name.to_ascii_lowercase(),
+                    rocky_storage::partition_sql::GeneratedTable {
+                        partition_by: table.partition_by.clone(),
+                        insertable: table
+                            .columns
+                            .iter()
+                            .filter(|column| {
+                                column.class == rocky_core::ColumnClass::Replicated
+                                    && !column
+                                        .sql_name
+                                        .eq_ignore_ascii_case(rocky_core::GENERATED_ID)
+                            })
+                            .map(|column| column.sql_name.clone())
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        Some((schema.views.clone(), generated))
+    }
+    pub(super) fn generates_ids(&self, sql: &str, params: &[SqlValue]) -> Result<bool, Error> {
+        let Some((views, generated)) = self.generated_tables() else {
+            return Ok(false);
+        };
+        match rocky_storage::partition_sql::fill_generated_ids(
+            sql,
+            params,
+            &views,
+            |name| generated.get(name).cloned(),
+            |_| Ok::<_, Error>(Vec::new()),
+        ) {
+            Ok(filled) => Ok(filled.is_some()),
+            Err(SplitError::Refused(refusal)) => Err(Error::Sql(SqlError::Refused(refusal))),
+            Err(SplitError::Evaluate(error)) => Err(error),
+        }
+    }
+    pub(super) fn check_key_writes(&self, sql: &str) -> Result<(), IntentRefusal> {
+        let Some(typed) = &self.workspace.typed else {
+            return Ok(());
+        };
+        let schema = typed.rows.schema();
+        rocky_storage::partition_sql::check_key_writes(sql, &schema.views, |name| {
+            schema
+                .table(name)
+                .filter(|table| table.class == TableClass::Replayed)
+                .map(|table| table.primary_key.clone())
+        })
+    }
     pub(super) async fn intent_copies(
         &self,
         sql: &str,
@@ -40,6 +101,8 @@ impl<A: RowApplication> Inner<A> {
                 _ => return Ok(None),
             },
         };
+        self.check_key_writes(sql)
+            .map_err(|refusal| Error::Sql(SqlError::Refused(refusal)))?;
         let rules = self.partition_rules(None, status).await?;
         let conn = self.conn.connection();
         let split = split_intent_within(sql, params, &schema.views, &rules, limit, |read| {

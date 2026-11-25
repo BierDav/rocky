@@ -53,7 +53,8 @@ On a host with less than 8 GB of memory, build with `cargo build -j2`.
 ## One device
 
 Create a database, declare a table, write in a transaction and read it back.
-`Transaction::next_id` fills the `id` primary key every replayed table has.
+The table declares no primary key, so Rocky keys it by a generated `id` and
+fills it when an insert leaves it out.
 The application name in `Schema::builder(application, version)`, like every
 table, column and role name, is 1 to 64 ASCII letters, digits or underscores,
 not starting with a digit; `build()` checks it and fails with
@@ -74,11 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .database;
 
     let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
-    transaction
-        .execute(insert, params![id, "Hello, Rocky"])
-        .await?;
+    let insert = "INSERT INTO notes(body) VALUES(?)";
+    transaction.execute(insert, params!["Hello, Rocky"]).await?;
     transaction.commit().await?;
 
     let rows = database.query("SELECT body FROM notes", params![]).await?;
@@ -142,10 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut transaction = alice.database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
+    let insert = "INSERT INTO notes(body) VALUES(?)";
     transaction
-        .execute(insert, params![id, "Hello from Alice"])
+        .execute(insert, params!["Hello from Alice"])
         .await?;
     transaction.commit().await?;
 
@@ -306,13 +303,22 @@ constraint, such as a unique index, a foreign key or a `CHECK`, is dropped
 whole, on every device; `observe` reports it in `TableChange::dropped` and
 `transaction_outcome(token)` says what happened to it.
 
-Every replayed table has an `id` primary key holding a `RowIdentity`, which
-`Transaction::next_id(table, partition_values)` allocates without
-coordination; gap-free numbers come from `rocky-coordinator`. A `RowIdentity`
-prints as hex and parses back with `str::parse`, and a `Timestamp` column
-value prints as RFC 3339 in UTC. `commit` returns
-`Commit::Recorded(token)`, or `Commit::NoWrites` when no write statement ran
-and nothing syncs; a write that matched no row still records an intent. `flush` makes every returned commit durable.
+A row's primary key is its identity on every device. A table that declares one
+with `Table::primary_key` holds exactly its declared columns, and a foreign key
+references that key: `check_ins.ticket REFERENCES tickets(code)`. When two
+devices create the same key offline, the later insert in the global order fails
+the key and its transaction is dropped; `INSERT … ON CONFLICT DO UPDATE` replays
+onto the same row, and a deleted key may be created again. A table that declares
+no key gets a generated `id` holding a `RowIdentity`, which Rocky fills when an
+`INSERT … VALUES` omits it and `RETURNING id` reads back;
+`Transaction::next_id(table, partition_values)` allocates one ahead, for example
+to reference the row from child rows. A table partitioned by its own id names
+the id `next_id` allocated in every insert. Ids need no coordination; gap-free
+numbers come from `rocky-coordinator`. A `RowIdentity` prints as hex and parses
+back with `str::parse`, and a `Timestamp` column value prints as RFC 3339 in
+UTC. `commit` returns `Commit::Recorded(token)`, or `Commit::NoWrites` when no
+write statement ran and nothing syncs; a write that matched no row still records
+an intent. `flush` makes every returned commit durable.
 
 A write must replay identically everywhere, so Rocky refuses some SQL in a
 transaction with `ErrorKind::Sql { unsupported, .. }`:
@@ -321,6 +327,12 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
   `Unsupported::NonDeterministic(function)`, whose message says to bind the
   value as a parameter instead;
 - a `WITH` clause is `Unsupported::With`;
+- a write to a primary-key column, including `id` and the partition columns, is
+  `Unsupported::KeyUpdate`, since a row's key never changes; delete the row and
+  insert it again;
+- an `INSERT … SELECT` into a table with a generated id that does not name `id`
+  is `Unsupported::SelectWithoutId`; insert the rows with `VALUES`, or in a
+  migration with `MigrationStep::insert`, and Rocky fills each id;
 - `IS ?` and `IS NOT` comparisons are accepted;
 - a statement whose intent is over 128 KiB fails at `execute` with
   `ErrorKind::TooLarge` and `Limit::Intent`, and a transaction whose
@@ -385,9 +397,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .database;
 
     let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let stamped = "INSERT INTO notes(id, body) VALUES(?, datetime('now'))";
-    let Err(error) = transaction.execute(stamped, params![id]).await else {
+    let stamped = "INSERT INTO notes(body) VALUES(datetime('now'))";
+    let Err(error) = transaction.execute(stamped, params![]).await else {
         return Err("a clock value in a replayed write was accepted".into());
     };
     match error.kind() {
@@ -474,7 +485,9 @@ oldest first: `Column::new("text", ..).renamed_from("note").renamed_from("memo")
 A version that drops an earlier name fails to open with `ErrorKind::Schema`
 and `SchemaError::LostEarlierName`, and an earlier name cannot be used again.
 `cargo run -p rocky-sdk --example renamed_column` walks through it with two
-devices.
+devices. A primary-key column may be renamed this way, but a table's key never
+changes: a version that adds, drops or swaps a key column fails to open, so
+declare a new table and copy the rows into it with `MigrationStep::insert`.
 
 An admin device publishes a new version when it opens with it. A version that
 drops tables or fields or narrows a role fails to open with

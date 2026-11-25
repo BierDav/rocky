@@ -10,7 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-const SCHEMA: &str = r#"{"application":"sync","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"sync","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn link_sessions(
     dialer: &Node,
@@ -182,10 +182,9 @@ async fn read_rows(node: &Node, sql: &str) -> Result<Vec<Vec<SqlValue>>, Failure
 async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
     let sql = node.sql_session(SqlOptions::default()).await?;
     sql.run("BEGIN", Vec::new()).await?;
-    let id = sql.next_id("items").await?;
     sql.run(
-        "INSERT INTO items(key,title,id) VALUES(?,'Milk',?)",
-        vec![SqlValue::Text(handle.to_string()), id.sql()],
+        "INSERT INTO items(key,title) VALUES(?,'Milk')",
+        vec![SqlValue::Text(handle.to_string())],
     )
     .await?;
     sql.commit(commitment("rocky.sdk.mutation.v1", &[handle; 32]))
@@ -456,7 +455,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
-        r#"{"format":8,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        r#"{"format":9,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));
@@ -510,10 +509,9 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
             serve(writer.clone(), call)
         };
         execute("BEGIN IMMEDIATE TRANSACTION", Vec::new()).await?;
-        let Reply::Page(page) = execute("SELECT rocky_next_id('items')", Vec::new()).await? else {
-            return Err("no row id".into());
+        let Reply::Page(_) = execute("SELECT count(*) FROM items", Vec::new()).await? else {
+            return Err("no count".into());
         };
-        let id = page.rows[0][0].clone();
         let renewal = node.renew(None, false, None, false);
         tokio::pin!(renewal);
         tokio::select! {
@@ -523,7 +521,7 @@ async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> R
         }
         assert!(node.settings.try_lock().is_err(), "the renewal holds the settings");
         let write = async {
-            execute("INSERT INTO items(key,title,id) VALUES('k','Milk',?)", vec![id]).await?;
+            execute("INSERT INTO items(key,title) VALUES('k','Milk')", Vec::new()).await?;
             execute("COMMIT", Vec::new()).await
         };
         let (renewed, written) = tokio::join!(renewal, write);
@@ -588,12 +586,12 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
                 }
             };
             execute("BEGIN IMMEDIATE TRANSACTION").await?;
-            let Reply::Page(page) = execute("SELECT rocky_next_id('items')").await? else {
-                return Err("no row id".into());
+            let Reply::Page(_) = execute("SELECT count(*) FROM items").await? else {
+                return Err("no count".into());
             };
             execute_with(
-                "INSERT INTO items(key,title,id) VALUES('k','held',?)",
-                vec![page.rows[0][0].clone()],
+                "INSERT INTO items(key,title) VALUES('k','held')",
+                Vec::new(),
             )
             .await?;
             clock.advance(timeout - Duration::from_millis(1));

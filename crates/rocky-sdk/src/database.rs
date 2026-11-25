@@ -1017,26 +1017,22 @@ pub(crate) async fn insert_rows(
         .table(table)
         .ok_or_else(|| refused(format!("{table} is not a table")))?;
     let rows = sql.run(select, Vec::new()).await?;
-    let partition = logical
-        .partition_by
-        .iter()
-        .map(|name| {
-            rows.columns
-                .iter()
-                .position(|column| column.eq_ignore_ascii_case(name))
-                .ok_or_else(|| {
-                    refused(format!(
-                        "the rows for {table} lack its partition column {name}"
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(name) = logical.partition_by.iter().find(|name| {
+        !rows
+            .columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(name))
+    }) {
+        return Err(refused(format!(
+            "the rows for {table} lack its partition column {name}"
+        )));
+    }
     let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-    let width = rows.columns.len() + 1;
+    let width = rows.columns.len().max(1);
     let row = format!("({})", vec!["?"; width].join(","));
     let insert = |count: usize| {
         format!(
-            "INSERT INTO {}({},\"id\") VALUES{}",
+            "INSERT INTO {}({}) VALUES{}",
             quoted(table),
             rows.columns
                 .iter()
@@ -1047,24 +1043,8 @@ pub(crate) async fn insert_rows(
         )
     };
     let batch = REPLAYED_INSERT_ROWS.min(32_766 / width).max(1);
-    let mut values = Vec::new();
-    let mut pending = 0;
-    let total = rows.rows.len();
-    for (index, row) in rows.rows.into_iter().enumerate() {
-        let id = if partition.is_empty() {
-            sql.next_id(table).await?
-        } else {
-            let values: Vec<_> = partition.iter().map(|index| row[*index].clone()).collect();
-            sql.next_id_partition(table, &values).await?
-        };
-        values.extend(row);
-        values.push(id.sql());
-        pending += 1;
-        if pending == batch || index + 1 == total {
-            sql.run(&insert(pending), std::mem::take(&mut values))
-                .await?;
-            pending = 0;
-        }
+    for chunk in rows.rows.chunks(batch) {
+        sql.run(&insert(chunk.len()), chunk.concat()).await?;
     }
     Ok(())
 }
@@ -1808,7 +1788,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     fn held_schema() -> &'static Schema {
         static PARSED: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(|| {
-            Schema::parse(r#"{"application":"held","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
+            Schema::parse(r#"{"application":"held","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
         });
         &PARSED
     }
@@ -2078,7 +2058,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":8,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":9,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         for format in [0, 1, 2, 3, 5] {
             let directory = rocky_platform::fs::Scratch::new().await;
@@ -2133,7 +2113,7 @@ mod tests {
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
         let schema = Schema::parse(
-            r#"{"format":8,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":9,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         let directory = rocky_platform::fs::Scratch::new().await;
         let configuration = Configuration::new(directory.path(), &schema)?;
@@ -2183,7 +2163,7 @@ mod tests {
     async fn saturated_waits_cannot_block_close() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"saturation","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"saturation","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()
@@ -2215,21 +2195,16 @@ mod tests {
         use crate::SqlValue;
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"poolcheck","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"poolcheck","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()
             .await?
             .database;
         let mut tx = database.transaction().await?;
-        let first_id = tx.next_id("items", Vec::new()).await?;
         tx.execute(
-            "INSERT INTO items(id, key, title) VALUES (?, ?, ?)",
-            vec![
-                first_id.sql(),
-                SqlValue::Text("a".into()),
-                SqlValue::Text("first".into()),
-            ],
+            "INSERT INTO items(key, title) VALUES (?, ?)",
+            vec![SqlValue::Text("a".into()), SqlValue::Text("first".into())],
         )
         .await?;
         tx.commit().await?;
@@ -2278,14 +2253,9 @@ mod tests {
         conn.close().await;
 
         let mut tx = database.transaction().await?;
-        let second_id = tx.next_id("items", Vec::new()).await?;
         tx.execute(
-            "INSERT INTO items(id, key, title) VALUES (?, ?, ?)",
-            vec![
-                second_id.sql(),
-                SqlValue::Text("b".into()),
-                SqlValue::Text("second".into()),
-            ],
+            "INSERT INTO items(key, title) VALUES (?, ?)",
+            vec![SqlValue::Text("b".into()), SqlValue::Text("second".into())],
         )
         .await?;
         tx.commit().await?;

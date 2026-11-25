@@ -2082,8 +2082,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             let sql = a.sql_session(SqlOptions::default()).await?;
             sql.run("BEGIN", Vec::new()).await.map_err(|error| format!("source begin: {error}"))?;
             for table in ["contacts", "receipts", "versions"] {
-                let id = sql.next_id(table).await.map_err(|error| format!("source allocation in {table}: {error}"))?;
-                sql.run(&format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)"), vec![rocky_sdk::SqlValue::Text(version.to_string()), id.sql()]).await?;
+                sql.run(&format!("INSERT INTO {table}(key,title) VALUES(?,'associated')"), vec![rocky_sdk::SqlValue::Text(version.to_string())]).await?;
             }
             let commit = async {
                 sql.commit(commitment("rocky.sdk.mutation.v1", &[version; 32])).await?;
@@ -2113,7 +2112,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             eprintln!("publication native traffic: {traffic:?}");
             assert_eq!(
                 [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
-                [if version == 1 { 6 } else { 7 }, 2],
+                [6, 2],
                 "one fragmented publication and receipt"
             );
             let notification_us = if notified >= committed {
@@ -2240,13 +2239,11 @@ async fn add_over_budget_burst(node: &Node) -> Result<(), Failure> {
     let sql = node.sql_session(SqlOptions::default()).await?;
     for key in 0..24u8 {
         sql.run("BEGIN", Vec::new()).await?;
-        let id = sql.next_id("items").await?;
         sql.run(
-            "INSERT INTO items(key,title,id) VALUES(?,?,?)",
+            "INSERT INTO items(key,title) VALUES(?,?)",
             vec![
                 rocky_sdk::SqlValue::Text(format!("burst_{key}")),
                 rocky_sdk::SqlValue::Text(title.clone()),
-                id.sql(),
             ],
         )
         .await?;

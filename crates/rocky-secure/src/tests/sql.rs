@@ -38,31 +38,19 @@ fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
         class: ColumnClass::Replicated,
     }
 }
-fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
-    columns.push(column("id", Affinity::Blob, true));
-    let sql = format!("{},id BLOB NOT NULL)", sql.trim_end_matches(')'));
+fn table(name: &str, sql: &str, columns: Vec<LogicalColumn>) -> LogicalTable {
     LogicalTable {
         earlier_names: Vec::new(),
         sql_name: name.into(),
         explicit_access_only: false,
         class: TableClass::Replayed,
-        create_sql: sql,
+        create_sql: sql.into(),
         auto_generate: false,
         columns,
         primary_key: vec!["key".into()],
         partition_by: Vec::new(),
         partition_group: None,
-        indexes: vec![rocky_core::LogicalIndex {
-            name: format!("{name}_identity"),
-            unique: true,
-            columns: vec![rocky_core::IndexColumn {
-                name: "id".into(),
-                descending: false,
-            }],
-            create_sql: format!("CREATE UNIQUE INDEX {name}_identity ON {name}(id)"),
-            expressions: Vec::new(),
-            predicate: None,
-        }],
+        indexes: Vec::new(),
         foreign_keys: Vec::new(),
     }
 }
@@ -378,60 +366,7 @@ async fn insert(
     if implicit {
         session.run("BEGIN", vec![]).await?;
     }
-    let result = async {
-        let (head, tail) = sql.split_once(" VALUES").unwrap();
-        let name = head
-            .trim_start_matches("INSERT INTO ")
-            .split('(')
-            .next()
-            .unwrap()
-            .trim();
-        let columns = if let Some((_, columns)) = head.split_once('(') {
-            columns.trim_end_matches(')').to_owned()
-        } else {
-            match name {
-                "items" if tail.starts_with("(?,?,?,?)") || tail.starts_with("('s',7,") => {
-                    "sensor,sequence,reading,raw"
-                }
-                "items" => "key,title,done",
-                "salaries" => "key,amount",
-                "drafts" => "key,body",
-                _ => unreachable!(),
-            }
-            .to_owned()
-        };
-        let mut rewritten = format!("INSERT INTO {name}({columns},id) VALUES");
-        let mut quoted = false;
-        let mut depth = 0;
-        for ch in tail.chars() {
-            if ch == '\'' {
-                quoted = !quoted;
-            }
-            if !quoted {
-                if ch == '(' {
-                    depth += 1;
-                }
-                if ch == ')' {
-                    depth -= 1;
-                    if depth == 0 {
-                        let id = if name == "drafts" {
-                            rocky_core::RowIdentity::new(
-                                rocky_core::WriterId::from_bytes([1; 32]),
-                                1,
-                            )
-                            .map_err(|error| denied(&error.to_string()))?
-                        } else {
-                            session.next_id(name).await?
-                        };
-                        rewritten.push_str(&format!(",X'{id}'"));
-                    }
-                }
-            }
-            rewritten.push(ch);
-        }
-        session.run(&rewritten, values).await
-    }
-    .await;
+    let result = session.run(sql, values).await;
     if implicit {
         match result {
             Ok(mut result) => {
@@ -693,7 +628,7 @@ async fn applied_rows_stay_readable_while_later_frames_await_their_predecessors(
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_import_of_another_scope_does_not_make_an_unwritable_table_retry_allocation() {
-    let t = Typed::new();
+    let t = identity_fixture();
     let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let replica = t
@@ -982,12 +917,7 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
     let staged = alice.session(both.into()).await.unwrap();
     let table = t.schema.table("items").unwrap();
     let typed = t.app();
-    let row = [
-        text("c"),
-        text("cheese"),
-        SqlValue::Integer(0),
-        SqlValue::Integer(4294967297),
-    ];
+    let row = [text("c"), text("cheese"), SqlValue::Integer(0)];
     let (id, fields) = {
         let table = typed
             .tables()
@@ -1978,7 +1908,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":8, "publisher": "PUBLISHER",
+        "format":9, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"replayed", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -2105,11 +2035,11 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":8, "publisher": "PUBLISHER",
+        "format":9, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "replayed", "columns": [
                 {"name": "key", "type": "text", "not_null": true},
-                {"name": "title", "type": "text", "not_null": true}], "primary_key": ["key"]},
+                {"name": "title", "type": "text", "not_null": true}], "primary_key": ["id"]},
             {"name": "salaries", "class": "replayed", "columns": [
                 {"name": "amount", "type": "integer", "not_null": true}], "primary_key": ["id"]},
             {"name": "drafts", "class": "local_only", "columns": [

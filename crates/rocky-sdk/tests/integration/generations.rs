@@ -611,6 +611,42 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_version_that_changes_or_drops_a_declared_key_fails_to_open() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None).await?;
+    a.add(1, "apples").await;
+    a.close().await;
+    let widened = build(shopping(2).table(items().primary_key(["key", "title"])));
+    let generated = build(
+        shopping(2).table(
+            Table::replayed("items")
+                .column(required("key", Affinity::Text))
+                .column(required("completed", Affinity::Integer))
+                .column(required("title", Affinity::Text)),
+        ),
+    );
+    for schema in [widened, generated] {
+        let error = open(root.path(), &schema, None)
+            .open()
+            .await
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            error.contains(
+                "the primary key of items changed; a row's key never changes, so declare a new table"
+            ),
+            "{error}"
+        );
+    }
+    let a = reopen(root.path(), &common::schema(), None).await?;
+    assert_eq!(generation(&a).await["current"]["schema"], 1);
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent_rows()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;

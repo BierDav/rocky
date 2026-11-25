@@ -297,10 +297,9 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
             let sql = a.sql_session(SqlOptions::default()).await?;
             for (index, name) in names.iter().enumerate() {
                 sql.run("BEGIN", Vec::new()).await?;
-                let id = sql.next_id(name).await?;
                 sql.run(
-                    &format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)"),
-                    vec![id.sql()],
+                    &format!("INSERT INTO {name}(key,title) VALUES('1','Milk')"),
+                    Vec::new(),
                 )
                 .await?;
                 sql.commit(commitment("rocky.sdk.mutation.v1", &[index as u8 + 1; 32]))

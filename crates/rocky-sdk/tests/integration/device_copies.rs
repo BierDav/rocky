@@ -9,24 +9,19 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 
 async fn try_add(device: &Device, key: &str) -> Result<(), rocky_sdk::Error> {
     let mut tx = device.database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
-        vec![
-            SqlValue::Text(key.into()),
-            id.sql(),
-            SqlValue::Text(key.into()),
-        ],
+        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+        vec![SqlValue::Text(key.into()), SqlValue::Text(key.into())],
     )
     .await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn identities(device: &Device) -> Vec<String> {
+async fn keys(device: &Device) -> Vec<String> {
     device
         .database
-        .query("SELECT hex(id) FROM items ORDER BY id", Vec::new())
+        .query("SELECT key FROM items ORDER BY key", Vec::new())
         .await
         .expect("read")
         .collect()
@@ -35,9 +30,9 @@ async fn identities(device: &Device) -> Vec<String> {
         .into_iter()
         .map(|row| {
             row.get_at::<SqlValue>(0)
-                .expect("id")
+                .expect("key")
                 .to_text()
-                .expect("hex id")
+                .expect("text key")
         })
         .collect()
 }
@@ -66,7 +61,7 @@ async fn a_wiped_worker_rejoins_as_a_new_device_and_catches_up_before_it_authors
     w.add(2, "second").await;
     w.sync().await.expect("sync");
     assert_eq!(a.titles().await.len(), 2);
-    let before = identities(&a).await;
+    let before = keys(&a).await;
     let node = w.node().await;
     w.close().await;
     drop(w);
@@ -75,13 +70,13 @@ async fn a_wiped_worker_rejoins_as_a_new_device_and_catches_up_before_it_authors
     let w = Device::join(&worker, &a.invite().await, memory(&hub, "w2")).await?;
     assert_ne!(w.node().await, node);
     w.sync().await.expect("catch up");
-    assert_eq!(identities(&w).await, before);
+    assert_eq!(keys(&w).await, before);
     try_add(&w, "third").await.expect("caught-up lane authors");
     w.sync().await.expect("sync");
-    let after = identities(&a).await;
+    let after = keys(&a).await;
     assert_eq!(after.len(), 3, "{after:?}");
-    assert!(before.iter().all(|id| after.contains(id)));
-    assert_eq!(after, identities(&w).await);
+    assert!(before.iter().all(|key| after.contains(key)));
+    assert_eq!(after, keys(&w).await);
     w.close().await;
     a.close().await;
     Ok(())

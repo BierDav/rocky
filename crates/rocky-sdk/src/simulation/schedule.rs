@@ -63,10 +63,10 @@ pub(super) enum Change {
         card: u8,
         by: i8,
     },
-    Recode {
+    Upsert {
         list: String,
-        board: u8,
         code: u8,
+        cap: u8,
     },
     DropBoard {
         list: String,
@@ -526,10 +526,10 @@ fn change(draws: &mut Draws, lists: &[String]) -> Change {
             card: small(draws, 8),
             by: small(draws, 6) as i8 - 1,
         },
-        13 => Change::Recode {
+        13 => Change::Upsert {
             list: list(draws),
-            board: small(draws, 8),
             code: small(draws, 4),
+            cap: small(draws, 14),
         },
         14..=15 => Change::DropBoard {
             list: list(draws),

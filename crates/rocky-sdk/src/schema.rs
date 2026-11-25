@@ -335,10 +335,11 @@ impl Role {
     }
 }
 
-/// A table whose writes are replayed on every device; its primary key is `id` unless set.
+/// A table whose writes are replayed on every device; without a declared primary key it is keyed by
+/// a generated `id`.
 pub struct Table(rocky_core::TableDefinition);
 impl Table {
-    /// A table named `name` with an `id` primary key, which `Transaction::next_id` fills.
+    /// A table named `name` keyed by a generated `id`, which Rocky fills when an insert omits it.
     pub fn replayed(name: impl Into<String>) -> Self {
         Self::of(name, rocky_core::TableClass::Replayed)
     }
@@ -363,7 +364,8 @@ impl Table {
         self.0.columns.push(column.0);
         self
     }
-    /// Replaces the `id` primary key.
+    /// Declares the row's key, which never changes and must list the partition columns; a key
+    /// without `id` leaves the table without a generated `id` column.
     #[must_use]
     pub fn primary_key(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.0.primary_key = columns.into_iter().map(Into::into).collect();

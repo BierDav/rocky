@@ -13,7 +13,7 @@ fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
+pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
 pub(super) struct Running {
     pub(super) database: Database,
@@ -158,13 +158,10 @@ impl Member {
     ) -> Result<(), Failure> {
         let mut tx = self.database()?.transaction().await?;
         for values in rows {
-            let id = tx.next_id(table, Vec::new()).await?;
-            let mut values = values.clone();
-            values.push(id.sql());
             let places = vec!["?"; values.len()].join(", ");
             tx.execute(
-                &format!("INSERT INTO {table}({columns}, id) VALUES({places})"),
-                values,
+                &format!("INSERT INTO {table}({columns}) VALUES({places})"),
+                values.clone(),
             )
             .await?;
         }

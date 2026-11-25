@@ -103,10 +103,9 @@ async fn create_partition(device: &Device) -> Value {
 async fn write_group(device: &Device, prefix: &str) {
     let mut tx = device.database.transaction().await.expect("begin");
     for table in ["parts", "labels", "attachments"] {
-        let id = tx.next_id(table, values()).await.expect("id");
         tx.execute(
-            &format!("INSERT INTO {table}(list,key,id) VALUES ('L', '{prefix}', ?)"),
-            vec![id.sql()],
+            &format!("INSERT INTO {table}(list,key) VALUES ('L', '{prefix}')"),
+            Vec::new(),
         )
         .await
         .expect("insert");
@@ -358,10 +357,9 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
 -> Result<(), Failure> {
     async fn write(device: &Device, key: &str) {
         let mut tx = device.database.transaction().await.expect("begin");
-        let id = tx.next_id("parts", values()).await.expect("id");
         tx.execute(
-            "INSERT INTO parts(list,key,id) VALUES ('L', ?, ?)",
-            vec![rocky_sdk::SqlValue::Text(key.to_owned()), id.sql()],
+            "INSERT INTO parts(list,key) VALUES ('L', ?)",
+            vec![rocky_sdk::SqlValue::Text(key.to_owned())],
         )
         .await
         .expect("insert");

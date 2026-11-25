@@ -104,18 +104,16 @@ async fn rows(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
 }
 async fn insert(device: &Device, table: &str, values: [&str; 2]) -> Result<(), Failure> {
     let mut tx = device.database.transaction().await?;
-    let (columns, partition) = match table {
-        "tickets" => ("code,holder", Vec::new()),
-        "check_ins" => ("code,gate", Vec::new()),
-        _ => ("ward,note", vec![SqlValue::Text(values[0].into())]),
+    let columns = match table {
+        "tickets" => "code,holder",
+        "check_ins" => "code,gate",
+        _ => "ward,note",
     };
-    let id = tx.next_id(table, partition).await?;
     tx.execute(
-        &format!("INSERT INTO {table}({columns},id) VALUES(?,?,?)"),
+        &format!("INSERT INTO {table}({columns}) VALUES(?,?)"),
         vec![
             SqlValue::Text(values[0].into()),
             SqlValue::Text(values[1].into()),
-            id.sql(),
         ],
     )
     .await?;
@@ -124,10 +122,9 @@ async fn insert(device: &Device, table: &str, values: [&str; 2]) -> Result<(), F
 }
 async fn ward_name(device: &Device, name: &str) -> Result<(), Failure> {
     let mut tx = device.database.transaction().await?;
-    let id = tx.next_id("wards", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO wards(name,id) VALUES(?,?)",
-        vec![SqlValue::Text(name.into()), id.sql()],
+        "INSERT INTO wards(name) VALUES(?)",
+        vec![SqlValue::Text(name.into())],
     )
     .await?;
     tx.commit().await?;

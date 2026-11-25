@@ -12,11 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .database;
 
     let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
-    transaction
-        .execute(insert, params![id, "Hello, Rocky"])
-        .await?;
+    let insert = "INSERT INTO notes(body) VALUES(?)";
+    transaction.execute(insert, params!["Hello, Rocky"]).await?;
     transaction.commit().await?;
 
     let rows = database.query("SELECT body FROM notes", params![]).await?;

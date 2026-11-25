@@ -188,8 +188,7 @@ fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> C
     let db = rusqlite::Connection::open_in_memory().unwrap();
     rocky_storage::exact::register(&db).unwrap();
     db.execute_batch(
-        "CREATE TABLE items(list TEXT NOT NULL,key TEXT NOT NULL,amount INTEGER NOT NULL,id BLOB NOT NULL,PRIMARY KEY(list,key));
-         CREATE UNIQUE INDEX items_identity ON items(list,id);",
+        "CREATE TABLE items(list TEXT NOT NULL,key TEXT NOT NULL,amount INTEGER NOT NULL,PRIMARY KEY(list,key));",
     )
     .unwrap();
     let mut outcomes = BTreeMap::new();

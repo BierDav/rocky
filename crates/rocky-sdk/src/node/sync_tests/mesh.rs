@@ -504,7 +504,7 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
 async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
-        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"roles":[{"name":"outsider","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#)?;
+        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"roles":[{"name":"outsider","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#)?;
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
@@ -517,8 +517,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         pass(&b).await?;
         let sql = a.sql_session(SqlOptions::default()).await?;
         sql.run("BEGIN", Vec::new()).await?;
-        let id = sql.next_id_partition("items", &[SqlValue::Text("only-custody".into())]).await?;
-        sql.run("INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![id.sql()]).await?;
+        sql.run("INSERT INTO items(list,key,title) VALUES('only-custody','k','custody row')", Vec::new()).await?;
         sql.run("COMMIT", Vec::new()).await?;
         let custody = contact(&a, &d).await?;
         a.configure(|settings| {

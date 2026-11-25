@@ -78,7 +78,7 @@ impl Household {
         introduce(&owner, &member).await;
         write(
             &owner,
-            "INSERT INTO items(id,key,completed,title) VALUES(?,'k1',0,'apples')",
+            "INSERT INTO items(key,completed,title) VALUES('k1',0,'apples')",
         )
         .await?;
         sync(&member).await;
@@ -141,13 +141,7 @@ async fn sync(device: &Device) {
 }
 async fn write(device: &Device, sql: &str) -> Result<TransactionToken, Failure> {
     let mut transaction = device.database.transaction().await?;
-    let id = transaction.next_id("items", Vec::new()).await?;
-    let bound = if sql.contains('?') {
-        params![id]
-    } else {
-        params![]
-    };
-    transaction.execute(sql, bound).await?;
+    transaction.execute(sql, params![]).await?;
     match transaction.commit().await? {
         Commit::Recorded(token) => Ok(token),
         Commit::NoWrites => Err("the write changed nothing".into()),
@@ -198,7 +192,7 @@ async fn a_late_write_to_a_renamed_column_lands_in_its_new_name() -> Result<(), 
     .await?;
     let late = write(
         household.member(),
-        "INSERT INTO items(id,key,completed,title) VALUES(?,'k2',0,'bread')",
+        "INSERT INTO items(key,completed,title) VALUES('k2',0,'bread')",
     )
     .await?;
     household.reconnect().await;
@@ -291,7 +285,7 @@ async fn a_late_write_to_a_renamed_table_lands_in_its_new_name() -> Result<(), F
     .await?;
     write(
         household.member(),
-        "INSERT INTO items(id,key,completed,title) VALUES(?,'k2',0,'bread')",
+        "INSERT INTO items(key,completed,title) VALUES('k2',0,'bread')",
     )
     .await?;
     household.reopen_member(&entries).await?;
@@ -304,6 +298,26 @@ async fn a_late_write_to_a_renamed_table_lands_in_its_new_name() -> Result<(), F
             "a renamed table keeps its rows, its key column and the late writes to both"
         );
     }
+    let mut transaction = household.owner().database.transaction().await?;
+    let refused = transaction
+        .execute(
+            "UPDATE entries SET code = 'k9' WHERE code = 'k1'",
+            params![],
+        )
+        .await
+        .err()
+        .ok_or("a renamed key column was updated")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Sql {
+                unsupported: Some(rocky_sdk::Unsupported::KeyUpdate { table, column }),
+                ..
+            } if table == "entries" && column == "code"
+        ),
+        "a renamed key column is still the row's key, so updating it is refused: {refused:?}"
+    );
+    drop(transaction);
     household.close().await;
     Ok(())
 }
@@ -414,7 +428,7 @@ async fn renaming_a_column_a_role_and_an_index_name_neither_removes_nor_narrows(
     )?;
     write(
         &owner,
-        "INSERT INTO items(id,key,completed,title) VALUES(?,'k1',0,'apples')",
+        "INSERT INTO items(key,completed,title) VALUES('k1',0,'apples')",
     )
     .await?;
     owner.close().await;
@@ -435,7 +449,7 @@ async fn renaming_a_column_a_role_and_an_index_name_neither_removes_nor_narrows(
     );
     let duplicate = write(
         &owner,
-        "INSERT INTO items(id,key,completed,label) VALUES(?,'k2',0,'apples')",
+        "INSERT INTO items(key,completed,label) VALUES('k2',0,'apples')",
     )
     .await;
     assert!(
@@ -464,7 +478,7 @@ async fn a_migration_in_the_renaming_version_reads_its_parent_under_the_old_name
     )?;
     write(
         &owner,
-        "INSERT INTO items(id,key,completed,title) VALUES(?,'k1',0,'apples')",
+        "INSERT INTO items(key,completed,title) VALUES('k1',0,'apples')",
     )
     .await?;
     owner.close().await;

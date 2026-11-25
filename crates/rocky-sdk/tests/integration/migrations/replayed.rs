@@ -16,17 +16,16 @@ fn positioned_items() -> Schema {
 
 async fn insert(device: &Device, key: &str, title: &str) {
     let mut tx = device.database.transaction().await.expect("begin");
-    let id = tx.next_id("items", Vec::new()).await.expect("id");
     tx.execute(
-        "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
-        vec![text(key), text(title), id.sql()],
+        "INSERT INTO items(key,completed,title) VALUES(?,0,?)",
+        vec![text(key), text(title)],
     )
     .await
     .expect("insert");
     tx.commit().await.expect("commit");
 }
 
-const STATE: &str = "SELECT id, key, completed, position, title FROM items ORDER BY id";
+const STATE: &str = "SELECT key, completed, position, title FROM items ORDER BY key";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {

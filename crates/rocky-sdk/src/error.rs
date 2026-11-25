@@ -206,6 +206,17 @@ pub enum Unsupported {
     With,
     /// The statement kind is not allowed in a transaction.
     Statement,
+    /// The statement writes `column`, part of `table`'s primary key; a row's key never changes, so
+    /// delete the row and insert it again.
+    KeyUpdate {
+        /// The table whose key the statement writes.
+        table: String,
+        /// The key column the statement writes.
+        column: String,
+    },
+    /// An `INSERT … SELECT` into a table with a generated id that does not name `id`; insert the
+    /// rows with `VALUES`, and Rocky fills each id.
+    SelectWithoutId(String),
 }
 
 impl ErrorKind {

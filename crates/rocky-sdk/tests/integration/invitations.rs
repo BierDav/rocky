@@ -425,12 +425,10 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
 
 async fn writes_an_item(device: &Device, title: &str) -> Result<(), Failure> {
     let mut tx = device.database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
         vec![
             rocky_sdk::SqlValue::Text(title.to_owned()),
-            id.sql(),
             rocky_sdk::SqlValue::Text(title.to_owned()),
         ],
     )

@@ -338,9 +338,8 @@ pub async fn mutate(
             if !valid(&table) || values.iter().any(|(name, _)| !valid(name)) {
                 return Err("invalid fixture identifier".into());
             }
-            let id = tx.next_id(&table, Vec::new()).await?;
-            let mut columns = vec!["key".to_owned(), "id".to_owned()];
-            let mut bound = vec![sdk::SqlValue::Text(key.clone()), id.sql()];
+            let mut columns = vec!["key".to_owned()];
+            let mut bound = vec![sdk::SqlValue::Text(key.clone())];
             for (name, value) in values {
                 columns.push(format!("\"{name}\""));
                 bound.push(value);

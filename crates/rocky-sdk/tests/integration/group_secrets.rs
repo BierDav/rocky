@@ -599,10 +599,9 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
     let mut tx = issuer.database.transaction().await.unwrap();
-    let id = tx.next_id("attachments", values("A")).await.unwrap();
     tx.execute(
-        "INSERT INTO attachments(list,key,id) VALUES('A','photo',?)",
-        vec![id.sql()],
+        "INSERT INTO attachments(list,key) VALUES('A','photo')",
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -680,12 +679,11 @@ async fn write(peer: &Peer, table: &str, key: &str) {
         tx.commit().await.unwrap();
         return;
     }
-    let id = tx.next_id(table, values("A")).await.unwrap();
     let sql = match table {
-        "lists" => format!("INSERT INTO lists(name,title,id) VALUES('A','{key}',?)"),
-        _ => format!("INSERT INTO {table}(list,key,id) VALUES('A','{key}',?)"),
+        "lists" => format!("INSERT INTO lists(name,title) VALUES('A','{key}')"),
+        _ => format!("INSERT INTO {table}(list,key) VALUES('A','{key}')"),
     };
-    tx.execute(&sql, vec![id.sql()]).await.unwrap();
+    tx.execute(&sql, Vec::new()).await.unwrap();
     tx.commit().await.unwrap();
 }
 async fn rows(peer: &Peer) -> Vec<Vec<String>> {
@@ -858,10 +856,9 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     snap::ok(writer.database.sync_now()).await;
     snap::ok(writer.database.sync_now()).await;
     let mut tx = writer.database.transaction().await.unwrap();
-    let id = tx.next_id("items", values("A")).await.unwrap();
     tx.execute(
-        "INSERT INTO items(list,key,id) VALUES('A','writer',?)",
-        vec![id.sql()],
+        "INSERT INTO items(list,key) VALUES('A','writer')",
+        Vec::new(),
     )
     .await
     .unwrap();

@@ -21,6 +21,7 @@ pub enum Unsupported {
     AddedReference(String),
     FilledReference(String),
     LostEarlierName { renamed: String, earlier: String },
+    ChangedKey(String),
 }
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,6 +35,10 @@ impl std::fmt::Display for Unsupported {
             Self::AddedReference(key) => write!(
                 f,
                 "foreign key {key} would constrain existing rows; declare it on a new optional field"
+            ),
+            Self::ChangedKey(table) => write!(
+                f,
+                "the primary key of {table} changed; a row's key never changes, so declare a new table"
             ),
             Self::FilledReference(key) => write!(
                 f,
@@ -135,6 +140,20 @@ pub fn classify_carrying(
         else {
             continue;
         };
+        let same_key = before.primary_key.len() == after.primary_key.len()
+            && after
+                .primary_key
+                .iter()
+                .zip(&before.primary_key)
+                .all(|(now, was)| {
+                    after
+                        .column(now)
+                        .and_then(|now| before.counterpart(now))
+                        .is_some_and(|counterpart| counterpart.sql_name.eq_ignore_ascii_case(was))
+                });
+        if !same_key {
+            return Err(Unsupported::ChangedKey(after.sql_name.clone()));
+        }
         let held = |name: &str| {
             after
                 .column(name)
@@ -373,6 +392,40 @@ mod tests {
         let mut required = schema(vec![items(&[("name", true), ("note", true)])]);
         required.tables[0].columns[2].default = Some("''".into());
         assert_eq!(classify(&old, &required), Ok(SchemaChange::Replicated));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_changed_primary_key_is_refused() {
+        let old = schema(vec![items(&[("name", true)])]);
+        let mut rekeyed = old.clone();
+        rekeyed.tables[0].primary_key = vec!["name".into()];
+        assert_eq!(
+            classify(&old, &rekeyed),
+            Err(Unsupported::ChangedKey("items".into())),
+            "a row's key is its identity on every device"
+        );
+        let mut respelled = old.clone();
+        respelled.tables[0].primary_key = vec!["ID".into()];
+        assert_ne!(
+            classify(&old, &respelled),
+            Err(Unsupported::ChangedKey("items".into()))
+        );
+        let mut keyed = old.clone();
+        keyed.tables[0].primary_key = vec!["name".into()];
+        let mut renamed = keyed.clone();
+        let label = renamed.tables[0]
+            .columns
+            .iter_mut()
+            .find(|column| column.sql_name == "name")
+            .unwrap();
+        label.sql_name = "label".into();
+        label.earlier_names = vec!["name".into()];
+        renamed.tables[0].primary_key = vec!["label".into()];
+        assert_ne!(
+            classify(&keyed, &renamed),
+            Err(Unsupported::ChangedKey("items".into())),
+            "a renamed key column keeps the identity of its first name, so the key is unchanged"
+        );
     }
 
     fn reference(column: &str, parent: &str, on_delete: &str, deferred: bool) -> LogicalForeignKey {

@@ -83,12 +83,8 @@ mod native {
             .await?
             .database;
         let mut tx = db.transaction().await?;
-        let id = tx.next_id("notes", vec![]).await?;
-        tx.execute(
-            "INSERT INTO notes(id,body) VALUES(?,?)",
-            params![id, "from native"],
-        )
-        .await?;
+        tx.execute("INSERT INTO notes(body) VALUES(?)", params!["from native"])
+            .await?;
         tx.commit().await?;
         let invitation = db.invite(rocky_sdk::Invite::new(Access::Full)).await?;
         Ok((db, invitation))

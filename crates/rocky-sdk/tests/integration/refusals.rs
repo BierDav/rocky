@@ -130,10 +130,9 @@ async fn write(device: &Device, sql: &str, params: Vec<SqlValue>) -> Result<(), 
 async fn insert(device: &Device, table: &str, value: &str) -> Result<(), rocky_sdk::Error> {
     let column = if table == "check_ins" { "gate" } else { "code" };
     let mut tx = device.database.transaction().await?;
-    let id = tx.next_id(table, Vec::new()).await?;
     tx.execute(
-        &format!("INSERT INTO {table}({column},id) VALUES(?,?)"),
-        vec![SqlValue::Text(value.into()), id.sql()],
+        &format!("INSERT INTO {table}({column}) VALUES(?)"),
+        vec![SqlValue::Text(value.into())],
     )
     .await?;
     tx.commit().await?;

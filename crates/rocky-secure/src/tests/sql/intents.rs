@@ -670,53 +670,6 @@ async fn commits_after_a_replay_still_reach_the_flusher() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_replay_its_capture_refuses_drops() {
-    let t = Typed::new();
-    let dir = Scratch::new().await;
-    let both = [t.items, t.salaries];
-    let open = |name: &'static str| {
-        let (t, dir) = (&t, &dir);
-        async move {
-            t.open(&dir.path().join(name), &PrivateKey::new(), t.full(), &both)
-                .await
-        }
-    };
-    let (alice, bob) = (open("a.db").await, open("b.db").await);
-    let created = create(&alice, &both, 10).await;
-    let ids = "SELECT key,id FROM salaries ORDER BY key";
-    let before = select(&sql(&alice, &both).await, ids).await;
-    let bobs = sql(&bob, &both).await;
-    let [moved] = bobs
-        .run("UPDATE salaries SET id=id+1000 WHERE key='ann'", vec![])
-        .await
-        .unwrap()
-        .committed
-        .unwrap()
-        .frames
-        .try_into()
-        .unwrap();
-    assert!(
-        select(&bobs, ids).await.is_empty(),
-        "Bob holds no `ann`: his statement changes nothing where he runs it"
-    );
-    assert!(
-        replay_stamp(&created) < replay_stamp(&moved),
-        "Bob's statement replays after Alice's insert"
-    );
-    assert_eq!(alice.receive(moved).await.unwrap(), ReceiveStatus::Applied);
-    assert_eq!(
-        select(&sql(&alice, &both).await, ids).await,
-        before,
-        "the capture refuses the changed id, so Alice's rows stay"
-    );
-    assert_eq!(
-        outcomes(&alice).await,
-        vec![None, Some("engine".into())],
-        "Bob's transaction drops for the engine"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_single_row_intent_receives_within_its_statement_budget() {
     let t = Typed::new();
     let dir = Scratch::new().await;
@@ -921,7 +874,7 @@ async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replayed_inserts_take_their_authors_own_identities() {
-    let t = Typed::new();
+    let t = super::identity_fixture();
     let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
@@ -929,21 +882,17 @@ async fn replayed_inserts_take_their_authors_own_identities() {
     let bob = t.open(&dir.path().join("b.db"), &b, t.full(), &both).await;
     let session = sql(&bob, &both).await;
     let mut frames = Vec::new();
-    for key in ["ann", "ben"] {
+    for _ in 0..2 {
         frames.extend(
-            insert(
-                &session,
-                &format!("INSERT INTO salaries VALUES('{key}',1)"),
-                vec![],
-            )
-            .await
-            .unwrap()
-            .committed
-            .unwrap()
-            .frames,
+            insert(&session, "INSERT INTO salaries(amount) VALUES(1)", vec![])
+                .await
+                .unwrap()
+                .committed
+                .unwrap()
+                .frames,
         );
     }
-    let bobs_ids = select(&session, "SELECT id FROM salaries ORDER BY key").await;
+    let bobs_ids = select(&session, "SELECT id FROM salaries ORDER BY id").await;
     assert_ne!(
         bobs_ids[0], bobs_ids[1],
         "the allocator advances for a replayed table"
@@ -958,7 +907,7 @@ async fn replayed_inserts_take_their_authors_own_identities() {
     }
     let alices =
         rocky_core::RowIdentity::next(crate::writer::writer(&a.public_key()), 100).unwrap();
-    let forged = format!("INSERT INTO salaries(key,amount,id) VALUES('cy',1,X'{alices}')");
+    let forged = format!("INSERT INTO salaries(amount,id) VALUES(1,X'{alices}')");
     assert!(
         matches!(session.run(&forged, vec![]).await, Err(Error::Rejected(_))),
         "an id of another author's number is refused at commit"
@@ -989,7 +938,12 @@ async fn replayed_inserts_take_their_authors_own_identities() {
         }),
         "a replica drops another author's id when the author skips the commit check"
     );
-    assert_eq!(amounts(&alice, &both).await.len(), 2);
+    assert_eq!(
+        select(&sql(&alice, &both).await, "SELECT amount FROM salaries")
+            .await
+            .len(),
+        2
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

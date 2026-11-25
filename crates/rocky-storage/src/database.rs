@@ -69,7 +69,7 @@ fn has_data(path: &Path) -> bool {
     fs::len(path).is_ok_and(|len| len > 0)
 }
 
-pub const FILE_FORMAT: i64 = 0x524b5902;
+pub const FILE_FORMAT: i64 = 0x524b5903;
 
 pub async fn check_file_format(path: &Path) -> Result<(), Error> {
     if !has_data(path) {
@@ -154,7 +154,7 @@ mod tests {
             "rocky_logical_schema",
             "d0000000000000000000000000000000000000000000000000000000000000000_rocky_logical_schema",
         ] {
-            for version in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
+            for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("file.sqlite");
                 let conn = sqlite::Connection::open(&path).unwrap();

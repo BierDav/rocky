@@ -14,7 +14,7 @@ fn shelved() -> Schema {
             .table(
                 items()
                     .column(Column::new("category", Affinity::Text))
-                    .column(Column::new("shelf", Affinity::Blob))
+                    .column(Column::new("shelf", Affinity::Text))
                     .index(IndexDefinition {
                         name: "items_category".into(),
                         columns: vec![IndexColumn {
@@ -124,10 +124,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
             .await?,
     )?;
     introduce(&a, &b).await;
-    create(&a, 1, "shelves", json!({"label": "pantry"})).await;
-    let shelf: Vec<u8> =
-        serde_json::from_value(rows(&a, "SELECT id FROM shelves").await[0][0]["value"].clone())?;
-    let shelf = rocky_sdk::RowIdentity::from_bytes(&shelf)?.to_string();
+    let shelf = create(&a, 1, "shelves", json!({"label": "pantry"})).await;
     create(
         &a,
         2,
@@ -341,10 +338,9 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
         Vec::new(),
     )
     .await?;
-    let id = tx.next_id("shelves", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO shelves(key,label,id) VALUES('cellar','cellar',?)",
-        vec![id.sql()],
+        "INSERT INTO shelves(key,label) VALUES('cellar','cellar')",
+        Vec::new(),
     )
     .await?;
     tx.commit().await?;
@@ -613,16 +609,14 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
         .await;
 
         let mut tx = b.database.transaction().await?;
-        let id = tx.next_id("items", vec![text(list)]).await?;
         tx.execute(
-            "INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO items(list,key,title,completed,note) VALUES(?,?,?,?,?)",
             vec![
                 text(list),
                 text("key"),
                 text(list),
                 rocky_sdk::SqlValue::Integer(0),
                 text("old"),
-                id.sql(),
             ],
         )
         .await?;

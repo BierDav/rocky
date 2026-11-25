@@ -25,10 +25,9 @@ fn open(root: &Path, schema: &Schema, hub: &Arc<Hub>, name: &str) -> rocky_sdk::
 }
 async fn note(database: &Database, title: &str, tag: Option<&str>) -> Result<(), Failure> {
     let mut tx = database.transaction().await?;
-    let id = tx.next_id("notes", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO notes(title,tag,id) VALUES(?,?,?)",
-        params![title, tag, id],
+        "INSERT INTO notes(title,tag) VALUES(?,?)",
+        params![title, tag],
     )
     .await?;
     tx.commit().await?;
@@ -224,11 +223,10 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
         .await?
         .database;
     let mut tx = database.transaction().await?;
-    let id = tx.next_id("notes", Vec::new()).await?;
     let refused = tx
         .execute(
-            "INSERT INTO notes(title,id) VALUES(?,?)",
-            params!["x".repeat(200 * 1024), id],
+            "INSERT INTO notes(title) VALUES(?)",
+            params!["x".repeat(200 * 1024)],
         )
         .await
         .err()

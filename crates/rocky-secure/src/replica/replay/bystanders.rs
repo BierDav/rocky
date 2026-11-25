@@ -156,7 +156,7 @@ impl<'a> Bystanders<'a> {
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn read_after_undoing_inserts_for_test(
         &self,
-        inserts: &[(&str, &str)],
+        inserts: &[(&str, SqlValue)],
         read: &str,
     ) -> Result<Vec<Vec<SqlValue>>, Error> {
         let inner = self.inner.lock(Class::Background).await;
@@ -164,7 +164,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .iter()
             .map(|(table, key)| Undo {
                 table: (*table).into(),
-                key: vec![SqlValue::Text((*key).into())],
+                key: vec![key.clone()],
                 before: None,
             })
             .collect();

@@ -214,12 +214,10 @@ impl Device {
             .is_some();
         if !exists {
             let mut tx = self.database.transaction().await.expect("begin");
-            let id = tx.next_id("items", Vec::new()).await.expect("id");
             tx.execute(
-                "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+                "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
                 vec![
                     rocky_sdk::SqlValue::Text(key.clone()),
-                    id.sql(),
                     rocky_sdk::SqlValue::Text(title.into()),
                 ],
             )

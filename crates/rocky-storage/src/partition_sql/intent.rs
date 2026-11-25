@@ -10,6 +10,9 @@ use std::{
     ops::ControlFlow,
 };
 
+mod keys;
+pub use keys::{GeneratedTable, check_key_writes, fill_generated_ids};
+
 pub const MAX_INTENT_PARTITIONS: usize = 64;
 
 pub use rocky_core::DETERMINISTIC_FUNCTIONS;
@@ -43,7 +46,8 @@ pub enum IntentRefusal {
     UnknownCollation(String),
     RowId,
     Autoincrement,
-    PartitionMove { table: String, column: String },
+    KeyUpdate { table: String, column: String },
+    GeneratedIdFromSelect { table: String },
     CorrelatedSubquery,
     With,
     Unavailable { table: String, reason: Unavailable },
@@ -65,9 +69,14 @@ impl std::fmt::Display for IntentRefusal {
             Self::UnknownCollation(name) => write!(f, "collation {name}"),
             Self::RowId => f.write_str("rowid keys are assigned per replica"),
             Self::Autoincrement => f.write_str("AUTOINCREMENT keys are assigned per replica"),
-            Self::PartitionMove { table, column } => {
-                write!(f, "writing {table}.{column} moves the row")
-            }
+            Self::KeyUpdate { table, column } => write!(
+                f,
+                "{table}.{column} is part of the row's key, which never changes; delete the row and insert it again"
+            ),
+            Self::GeneratedIdFromSelect { table } => write!(
+                f,
+                "an INSERT … SELECT into {table} must name its generated id; insert the rows with VALUES so Rocky fills the id"
+            ),
             Self::CorrelatedSubquery => {
                 f.write_str("a read of other partitions refers to the outer statement")
             }
@@ -299,6 +308,12 @@ pub fn split_intent_within<E>(
     let mut copies = Vec::with_capacity(reached.len());
     for (index, rows) in reached {
         let mut copy = statement.clone();
+        match &mut copy {
+            Statement::Insert(insert) => insert.returning = None,
+            Statement::Update(update) => update.returning = None,
+            Statement::Delete(delete) => delete.returning = None,
+            _ => {}
+        }
         if let (Some(rows), Statement::Insert(insert)) = (rows, &mut copy)
             && let Some(source) = &mut insert.source
             && let SetExpr::Values(values) = &mut *source.body
@@ -460,7 +475,7 @@ fn writes(statement: &Statement, table: &str, rule: &TablePartitions) -> Result<
                 .iter()
                 .any(|partition| partition.name.eq_ignore_ascii_case(&column))
             {
-                return Err(IntentRefusal::PartitionMove {
+                return Err(IntentRefusal::KeyUpdate {
                     table: table.into(),
                     column,
                 });

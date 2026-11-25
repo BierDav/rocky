@@ -59,7 +59,11 @@ impl Table {
                 .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                 .ok_or_else(|| Error::Incompatible(format!("missing row {name}")))
         };
-        Self::with_identity(table, names, owner, Some(position("id")?))
+        let identity = table
+            .generated_id()
+            .then(|| position(rocky_core::GENERATED_ID))
+            .transpose()?;
+        Self::with_identity(table, names, owner, identity)
     }
     fn with_identity(
         table: &rocky_core::LogicalTable,
@@ -626,6 +630,20 @@ impl Sink {
                 return;
             }
         }
+        if self.mode == Mode::User
+            && plan.tables[index].captured()
+            && let (Some(old), Some(new)) = (&old, &new)
+            && plan.tables[index]
+                .key
+                .iter()
+                .any(|position| old.get(*position) != new.get(*position))
+        {
+            self.fail(format!(
+                "a row's key never changes; {} refuses an update of its key",
+                plan.tables[index].name
+            ));
+            return;
+        }
         if self.mode == Mode::Reconcile {
             let same = match (&old, &new) {
                 (Some(old), Some(new)) => {
@@ -889,7 +907,6 @@ mod tests {
             !run(&conn, &plan, "UPDATE plain SET b='uno' WHERE a=1"),
             "a trigger's replace into a WITHOUT ROWID table is captured"
         );
-        assert!(!run(&conn, &plan, "UPDATE plain SET a=3 WHERE a=2"));
         assert_eq!(
             frozen(&conn),
             vec![
@@ -900,8 +917,6 @@ mod tests {
                     false,
                     vec![false, true, false]
                 ),
-                (0, vec![SqlValue::Integer(2)], true, true, vec![false; 3]),
-                (0, vec![SqlValue::Integer(3)], false, false, vec![false; 3]),
                 (
                     1,
                     vec![text("uno"), SqlValue::Integer(1)],
@@ -909,15 +924,7 @@ mod tests {
                     false,
                     vec![false; 3]
                 ),
-                (
-                    2,
-                    vec![SqlValue::Integer(11)],
-                    true,
-                    false,
-                    vec![false, true]
-                ),
-            ],
-            "a key change touches both keys and cascades to the child row"
+            ]
         );
         let mark = conn.capture().unwrap().lock().unwrap().mark();
         conn.run_now("SAVEPOINT s").unwrap();
@@ -927,12 +934,12 @@ mod tests {
             &plan,
             "INSERT OR REPLACE INTO keyed VALUES('UNO',1,'again')"
         ));
-        assert_eq!(frozen(&conn).len(), 6);
+        assert_eq!(frozen(&conn).len(), 3);
         conn.run_now("ROLLBACK TO s").unwrap();
         conn.capture().unwrap().lock().unwrap().truncate(mark);
         assert_eq!(
             frozen(&conn).len(),
-            5,
+            2,
             "a savepoint rollback removes exactly its events"
         );
         assert!(run(
@@ -941,7 +948,7 @@ mod tests {
             "INSERT INTO plain VALUES(9,'nine',0),(1,'dup',0)"
         ));
         let rows = frozen(&conn);
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 3);
         assert!(
             rows.contains(&(0, vec![SqlValue::Integer(9)], false, false, vec![false; 3])),
             "a failed statement's events stay as touches without evidence"
@@ -960,6 +967,20 @@ mod tests {
                 vec![false; 3]
             )),
             "replacing a key under another spelling is a delete and an insert"
+        );
+        conn.run_now("ROLLBACK").unwrap();
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn updating_a_key_column_fails_the_capture_even_through_a_cascade() {
+        let (conn, plan) = setup();
+        conn.run_now("INSERT INTO plain VALUES(2,'two',2.0)")
+            .unwrap();
+        conn.run_now("BEGIN").unwrap();
+        run(&conn, &plan, "UPDATE plain SET a=3 WHERE a=2");
+        assert_eq!(
+            conn.capture().unwrap().lock().unwrap().failure().as_deref(),
+            Some("a row's key never changes; plain refuses an update of its key")
         );
         conn.run_now("ROLLBACK").unwrap();
     }

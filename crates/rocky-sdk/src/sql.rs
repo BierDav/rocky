@@ -535,8 +535,9 @@ impl Transaction {
         }
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
     }
-    /// Allocates a row id in `table`, unique across devices; `partition` names the partition's
-    /// values, empty for an unpartitioned table.
+    /// Allocates a generated id in `table` before inserting, for example to reference the row from
+    /// child rows; `partition` names the partition's values, empty for an unpartitioned table. A
+    /// table keyed by declared columns has no generated id and is refused.
     pub async fn next_id(
         &mut self,
         table: &str,

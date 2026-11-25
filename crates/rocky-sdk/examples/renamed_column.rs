@@ -29,11 +29,8 @@ fn configure(
 
 async fn spend(database: &Database, cents: i64, note: &str) -> Result<(), rocky_sdk::Error> {
     let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("expenses", vec![]).await?;
-    let insert = "INSERT INTO expenses(id, cents, note) VALUES(?, ?, ?)";
-    transaction
-        .execute(insert, params![id, cents, note])
-        .await?;
+    let insert = "INSERT INTO expenses(cents, note) VALUES(?, ?)";
+    transaction.execute(insert, params![cents, note]).await?;
     transaction.commit().await?;
     Ok(())
 }

@@ -150,6 +150,13 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
                     crate::Unsupported::NonDeterministic(name.clone())
                 }
                 IntentRefusal::With => crate::Unsupported::With,
+                IntentRefusal::KeyUpdate { table, column } => crate::Unsupported::KeyUpdate {
+                    table: table.clone(),
+                    column: column.clone(),
+                },
+                IntentRefusal::GeneratedIdFromSelect { table } => {
+                    crate::Unsupported::SelectWithoutId(table.clone())
+                }
                 _ => crate::Unsupported::Statement,
             };
             let hint = match &unsupported {
@@ -157,7 +164,9 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
                     "; compute the value in the application and bind it as a parameter"
                 }
                 crate::Unsupported::With => "; write the subquery inline instead",
-                crate::Unsupported::Statement => "",
+                crate::Unsupported::Statement
+                | crate::Unsupported::KeyUpdate { .. }
+                | crate::Unsupported::SelectWithoutId(_) => "",
             };
             let message = format!("{error}{hint}");
             crate::Error::new(

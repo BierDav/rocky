@@ -46,11 +46,10 @@ mod native {
             .await?
             .database;
         let mut transaction = admin.transaction().await?;
-        let id = transaction.next_id("notes", vec![]).await?;
         transaction
             .execute(
-                "INSERT INTO notes(id, body) VALUES(?, ?)",
-                params![id, "served beside the web app"],
+                "INSERT INTO notes(body) VALUES(?)",
+                params!["served beside the web app"],
             )
             .await?;
         transaction.commit().await?;

@@ -347,7 +347,7 @@ impl Settings {
 mod tests {
     use super::*;
     use crate::{FileSecretStore, IdentityKey, RootKey, Schema, SecretStore};
-    const SCHEMA: &str = r#"{"format":8,"application":"scoped_enrollment","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+    const SCHEMA: &str = r#"{"format":9,"application":"scoped_enrollment","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
     #[test]
     fn foreign_identity_answers_are_refused_before_installation() -> Result<(), Failure> {

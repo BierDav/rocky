@@ -3,7 +3,7 @@ use crate::support::snapshot as snap;
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
-const SCHEMA: &str = r#"{"format":8,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}],"roles":[{"name":"reader","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#;
+const SCHEMA: &str = r#"{"format":9,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","id"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}],"roles":[{"name":"reader","tables":[{"table":"items","access":"read"}],"per_partition":["items"]}]}"#;
 fn open(directory: &Path, hub: &Arc<Hub>) -> rocky_sdk::Configuration {
     let name = directory.file_name().unwrap().to_str().unwrap();
     crate::common::configuration(
@@ -167,7 +167,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
 #[tokio::test]
 async fn own_id_partitions_continue_the_table_log() {
     let root = tempfile::tempdir().unwrap();
-    let schema = r#"{"format":8,"application":"ownid","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
+    let schema = r#"{"format":9,"application":"ownid","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
     let options = || {
         crate::common::configuration(
             root.path(),

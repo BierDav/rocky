@@ -29,10 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut transaction = alice.database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let insert = "INSERT INTO notes(id, body) VALUES(?, ?)";
+    let insert = "INSERT INTO notes(body) VALUES(?)";
     transaction
-        .execute(insert, params![id, "Hello from Alice"])
+        .execute(insert, params!["Hello from Alice"])
         .await?;
     transaction.commit().await?;
 

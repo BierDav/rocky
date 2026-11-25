@@ -12,9 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .database;
 
     let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    let stamped = "INSERT INTO notes(id, body) VALUES(?, datetime('now'))";
-    let Err(error) = transaction.execute(stamped, params![id]).await else {
+    let stamped = "INSERT INTO notes(body) VALUES(datetime('now'))";
+    let Err(error) = transaction.execute(stamped, params![]).await else {
         return Err("a clock value in a replayed write was accepted".into());
     };
     match error.kind() {

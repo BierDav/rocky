@@ -57,7 +57,7 @@ pub fn schema() -> Result<Schema, Failure> {
         .column(Column::new("role", Affinity::Text).required())
         .column(Column::new("name", Affinity::Text).required())
         .check("role IN ('admin', 'full', 'partial')")
-        .index(unique("devices_node", ["node"]));
+        .primary_key(["node"]);
     Ok(Schema::builder(APPLICATION, 1)
         .table(lists)
         .table(todos)

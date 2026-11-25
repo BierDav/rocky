@@ -1256,10 +1256,9 @@ impl LateWriter {
         let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
         let events = bob.database.observe(&[]).await?;
         let mut tx = bob.database.transaction().await?;
-        let id = tx.next_id("items", Vec::new()).await?;
         tx.execute(
-            "INSERT INTO items(id,key,completed,title) VALUES(?,'tea',0,'Tea')",
-            vec![id.sql()],
+            "INSERT INTO items(key,completed,title) VALUES('tea',0,'Tea')",
+            Vec::new(),
         )
         .await?;
         let rocky_sdk::Commit::Recorded(tea) = tx.commit().await? else {
@@ -1354,11 +1353,10 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
         declared: 1,
     };
     let mut tx = late.bob.database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?;
     let refused = tx
         .execute(
-            "INSERT INTO items(id,key,completed,title) VALUES(?,'milk',0,'Milk')",
-            vec![id.sql()],
+            "INSERT INTO items(key,completed,title) VALUES('milk',0,'Milk')",
+            Vec::new(),
         )
         .await
         .err()

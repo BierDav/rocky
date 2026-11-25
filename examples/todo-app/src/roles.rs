@@ -1,4 +1,4 @@
-use crate::{Configuration, DEVICES, Failure, LIST_GROUP, TodoError, Todos};
+use crate::{Configuration, Failure, LIST_GROUP, TodoError, Todos};
 use rocky_sdk::{Access, RoleName, RowIdentity, params};
 use std::collections::BTreeSet;
 
@@ -82,27 +82,13 @@ impl Todos {
         let node = self.node().await?;
         let name = crate::title(name)?;
         let mut transaction = self.database.transaction().await?;
-        let known = transaction
-            .query("SELECT 1 FROM devices WHERE node=?", params![node.as_str()])
-            .await?
-            .collect()
+        transaction
+            .execute(
+                "INSERT INTO devices(node,role,name) VALUES(?,?,?) \
+                 ON CONFLICT(node) DO UPDATE SET role=excluded.role,name=excluded.name",
+                params![node, role.as_str(), name],
+            )
             .await?;
-        if known.is_empty() {
-            let id = transaction.next_id(DEVICES, params![]).await?;
-            transaction
-                .execute(
-                    "INSERT INTO devices(id,role,name,node) VALUES(?,?,?,?)",
-                    params![id, role.as_str(), name, node],
-                )
-                .await?;
-        } else {
-            transaction
-                .execute(
-                    "UPDATE devices SET role=?,name=? WHERE node=?",
-                    params![role.as_str(), name, node],
-                )
-                .await?;
-        }
         transaction.commit().await?;
         Ok(())
     }

@@ -8,7 +8,7 @@ use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":8,
+const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":9,
     "tables":[
         {"name":"balances","class":"replayed",
          "columns":[{"name":"key","type":"text","not_null":true},
@@ -51,10 +51,9 @@ async fn write(
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<(), Failure> {
     let mut tx = database.transaction().await?;
-    let id = tx.next_id("balances", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO balances(key,amount,fee,bonus,id) VALUES(?,?,0,0,?)",
-        params![key, amount, id],
+        "INSERT INTO balances(key,amount,fee,bonus) VALUES(?,?,0,0)",
+        params![key, amount],
     )
     .await?;
     tx.commit().await?;
@@ -237,10 +236,9 @@ async fn uuids_timestamps_json_and_extreme_integers_round_trip() -> Result<(), F
     let at = Timestamp::from_unix_micros(-1_234_567);
     let doc = json!({"b": [1, 2.5, null], "a": {"z": "x", "y": true}});
     let mut tx = a.database.transaction().await?;
-    let id = tx.next_id("records", Vec::new()).await?;
     tx.execute(
-        "INSERT INTO records(key,uuid,at,doc,id) VALUES(?,?,?,?,?)",
-        params!["r", uuid, at, doc.clone(), id],
+        "INSERT INTO records(key,uuid,at,doc) VALUES(?,?,?,?)",
+        params!["r", uuid, at, doc.clone()],
     )
     .await?;
     tx.commit().await?;

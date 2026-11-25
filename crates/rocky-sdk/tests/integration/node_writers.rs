@@ -1,24 +1,42 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{Network, transport::memory::Hub};
+use rocky_sdk::{Affinity, Network, Schema, Table, transport::memory::Hub};
 use std::sync::Arc;
 
 use crate::common;
+
+fn with_notes() -> Schema {
+    common::build(
+        common::shopping(1)
+            .table(common::items())
+            .table(Table::replayed("notes").column(common::required("body", Affinity::Text))),
+    )
+}
 
 #[tokio::test]
 async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let issuer = Device::create(
-        &directory.path().join("issuer"),
-        Some(Network::Owned(hub.connector("issuer"))),
-    )
-    .await?;
+    let schema = with_notes();
+    let issuer_path = directory.path().join("issuer");
+    let issuer = Device::new(
+        common::create_as(
+            common::configuration(
+                &issuer_path,
+                &schema,
+                None,
+                Some(common::external_identity(&issuer_path)),
+                Some(Network::Owned(hub.connector("issuer"))),
+            ),
+            common::external_key(&issuer_path),
+        )
+        .await?,
+    )?;
     let path = directory.path().join("writer");
     let open = || {
         crate::common::configuration(
             &path,
-            common::parsed_schema(),
+            &schema,
             None,
             common::prepared_identity(&path),
             Some(Network::Owned(hub.connector("writer"))),
@@ -29,7 +47,7 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     let own = before["node"].as_str().ok_or("node missing")?.to_owned();
     writer.add(1, "first").await;
     let mut tx = writer.database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?.to_string();
+    let id = tx.next_id("notes", Vec::new()).await?.to_string();
     assert_eq!(
         (id.len(), &id[..64]),
         (80, own.as_str()),

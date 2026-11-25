@@ -49,7 +49,7 @@ fn referencing(
                 _ => "TEXT",
             };
             let null = if column.not_null { " NOT NULL" } else { "" };
-            let key = if column.sql_name == "key" {
+            let key = if column.sql_name == "id" {
                 " PRIMARY KEY"
             } else {
                 ""
@@ -73,17 +73,17 @@ fn referencing(
         create_sql: String::new(),
         auto_generate: false,
         columns,
-        primary_key: vec!["key".into()],
+        primary_key: vec!["id".into()],
         partition_by: Vec::new(),
         partition_group: None,
         indexes: vec![LogicalIndex {
-            name: format!("{name}_identity"),
+            name: format!("{name}_key"),
             unique: true,
             columns: vec![IndexColumn {
-                name: "id".into(),
+                name: "key".into(),
                 descending: false,
             }],
-            create_sql: format!("CREATE UNIQUE INDEX {name}_identity ON {name}(id)"),
+            create_sql: format!("CREATE UNIQUE INDEX {name}_key ON {name}(key)"),
             expressions: Vec::new(),
             predicate: None,
         }],
@@ -312,11 +312,11 @@ impl Lineage {
             .filter(|table| self.partitioned && table.sql_name == "tags")
         {
             tags.partition_by = vec!["label".into()];
-            tags.primary_key = vec!["label".into(), "key".into()];
+            tags.primary_key = vec!["label".into(), "id".into()];
             tags.create_sql = tags
                 .create_sql
                 .replace(" PRIMARY KEY", "")
-                .replace("DEFAULT 0)", "DEFAULT 0,PRIMARY KEY(label,key))");
+                .replace("DEFAULT 0)", "DEFAULT 0,PRIMARY KEY(label,id))");
             tags.indexes[0].columns.insert(
                 0,
                 IndexColumn {
@@ -324,8 +324,7 @@ impl Lineage {
                     descending: false,
                 },
             );
-            tags.indexes[0].create_sql =
-                "CREATE UNIQUE INDEX tags_identity ON tags(label,id)".into();
+            tags.indexes[0].create_sql = "CREATE UNIQUE INDEX tags_key ON tags(label,key)".into();
         }
         for items in tables
             .iter_mut()
@@ -888,7 +887,7 @@ async fn an_interrupted_local_plan_finishes_when_the_replica_opens() {
     };
     assert_eq!(
         indexes,
-        vec![vec![text("drafts_body")], vec![text("drafts_identity")]]
+        vec![vec![text("drafts_body")], vec![text("drafts_key")]]
     );
     let status = replica.generations().await.unwrap();
     assert_eq!(status.current, Generation { schema: 1 });

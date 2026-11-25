@@ -221,11 +221,13 @@ impl Node {
     }
     pub(super) async fn refresh_admin_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
-            match self.registry(&*self.settings_snapshot().await).await {
-                Ok(registry) => Some(registry),
-                Err(error) if super::waits_on_blockers(error.as_ref()) => return Ok(()),
-                Err(error) => return Err(error),
-            }
+            let Some(registry) = self
+                .readable_registry(&*self.settings_snapshot().await)
+                .await?
+            else {
+                return Ok(());
+            };
+            Some(registry)
         } else {
             None
         };

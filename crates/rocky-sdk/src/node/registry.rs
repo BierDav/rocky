@@ -13,7 +13,36 @@ impl Node {
         if !settings.issuer() || purged {
             return Ok(Registry::default());
         }
+        #[cfg(test)]
+        if self.registry_awaits_key.load(Ordering::SeqCst) {
+            return Err(Box::new(Error::Sql(
+                rocky_storage::sql::SqlError::Unavailable {
+                    table: crate::domain::REGISTRY.into(),
+                    reason: rocky_storage::sql::Unavailable::Incomplete {
+                        blockers: vec![rocky_core::Blocker {
+                            scope: rocky_core::scope_label(&self.domain().registry()),
+                            kind: rocky_core::BlockerKind::PendingFrames {
+                                reason: rocky_core::WaitReason::OpeningKey,
+                                count: 1,
+                            },
+                            clears_by: rocky_core::ClearsBy::AnyPeer,
+                            since: None,
+                        }],
+                    },
+                },
+            )));
+        }
         Box::pin(registry::read(&self.replica, self.domain().registry())).await
+    }
+    pub(crate) async fn readable_registry(
+        &self,
+        settings: &Settings,
+    ) -> Result<Option<Registry>, Failure> {
+        match self.registry(settings).await {
+            Ok(registry) => Ok(Some(registry)),
+            Err(error) if waits_on_blockers(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     pub(crate) async fn membership(&self) -> Result<Membership, Failure> {
         let mut known = self.replica.revocations().await;

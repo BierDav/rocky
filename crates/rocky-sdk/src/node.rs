@@ -243,6 +243,8 @@ pub(crate) struct Node {
     redeeming: Mutex<()>,
     #[cfg(test)]
     redemption_hook: std::sync::Mutex<Option<invitations::RedemptionHook>>,
+    #[cfg(test)]
+    registry_awaits_key: AtomicBool,
     pub(crate) bootstrap_intent: BootstrapIntentFile,
     retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
@@ -369,6 +371,8 @@ impl Node {
             redeeming: Mutex::new(()),
             #[cfg(test)]
             redemption_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            registry_awaits_key: AtomicBool::new(false),
             bootstrap_intent,
             retry_seed: rocky_platform::entropy::random_u64(),
             retries: std::sync::Mutex::new(BTreeMap::new()),
@@ -766,7 +770,7 @@ impl Node {
     async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
         let registry = match self.registry(&*self.settings_snapshot().await).await {
             Ok(registry) => Some(registry),
-            Err(error) if waits_on_blockers(error.as_ref()) => None,
+            Err(error) if waits_on_blockers(&error) => None,
             Err(error) => return Err(error),
         };
         let node = self
@@ -1241,9 +1245,13 @@ impl Node {
         }
         if settings.issuer() && !promoted {
             drop(settings);
-            let registry = self.registry(&*self.settings_snapshot().await).await?;
+            let readable = self
+                .readable_registry(&*self.settings_snapshot().await)
+                .await?;
             settings = self.settings.lock().await;
-            if settings.begin_exposure_rotation(&registry)? {
+            if let Some(registry) = readable
+                && settings.begin_exposure_rotation(&registry)?
+            {
                 changed = true;
                 settings.save(&self.replica).await?;
                 let keys = settings
@@ -1692,7 +1700,8 @@ impl Node {
     async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
         let rotates_locally = !self.settings.lock().await.renews_from_issuer();
         let registry = if rotates_locally {
-            Some(self.registry(&*self.settings_snapshot().await).await?)
+            self.readable_registry(&*self.settings_snapshot().await)
+                .await?
         } else {
             None
         };
@@ -2312,11 +2321,8 @@ fn typed_cause(
     };
     crate::Error::new(kind, detail)
 }
-pub(crate) fn waits_on_blockers(error: &(dyn std::error::Error + 'static)) -> bool {
-    matches!(error.downcast_ref::<Error>(), Some(Error::Blocked(_)))
-        || error
-            .downcast_ref::<crate::Error>()
-            .is_some_and(|error| matches!(error.kind(), crate::ErrorKind::Blocked { .. }))
+pub(crate) fn waits_on_blockers(error: &Failure) -> bool {
+    matches!(typed_error(error).kind(), crate::ErrorKind::Blocked { .. })
 }
 fn storage_error(error: &Error, detail: String) -> crate::Error {
     use crate::ErrorKind as Kind;

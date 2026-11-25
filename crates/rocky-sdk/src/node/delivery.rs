@@ -247,10 +247,9 @@ impl Node {
         if !settings.issuer() {
             return Ok(false);
         }
-        match self.registry(&settings).await {
-            Ok(registry) => settings.rights_lag(&registry, &self.domain(), chain),
-            Err(error) if waits_on_blockers(error.as_ref()) => Ok(false),
-            Err(error) => Err(error),
+        match self.readable_registry(&settings).await? {
+            Some(registry) => settings.rights_lag(&registry, &self.domain(), chain),
+            None => Ok(false),
         }
     }
     async fn receive(

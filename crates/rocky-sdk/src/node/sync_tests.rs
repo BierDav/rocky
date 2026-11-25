@@ -693,6 +693,40 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
         .await
 }
 
+#[tokio::test]
+async fn an_issuer_whose_registry_waits_on_a_key_still_admits_the_link_that_brings_it()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let issuer = enrolled(&root.path().join("issuer"), &hub, "issuer", None).await?;
+            let member = enrolled(
+                &root.path().join("member"),
+                &hub,
+                "member",
+                Some((&issuer, crate::Access::Full)),
+            )
+            .await?;
+            assert!(
+                !issuer.settings.lock().await.renews_from_issuer(),
+                "the only issuer rotates on its own, so it reads its registry at every link"
+            );
+            issuer.registry_awaits_key.store(true, Ordering::SeqCst);
+            let report = member.sync_once().await?;
+            assert_eq!(
+                report.reconciled(),
+                1,
+                "the issuer admits the member while its registry waits on a key: {report}"
+            );
+            issuer.registry_awaits_key.store(false, Ordering::SeqCst);
+            issuer.detach().await;
+            member.detach().await;
+            Ok(())
+        })
+        .await
+}
+
 fn completed_peers(report: &Value) -> usize {
     serde_json::from_value::<crate::SyncReport>(report.clone())
         .expect("a native sync report")

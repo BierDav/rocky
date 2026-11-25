@@ -70,7 +70,7 @@ impl Fixture {
             operation,
             (
                 key,
-                Some(crate::machine::self_certificate_in(
+                Some(crate::request::self_certificate_in(
                     key,
                     rocky_credentials::DatabaseContext {
                         publisher: self.owner.public_key(),

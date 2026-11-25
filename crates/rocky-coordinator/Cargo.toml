@@ -11,7 +11,7 @@ license-file.workspace = true
 [features]
 default = ["database"]
 database = ["dep:rocky-sdk"]
-test-support = []
+voter = []
 
 # The protocol, the state machine and the client, on every target.
 [dependencies]
@@ -38,6 +38,7 @@ name = "counters"
 required-features = ["database"]
 
 [dev-dependencies]
+rocky-coordinator = { path = ".", features = ["voter"] }
 rocky-credentials = { workspace = true, features = ["test-support"] }
 # Each pure test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).
 wasm-bindgen-test = "0.3"

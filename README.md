@@ -422,23 +422,43 @@ Rocky's encryption and authorization apply on top of every transport.
 
 ## Coordinator
 
-`rocky-coordinator` adds gap-free counters and at-most-once claims to a
+`rocky-coordinator` adds gap-free counters and admit-once claims to a
 `Database`. `Counters::connect(database, &bundle, transport)` reaches the
-coordinator a `TrustBundle` names. The owner registers the database once with
+coordinator a `TrustBundle` names. Voters accept only iroh connections, so pass
+a `rocky-iroh` transport, such as
+`rocky_iroh::Options::isolated("127.0.0.1:0").client().await?.transport()`.
+The owner registers the database once with
 `counters.register(&root, &tenant, lifetime)`, where `tenant` is the
 coordinator account (`Tenant::generate()`, kept through `Tenant::secret`), and
 renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
 
-`counters.claim(&name, claim)` then takes a counter's next number for any
-person with write access, and the application writes that number in its own
-transaction. A keyed claim, `Claim::keyed(order_id, issued)`, returns its first
-number to every retry with the same key and the same issuance time, for seven
-days and up to 1024 claims per counter. An unreachable coordinator is
-`CoordinationError::Unavailable` and takes no number.
+`counters.claim(&name, &claim)` takes a counter's next number for any person
+with write access, and the application writes that number in its own
+transaction. `Claim::new(key)` makes one attempt on an application key such as
+an order id or a ticket; store the claim and send the same value to retry. The
+answer is `Claimed::First(n)` for the attempt that holds the key, on every
+retry, and `Claimed::Taken(n)` for any other attempt while the key is in force,
+so admitting a ticket once is
+`matches!(counters.claim(&door, &Claim::new(ticket)).await?, Claimed::First(_))`.
+`Claim::unkeyed()` takes a number no business key names.
+
+A key stays in force for seven days (`CLAIM_WINDOW`), or until
+`Claim::expires(at)`, at most 366 days ahead. A counter holds 16,384 keys in
+force (`MAX_CLAIMS`); a new key beyond them is refused with
+`CoordinationError::Full` and takes no number, and only expired keys are ever
+forgotten. A database holds 64 counters, and the tenant's storage limit may
+refuse a claim earlier with `Backpressure`.
+
+`CounterError::retryable` says whether sending the same call again may succeed.
+`Unavailable` means no voter accepted the request. `OutcomeUnknown` means the
+request may have reached the coordinator without an answer: send the same
+`Claim` again to learn its number, never a new one.
 
 `scripts/coordinator-local DIR` builds `rocky-voter`, starts three voters on
 loopback and prints the trust bundle that `cargo run -p rocky-coordinator
---example counters -- BUNDLE EMPTY_DIR` claims from.
+--example counters -- BUNDLE EMPTY_DIR` claims from. Tests in this workspace
+start voters in-process with `rocky_voter::LocalCluster::start(dir, 3)` and
+reach them through `cluster.bundle()`.
 
 ## Browser (wasm)
 

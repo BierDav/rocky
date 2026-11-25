@@ -1,35 +1,11 @@
 use p2panda_core::{PrivateKey, PublicKey};
 use rocky_coordinator::certified::CertifiedGenesis;
 use rocky_core::MeshId;
-use rocky_voter::{self as service, VoterService};
-use serde::{Deserialize, Serialize};
+use rocky_voter::{self as service, provision::*};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub(super) type Failure = Box<dyn std::error::Error>;
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    data: PathBuf,
-    genesis: PathBuf,
-    trusted_root: PublicKey,
-    mesh: MeshId,
-    node: u64,
-    key: PrivateKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    client: Option<ClientLane>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientLane {
-    secret: String,
-    #[serde(default)]
-    relay: Option<String>,
-    #[serde(default)]
-    discovery: bool,
-    #[serde(default)]
-    bind: Option<String>,
-}
+pub(super) use rocky_voter::Failure;
 
 const USAGE: &str = "usage:
   rocky-voter CONFIG.json [--provision]
@@ -109,75 +85,25 @@ async fn relay(address: &str) -> Result<(), Failure> {
 
 fn load(path: &Path) -> Result<(Configuration, CertifiedGenesis), Failure> {
     let configuration: Configuration = serde_json::from_slice(&std::fs::read(path)?)?;
-    let genesis = CertifiedGenesis::from_bytes(&std::fs::read(&configuration.genesis)?)?;
-    genesis.verify(configuration.trusted_root, configuration.mesh)?;
+    let genesis = service::provision::load(&configuration)?;
     Ok((configuration, genesis))
 }
 
 async fn run(path: &Path, provision: bool) -> Result<(), Failure> {
     let (configuration, genesis) = load(path)?;
-    let public = genesis.genesis.public.is_some();
-    let service = VoterService::open(
-        &configuration.data,
-        genesis,
-        configuration.trusted_root,
-        configuration.mesh,
-        configuration.node,
-        configuration.key,
-        provision,
-    )
-    .await?;
-    match (configuration.client, public) {
-        (None, true) => return Err("a public service needs a client lane".into()),
-        (Some(_), false) => return Err("only a public service has a client lane".into()),
-        (Some(lane), true) => serve_clients(&service, lane).await?,
-        (None, false) => {}
+    check_client_lane(&configuration, &genesis)?;
+    let service = open(&configuration, genesis, provision).await?;
+    let mut clients = None;
+    if let Some(lane) = &configuration.client {
+        let attachment = lane.start().await?;
+        tokio::spawn(service.clone().serve_clients(attachment.transport()));
+        clients = Some(attachment);
     }
     let Err(stopped) = service.serve().await;
+    drop(clients);
     Err(stopped.into())
 }
 
-const ANNOUNCES_A_TOPIC: bool = false;
-
-async fn serve_clients(
-    service: &std::sync::Arc<VoterService>,
-    lane: ClientLane,
-) -> Result<(), Failure> {
-    let options = rocky_iroh::Options {
-        relay: lane.relay,
-        lookup: (!lane.discovery).then(|| "disabled".into()),
-        topic: ANNOUNCES_A_TOPIC,
-        local: false,
-        bind: lane.bind,
-    };
-    let attachment = options
-        .start_serving(
-            secret(&lane.secret)?,
-            vec![rocky_core::net::Protocol::Coordinate],
-        )
-        .await
-        .map_err(|error| -> Failure { error.to_string().into() })?;
-    tokio::spawn(service.clone().serve_clients(attachment.transport()));
-    Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-fn unhex<const N: usize>(text: &str) -> Result<[u8; N], Failure> {
-    let text = text.trim();
-    if text.len() != N * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("expected {} hexadecimal digits", N * 2).into());
-    }
-    let mut bytes = [0; N];
-    for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
-    }
-    Ok(bytes)
-}
-fn secret(text: &str) -> Result<[u8; 32], Failure> {
-    unhex(text)
-}
 fn write_private(path: &Path, text: &str) -> Result<(), Failure> {
     if path.exists() {
         return Err(format!("{} exists; secrets are never replaced", path.display()).into());
@@ -194,20 +120,15 @@ fn keys(out: &Path, address: Option<&str>) -> Result<(), Failure> {
     Ok(())
 }
 fn voter_keys(out: &Path, address: Option<&str>) -> Result<serde_json::Value, Failure> {
-    use rocky_iroh::iroh::{EndpointAddr, SecretKey};
     std::fs::create_dir_all(out)?;
     let voter = PrivateKey::new();
     let client = PrivateKey::new();
     write_private(&out.join("voter.key"), &voter.to_hex())?;
     write_private(&out.join("client.secret"), &client.to_hex())?;
-    let id = SecretKey::from_bytes(client.as_bytes()).public();
-    let mut endpoint = EndpointAddr::new(id);
-    if let Some(address) = address {
-        endpoint = endpoint.with_ip_addr(address.parse()?);
-    }
+    let address = address.map(str::parse).transpose()?;
     Ok(serde_json::json!({
         "key": voter.public_key(),
-        "client": serde_json::to_string(&endpoint)?,
+        "client": client_endpoint(client.as_bytes(), address)?,
     }))
 }
 
@@ -225,52 +146,39 @@ fn local(out: &Path, port: u16) -> Result<(), Failure> {
     let root = PrivateKey::new();
     let admin = PrivateKey::new();
     write_private(&out.join("admin.key"), &admin.to_hex())?;
-    let mesh = MeshId(
-        *rocky_core::commitment("rocky.local-mesh", root.public_key().as_bytes())
-            .first_chunk::<16>()
-            .ok_or("mesh")?,
-    );
+    let mesh = local_mesh(&root);
+    let genesis = out.join("service/genesis.cbor");
     let mut voters = Vec::new();
     for id in 1..=LOCAL_VOTERS {
-        let dir = out.join(format!("voter-{id}"));
-        let udp = format!("127.0.0.1:{}", port + LOCAL_IROH_PORT_OFFSET + id);
-        let public = voter_keys(&dir, Some(&udp))?;
-        voters.push(serde_json::json!({
-            "id": id,
-            "address": format!("127.0.0.1:{}", port + id),
-            "key": public["key"],
-            "client": public["client"],
-        }));
-        let config = serde_json::json!({
-            "data": dir.join("store"),
-            "genesis": out.join("service/genesis.cbor"),
-            "trusted_root": root.public_key(),
-            "mesh": mesh,
-            "node": id,
-            "key": std::fs::read_to_string(dir.join("voter.key"))?,
-            "client": {
-                "secret": std::fs::read_to_string(dir.join("client.secret"))?,
-                "relay": "disabled",
-                "discovery": false,
-                "bind": udp,
-            },
+        let key = PrivateKey::new();
+        let secret = PrivateKey::new();
+        let client_bind =
+            std::net::SocketAddr::from(([127, 0, 0, 1], port + LOCAL_IROH_PORT_OFFSET + id));
+        voters.push(PlannedVoter {
+            id: id.into(),
+            address: format!("127.0.0.1:{}", port + id),
+            key: key.public_key(),
+            client: client_endpoint(secret.as_bytes(), Some(client_bind))?,
         });
-        write_private(&out.join(format!("voter-{id}.json")), &config.to_string())?;
+        let configuration = Configuration {
+            data: out.join(format!("voter-{id}/store")),
+            genesis: genesis.clone(),
+            trusted_root: root.public_key(),
+            mesh,
+            node: id.into(),
+            key,
+            client: Some(ClientLane::loopback(secret.as_bytes(), client_bind)),
+        };
+        write_private(
+            &out.join(format!("voter-{id}.json")),
+            &serde_json::to_string(&configuration)?,
+        )?;
     }
-    let plan = serde_json::json!({
-        "mesh": hex(&mesh.0),
-        "configuration": hex(&rocky_core::commitment("rocky.local-configuration", &mesh.0)[..16]),
-        "membership_authority": admin.public_key(),
-        "voters": voters,
-        "max_control_lifetime": 30 * 86_400,
-        "tenants": 6,
-        "registrations_per_day": 64,
-        "tenant_lanes": 4,
-    });
+    let plan = Plan::local(&root, admin.public_key(), voters);
     std::fs::write(out.join("plan.json"), serde_json::to_string_pretty(&plan)?)?;
-    certify_plan(&serde_json::from_value(plan)?, &root, &out.join("service"))?;
+    certify_plan(&plan, &root, &out.join("service"))?;
     let admin_config = serde_json::json!({
-        "genesis": out.join("service/genesis.cbor"),
+        "genesis": genesis,
         "trusted_root": root.public_key(),
         "mesh": mesh,
         "key": admin.to_hex(),
@@ -329,30 +237,6 @@ async fn admin(path: &Path, command: &[&str]) -> Result<(), Failure> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Plan {
-    mesh: String,
-    configuration: String,
-    membership_authority: PublicKey,
-    #[serde(default)]
-    admission: Option<PublicKey>,
-    voters: Vec<PlannedVoter>,
-    max_control_lifetime: u64,
-    tenants: u32,
-    registrations_per_day: u32,
-    tenant_lanes: u32,
-    #[serde(default)]
-    limits: Option<rocky_coordinator::Limits>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlannedVoter {
-    id: u64,
-    address: String,
-    key: PublicKey,
-    client: String,
-}
 fn certify(plan: &Path, root: &Path, out: &Path) -> Result<(), Failure> {
     let plan: Plan = serde_json::from_slice(&std::fs::read(plan)?)?;
     let root: PrivateKey = serde_json::from_value(serde_json::Value::String(
@@ -361,44 +245,8 @@ fn certify(plan: &Path, root: &Path, out: &Path) -> Result<(), Failure> {
     certify_plan(&plan, &root, out)
 }
 fn certify_plan(plan: &Plan, root: &PrivateKey, out: &Path) -> Result<(), Failure> {
-    use rocky_coordinator::certified::*;
-    let mesh = MeshId(unhex(&plan.mesh)?);
-    let genesis = CertifiedGenesis::sign(
-        Genesis {
-            mesh,
-            configuration: unhex(&plan.configuration)?,
-            voters: plan
-                .voters
-                .iter()
-                .map(|v| Voter {
-                    id: v.id,
-                    address: v.address.clone(),
-                    key: v.key,
-                })
-                .collect(),
-            initial_voters: plan.voters.iter().map(|v| v.id).collect(),
-            membership_authority: plan.membership_authority,
-            authorities: Vec::new(),
-            max_control_lifetime: plan.max_control_lifetime,
-            public: Some(PublicService {
-                endpoints: plan
-                    .voters
-                    .iter()
-                    .map(|v| ClientEndpoint {
-                        voter: v.id,
-                        kind: "iroh".into(),
-                        address: v.client.clone(),
-                    })
-                    .collect(),
-                admission: plan.admission,
-                limits: plan.limits.unwrap_or_default(),
-                tenants: plan.tenants,
-                registrations_per_day: plan.registrations_per_day,
-                tenant_lanes: plan.tenant_lanes,
-            }),
-        },
-        root,
-    )?;
+    use rocky_coordinator::certified::TrustBundle;
+    let genesis = plan.certify(root)?;
     std::fs::create_dir_all(out)?;
     std::fs::write(out.join("genesis.cbor"), genesis.to_bytes()?)?;
     std::fs::write(

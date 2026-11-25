@@ -1,10 +1,12 @@
 use super::*;
-use crate::tenancy::{CoordinationGrant, CoordinatorControl};
+use crate::tenancy::{CoordinationGrant, CoordinatorControl, SignedCoordinationGrant};
 use crate::{
-    counters::{CLAIM_WINDOW, Claim, Lookup, Name},
-    machine::{Metadata, self_certificate_in},
+    counters::{Claim, Claimed::*, Name},
+    machine::Metadata,
+    request::self_certificate_in,
     retention::DAY,
 };
+use p2panda_core::PublicKey;
 use rocky_core::net::{BoxFuture, Failure, Stream};
 use rocky_credentials::Publisher;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,6 +19,7 @@ pub(crate) struct Memory {
     state: Arc<Mutex<Metadata>>,
     streams: AtomicUsize,
     clock_ahead_seconds: std::sync::atomic::AtomicU64,
+    loses_replies: AtomicBool,
 }
 impl Memory {
     fn answer(&self, request: &Request) -> Result<Outcome, CoordinationError> {
@@ -45,6 +48,9 @@ impl Memory {
                     .client_request(self.genesis)
                     .and_then(|request| self.answer(&request)),
             };
+            if self.loses_replies.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let response = crate::transport::Envelope::from_body(
                 self.genesis,
                 envelope.nonce,
@@ -177,6 +183,7 @@ impl Service {
             )),
             streams: AtomicUsize::new(0),
             clock_ahead_seconds: Default::default(),
+            loses_replies: AtomicBool::new(false),
         });
         let tenant = PrivateKey::new();
         let node = PrivateKey::new();
@@ -225,6 +232,7 @@ impl Service {
                 state: memory.state.clone(),
                 streams: AtomicUsize::new(0),
                 clock_ahead_seconds: Default::default(),
+                loses_replies: AtomicBool::new(false),
             }),
         };
         Self {
@@ -263,31 +271,100 @@ async fn an_admin_node_claims_and_a_retry_returns_the_same_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("company-1/invoices").unwrap();
-    let first = Claim::fresh().unwrap();
+    let first = Claim::unkeyed();
     assert_eq!(
         client.claim(service.scope, invoices.clone(), first).await,
-        Ok(1)
+        Ok(First(1))
     );
     assert_eq!(
         client.claim(service.scope, invoices.clone(), first).await,
-        Ok(1)
+        Ok(First(1))
     );
-    let second = Claim::fresh().unwrap();
+    let second = Claim::unkeyed();
     assert_eq!(
         client.claim(service.scope, invoices.clone(), second).await,
-        Ok(2)
+        Ok(First(2))
     );
     let reopened = service.client(&service.node);
-    let reading = reopened
-        .counter(service.scope, invoices.clone(), Some(first))
-        .await
-        .unwrap();
     assert_eq!(
-        (reading.value, reading.claim),
-        (2, Some(Lookup::Claimed(1))),
+        reopened.counter(service.scope, invoices.clone()).await,
+        Ok(2),
         "a client reopened on the same node sees the same counter"
     );
-    assert_eq!(reopened.claim(service.scope, invoices, second).await, Ok(2));
+    assert_eq!(
+        reopened.claim(service.scope, invoices, second).await,
+        Ok(First(2))
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn two_doors_racing_one_ticket_admit_it_exactly_once() {
+    let service = Service::start().await;
+    let doors = [service.client(&service.node), service.client(&service.node)];
+    let door = Name::new("door").unwrap();
+    let scans = [Claim::new(b"ticket-42"), Claim::new(b"ticket-42")];
+    let (east, west) = tokio::join!(
+        doors[0].claim(service.scope, door.clone(), scans[0]),
+        doors[1].claim(service.scope, door.clone(), scans[1]),
+    );
+    let answers = [east.unwrap(), west.unwrap()];
+    let mut sorted = answers;
+    sorted.sort_by_key(|answer| matches!(answer, Taken(_)));
+    assert_eq!(
+        sorted,
+        [First(1), Taken(1)],
+        "exactly one door admits the ticket, and both see its one number"
+    );
+    for ((door_client, scan), answer) in doors.iter().zip(scans).zip(answers) {
+        assert_eq!(
+            door_client.claim(service.scope, door.clone(), scan).await,
+            Ok(answer),
+            "a retried scan repeats its door's answer"
+        );
+    }
+    assert_eq!(
+        doors[0].counter(service.scope, door).await,
+        Ok(1),
+        "the ticket took one number"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_lost_reply_is_outcome_unknown_and_the_same_claim_learns_its_number() {
+    let service = Service::start().await;
+    let client = service.client(&service.node);
+    let invoices = Name::new("invoices").unwrap();
+    let order = Claim::new(b"order-17");
+    service.voter.loses_replies.store(true, Ordering::Relaxed);
+    assert_eq!(
+        client.claim(service.scope, invoices.clone(), order).await,
+        Err(CoordinationError::OutcomeUnknown),
+        "a claim that reached the voter without an answer is not reported as taking no number"
+    );
+    assert!(CoordinationError::OutcomeUnknown.retryable());
+    assert_eq!(
+        client.counter(service.scope, invoices.clone()).await,
+        Err(CoordinationError::Unavailable),
+        "a lost answer to a read changed nothing"
+    );
+    service.voter.loses_replies.store(false, Ordering::Relaxed);
+    assert_eq!(
+        client.counter(service.scope, invoices.clone()).await,
+        Ok(1),
+        "the unanswered claim took its number"
+    );
+    assert_eq!(
+        client.claim(service.scope, invoices.clone(), order).await,
+        Ok(First(1)),
+        "the same claim sent again learns the number it took"
+    );
+    assert_eq!(
+        client
+            .claim(service.scope, invoices.clone(), Claim::unkeyed())
+            .await,
+        Ok(First(2)),
+        "no number was lost or taken twice"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -295,19 +372,14 @@ async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    let stale = Claim {
-        id: [5; 32],
-        issued: now().unwrap() - CLAIM_WINDOW - 60,
-    };
+    let stale = Claim::new(b"order-5").expires(
+        rocky_platform::time::SystemTime::now() - rocky_platform::time::Duration::from_secs(60),
+    );
     assert_eq!(
         client.claim(service.scope, invoices.clone(), stale).await,
         Err(CoordinationError::Expired)
     );
-    let reading = client.counter(service.scope, invoices, Some(stale)).await;
-    assert_eq!(
-        reading.map(|reading| (reading.value, reading.claim)),
-        Ok((0, Some(Lookup::Expired)))
-    );
+    assert_eq!(client.counter(service.scope, invoices).await, Ok(0));
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -317,7 +389,7 @@ async fn only_admin_nodes_claim() {
     let stranger = service.client(&PrivateKey::new());
     assert_eq!(
         stranger
-            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+            .claim(service.scope, invoices.clone(), Claim::unkeyed())
             .await,
         Err(CoordinationError::Denied(Refusal::NotMember))
     );
@@ -329,14 +401,13 @@ async fn only_admin_nodes_claim() {
     .unwrap();
     assert_eq!(
         uncertified
-            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+            .claim(service.scope, invoices.clone(), Claim::unkeyed())
             .await,
         Err(CoordinationError::Denied(Refusal::NotMember)),
         "an admin node's key without its certificate is no identity"
     );
     let admin = service.client(&service.node);
-    let reading = admin.counter(service.scope, invoices, None).await.unwrap();
-    assert_eq!(reading.value, 0);
+    assert_eq!(admin.counter(service.scope, invoices).await, Ok(0));
 }
 
 fn control_beyond_the_client_request_limit(service: &Service) -> ControlCertificate {
@@ -399,10 +470,10 @@ async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
     let invoices = Name::new("invoices").unwrap();
     assert_eq!(
         client
-            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .claim(service.scope, invoices, Claim::unkeyed())
             .await,
-        Err(CoordinationError::Unavailable),
-        "every attempt is refused, so the outcome stays uncertain"
+        Err(CoordinationError::OutcomeUnknown),
+        "every answer is refused after the request was sent, so its outcome is unknown"
     );
     assert!(service.voter.streams.load(Ordering::Relaxed) > 1);
 }
@@ -422,9 +493,9 @@ async fn an_observer_sees_every_voter_answer_and_refusal() {
     let invoices = Name::new("invoices").unwrap();
     assert_eq!(
         client
-            .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+            .claim(service.scope, invoices.clone(), Claim::unkeyed())
             .await,
-        Ok(1)
+        Ok(First(1))
     );
     service
         .voter
@@ -432,7 +503,7 @@ async fn an_observer_sees_every_voter_answer_and_refusal() {
         .store(3600, Ordering::Relaxed);
     assert!(matches!(
         client
-            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .claim(service.scope, invoices, Claim::unkeyed())
             .await,
         Err(CoordinationError::ClockSkew { .. })
     ));
@@ -453,6 +524,7 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         state: Arc::new(Mutex::new(Metadata::new(genesis.clone()).unwrap())),
         streams: AtomicUsize::new(0),
         clock_ahead_seconds: Default::default(),
+        loses_replies: AtomicBool::new(false),
     });
     let bundle = TrustBundle::new(&genesis).unwrap();
     assert!(matches!(
@@ -534,14 +606,14 @@ async fn connecting_never_closes_the_callers_transport() {
         let client = service.client_on(&service.node, transport.clone());
         assert_eq!(
             client
-                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .claim(service.scope, invoices.clone(), Claim::unkeyed())
                 .await,
-            Ok(1)
+            Ok(First(1))
         );
         let stranger = service.client_on(&PrivateKey::new(), transport.clone());
         assert_eq!(
             stranger
-                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .claim(service.scope, invoices.clone(), Claim::unkeyed())
                 .await,
             Err(CoordinationError::Denied(Refusal::NotMember)),
             "the voter refuses the request"
@@ -549,7 +621,7 @@ async fn connecting_never_closes_the_callers_transport() {
         transport.refuse_connections(true);
         assert_eq!(
             client
-                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .claim(service.scope, invoices.clone(), Claim::unkeyed())
                 .await,
             Err(CoordinationError::Unavailable),
             "every connection fails"
@@ -564,9 +636,9 @@ async fn connecting_never_closes_the_callers_transport() {
     let reopened = service.client_on(&service.node, transport.clone());
     assert_eq!(
         reopened
-            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .claim(service.scope, invoices, Claim::unkeyed())
             .await,
-        Ok(2),
+        Ok(First(2)),
         "the caller's transport still carries a new client"
     );
     assert_eq!(

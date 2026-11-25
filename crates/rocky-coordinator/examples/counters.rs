@@ -1,9 +1,4 @@
-use rocky_coordinator::{
-    Counters,
-    certified::{TrustBundle, now},
-    counters::{Claim, Name},
-    tenancy::Tenant,
-};
+use rocky_coordinator::{Claim, Claimed, Counters, Name, Tenant, TrustBundle};
 use rocky_sdk::{Affinity, Column, Configuration, Schema, Table, transport::Transport};
 use std::{path::Path, sync::Arc};
 
@@ -19,7 +14,11 @@ async fn main() -> Result<(), Failure> {
         return Err(USAGE.into());
     };
     let bundle = TrustBundle::from_json(&std::fs::read_to_string(bundle)?)?;
-    let transport = transport().await?;
+    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
+        .client()
+        .await
+        .map_err(|error| -> Failure { error.to_string().into() })?
+        .transport();
     let claimed = run(&bundle, Path::new(directory), transport.clone()).await;
     transport.close().await;
     claimed
@@ -32,10 +31,10 @@ async fn run(
 ) -> Result<(), Failure> {
     let schema = Schema::builder("tickets", 1)
         .table(
-            Table::replayed("tickets")
-                .column(Column::new("order_key", Affinity::Text).required())
+            Table::replayed("admissions")
+                .column(Column::new("ticket", Affinity::Text).required())
                 .column(Column::new("number", Affinity::Integer).required())
-                .primary_key(["order_key"]),
+                .primary_key(["ticket"]),
         )
         .build()?;
     let created = Configuration::new(directory, &schema)?.create().await?;
@@ -50,29 +49,19 @@ async fn run(
         control.revision, control.expires
     );
 
-    let tickets = Name::new("tickets")?;
-    let order = Claim::keyed(b"order-1", now()?);
-    let number = counters.claim(&tickets, order).await?;
-    let retried = counters.claim(&tickets, order).await?;
-    println!("order-1 holds ticket {number}; its retry answered {retried}");
-    if retried != number {
-        return Err("a keyed retry answered another number".into());
+    let door = Name::new("main-door")?;
+    let east = Claim::new(b"ticket-1");
+    let west = Claim::new(b"ticket-1");
+    let admitted = counters.claim(&door, &east).await?;
+    let rescanned = counters.claim(&door, &west).await?;
+    let retried = counters.claim(&door, &east).await?;
+    println!("east door: {admitted:?}; west door: {rescanned:?}; east retry: {retried:?}");
+    if !matches!(admitted, Claimed::First(_))
+        || !matches!(rescanned, Claimed::Taken(_))
+        || retried != admitted
+    {
+        return Err("a ticket was admitted twice or a retry lost its admission".into());
     }
     created.database.close().await?;
     Ok(())
-}
-
-async fn transport() -> Result<Arc<dyn Transport>, Failure> {
-    let options = rocky_iroh::Options {
-        relay: Some("disabled".into()),
-        lookup: Some("disabled".into()),
-        topic: false,
-        local: false,
-        bind: Some("127.0.0.1:0".into()),
-    };
-    let endpoint = options
-        .bind(rocky_platform::entropy::random())
-        .await
-        .map_err(|error| -> Failure { error.to_string().into() })?;
-    Ok(rocky_iroh::Attachment::serving(endpoint, Vec::new()).transport())
 }

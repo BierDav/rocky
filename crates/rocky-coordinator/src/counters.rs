@@ -1,21 +1,24 @@
 use crate::CoordinationError;
-use rocky_core::{Commitment, MAX_COUNTER};
+use rocky_core::Commitment;
+use rocky_platform::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+
+#[cfg(feature = "voter")]
+mod state;
+#[cfg(feature = "voter")]
+pub(crate) use state::Counters;
 
 /// Counters one database may hold.
 pub const MAX_COUNTERS: usize = 64;
-/// Seconds a claim's issuance time may lie ahead of the coordinator's clock.
-pub const ISSUE_SKEW: u64 = crate::transport::MAX_CLOCK_SKEW_SECONDS;
-const ACCOUNTED_COUNTER_BYTES: usize = 128;
-const ACCOUNTED_CLAIM_BYTES: usize = 64;
-
 /// The longest counter name in bytes.
 pub const MAX_NAME: usize = 64;
-/// Seconds a claim stays remembered, so a retry within seven days gets its first number.
+/// Seconds a claim stays in force unless `Claim::expires` sets another time: seven days.
 pub const CLAIM_WINDOW: u64 = 7 * 86_400;
-/// Claims remembered per counter; older ones are forgotten first.
-pub const CLAIM_RECORDS: usize = 1024;
+/// The furthest ahead of the coordinator's clock a claim may expire, in seconds: 366 days.
+pub const MAX_CLAIM_LIFETIME: u64 = 366 * 86_400;
+/// Claims in force one counter holds; a new key beyond them is refused as `Full` until one expires.
+pub const MAX_CLAIMS: usize = 16_384;
+
 /// A counter name of 1 to 64 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
@@ -45,190 +48,84 @@ impl From<Name> for Vec<u8> {
         name.0
     }
 }
-/// Identifies one claim, so a retry returns the number the first attempt took.
+
+/// One attempt to take a counter's number for a key such as an order id or a ticket; store it and
+/// send the same value to retry. A retry answers `First` with the attempt's number, while another
+/// attempt on a key still in force answers `Taken`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
-    /// The claim's identity.
-    pub id: Commitment,
-    /// Unix seconds when the claim was first made; a retry must repeat it.
-    pub issued: u64,
+    key: Commitment,
+    attempt: Commitment,
+    expires: u64,
 }
 impl Claim {
-    /// A random claim issued now, for a number no retry needs to match.
-    pub fn fresh() -> Result<Self, CoordinationError> {
-        Ok(Self {
-            id: rocky_platform::entropy::random(),
-            issued: crate::certified::now()?,
-        })
+    /// A new attempt on an application key, in force for `CLAIM_WINDOW` from now.
+    pub fn new(key: impl AsRef<[u8]>) -> Self {
+        Self::attempt(rocky_core::commitment(
+            "rocky.counter-claim-key.v2",
+            key.as_ref(),
+        ))
     }
-    /// A claim derived from an application key such as an order id; retries need the same key and
-    /// the same `issued` time.
-    pub fn keyed(key: &[u8], issued: u64) -> Self {
+    /// A new attempt on a random key no other attempt shares, for a number without a business key.
+    pub fn unkeyed() -> Self {
+        Self::attempt(rocky_platform::entropy::random())
+    }
+    /// Keeps the key in force until `at` instead, at most `MAX_CLAIM_LIFETIME` ahead.
+    pub fn expires(self, at: SystemTime) -> Self {
         Self {
-            id: rocky_core::commitment("rocky.counter-claim.v1", key),
-            issued,
+            expires: unix_seconds(at),
+            ..self
         }
     }
-}
-/// A counter's state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reading {
-    /// The last number taken, or 0 before any.
-    pub value: u64,
-    /// What the coordinator remembers of the asked claim, or `None` when none was asked.
-    pub claim: Option<Lookup>,
-}
-/// What the coordinator remembers of one claim.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Lookup {
-    /// The claim took this number.
-    Claimed(u64),
-    /// The claim took no number yet.
-    Unclaimed,
-    /// The claim is past `CLAIM_WINDOW` or was forgotten, so its number is unknown.
-    Expired,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Record {
-    claim: Claim,
-    value: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Counter {
-    name: Name,
-    value: u64,
-    floor: u64,
-    records: VecDeque<Record>,
-}
-impl Counter {
-    fn new(name: Name) -> Self {
+    fn attempt(key: Commitment) -> Self {
         Self {
-            name,
-            value: 0,
-            floor: 0,
-            records: VecDeque::new(),
+            key,
+            attempt: rocky_platform::entropy::random(),
+            expires: unix_seconds(SystemTime::now()).saturating_add(CLAIM_WINDOW),
         }
     }
-    fn bytes(&self) -> usize {
-        ACCOUNTED_COUNTER_BYTES
-            + self.name.as_bytes().len()
-            + self.records.len() * ACCOUNTED_CLAIM_BYTES
-    }
-    fn evict(&mut self, time: u64) {
-        let floor = &mut self.floor;
-        self.records.retain(|record| {
-            let live = record.claim.issued.saturating_add(CLAIM_WINDOW) >= time;
-            if !live {
-                *floor = (*floor).max(record.claim.issued);
-            }
-            live
-        });
-    }
-    fn lookup(&self, claim: Claim, time: u64) -> Result<Lookup, CoordinationError> {
-        if let Some(record) = self.records.iter().find(|r| r.claim.id == claim.id) {
-            return match record.claim.issued == claim.issued {
-                true if record.claim.issued.saturating_add(CLAIM_WINDOW) >= time => {
-                    Ok(Lookup::Claimed(record.value))
-                }
-                true => Ok(Lookup::Expired),
-                false => Err(CoordinationError::RequestConflict),
-            };
+}
+#[cfg(test)]
+impl Claim {
+    pub(crate) fn unkeyed_until(expires: u64) -> Self {
+        Self {
+            expires,
+            ..Self::unkeyed()
         }
-        if claim.issued > time.saturating_add(ISSUE_SKEW) {
-            return Err(CoordinationError::ClockSkew {
-                coordinator_time: time,
-            });
-        }
-        if claim.issued.saturating_add(CLAIM_WINDOW) < time || claim.issued <= self.floor {
-            return Ok(Lookup::Expired);
-        }
-        Ok(Lookup::Unclaimed)
     }
+    pub(crate) fn keyed_for_test((key, attempt): (Commitment, u8), expires: u64) -> Self {
+        Self {
+            key,
+            attempt: [attempt; 32],
+            expires,
+        }
+    }
+    pub(crate) fn fixed(key: u8, attempt: u8, expires: u64) -> Self {
+        Self {
+            key: [key; 32],
+            attempt: [attempt; 32],
+            expires,
+        }
+    }
+}
+fn unix_seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct Counters {
-    counters: Vec<Counter>,
+/// What a claim found: the number it holds, or the number another attempt already took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Claimed {
+    /// This attempt holds the key's number, whether it took it now or on an earlier try.
+    First(u64),
+    /// Another attempt already holds this key, with this number.
+    Taken(u64),
 }
-impl Counters {
-    pub fn bytes(&self) -> usize {
-        self.counters.iter().map(Counter::bytes).sum()
-    }
-    pub fn claim(
-        &mut self,
-        name: &Name,
-        claim: Claim,
-        time: u64,
-        available: usize,
-    ) -> Result<u64, CoordinationError> {
-        let index = match self.counters.iter().position(|c| c.name == *name) {
-            Some(index) => index,
-            None => {
-                if self.counters.len() >= MAX_COUNTERS {
-                    return Err(CoordinationError::Backpressure);
-                }
-                self.counters.push(Counter::new(name.clone()));
-                self.counters.len() - 1
-            }
-        };
-        let result = Self::take(&mut self.counters[index], claim, time, available);
-        if self.counters[index].value == 0 {
-            self.counters.remove(index);
+impl Claimed {
+    /// The key's number, whichever attempt took it.
+    pub fn number(self) -> u64 {
+        match self {
+            Self::First(number) | Self::Taken(number) => number,
         }
-        result
-    }
-    fn take(
-        counter: &mut Counter,
-        claim: Claim,
-        time: u64,
-        available: usize,
-    ) -> Result<u64, CoordinationError> {
-        counter.evict(time);
-        match counter.lookup(claim, time)? {
-            Lookup::Claimed(value) => return Ok(value),
-            Lookup::Expired => return Err(CoordinationError::Expired),
-            Lookup::Unclaimed => {}
-        }
-        let mut growth = ACCOUNTED_CLAIM_BYTES;
-        if counter.value == 0 {
-            growth += ACCOUNTED_COUNTER_BYTES + counter.name.as_bytes().len();
-        } else if counter.records.len() >= CLAIM_RECORDS {
-            growth = 0;
-        }
-        if growth > available {
-            return Err(CoordinationError::Backpressure);
-        }
-        let value = counter
-            .value
-            .checked_add(1)
-            .filter(|value| *value <= MAX_COUNTER)
-            .ok_or(CoordinationError::Configuration)?;
-        if counter.records.len() >= CLAIM_RECORDS
-            && let Some(evicted) = counter.records.pop_front()
-        {
-            counter.floor = counter.floor.max(evicted.claim.issued);
-        }
-        counter.value = value;
-        counter.records.push_back(Record { claim, value });
-        Ok(value)
-    }
-    pub fn read(
-        &self,
-        name: &Name,
-        claim: Option<Claim>,
-        time: u64,
-    ) -> Result<Reading, CoordinationError> {
-        let unopened;
-        let counter = match self.counters.iter().find(|c| c.name == *name) {
-            Some(counter) => counter,
-            None => {
-                unopened = Counter::new(name.clone());
-                &unopened
-            }
-        };
-        Ok(Reading {
-            value: counter.value,
-            claim: claim.map(|claim| counter.lookup(claim, time)).transpose()?,
-        })
     }
 }

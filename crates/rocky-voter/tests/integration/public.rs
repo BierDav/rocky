@@ -45,7 +45,10 @@ async fn commit(
     scope: Scope,
     claim: Claim,
 ) -> Result<u64, CoordinationError> {
-    client.claim(scope, invoices(), claim).await
+    client
+        .claim(scope, invoices(), claim)
+        .await
+        .map(rocky_coordinator::Claimed::number)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -240,10 +243,13 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     for id in &down {
         cluster.stop(*id);
     }
-    assert_eq!(
-        commit(&exec, scope, pending).await,
-        Err(CoordinationError::Unavailable),
-        "a quorum outage fabricates no success"
+    let outage = commit(&exec, scope, pending).await;
+    assert!(
+        matches!(
+            outage,
+            Err(CoordinationError::Unavailable | CoordinationError::OutcomeUnknown)
+        ),
+        "a quorum outage fabricates no success: {outage:?}"
     );
     assert_eq!(
         reading(&exec, scope).await,
@@ -266,7 +272,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     assert_eq!(
         commit(&exec, scope, pending).await,
         Ok(before + 1),
-        "`Unavailable` was unknown, not failure: retrying the claim yields its one number"
+        "retrying the same claim after an outage yields its one number"
     );
     assert_eq!(reading(&exec, scope).await, Ok(before + 1));
 

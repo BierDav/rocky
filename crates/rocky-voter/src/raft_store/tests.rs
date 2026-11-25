@@ -148,7 +148,6 @@ fn reading(scope: Scope) -> Operation {
     Operation::Counter {
         scope,
         counter: invoices(),
-        claim: None,
     }
 }
 
@@ -188,15 +187,15 @@ async fn claims_recover_from_logs_and_snapshot_and_retry_identically() {
     let claim = Operation::Claim {
         scope,
         counter: invoices(),
-        claim: rocky_coordinator::counters::Claim {
-            id: [7; 32],
-            issued: time,
-        },
+        claim: rocky_coordinator::Claim::new([7]),
     };
     let claimed = write(&mut store, request(claim.clone()), 1, time)
         .await
         .unwrap();
-    assert_eq!(claimed, Outcome::Claimed(1));
+    assert_eq!(
+        claimed,
+        Outcome::Claimed(rocky_coordinator::Claimed::First(1))
+    );
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
     replay_committed_entries_as_openraft_does_on_startup(&mut store, 0..=1).await;
@@ -209,10 +208,7 @@ async fn claims_recover_from_logs_and_snapshot_and_retry_identically() {
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
     assert!(matches!(
         store.read(&request(reading(scope))).await,
-        Ok(Outcome::Counter(rocky_coordinator::counters::Reading {
-            value: 1,
-            ..
-        }))
+        Ok(Outcome::Counter(1))
     ));
     assert_eq!(
         write(&mut store, request(claim), 3, time).await,
@@ -334,10 +330,7 @@ async fn reads_and_preflight_do_not_wait_for_a_blocked_log_sync() {
     assert!(!write.is_finished());
     release.send(()).unwrap();
     write.await.unwrap().unwrap();
-    assert!(matches!(
-        read.unwrap(),
-        Outcome::Counter(rocky_coordinator::counters::Reading { value: 0, .. })
-    ));
+    assert!(matches!(read.unwrap(), Outcome::Counter(0)));
     println!("read + preflight during blocked disk sync: {elapsed:?}");
 }
 

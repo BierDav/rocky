@@ -1,5 +1,5 @@
 use super::*;
-use crate::counters::{Claim, Name};
+use crate::counters::{CLAIM_WINDOW, Claim, Claimed, Name};
 use crate::tenancy::{
     CoordinationGrant, CoordinatorControl, SignedCoordinationGrant, SignedTenantAdmission,
     TenantAdmission,
@@ -158,7 +158,7 @@ impl Service {
         operation: Operation,
         time: u64,
     ) -> Result<Outcome, CoordinationError> {
-        let request = crate::machine::self_certified(
+        let request = crate::request::self_certified(
             self.genesis.id().unwrap(),
             nonce(),
             operation,
@@ -174,7 +174,7 @@ impl Service {
         key: &PrivateKey,
         operation: Operation,
     ) -> Result<Outcome, CoordinationError> {
-        let request = crate::machine::self_certified(
+        let request = crate::request::self_certified(
             self.genesis.id().unwrap(),
             nonce(),
             operation,
@@ -212,13 +212,13 @@ impl Service {
     }
     fn claim(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope) -> u64 {
         match self.apply(metadata, key, claim(scope), T) {
-            Ok(Outcome::Claimed(value)) => value,
+            Ok(Outcome::Claimed(Claimed::First(value))) => value,
             other => panic!("claim: {other:?}"),
         }
     }
     fn reading(&self, metadata: &Metadata, key: &PrivateKey, scope: Scope) -> u64 {
         match self.read(metadata, key, read(scope)) {
-            Ok(Outcome::Counter(reading)) => reading.value,
+            Ok(Outcome::Counter(value)) => value,
             other => panic!("reading: {other:?}"),
         }
     }
@@ -227,17 +227,13 @@ fn read(scope: Scope) -> Operation {
     Operation::Counter {
         scope,
         counter: Name::new("invoices").unwrap(),
-        claim: None,
     }
 }
 fn claim(scope: Scope) -> Operation {
     Operation::Claim {
         scope,
         counter: Name::new("invoices").unwrap(),
-        claim: Claim {
-            id: nonce(),
-            issued: T,
-        },
+        claim: Claim::unkeyed_until(T + CLAIM_WINDOW),
     }
 }
 
@@ -550,7 +546,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
     let mut m = service.open();
     let (a, b) = (Tenant::new(), Tenant::new());
     let (sa, sb) = (a.scope(1), b.scope(2));
-    let pending = crate::machine::self_certified(
+    let pending = crate::request::self_certified(
         service.genesis.id().unwrap(),
         nonce(),
         Operation::Register(Box::new(Registration {
@@ -570,7 +566,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
     }
     assert_eq!(m.tenant_lane(&pending), Some(a.key.public_key()));
     for (scope, tenant) in [(sa, &a), (sb, &b)] {
-        let request = crate::machine::self_certified(
+        let request = crate::request::self_certified(
             service.genesis.id().unwrap(),
             nonce(),
             read(scope),

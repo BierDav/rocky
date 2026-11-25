@@ -1,5 +1,5 @@
 use super::*;
-use crate::counters::{Claim, Name, Reading};
+use crate::counters::{CLAIM_WINDOW, Claim, Name};
 use p2panda_core::PrivateKey;
 
 const DAY: u64 = crate::retention::DAY;
@@ -61,7 +61,7 @@ impl Mesh {
         control(&self.authority, &self.executor, scope, revision, self.time)
     }
     fn request(&self, key: &PrivateKey, operation: Operation, time: u64) -> Request {
-        crate::machine::self_certified(self.genesis.id().unwrap(), nonce(), operation, key, time)
+        crate::request::self_certified(self.genesis.id().unwrap(), nonce(), operation, key, time)
             .unwrap()
     }
     fn apply(
@@ -83,14 +83,13 @@ impl Mesh {
     ) -> Result<Outcome, CoordinationError> {
         metadata.apply_at(proposed, &self.request(key, operation, signed))
     }
-    fn reading(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> Reading {
+    fn reading(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> u64 {
         let read = Operation::Counter {
             scope,
             counter: Name::new("invoices").unwrap(),
-            claim: None,
         };
         match self.apply(metadata, &self.executor, read, time) {
-            Ok(Outcome::Counter(reading)) => reading,
+            Ok(Outcome::Counter(value)) => value,
             other => panic!("reading: {other:?}"),
         }
     }
@@ -98,10 +97,7 @@ impl Mesh {
         Operation::Claim {
             scope,
             counter: Name::new("invoices").unwrap(),
-            claim: Claim {
-                id: nonce(),
-                issued,
-            },
+            claim: Claim::unkeyed_until(issued + CLAIM_WINDOW),
         }
     }
     fn open(&self, limits: Limits) -> Metadata {
@@ -164,7 +160,7 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
         "a new leader whose clock is behind cannot rewind authority time"
     );
     assert_eq!(metadata.time(), t + DAY + 10);
-    assert_eq!(mesh.reading(&mut metadata, scope, t + DAY + 10).value, 1);
+    assert_eq!(mesh.reading(&mut metadata, scope, t + DAY + 10), 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -269,5 +265,5 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
         Err(CoordinationError::Backpressure),
         "a counter that would grow past the tenant's bytes is refused"
     );
-    assert_eq!(mesh.reading(&mut metadata, scope, t).value, 0);
+    assert_eq!(mesh.reading(&mut metadata, scope, t), 0);
 }

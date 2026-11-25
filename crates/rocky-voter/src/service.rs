@@ -1,7 +1,9 @@
 pub use crate::raft_store::{Backup, Fence};
 use crate::{raft_store::*, transport::*};
 use openraft::{
-    BasicNode, LogId, RaftMetrics, SnapshotPolicy, error::Fatal, raft::ClientWriteResponse,
+    BasicNode, LogId, RaftMetrics, SnapshotPolicy,
+    error::{ClientWriteError, Fatal, RaftError},
+    raft::ClientWriteResponse,
 };
 use p2panda_core::{PrivateKey, PublicKey};
 use rocky_coordinator::{CoordinationError, Refusal};
@@ -95,7 +97,9 @@ impl Counters {
         self.requests.fetch_add(1, Ordering::Relaxed);
         match result {
             Err(CoordinationError::Denied(_)) => self.denied.fetch_add(1, Ordering::Relaxed),
-            Err(CoordinationError::Unavailable) => self.unavailable.fetch_add(1, Ordering::Relaxed),
+            Err(CoordinationError::Unavailable | CoordinationError::OutcomeUnknown) => {
+                self.unavailable.fetch_add(1, Ordering::Relaxed)
+            }
             _ => 0,
         };
     }
@@ -247,6 +251,21 @@ impl VoterService {
             }
         }
     }
+    pub async fn leads_a_quorum(&self) -> bool {
+        let node = self.node;
+        self.raft
+            .metrics()
+            .wait_for(|metrics| {
+                metrics.current_leader == Some(node) && quorum_acknowledged(metrics)
+            })
+            .await
+            .is_ok()
+    }
+    pub async fn shutdown(&self) {
+        if self.raft.shutdown().await.is_err() {
+            log_lifecycle(self.node, "consensus had already stopped");
+        }
+    }
     fn leader_hint(&self) -> Option<u64> {
         let metrics = self.raft.metrics();
         let metrics = metrics.borrow();
@@ -272,16 +291,17 @@ impl VoterService {
         if !quorum_acknowledged(&self.raft.metrics().borrow()) {
             return Err(CoordinationError::Unavailable);
         }
-        tokio::time::timeout(
-            PROPOSAL_TIMEOUT,
-            self.raft.client_write(Proposal {
-                time: now()?,
-                request,
-            }),
-        )
-        .await
-        .map_err(|_| CoordinationError::Unavailable)?
-        .map_err(|_| CoordinationError::Unavailable)
+        let proposal = Proposal {
+            time: now()?,
+            request,
+        };
+        match tokio::time::timeout(PROPOSAL_TIMEOUT, self.raft.client_write(proposal)).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_)))) => {
+                Err(CoordinationError::Unavailable)
+            }
+            Ok(Err(_)) | Err(_) => Err(CoordinationError::OutcomeUnknown),
+        }
     }
     async fn consensus_halted(&self) -> Fatal<u64> {
         let mut metrics = self.raft.metrics();
@@ -331,7 +351,9 @@ impl VoterService {
             }
             let response = self.propose(request).await?;
             if let Ok(Outcome::Membership(voters)) = &response.data {
-                self.complete_membership(voters).await?;
+                self.complete_membership(voters)
+                    .await
+                    .map_err(|_| CoordinationError::OutcomeUnknown)?;
             }
             Ok((response.data, response.log_id))
         }
@@ -395,7 +417,7 @@ impl VoterService {
         log_lifecycle(self.node, &format!("serving voters at {}", voter.address));
         self.serve_voters(listener).await
     }
-    async fn serve_voters(
+    pub async fn serve_voters(
         self: Arc<Self>,
         listener: TcpListener,
     ) -> Result<Infallible, ServeError> {

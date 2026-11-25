@@ -1,8 +1,8 @@
 use super::fixture::{Fixture, T};
 use super::*;
 use crate::counters::{
-    CLAIM_RECORDS, CLAIM_WINDOW, Claim, Counters, ISSUE_SKEW, Lookup, MAX_COUNTERS, MAX_NAME, Name,
-    Reading,
+    CLAIM_WINDOW, Claim, Claimed, Claimed::*, Counters, MAX_CLAIM_LIFETIME, MAX_CLAIMS,
+    MAX_COUNTERS, MAX_NAME, Name,
 };
 use p2panda_core::PrivateKey;
 
@@ -10,10 +10,7 @@ fn name(text: &str) -> Name {
     Name::new(text).unwrap()
 }
 fn claim(n: u8, issued: u64) -> Claim {
-    Claim {
-        id: [n; 32],
-        issued,
-    }
+    Claim::fixed(n, n, issued + CLAIM_WINDOW)
 }
 impl Fixture {
     fn operate(
@@ -31,14 +28,14 @@ impl Fixture {
         counter: &str,
         claim: Claim,
         time: u64,
-    ) -> Result<u64, CoordinationError> {
+    ) -> Result<Claimed, CoordinationError> {
         let operation = Operation::Claim {
             scope: self.scope,
             counter: name(counter),
             claim,
         };
         match self.operate(key, operation, time)? {
-            Outcome::Claimed(value) => Ok(value),
+            Outcome::Claimed(claimed) => Ok(claimed),
             other => panic!("claim: {other:?}"),
         }
     }
@@ -48,23 +45,22 @@ impl Fixture {
         counter: &str,
         claim: Claim,
         time: u64,
-    ) -> Result<u64, CoordinationError> {
+    ) -> Result<Claimed, CoordinationError> {
         let key = self.nodes[node].clone();
         self.claim_as(&key, counter, claim, time)
     }
-    fn reading(&self, counter: &str, claim: Option<Claim>, time: u64) -> Reading {
+    fn reading(&self, counter: &str, time: u64) -> u64 {
         let request = self.certified(
             Operation::Counter {
                 scope: self.scope,
                 counter: name(counter),
-                claim,
             },
             &self.nodes[0],
             time,
         );
         assert!(request.read_only());
         match self.state.read(&request).unwrap() {
-            Outcome::Counter(reading) => reading,
+            Outcome::Counter(value) => value,
             other => panic!("reading: {other:?}"),
         }
     }
@@ -76,14 +72,12 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     let retry_records = fixture.state.retry_records();
     let mut values = Vec::new();
     for n in 0..20u8 {
-        let value = fixture
-            .claim(usize::from(n % 2), "invoices", claim(n, T), T)
-            .unwrap();
-        let retried = fixture
-            .claim(usize::from(n % 2 == 0), "invoices", claim(n, T), T + 1)
-            .unwrap();
+        let Ok(First(value)) = fixture.claim(usize::from(n % 2), "invoices", claim(n, T), T) else {
+            panic!("claim {n} takes a first number");
+        };
         assert_eq!(
-            retried, value,
+            fixture.claim(usize::from(n % 2 == 0), "invoices", claim(n, T), T + 1),
+            Ok(First(value)),
             "a claim retried by the other admin node answers the same value"
         );
         values.push(value);
@@ -92,58 +86,79 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     for n in 0..20u8 {
         assert_eq!(
             fixture.claim(0, "invoices", claim(n, T), T + 2),
-            Ok(u64::from(n) + 1),
+            Ok(First(u64::from(n) + 1)),
             "every earlier claim still answers its own value"
         );
     }
     assert_eq!(
-        fixture.claim(0, "invoices", claim(3, T + 1), T + 2),
-        Err(CoordinationError::RequestConflict),
-        "the same identity with another issue time is a different request"
+        fixture.claim(0, "invoices", Claim::fixed(3, 99, T + CLAIM_WINDOW), T + 2),
+        Ok(Taken(4)),
+        "another attempt on a key in force finds the number taken"
     );
     assert_eq!(
         fixture.claim(1, "receipts", claim(3, T), T + 2),
-        Ok(1),
-        "counters are independent; the same claim identity may name another"
+        Ok(First(1)),
+        "counters are independent; the same key may claim on another"
     );
-    assert_eq!(
-        fixture.reading("invoices", Some(claim(7, T)), T + 2),
-        Reading {
-            value: 20,
-            claim: Some(Lookup::Claimed(8)),
-        }
-    );
-    assert_eq!(
-        fixture.reading("invoices", Some(claim(99, T + 2)), T + 2),
-        Reading {
-            value: 20,
-            claim: Some(Lookup::Unclaimed),
-        }
-    );
-    assert_eq!(
-        fixture.reading("unused", None, T + 2),
-        Reading {
-            value: 0,
-            claim: None,
-        }
-    );
+    assert_eq!(fixture.reading("invoices", T + 2), 20);
+    assert_eq!(fixture.reading("unused", T + 2), 0);
     assert_eq!(
         fixture.state.retry_records(),
         retry_records,
-        "claims keep no machine retry record; their identities deduplicate"
+        "claims keep no machine retry record; their keys deduplicate"
     );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn snapshot_round_trip_keeps_values_and_claim_identities() {
+fn two_doors_scanning_one_ticket_admit_it_exactly_once() {
+    for first_door in [0, 1] {
+        let mut fixture = Fixture::new(Limits::default());
+        let ticket = |door: u8| Claim::fixed(7, door, T + CLAIM_WINDOW);
+        let doors = [first_door, 1 - first_door];
+        let answers: Vec<_> = doors
+            .iter()
+            .map(|&door| fixture.claim(door, "door", ticket(door as u8), T).unwrap())
+            .collect();
+        assert_eq!(
+            answers,
+            [First(1), Taken(1)],
+            "the first scan admits and the other door finds the ticket taken"
+        );
+        for (&door, answer) in doors.iter().zip(&answers) {
+            assert_eq!(
+                fixture.claim(door, "door", ticket(door as u8), T + 1),
+                Ok(*answer),
+                "each door's retry repeats its own answer"
+            );
+        }
+        assert_eq!(
+            fixture.reading("door", T + 1),
+            1,
+            "the ticket took one number"
+        );
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn snapshot_round_trip_keeps_values_and_claim_keys() {
     let mut fixture = Fixture::new(Limits::default());
     for n in 0..5 {
         fixture.claim(0, "invoices", claim(n, T), T).unwrap();
     }
     let image = crate::certified::encode(&fixture.state).unwrap();
     fixture.state = crate::certified::decode(&image).unwrap();
-    assert_eq!(fixture.claim(1, "invoices", claim(2, T), T + 1), Ok(3));
-    assert_eq!(fixture.claim(1, "invoices", claim(9, T), T + 1), Ok(6));
+    assert_eq!(
+        fixture.claim(1, "invoices", claim(2, T), T + 1),
+        Ok(First(3))
+    );
+    assert_eq!(
+        fixture.claim(1, "invoices", Claim::fixed(2, 9, T + CLAIM_WINDOW), T + 1),
+        Ok(Taken(3))
+    );
+    assert_eq!(
+        fixture.claim(1, "invoices", claim(9, T), T + 1),
+        Ok(First(6))
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -160,7 +175,6 @@ fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
         let read = Operation::Counter {
             scope: fixture.scope,
             counter: name("invoices"),
-            claim: None,
         };
         assert_eq!(
             fixture.operate(key, read, T),
@@ -199,9 +213,9 @@ fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
         ),
         Err(CoordinationError::UnknownDomain)
     );
-    assert_eq!(fixture.reading("invoices", None, T).value, 0);
+    assert_eq!(fixture.reading("invoices", T), 0);
 
-    assert_eq!(fixture.claim(0, "invoices", claim(1, T), T), Ok(1));
+    assert_eq!(fixture.claim(0, "invoices", claim(1, T), T), Ok(First(1)));
     let close = Operation::Close {
         scope: fixture.scope,
     };
@@ -215,101 +229,92 @@ fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
         fixture.claim(0, "invoices", claim(1, T), T),
         Err(CoordinationError::Denied(Refusal::ClosedDomain))
     );
-    assert_eq!(
-        fixture.reading("invoices", Some(claim(1, T)), T),
-        Reading {
-            value: 1,
-            claim: Some(Lookup::Claimed(1)),
-        }
-    );
+    assert_eq!(fixture.reading("invoices", T), 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn claims_outside_the_window_are_expired_never_given_a_second_value() {
+fn a_claim_past_its_expiry_takes_no_number_and_an_expired_key_claims_anew() {
     let mut counters = Counters::default();
-    let invoices = name("invoices");
-    let mut take = |claim, time| counters.claim(&invoices, claim, time, usize::MAX);
-    assert_eq!(take(claim(1, T), T), Ok(1));
+    let door = name("door");
+    let mut take = |claim, time| counters.claim(&door, claim, time, usize::MAX);
     let end = T + CLAIM_WINDOW;
-    assert_eq!(take(claim(1, T), end), Ok(1));
-    assert_eq!(take(claim(1, T), end + 1), Err(CoordinationError::Expired));
+    assert_eq!(take(claim(1, T), T), Ok(First(1)));
+    assert_eq!(take(claim(1, T), end - 1), Ok(First(1)));
+    assert_eq!(take(Claim::fixed(1, 2, end + 10), end - 1), Ok(Taken(1)));
     assert_eq!(
-        take(claim(2, T), end + 1),
+        take(claim(1, T), end),
         Err(CoordinationError::Expired),
-        "a new claim issued that long ago cannot be told apart from a retry"
-    );
-    assert_eq!(take(claim(3, end), end + 1), Ok(2));
-    assert_eq!(
-        take(claim(4, end + 2 + ISSUE_SKEW), end + 1),
-        Err(CoordinationError::ClockSkew {
-            coordinator_time: end + 1,
-        }),
-        "an issue time ahead of authority time beyond the skew is refused"
-    );
-    assert_eq!(take(claim(4, end + 1 + ISSUE_SKEW), end + 1), Ok(3));
-    assert_eq!(
-        counters.read(&invoices, Some(claim(3, end)), end + 1 + CLAIM_WINDOW),
-        Ok(Reading {
-            value: 3,
-            claim: Some(Lookup::Expired),
-        })
+        "a retry at its expiry is expired, never given a second number"
     );
     assert_eq!(
-        counters.read(&invoices, Some(claim(3, end)), end + CLAIM_WINDOW),
-        Ok(Reading {
-            value: 3,
-            claim: Some(Lookup::Claimed(2)),
-        })
+        take(Claim::fixed(1, 2, end + 10), end),
+        Ok(First(2)),
+        "a key whose claim expired may be claimed by a new attempt"
     );
+    assert_eq!(
+        take(claim(3, T - CLAIM_WINDOW), T),
+        Err(CoordinationError::Expired),
+        "a claim that expired before it arrived takes no number"
+    );
+    assert_eq!(
+        take(Claim::fixed(4, 4, end + MAX_CLAIM_LIFETIME + 1), end),
+        Err(CoordinationError::Configuration),
+        "a claim may not stay in force beyond the longest lifetime"
+    );
+    assert_eq!(
+        take(Claim::fixed(4, 4, end + MAX_CLAIM_LIFETIME), end),
+        Ok(First(3))
+    );
+    assert_eq!(counters.read(&door), 3);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
-    let mut fixture = Fixture::new(Limits::default());
-    let records = u64::try_from(CLAIM_RECORDS).unwrap();
-    let claim = |n: u64| Claim {
-        id: rocky_core::commitment("counter-test", &n.to_be_bytes()),
-        issued: T + n,
+fn a_full_counter_refuses_new_keys_and_never_admits_a_ticket_in_force_twice() {
+    let mut counters = Counters::default();
+    let door = name("door");
+    let ticket = |n: usize, attempt: u8| {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        (key, attempt)
     };
-    for n in 0..=records {
+    let early = T + 10;
+    for n in 0..MAX_CLAIMS {
+        let expires = if n == 0 { early } else { T + CLAIM_WINDOW };
+        let claim = crate::counters::Claim::keyed_for_test(ticket(n, 1), expires);
         assert_eq!(
-            fixture.claim(0, "invoices", claim(n), T + records),
-            Ok(n + 1)
+            counters.claim(&door, claim, T, usize::MAX),
+            Ok(First(n as u64 + 1))
         );
     }
-    let now = T + records;
+    let newcomer = crate::counters::Claim::keyed_for_test(ticket(MAX_CLAIMS, 1), T + CLAIM_WINDOW);
     assert_eq!(
-        fixture.claim(0, "invoices", claim(0), now),
-        Err(CoordinationError::Expired),
-        "an evicted claim's retry, and any claim issued no later, is refused"
+        counters.claim(&door, newcomer, T, usize::MAX),
+        Err(CoordinationError::Full),
+        "a full counter takes no number for a new key"
     );
-    let mut early = claim(records + 1);
-    early.issued = T;
+    for n in [0, 1, MAX_CLAIMS / 2, MAX_CLAIMS - 1] {
+        let rescan = crate::counters::Claim::keyed_for_test(ticket(n, 2), T + CLAIM_WINDOW);
+        assert_eq!(
+            counters.claim(&door, rescan, T, usize::MAX),
+            Ok(Taken(n as u64 + 1)),
+            "every ticket in force stays admitted once, however many came after it"
+        );
+    }
     assert_eq!(
-        fixture.claim(0, "invoices", early, now),
-        Err(CoordinationError::Expired)
-    );
-    assert_eq!(fixture.claim(0, "invoices", claim(1), now), Ok(2));
-    assert_eq!(
-        fixture.claim(0, "invoices", claim(records), now),
-        Ok(records + 1)
+        counters.claim(&door, newcomer, early, usize::MAX),
+        Ok(First(MAX_CLAIMS as u64 + 1)),
+        "an expired claim makes room, and numbers stay gap-free"
     );
     assert_eq!(
-        fixture.claim(0, "invoices", claim(records + 1), now),
-        Ok(records + 2)
+        counters.claim(
+            &door,
+            crate::counters::Claim::keyed_for_test(ticket(1, 2), T + CLAIM_WINDOW),
+            early,
+            usize::MAX
+        ),
+        Ok(Taken(2))
     );
-    let bytes = fixture
-        .state
-        .state
-        .find(fixture.scope)
-        .unwrap()
-        .counters
-        .bytes();
-    assert_eq!(
-        bytes,
-        128 + "invoices".len() + CLAIM_RECORDS * 64,
-        "eviction keeps the accounted bytes bounded"
-    );
+    assert_eq!(counters.bytes(), 128 + "door".len() + MAX_CLAIMS * 96);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -338,7 +343,7 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
     );
     assert_eq!(
         fixture.claim(0, "series-0", claim(2, T), T),
-        Ok(2),
+        Ok(First(2)),
         "existing counters keep counting"
     );
 
@@ -348,10 +353,10 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         .state
         .tenant_used(fixture.owner.public_key())
         .unwrap();
-    fixture.state.state.limits.tenant_bytes = used + 64;
+    fixture.state.state.limits.tenant_bytes = used + 96;
     assert_eq!(
-        fixture.claim(0, "invoices", claim(2, T), T),
-        Ok(2),
+        fixture.claim(0, "invoices", Claim::fixed(2, 2, T + 10), T),
+        Ok(First(2)),
         "claims count against the tenant's bytes"
     );
     assert_eq!(
@@ -362,18 +367,17 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         fixture.claim(0, "receipts", claim(3, T), T),
         Err(CoordinationError::Backpressure)
     );
-    assert_eq!(
-        fixture.reading("invoices", Some(claim(3, T)), T),
-        Reading {
-            value: 2,
-            claim: Some(Lookup::Unclaimed),
-        }
-    );
-    assert_eq!(fixture.reading("receipts", None, T).value, 0);
+    assert_eq!(fixture.reading("invoices", T), 2);
+    assert_eq!(fixture.reading("receipts", T), 0);
     assert_eq!(
         fixture.claim(1, "invoices", claim(1, T), T),
-        Ok(1),
+        Ok(First(1)),
         "retries of kept claims need no budget"
+    );
+    assert_eq!(
+        fixture.claim(0, "invoices", claim(3, T + 10), T + 10),
+        Ok(First(3)),
+        "expired claims free the bytes a new one needs"
     );
 }
 
@@ -421,7 +425,7 @@ fn admin_siblings_claim_until_their_identity_unlinks_them() {
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(
             f.state.apply_at(T, request),
-            Ok(Outcome::Claimed(index as u64 + 1))
+            Ok(Outcome::Claimed(First(index as u64 + 1)))
         );
     }
     let unlink = SignedRevocation::sign(

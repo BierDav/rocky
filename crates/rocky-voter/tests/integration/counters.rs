@@ -3,15 +3,17 @@ use crate::support::{
     timestamp,
 };
 use rocky_coordinator::{
-    CoordinationError, CounterError, Counters, Limits, Refusal,
-    control::ControlReceipt,
-    counters::{Claim, Lookup, Name},
-    tenancy::{SignedTenantAdmission, Tenant, TenantAdmission},
+    Claim,
+    Claimed::{First, Taken},
+    ControlReceipt, CoordinationError, CounterError, Counters, Limits, Name, Refusal, Tenant,
+    TrustBundle,
+    tenancy::{SignedTenantAdmission, TenantAdmission},
 };
 use rocky_sdk::{
     Access, Affinity, Column, Configuration, Database, Network, PersonId, RootKey, Schema, Table,
     transport::memory::Hub,
 };
+use rocky_voter::LocalCluster;
 use std::{path::Path, sync::Arc, time::Duration};
 
 const MAX_CONTROL_LIFETIME: u64 = 30 * DAY;
@@ -35,23 +37,36 @@ fn invoices() -> Name {
     Name::new("invoices").unwrap()
 }
 
+enum Voters {
+    InProcess(Box<LocalCluster>),
+    Processes(Box<PublicCluster>),
+}
 struct Office {
     directory: tempfile::TempDir,
     hub: Arc<Hub>,
-    cluster: PublicCluster,
+    voters: Voters,
+    bundle: TrustBundle,
     publisher: Database,
     root: RootKey,
     tenant: Tenant,
 }
 impl Office {
-    async fn open() -> Self {
-        let cluster = PublicCluster::start(Limits::default(), 2).await;
+    async fn in_process() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let hub = Arc::new(Hub::default());
-        let created = configuration(&directory.path().join("publisher"), &hub, "publisher")
-            .create()
+        let cluster = LocalCluster::start(&directory.path().join("voters"), 3)
             .await
             .unwrap();
+        let bundle = cluster.bundle().clone();
+        Self::open(
+            directory,
+            Voters::InProcess(Box::new(cluster)),
+            bundle,
+            Tenant::generate(),
+        )
+        .await
+    }
+    async fn as_processes() -> Self {
+        let cluster = PublicCluster::start(Limits::default(), 2).await;
         let tenant = Tenant::generate();
         let admission = SignedTenantAdmission::sign(
             TenantAdmission {
@@ -63,13 +78,34 @@ impl Office {
             &cluster.provider,
         )
         .unwrap();
+        let bundle = cluster.bundle.clone();
+        Self::open(
+            tempfile::tempdir().unwrap(),
+            Voters::Processes(Box::new(cluster)),
+            bundle,
+            tenant.admitted(admission).unwrap(),
+        )
+        .await
+    }
+    async fn open(
+        directory: tempfile::TempDir,
+        voters: Voters,
+        bundle: TrustBundle,
+        tenant: Tenant,
+    ) -> Self {
+        let hub = Arc::new(Hub::default());
+        let created = configuration(&directory.path().join("publisher"), &hub, "publisher")
+            .create()
+            .await
+            .unwrap();
         Self {
             directory,
             hub,
-            cluster,
+            voters,
+            bundle,
             publisher: created.database,
             root: created.root,
-            tenant: tenant.admitted(admission).unwrap(),
+            tenant,
         }
     }
     async fn person(&self, name: &str, access: Access) -> Database {
@@ -85,7 +121,7 @@ impl Office {
             .database
     }
     async fn counters(&self, database: &Database) -> Counters {
-        Counters::connect(database.clone(), &self.cluster.bundle, transport().await).unwrap()
+        Counters::connect(database.clone(), &self.bundle, transport().await).unwrap()
     }
     async fn registered(&self) -> (Counters, ControlReceipt) {
         let counters = self.counters(&self.publisher).await;
@@ -101,15 +137,22 @@ impl Office {
         );
         (counters, receipt)
     }
+    fn processes(&mut self) -> &mut PublicCluster {
+        match &mut self.voters {
+            Voters::Processes(cluster) => cluster,
+            Voters::InProcess(_) => panic!("this exercise stops voter processes"),
+        }
+    }
     async fn restart_every_voter(&mut self) {
-        let admin = self.cluster.admin();
+        let cluster = self.processes();
+        let admin = cluster.admin();
         for id in 1..=3 {
-            self.cluster.spawn(id, false);
+            cluster.spawn(id, false);
         }
         for id in 1..=3 {
-            self.cluster.wait_online(id, &admin).await;
+            cluster.wait_online(id, &admin).await;
         }
-        self.cluster.wait_unfenced_leader(&admin).await;
+        cluster.wait_unfenced_leader(&admin).await;
     }
 }
 
@@ -119,40 +162,45 @@ fn refused<T: std::fmt::Debug>(result: Result<T, CounterError>) -> Refusal {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
-fn unavailable<T>(result: Result<T, CounterError>) -> bool {
-    matches!(
-        result,
-        Err(CounterError::Coordination(CoordinationError::Unavailable))
-    )
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn devices_of_a_database_claim_gap_free_numbers_from_the_voters_and_a_keyed_retry_keeps_its_first()
+async fn devices_of_a_database_claim_gap_free_numbers_from_in_process_voters_and_a_retry_keeps_its_first()
  {
-    let office = Office::open().await;
+    let office = Office::in_process().await;
     let (mine, receipt) = office.registered().await;
     let other = office.person("other", Access::Full).await;
     let theirs = office.counters(&other).await;
-    let issued = timestamp();
     let orders = [
-        (&mine, Claim::keyed(b"order-a1", issued)),
-        (&theirs, Claim::keyed(b"order-b1", issued)),
-        (&mine, Claim::keyed(b"order-a2", issued)),
-        (&theirs, Claim::keyed(b"order-b2", issued)),
+        (&mine, Claim::new(b"order-a1")),
+        (&theirs, Claim::new(b"order-b1")),
+        (&mine, Claim::new(b"order-a2")),
+        (&theirs, Claim::new(b"order-b2")),
     ];
     let mut numbers = Vec::new();
     for (counters, claim) in &orders {
-        numbers.push(counters.claim(&invoices(), *claim).await.unwrap());
+        numbers.push(counters.claim(&invoices(), claim).await.unwrap());
     }
-    assert_eq!(numbers, [1, 2, 3, 4], "gap-free and strictly increasing");
+    assert_eq!(
+        numbers,
+        [First(1), First(2), First(3), First(4)],
+        "gap-free and strictly increasing"
+    );
     for ((counters, claim), number) in orders.iter().zip(&numbers) {
         assert_eq!(
-            counters.claim(&invoices(), *claim).await.unwrap(),
+            counters.claim(&invoices(), claim).await.unwrap(),
             *number,
-            "a retry under the same key answers its first number"
+            "a retry of the same claim answers its first number"
         );
     }
-    assert_eq!(theirs.read(&invoices(), None).await.unwrap().value, 4);
+    assert_eq!(
+        theirs
+            .claim(&invoices(), &Claim::new(b"order-a1"))
+            .await
+            .unwrap(),
+        Taken(1),
+        "another device's attempt on a key in force finds it taken"
+    );
+    assert_eq!(theirs.read(&invoices()).await.unwrap(), 4);
 
     assert_eq!(
         refused(
@@ -169,10 +217,10 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_the_voters_and_a_keye
     assert_eq!(renewed.revision, receipt.revision + 1);
     assert_eq!(
         theirs
-            .claim(&invoices(), Claim::keyed(b"order-b3", issued))
+            .claim(&invoices(), &Claim::new(b"order-b3"))
             .await
             .unwrap(),
-        5,
+        First(5),
         "a renewed control keeps the counters"
     );
     assert!(
@@ -187,7 +235,7 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_the_voters_and_a_keye
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
-    let office = Office::open().await;
+    let office = Office::in_process().await;
     let (publisher, _) = office.registered().await;
     let writer = office.person("writer", Access::Full).await;
     let reader = office.person("reader", Access::Read).await;
@@ -195,24 +243,14 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
         office.counters(&writer).await,
         office.counters(&reader).await,
     );
-    let issued = timestamp();
+    let first = Claim::new(b"order-1");
+    assert_eq!(writing.claim(&invoices(), &first).await.unwrap(), First(1));
     assert_eq!(
-        writing
-            .claim(&invoices(), Claim::keyed(b"order-1", issued))
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        refused(
-            reading
-                .claim(&invoices(), Claim::keyed(b"order-2", issued))
-                .await
-        ),
+        refused(reading.claim(&invoices(), &Claim::new(b"order-2")).await),
         Refusal::ReadOnly
     );
     assert_eq!(
-        reading.read(&invoices(), None).await.unwrap().value,
+        reading.read(&invoices()).await.unwrap(),
         1,
         "a reader still reads the counter"
     );
@@ -225,58 +263,94 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
         .unwrap();
     publisher.share_revocations().await.unwrap();
     assert_eq!(
-        refused(
-            writing
-                .claim(&invoices(), Claim::keyed(b"order-3", issued))
-                .await
-        ),
+        refused(writing.claim(&invoices(), &Claim::new(b"order-3")).await),
         Refusal::Revoked
     );
     assert_eq!(
-        refused(
-            writing
-                .claim(&invoices(), Claim::keyed(b"order-1", issued))
-                .await
-        ),
+        refused(writing.claim(&invoices(), &first).await),
         Refusal::Revoked,
         "a removed person cannot even replay an earlier claim"
     );
     assert_eq!(
         publisher
-            .claim(&invoices(), Claim::keyed(b"order-4", issued))
+            .claim(&invoices(), &Claim::new(b"order-4"))
             .await
             .unwrap(),
-        2
+        First(2)
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unreachable_coordinator_is_unavailable_and_takes_no_number() {
-    let mut office = Office::open().await;
+async fn a_claim_sent_to_stopped_voters_is_retryable_and_its_retry_takes_one_number() {
+    let mut office = Office::as_processes().await;
     let counters = office
         .registered()
         .await
         .0
         .with_deadline(Duration::from_secs(2));
-    let claim = Claim::keyed(b"order-1", timestamp());
+    let claim = Claim::new(b"order-1");
     for id in 1..=3 {
-        office.cluster.stop(id);
+        office.processes().stop(id);
     }
-    assert!(unavailable(counters.claim(&invoices(), claim).await));
-    assert!(unavailable(counters.read(&invoices(), Some(claim)).await));
+    let unreached = counters.claim(&invoices(), &claim).await;
+    assert!(
+        matches!(
+            unreached,
+            Err(CounterError::Coordination(
+                CoordinationError::Unavailable | CoordinationError::OutcomeUnknown
+            ))
+        ),
+        "a claim over a connection that stops answering is never a success or a refusal: {unreached:?}"
+    );
+    assert!(unreached.is_err_and(|error| error.retryable()));
+    let unread = counters.read(&invoices()).await;
+    assert!(
+        matches!(
+            unread,
+            Err(CounterError::Coordination(CoordinationError::Unavailable))
+        ),
+        "an unanswered read changed nothing: {unread:?}"
+    );
 
     office.restart_every_voter().await;
-    let counters = counters.with_deadline(rocky_coordinator::service::CALL_DEADLINE);
-    let reading = counters.read(&invoices(), Some(claim)).await.unwrap();
+    let counters = counters.with_deadline(rocky_coordinator::CALL_DEADLINE);
     assert_eq!(
-        (reading.value, reading.claim),
-        (0, Some(Lookup::Unclaimed)),
-        "a claim the coordinator never answered took no number"
+        counters.read(&invoices()).await.unwrap(),
+        0,
+        "a claim no voter received took no number"
     );
-    assert_eq!(counters.claim(&invoices(), claim).await.unwrap(), 1);
+    assert_eq!(counters.claim(&invoices(), &claim).await.unwrap(), First(1));
     assert_eq!(
-        counters.claim(&invoices(), claim).await.unwrap(),
+        counters.claim(&invoices(), &claim).await.unwrap(),
+        First(1),
+        "the retry returns the first number"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_doors_scanning_one_ticket_at_once_admit_it_exactly_once() {
+    let office = Office::in_process().await;
+    office.registered().await;
+    let east = office.person("east-door", Access::Full).await;
+    let west = office.person("west-door", Access::Full).await;
+    let (east, west) = (office.counters(&east).await, office.counters(&west).await);
+    let door = Name::new("main-door").unwrap();
+    let scans = [Claim::new(b"ticket-7"), Claim::new(b"ticket-7")];
+    let (at_east, at_west) =
+        tokio::join!(east.claim(&door, &scans[0]), west.claim(&door, &scans[1]));
+    let answers = [at_east.unwrap(), at_west.unwrap()];
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| matches!(answer, First(_)))
+            .count(),
         1,
-        "the keyed retry returns the first number"
+        "exactly one door admits the ticket: {answers:?}"
     );
+    assert!(answers.iter().all(|answer| answer.number() == 1));
+    assert_eq!(east.claim(&door, &scans[0]).await.unwrap(), answers[0]);
+    assert_eq!(west.claim(&door, &scans[1]).await.unwrap(), answers[1]);
+    if let Voters::InProcess(cluster) = office.voters {
+        cluster.shutdown().await;
+    }
 }

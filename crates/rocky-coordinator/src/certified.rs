@@ -70,6 +70,9 @@ impl ControlCertificate {
             issuer: issuer.public_key(),
         })
     }
+}
+#[cfg(feature = "voter")]
+impl ControlCertificate {
     /// Checks the signer is the database's authority and the certificate is valid at `time`.
     pub fn verify(&self, genesis: &Genesis, time: u64) -> Result<(), CoordinationError> {
         if !genesis
@@ -91,7 +94,7 @@ impl ControlCertificate {
         if c.configuration != genesis.configuration
             || c.revision == 0
             || c.admins.is_empty()
-            || c.admins.len() > crate::machine::MAX_ADMINS
+            || c.admins.len() > crate::request::MAX_ADMINS
             || c.not_before > time
             || c.expires <= time
             || c.expires - c.not_before > genesis.max_control_lifetime
@@ -127,7 +130,7 @@ pub struct PublicService {
     /// The provider key whose admission tenants need, or `None` for open registration.
     pub admission: Option<PublicKey>,
     /// Storage and retry limits.
-    pub limits: crate::Limits,
+    pub limits: crate::retention::Limits,
     /// The most tenants the service holds.
     pub tenants: u32,
     /// Registrations one tenant may make per day.
@@ -276,11 +279,11 @@ impl CertifiedGenesis {
         Ok(())
     }
     /// The public service's limits, or the defaults.
-    pub fn limits(&self) -> crate::Limits {
+    pub fn limits(&self) -> crate::retention::Limits {
         self.genesis
             .public
             .as_ref()
-            .map_or_else(crate::Limits::default, |public| public.limits)
+            .map_or_else(crate::retention::Limits::default, |public| public.limits)
     }
     /// The canonical encoding.
     pub fn to_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
@@ -324,6 +327,7 @@ pub fn now() -> Result<u64, CoordinationError> {
     Ok(time)
 }
 /// What a client needs to reach and trust a coordinator, as `scripts/coordinator-local` prints it.
+/// Voters list only `iroh` endpoints, so a client connects through a `rocky-iroh` transport.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustBundle {

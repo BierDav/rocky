@@ -1,21 +1,20 @@
 use crate::{
     CoordinationError, Refusal,
-    tenancy::{SignedCoordinationGrant, SignedTenantAdmission},
-};
-use crate::{
     certified::*,
-    machine::Request,
-    service::{Operation, Outcome, Registration, Reply},
+    request::{Operation, Outcome, Reply, Request},
     transport::*,
 };
-use p2panda_core::{PrivateKey, PublicKey};
+use p2panda_core::PrivateKey;
 use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
 use rocky_credentials::{RevocationSet, SignedCapability};
 use rocky_platform::time::{Duration, sleep, timeout};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{
+    Arc, Mutex, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 /// A low-level coordinator client that sends signed requests to the voters, leader first.
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
@@ -27,28 +26,25 @@ pub struct NetworkCoordinator {
 }
 /// Hears the outcome of every call, for health reporting.
 pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
-/// How long a call waits by default before it is `Unavailable`.
+/// How long a call waits by default before it is `Unavailable` or `OutcomeUnknown`.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(12);
 const ATTEMPT_DEADLINE: Duration = Duration::from_secs(3);
+const ROUNDS: usize = 3;
 const PAUSE_BETWEEN_ROUNDS: Duration = Duration::from_millis(100);
 #[cfg(target_family = "wasm")]
 fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
     Err(CoordinationError::Configuration)
 }
+fn undecided(result: &Result<Outcome, CoordinationError>) -> bool {
+    matches!(
+        result,
+        Err(CoordinationError::Unavailable | CoordinationError::OutcomeUnknown)
+    )
+}
 impl NetworkCoordinator {
-    /// A client that dials voters directly over TCP, for operators and voters.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn open(
-        genesis: CertifiedGenesis,
-        root: PublicKey,
-        mesh: MeshId,
-        key: PrivateKey,
-    ) -> Result<Self, CoordinationError> {
-        Self::new(genesis, root, mesh, key, None)
-    }
     fn new(
         genesis: CertifiedGenesis,
-        root: PublicKey,
+        root: p2panda_core::PublicKey,
         mesh: MeshId,
         key: PrivateKey,
         public_client_lane: Option<Arc<dyn Transport>>,
@@ -62,17 +58,6 @@ impl NetworkCoordinator {
             preferred: Mutex::new((None, None)),
             observer: Mutex::new(None),
         })
-    }
-    /// Sets the one observer of call outcomes.
-    pub fn observe(&self, observer: Observer) {
-        *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
-    }
-    /// Attaches the capability that certifies this client's key for later requests.
-    pub fn certify(&self, certificate: SignedCapability) {
-        *self
-            .certificate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
     #[cfg(feature = "database")]
     pub(crate) fn certified_genesis(&self) -> &CertifiedGenesis {
@@ -99,14 +84,72 @@ impl NetworkCoordinator {
         }
         Self::new(genesis, bundle.root, bundle.mesh, key, Some(transport))
     }
+    async fn converse_with(
+        &self,
+        voter: &Voter,
+        genesis: Commitment,
+        request: &Request,
+        attempt_deadline: Duration,
+        sent: &AtomicBool,
+    ) -> Result<Reply, CoordinationError> {
+        let message = || Message::Client(Box::new(request.clone()));
+        let conversed = AtomicBool::new(false);
+        let reply: Result<Reply, CoordinationError> =
+            match (&self.public_client_lane, &self.genesis.genesis.public) {
+                (Some(transport), Some(public)) => {
+                    let mut reply = Err(CoordinationError::Unavailable);
+                    for endpoint in public
+                        .endpoints
+                        .iter()
+                        .filter(|e| e.voter == voter.id && e.kind == transport.kind())
+                    {
+                        reply = timeout(attempt_deadline, async {
+                            let mut stream = transport
+                                .connect(&endpoint.address, Protocol::Coordinate, None)
+                                .await
+                                .map_err(|_| CoordinationError::Unavailable)?;
+                            conversed.store(true, Ordering::Relaxed);
+                            converse(&mut stream, voter.key, genesis, &self.key, message()).await
+                        })
+                        .await
+                        .unwrap_or(Err(CoordinationError::Unavailable));
+                        if reply.is_ok() {
+                            break;
+                        }
+                    }
+                    reply
+                }
+                #[cfg(not(target_family = "wasm"))]
+                _ => timeout(attempt_deadline, async {
+                    let mut stream = tokio::net::TcpStream::connect(&voter.address)
+                        .await
+                        .map_err(|_| CoordinationError::Unavailable)?;
+                    conversed.store(true, Ordering::Relaxed);
+                    converse(&mut stream, voter.key, genesis, &self.key, message()).await
+                })
+                .await
+                .unwrap_or(Err(CoordinationError::Unavailable)),
+                #[cfg(target_family = "wasm")]
+                _ => unrouted_browser_client(),
+            };
+        let unanswered = match &reply {
+            Ok(reply) => reply.result == Err(CoordinationError::OutcomeUnknown),
+            Err(_) => conversed.load(Ordering::Relaxed),
+        };
+        if unanswered {
+            sent.store(true, Ordering::Relaxed);
+        }
+        reply
+    }
     async fn attempt_leader_first(
         &self,
         request: &Request,
         attempt_deadline: Duration,
-    ) -> Vec<Result<Reply, CoordinationError>> {
+        sent: &AtomicBool,
+    ) -> Option<Result<Outcome, CoordinationError>> {
         let genesis = match self.genesis.id() {
             Ok(id) => id,
-            Err(error) => return vec![Err(error)],
+            Err(error) => return Some(Err(error)),
         };
         let (last, leader) = *self
             .preferred
@@ -123,7 +166,6 @@ impl NetworkCoordinator {
             }
         }
         let mut visited = Vec::new();
-        let mut replies = Vec::new();
         while !queue.is_empty() {
             let id = queue.remove(0);
             if visited.contains(&id) {
@@ -133,55 +175,25 @@ impl NetworkCoordinator {
             let Ok(voter) = self.voter(id) else {
                 continue;
             };
-            let message = || Message::Client(Box::new(request.clone()));
-            let reply = match (&self.public_client_lane, &self.genesis.genesis.public) {
-                (Some(transport), Some(public)) => {
-                    let mut reply: Result<Reply, CoordinationError> =
-                        Err(CoordinationError::Unavailable);
-                    for endpoint in public
-                        .endpoints
-                        .iter()
-                        .filter(|e| e.voter == id && e.kind == transport.kind())
-                    {
-                        reply = timeout(attempt_deadline, async {
-                            let mut stream = transport
-                                .connect(&endpoint.address, Protocol::Coordinate, None)
-                                .await
-                                .map_err(|_| CoordinationError::Unavailable)?;
-                            converse(&mut stream, voter.key, genesis, &self.key, message()).await
-                        })
-                        .await
-                        .unwrap_or(Err(CoordinationError::Unavailable));
-                        if reply.is_ok() {
-                            break;
-                        }
-                    }
-                    reply
-                }
-                #[cfg(not(target_family = "wasm"))]
-                _ => exchange(voter, genesis, &self.key, message()).await,
-                #[cfg(target_family = "wasm")]
-                _ => unrouted_browser_client(),
+            let Ok(reply) = self
+                .converse_with(voter, genesis, request, attempt_deadline, sent)
+                .await
+            else {
+                continue;
             };
-            let done = if let Ok(reply) = &reply {
-                *self
-                    .preferred
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = (Some(id), reply.leader);
-                if let Some(hint) = reply.leader.filter(|hint| !visited.contains(hint)) {
-                    queue.retain(|id| *id != hint);
-                    queue.insert(0, hint);
-                }
-                reply.result != Err(CoordinationError::Unavailable)
-            } else {
-                false
-            };
-            replies.push(reply);
-            if done {
-                break;
+            *self
+                .preferred
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = (Some(id), reply.leader);
+            if let Some(hint) = reply.leader.filter(|hint| !visited.contains(hint)) {
+                queue.retain(|id| *id != hint);
+                queue.insert(0, hint);
+            }
+            if !undecided(&reply.result) {
+                return Some(reply.result);
             }
         }
-        replies
+        None
     }
     /// Sends an operation under a request id, which makes a retry apply once.
     pub async fn call(
@@ -195,7 +207,8 @@ impl NetworkCoordinator {
     pub async fn submit(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         self.submit_within(request, CALL_DEADLINE).await
     }
-    /// Sends a prepared request within `deadline`.
+    /// Sends a prepared request within `deadline`; a change that may have reached a voter without
+    /// an answer is `OutcomeUnknown`, never `Unavailable`.
     pub async fn submit_within(
         &self,
         request: &Request,
@@ -233,35 +246,92 @@ impl NetworkCoordinator {
         deadline: Duration,
     ) -> Result<Outcome, CoordinationError> {
         let attempt_deadline = ATTEMPT_DEADLINE.min(deadline);
-        timeout(deadline, async {
-            for _ in 0..3 {
-                for response in self.attempt_leader_first(request, attempt_deadline).await {
-                    match response {
-                        Ok(reply) if reply.result != Err(CoordinationError::Unavailable) => {
-                            return reply.result;
-                        }
-                        _ => continue,
-                    }
+        let sent = AtomicBool::new(false);
+        let answered = timeout(deadline, async {
+            for _ in 0..ROUNDS {
+                if let Some(result) = self
+                    .attempt_leader_first(request, attempt_deadline, &sent)
+                    .await
+                {
+                    return Some(result);
                 }
                 sleep(PAUSE_BETWEEN_ROUNDS).await;
             }
-            Err(CoordinationError::Unavailable)
+            None
         })
-        .await
-        .map_err(|_| CoordinationError::Unavailable)?
+        .await;
+        match answered {
+            Ok(Some(result)) => result,
+            _ if sent.load(Ordering::Relaxed) && !request.read_only() => {
+                Err(CoordinationError::OutcomeUnknown)
+            }
+            _ => Err(CoordinationError::Unavailable),
+        }
+    }
+    /// Pushes a database's revocations.
+    pub async fn revoke(
+        &self,
+        scope: Scope,
+        revocations: RevocationSet,
+    ) -> Result<Commitment, CoordinationError> {
+        match self
+            .call(
+                nonce(),
+                Operation::Revoke {
+                    scope,
+                    revocations: Box::new(revocations),
+                },
+            )
+            .await?
+        {
+            Outcome::Revoked(digest) => Ok(digest),
+            _ => Err(CoordinationError::Corrupt),
+        }
+    }
+    fn voter(&self, id: u64) -> Result<&Voter, CoordinationError> {
+        self.genesis
+            .genesis
+            .voters
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or(CoordinationError::Denied(Refusal::UnknownVoter))
+    }
+}
+#[cfg(feature = "voter")]
+impl NetworkCoordinator {
+    /// A client that dials voters directly over TCP, for operators and voters.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn open(
+        genesis: CertifiedGenesis,
+        root: p2panda_core::PublicKey,
+        mesh: MeshId,
+        key: PrivateKey,
+    ) -> Result<Self, CoordinationError> {
+        Self::new(genesis, root, mesh, key, None)
+    }
+    /// Sets the one observer of call outcomes.
+    pub fn observe(&self, observer: Observer) {
+        *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
+    }
+    /// Attaches the capability that certifies this client's key for later requests.
+    pub fn certify(&self, certificate: SignedCapability) {
+        *self
+            .certificate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
     /// Registers a database through a public service.
     pub async fn register(
         &self,
-        grant: SignedCoordinationGrant,
-        admission: Option<SignedTenantAdmission>,
+        grant: crate::tenancy::SignedCoordinationGrant,
+        admission: Option<crate::tenancy::SignedTenantAdmission>,
         certificate: ControlCertificate,
         id: Commitment,
     ) -> Result<Commitment, CoordinationError> {
         match self
             .call(
                 id,
-                Operation::Register(Box::new(Registration {
+                Operation::Register(Box::new(crate::request::Registration {
                     grant,
                     admission,
                     certificate,
@@ -287,13 +357,13 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// Takes the next number of a counter.
+    /// Takes a counter's number for `claim`; a retry of the same claim answers what it found.
     pub async fn claim(
         &self,
         scope: Scope,
         counter: crate::counters::Name,
         claim: crate::counters::Claim,
-    ) -> Result<u64, CoordinationError> {
+    ) -> Result<crate::counters::Claimed, CoordinationError> {
         match self
             .call(
                 nonce(),
@@ -305,54 +375,26 @@ impl NetworkCoordinator {
             )
             .await?
         {
-            Outcome::Claimed(value) => Ok(value),
+            Outcome::Claimed(claimed) => Ok(claimed),
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// Reads a counter.
+    /// Reads a counter's last number.
     pub async fn counter(
         &self,
         scope: Scope,
         counter: crate::counters::Name,
-        claim: Option<crate::counters::Claim>,
-    ) -> Result<crate::counters::Reading, CoordinationError> {
+    ) -> Result<u64, CoordinationError> {
         match self
-            .call(
-                nonce(),
-                Operation::Counter {
-                    scope,
-                    counter,
-                    claim,
-                },
-            )
+            .call(nonce(), Operation::Counter { scope, counter })
             .await?
         {
-            Outcome::Counter(reading) => Ok(reading),
-            _ => Err(CoordinationError::Corrupt),
-        }
-    }
-    /// Pushes a database's revocations.
-    pub async fn revoke(
-        &self,
-        scope: Scope,
-        revocations: RevocationSet,
-    ) -> Result<Commitment, CoordinationError> {
-        match self
-            .call(
-                nonce(),
-                Operation::Revoke {
-                    scope,
-                    revocations: Box::new(revocations),
-                },
-            )
-            .await?
-        {
-            Outcome::Revoked(digest) => Ok(digest),
+            Outcome::Counter(value) => Ok(value),
             _ => Err(CoordinationError::Corrupt),
         }
     }
     /// What this client's tenant has stored.
-    pub async fn usage(&self) -> Result<crate::service::Usage, CoordinationError> {
+    pub async fn usage(&self) -> Result<crate::request::Usage, CoordinationError> {
         match self.call(nonce(), Operation::Usage).await? {
             Outcome::Usage(usage) => Ok(usage),
             _ => Err(CoordinationError::Corrupt),
@@ -379,14 +421,6 @@ impl NetworkCoordinator {
             Message::Status,
         )
         .await
-    }
-    fn voter(&self, id: u64) -> Result<&Voter, CoordinationError> {
-        self.genesis
-            .genesis
-            .voters
-            .iter()
-            .find(|v| v.id == id)
-            .ok_or(CoordinationError::Denied(Refusal::UnknownVoter))
     }
     /// Starts the Raft group from one voter.
     #[cfg(not(target_family = "wasm"))]

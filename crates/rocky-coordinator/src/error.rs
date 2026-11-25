@@ -3,8 +3,11 @@ use serde::{Deserialize, Serialize};
 /// Why a coordinator call failed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoordinationError {
-    /// No quorum answered in time; the call took no number and may be retried.
+    /// No voter accepted the request, so it took no number and changed nothing; it may be retried.
     Unavailable,
+    /// The request may have reached the coordinator but no answer came back; only a retry of the
+    /// same `Claim` or request is safe, and it answers what the first one did.
+    OutcomeUnknown,
     /// The caller's clock is more than 30 seconds from the coordinator's.
     ClockSkew {
         /// The coordinator's Unix time in seconds.
@@ -23,11 +26,14 @@ pub enum CoordinationError {
     RequestConflict,
     /// A message failed to decode or held an unexpected answer.
     Corrupt,
-    /// The claim or request is older than the coordinator still remembers, so a retry cannot be
-    /// matched.
+    /// The claim's expiry has passed, or the request is older than the coordinator still
+    /// remembers, so a retry cannot be matched.
     Expired,
     /// The coordinator or this tenant is at a limit; retry later.
     Backpressure,
+    /// The counter holds `MAX_CLAIMS` claims still in force, so a new key takes no number until
+    /// one expires.
+    Full,
     /// The trust bundle has a format this version does not read.
     UnsupportedFormat,
 }
@@ -36,6 +42,7 @@ impl CoordinationError {
     pub fn category(&self) -> &'static str {
         match self {
             Self::Unavailable => "unavailable",
+            Self::OutcomeUnknown => "outcome_unknown",
             Self::ClockSkew { .. } => "clock_skew",
             Self::CoordinationStateLost => "state_lost",
             Self::UnknownDomain => "unknown_domain",
@@ -45,8 +52,17 @@ impl CoordinationError {
             Self::Corrupt => "corrupt",
             Self::Expired => "expired",
             Self::Backpressure => "backpressure",
+            Self::Full => "full",
             Self::UnsupportedFormat => "unsupported_format",
         }
+    }
+    /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
+    /// `Claim` or request is safe to send.
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable | Self::OutcomeUnknown | Self::Backpressure
+        )
     }
 }
 /// Why the coordinator refused a call.

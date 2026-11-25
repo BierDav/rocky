@@ -1,8 +1,9 @@
 use super::fixture::{Fixture, T};
 use super::*;
-use crate::counters::{CLAIM_WINDOW, Claim, Lookup, Name};
+use crate::counters::{CLAIM_WINDOW, Claim, Claimed::*, Name};
 use p2panda_core::PrivateKey;
 use rocky_core::{FieldSelection, ResourceGrant, ResourceScope, RowSelection};
+use rocky_credentials::CredentialChain;
 use rocky_credentials::{Revocation, SignedRevocation, Validity};
 use std::time::Duration;
 
@@ -12,10 +13,7 @@ fn name(text: &str) -> Name {
     Name::new(text).unwrap()
 }
 fn claim(n: u8, issued: u64) -> Claim {
-    Claim {
-        id: [n; 32],
-        issued,
-    }
+    Claim::fixed(n, n, issued + CLAIM_WINDOW)
 }
 struct Person {
     identity: PrivateKey,
@@ -84,7 +82,7 @@ impl Fixture {
         counter: &str,
         claim: Claim,
         time: u64,
-    ) -> Result<u64, CoordinationError> {
+    ) -> Result<crate::counters::Claimed, CoordinationError> {
         let operation = Operation::Claim {
             scope: self.scope,
             counter: name(counter),
@@ -92,24 +90,17 @@ impl Fixture {
         };
         let request = self.presenting(person, operation, time);
         match self.state.apply_at(time, &request)? {
-            Outcome::Claimed(value) => Ok(value),
+            Outcome::Claimed(claimed) => Ok(claimed),
             other => panic!("claim: {other:?}"),
         }
     }
-    fn read_by(
-        &self,
-        person: &Person,
-        counter: &str,
-        claim: Option<Claim>,
-        time: u64,
-    ) -> Result<Lookup, CoordinationError> {
+    fn read_by(&self, person: &Person, counter: &str, time: u64) -> Result<u64, CoordinationError> {
         let operation = Operation::Counter {
             scope: self.scope,
             counter: name(counter),
-            claim,
         };
         match self.state.read(&self.presenting(person, operation, time))? {
-            Outcome::Counter(reading) => Ok(reading.claim.unwrap_or(Lookup::Unclaimed)),
+            Outcome::Counter(value) => Ok(value),
             other => panic!("reading: {other:?}"),
         }
     }
@@ -124,7 +115,7 @@ impl Fixture {
             time,
         );
         match self.state.apply_at(time, &request).unwrap() {
-            Outcome::Claimed(value) => value,
+            Outcome::Claimed(First(value)) => value,
             other => panic!("claim: {other:?}"),
         }
     }
@@ -173,28 +164,40 @@ fn a_writer_that_is_not_an_admin_claims_gap_free_values_with_admin_nodes() {
             .admins
             .contains(&writer.node.public_key())
     );
-    assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
+    assert_eq!(
+        f.claim_by(&writer, "invoices", claim(1, T), T),
+        Ok(First(1))
+    );
     assert_eq!(f.admin_claim("invoices", claim(2, T), T), 2);
-    assert_eq!(f.claim_by(&writer, "invoices", claim(3, T), T + 1), Ok(3));
+    assert_eq!(
+        f.claim_by(&writer, "invoices", claim(3, T), T + 1),
+        Ok(First(3))
+    );
     assert_eq!(
         f.claim_by(&writer, "invoices", claim(1, T), T + 2),
-        Ok(1),
+        Ok(First(1)),
         "a retry answers the same value"
     );
-    assert_eq!(
-        f.read_by(&writer, "invoices", Some(claim(3, T)), T + 2),
-        Ok(Lookup::Claimed(3))
-    );
+    assert_eq!(f.read_by(&writer, "invoices", T + 2), Ok(3));
     assert_eq!(
         f.claim_by(&writer, "invoices", claim(4, T - CLAIM_WINDOW - 1), T + 2),
         Err(CoordinationError::Expired),
-        "an issue time outside the window is expired, never a new value"
+        "a claim past its expiry is expired, never a new value"
     );
     assert_eq!(
-        f.claim_by(&writer, "invoices", claim(1, T + 1), T + 2),
-        Err(CoordinationError::RequestConflict)
+        f.claim_by(
+            &writer,
+            "invoices",
+            Claim::fixed(1, 9, T + CLAIM_WINDOW),
+            T + 2
+        ),
+        Ok(Taken(1)),
+        "another attempt on a key in force finds it taken"
     );
-    assert_eq!(f.claim_by(&writer, "invoices", claim(5, T), T + 2), Ok(4));
+    assert_eq!(
+        f.claim_by(&writer, "invoices", claim(5, T), T + 2),
+        Ok(First(4))
+    );
     for right in [Right::Update, Right::Delete] {
         let writer = f.person(&[right]);
         assert!(f.claim_by(&writer, "credits", claim(6, T), T + 2).is_ok());
@@ -206,15 +209,18 @@ fn readers_strangers_and_foreign_chains_never_claim() {
     let mut f = Fixture::new(Limits::default());
     let writer = f.person(&[Right::Insert]);
     let reader = f.person(&[Right::Read]);
-    assert_eq!(f.claim_by(&writer, "invoices", claim(1, T), T), Ok(1));
+    assert_eq!(
+        f.claim_by(&writer, "invoices", claim(1, T), T),
+        Ok(First(1))
+    );
     assert_eq!(
         f.claim_by(&reader, "invoices", claim(2, T), T),
         Err(CoordinationError::Denied(Refusal::ReadOnly)),
         "a person without write access claims nothing"
     );
     assert_eq!(
-        f.read_by(&reader, "invoices", Some(claim(1, T)), T),
-        Ok(Lookup::Claimed(1)),
+        f.read_by(&reader, "invoices", T),
+        Ok(1),
         "a person without write access still reads"
     );
     let stranger = Person {
@@ -270,7 +276,6 @@ fn a_request_signed_outside_the_extension_label_is_refused() {
         Operation::Counter {
             scope: f.scope,
             counter: name("invoices"),
-            claim: None,
         },
         T,
     );
@@ -304,8 +309,14 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
     let mut f = Fixture::new(Limits::default());
     let removed = f.person(&[Right::Insert]);
     let lapsing = f.person(&[Right::Insert]);
-    assert_eq!(f.claim_by(&removed, "invoices", claim(1, T), T), Ok(1));
-    assert_eq!(f.claim_by(&lapsing, "invoices", claim(2, T), T), Ok(2));
+    assert_eq!(
+        f.claim_by(&removed, "invoices", claim(1, T), T),
+        Ok(First(1))
+    );
+    assert_eq!(
+        f.claim_by(&lapsing, "invoices", claim(2, T), T),
+        Ok(First(2))
+    );
 
     let stranger = PrivateKey::new();
     let outcome = f.push_removal(removed.identity.public_key(), &stranger, T + 1);
@@ -323,7 +334,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
         "a removed person cannot even replay an earlier claim"
     );
     assert_eq!(
-        f.read_by(&removed, "invoices", None, T + 1),
+        f.read_by(&removed, "invoices", T + 1),
         Err(CoordinationError::Denied(Refusal::Revoked))
     );
     assert_eq!(
@@ -340,7 +351,7 @@ fn a_removed_person_is_refused_once_pushed_or_when_their_link_expires() {
 
     assert_eq!(
         f.claim_by(&lapsing, "invoices", claim(4, T), T + LIFETIME - 1),
-        Ok(3)
+        Ok(First(3))
     );
     assert_eq!(
         f.claim_by(&lapsing, "invoices", claim(5, T), T + LIFETIME + 1),

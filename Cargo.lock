@@ -5999,6 +5999,7 @@ name = "rocky-coordinator"
 version = "0.1.0"
 dependencies = [
  "p2panda-core",
+ "rocky-coordinator",
  "rocky-core",
  "rocky-credentials",
  "rocky-iroh",

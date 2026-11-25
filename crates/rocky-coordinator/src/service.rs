@@ -1,18 +1,8 @@
-use crate::CoordinationError;
 pub use crate::client::{CALL_DEADLINE, NetworkCoordinator, Observer};
-pub use crate::machine::Usage;
-pub use crate::machine::{Operation, Outcome, Registration};
+pub use crate::request::{Operation, Outcome, Registration, Reply, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// A voter's answer to a client request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Reply {
-    /// The leader the voter knows of, so the client asks it next.
-    pub leader: Option<u64>,
-    /// The outcome.
-    pub result: Result<Outcome, CoordinationError>,
-}
 /// One voter's health and metrics.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {

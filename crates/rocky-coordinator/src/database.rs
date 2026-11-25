@@ -1,28 +1,50 @@
 use crate::{
     CoordinationError, Refusal,
     certified::{ControlCertificate, DomainControl, TrustBundle, encode, now},
-    control::ControlReceipt,
-    counters::{Claim, Name, Reading},
-    machine::{REQUEST_LABEL, Request},
-    service::{CALL_DEADLINE, NetworkCoordinator, Operation, Outcome, Registration},
+    client::{CALL_DEADLINE, NetworkCoordinator},
+    counters::{Claim, Claimed, Name},
+    request::{Operation, Outcome, REQUEST_LABEL, Registration, Request},
     tenancy::{CoordinationGrant, SignedCoordinationGrant, Tenant},
     transport::nonce,
 };
 use rocky_core::Commitment;
-use rocky_credentials::{IdentityProvider, PrivateKey, Publisher};
+use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher};
 use rocky_platform::time::Duration;
 use rocky_sdk::{Database, DeviceCredential, transport::Transport};
 use std::sync::Arc;
 
 const GRANT_LIFETIME_SECONDS: u64 = 3600;
 
+/// Proof of an accepted registration or renewal; keep it to renew.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlReceipt {
+    /// The tenant that signed it.
+    pub tenant: PublicKey,
+    /// Its control revision.
+    pub revision: u64,
+    /// The accepted certificate's reference.
+    pub control: Commitment,
+    /// Unix seconds when it expires; renew before then.
+    pub expires: u64,
+}
+
 /// A failed `Counters` call: the coordinator's answer or the database's.
 #[derive(Debug)]
 pub enum CounterError {
-    /// The coordinator was unreachable or refused; `Unavailable` took no number.
+    /// The coordinator was unreachable, refused or did not answer; see `CoordinationError`.
     Coordination(CoordinationError),
     /// The database could not supply or sign the device's credentials.
     Database(rocky_sdk::Error),
+}
+impl CounterError {
+    /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
+    /// `Claim` is safe to send.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Coordination(error) => error.retryable(),
+            Self::Database(_) => false,
+        }
+    }
 }
 impl std::fmt::Display for CounterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,28 +69,23 @@ impl From<rocky_sdk::Error> for CounterError {
 /// Gap-free named counters for one database, claimed through a coordinator.
 pub struct Counters {
     database: Database,
-    client: Arc<NetworkCoordinator>,
+    client: NetworkCoordinator,
     deadline: Duration,
 }
 impl Counters {
-    /// Claims through a coordinator client the application built.
-    pub fn new(database: Database, client: Arc<NetworkCoordinator>) -> Self {
-        Self {
-            database,
-            client,
-            deadline: CALL_DEADLINE,
-        }
-    }
     /// Reaches the coordinator a trust bundle names over `transport`, whose kind the bundle must
-    /// list.
+    /// list; `rocky-voter` serves `iroh` only, so pass a `rocky-iroh` transport.
     pub fn connect(
         database: Database,
         bundle: &TrustBundle,
         transport: Arc<dyn Transport>,
     ) -> Result<Self, CounterError> {
         let session = PrivateKey::new();
-        let client = NetworkCoordinator::connect(bundle, session, transport)?;
-        Ok(Self::new(database, Arc::new(client)))
+        Ok(Self {
+            database,
+            client: NetworkCoordinator::connect(bundle, session, transport)?,
+            deadline: CALL_DEADLINE,
+        })
     }
     /// Bounds how long each call waits, 12 seconds by default.
     pub fn with_deadline(self, deadline: Duration) -> Self {
@@ -121,34 +138,29 @@ impl Counters {
         let operation = Operation::Control(Box::new(certificate.clone()));
         self.publish(tenant, certificate, operation).await
     }
-    /// Takes the next number of a counter for any person with write access; a retried
-    /// `Claim::keyed` returns its first number.
-    pub async fn claim(&self, counter: &Name, claim: Claim) -> Result<u64, CounterError> {
+    /// Takes the counter's next number for the claim's key, for any person with write access;
+    /// only `Claimed::First` admits, and after `OutcomeUnknown` send the same `claim` again.
+    pub async fn claim(&self, counter: &Name, claim: &Claim) -> Result<Claimed, CounterError> {
         let device = self.database.device_credential().await?;
         let operation = Operation::Claim {
             scope: device.scope,
             counter: counter.clone(),
-            claim,
+            claim: *claim,
         };
         match self.submit(device, operation).await? {
-            Outcome::Claimed(value) => Ok(value),
+            Outcome::Claimed(claimed) => Ok(claimed),
             _ => Err(CoordinationError::Corrupt.into()),
         }
     }
-    /// Reads a counter's last number and, for `claim`, whether it took one.
-    pub async fn read(
-        &self,
-        counter: &Name,
-        claim: Option<Claim>,
-    ) -> Result<Reading, CounterError> {
+    /// The counter's last number, or 0 before any.
+    pub async fn read(&self, counter: &Name) -> Result<u64, CounterError> {
         let device = self.database.device_credential().await?;
         let operation = Operation::Counter {
             scope: device.scope,
             counter: counter.clone(),
-            claim,
         };
         match self.submit(device, operation).await? {
-            Outcome::Counter(reading) => Ok(reading),
+            Outcome::Counter(value) => Ok(value),
             _ => Err(CoordinationError::Corrupt.into()),
         }
     }

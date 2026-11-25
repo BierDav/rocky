@@ -263,8 +263,8 @@ async fn a_fatal_consensus_state_ends_the_voter_with_an_error() {
     std::fs::remove_dir_all(cluster.directory.path().join("voter-1/log")).unwrap();
     assert_eq!(
         voter.answer(cluster.affirm_membership(0)).await.result,
-        Err(CoordinationError::Unavailable),
-        "a write whose log append fails is refused"
+        Err(CoordinationError::OutcomeUnknown),
+        "a write whose log append fails is refused without promising it took no effect"
     );
 
     let ended = tokio::time::timeout(ELECTION_BOUND, serving)

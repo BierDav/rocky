@@ -2,7 +2,8 @@ use crate::CoordinationError;
 use crate::{
     Limits,
     certified::*,
-    machine::{Metadata, self_certified},
+    machine::Metadata,
+    request::self_certified,
     service::{NetworkCoordinator, Operation, Outcome},
 };
 use p2panda_core::PrivateKey;

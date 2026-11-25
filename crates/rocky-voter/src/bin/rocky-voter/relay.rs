@@ -52,7 +52,7 @@ mod tests {
 
     #[tokio::test]
     async fn relay_carries_authenticated_quic_without_ip_transports()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), crate::voter::Failure> {
         let server = start("127.0.0.1:0".parse()?).await?;
         let url: rocky_iroh::iroh::RelayUrl =
             format!("http://{}", server.http_addr().ok_or("listener missing")?).parse()?;
@@ -76,7 +76,7 @@ mod tests {
                 send.write_all(b"signed reply").await?;
                 send.finish()?;
                 connection.closed().await;
-                Ok::<_, Box<dyn std::error::Error>>(())
+                Ok::<_, crate::voter::Failure>(())
             };
             let sender = async {
                 let connection = a.connect(address, b"rocky-relay-test").await?;
@@ -85,10 +85,10 @@ mod tests {
                 send.finish()?;
                 assert_eq!(recv.read_to_end(64).await?, b"signed reply");
                 connection.close(0u32.into(), b"done");
-                Ok::<_, Box<dyn std::error::Error>>(())
+                Ok::<_, crate::voter::Failure>(())
             };
             tokio::try_join!(receiver, sender)?;
-            Ok::<_, Box<dyn std::error::Error>>(())
+            Ok::<_, crate::voter::Failure>(())
         })
         .await;
         a.close().await;

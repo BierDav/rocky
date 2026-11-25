@@ -1,4 +1,4 @@
-use rocky_coordinator::certified::TrustBundle;
+use rocky_coordinator::TrustBundle;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn the_retired_provider_bundle_is_refused() {

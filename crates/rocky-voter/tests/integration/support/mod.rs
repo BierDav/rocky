@@ -271,14 +271,11 @@ pub fn timestamp() -> u64 {
 pub fn invoices() -> rocky_coordinator::counters::Name {
     rocky_coordinator::counters::Name::new("invoices").unwrap()
 }
-pub fn fresh_claim(n: u8) -> rocky_coordinator::counters::Claim {
-    rocky_coordinator::counters::Claim {
-        id: [n; 32],
-        issued: timestamp(),
-    }
+pub fn fresh_claim(n: u8) -> rocky_coordinator::Claim {
+    rocky_coordinator::Claim::new([n])
 }
 pub async fn reading(client: &NetworkCoordinator, scope: Scope) -> Result<u64, CoordinationError> {
-    Ok(client.counter(scope, invoices(), None).await?.value)
+    client.counter(scope, invoices()).await
 }
 
 pub async fn membership_after_election(
@@ -289,7 +286,7 @@ pub async fn membership_after_election(
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             match admin.call(id, operation.clone()).await {
-                Err(CoordinationError::Unavailable) => continue,
+                Err(error) if error.retryable() => continue,
                 result => return result,
             }
         }

@@ -2,6 +2,7 @@ use crate::CoordinationError;
 use serde::{Deserialize, Serialize};
 
 /// Seconds in a day, the period of the registration budget.
+#[cfg(feature = "voter")]
 pub const DAY: u64 = 86_400;
 
 /// Storage and retry limits a coordinator enforces; the defaults suit a small shared service.

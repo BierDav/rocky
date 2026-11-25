@@ -1,9 +1,11 @@
 use crate::support;
-use rocky_coordinator::{CoordinationError, Refusal};
 use rocky_coordinator::{
-    counters::{Claim, Lookup, Name},
+    Claim,
+    Claimed::{self, First},
+    Name,
     service::{NetworkCoordinator, Operation, Outcome},
 };
+use rocky_coordinator::{CoordinationError, Refusal};
 use rocky_core::*;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
@@ -29,6 +31,7 @@ async fn three_persistent_voters_keep_controls_and_counters_across_restarts() {
         Ok(taken),
         "a retried claim returns its first answer"
     );
+    let taken = taken.number();
     let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
     let next = cluster.wait_unfenced_leader(&admin).await;
@@ -169,12 +172,12 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         cluster.wait_unfenced_leader(&admin).await;
         assert_eq!(
             claim_definitely(&alice, cluster.scope, &invoices(), claim).await,
-            Ok(before + 1),
+            Ok(First(before + 1)),
             "{stage}: the retry answers what the crashed call may have applied, once"
         );
         assert_eq!(
             alice.claim(cluster.scope, invoices(), claim).await,
-            Ok(before + 1)
+            Ok(First(before + 1))
         );
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
@@ -259,21 +262,18 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
 const RETRIES_PAST_THE_LAGGING_LOG: usize = 80;
 
 fn claim(n: u8) -> Claim {
-    Claim {
-        id: [n; 32],
-        issued: timestamp(),
-    }
+    Claim::new([n])
 }
 async fn claim_definitely(
     client: &NetworkCoordinator,
     scope: Scope,
     counter: &Name,
     claim: Claim,
-) -> Result<u64, CoordinationError> {
+) -> Result<Claimed, CoordinationError> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match client.claim(scope, counter.clone(), claim).await {
-                Err(CoordinationError::Unavailable) => continue,
+                Err(error) if error.retryable() => continue,
                 result => return result,
             }
         }
@@ -310,7 +310,8 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
             tokio::spawn(async move {
                 let mut values = Vec::new();
                 for claim in mine {
-                    values.push((claim, client.claim(scope, counter.clone(), claim).await));
+                    let claimed = client.claim(scope, counter.clone(), claim).await;
+                    values.push((claim, claimed.map(Claimed::number)));
                 }
                 values
             })
@@ -338,7 +339,8 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
             .await
             .unwrap();
         assert_eq!(
-            retried, *value,
+            retried,
+            First(*value),
             "either node's retry of either node's claim answers the same value"
         );
     }
@@ -350,12 +352,12 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.wait_exit(leader).await;
     assert_eq!(
         claim_definitely(&nodes[1], scope, &invoices, crashed).await,
-        Ok(25),
+        Ok(First(25)),
         "a retry answers the value a claim took before its leader crashed, once"
     );
     assert_eq!(
         claim_definitely(&nodes[0], scope, &invoices, claim(101)).await,
-        Ok(26)
+        Ok(First(26))
     );
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
@@ -366,13 +368,13 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     for (claim, value) in &taken {
         assert_eq!(
             claim_definitely(&nodes[1], scope, &invoices, *claim).await,
-            Ok(*value),
+            Ok(First(*value)),
             "a new leader answers retries with every value"
         );
     }
     assert_eq!(
         claim_definitely(&nodes[1], scope, &invoices, claim(102)).await,
-        Ok(27)
+        Ok(First(27))
     );
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
@@ -388,18 +390,17 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         claim_definitely(&nodes[0], scope, &invoices, crashed).await,
-        Ok(25),
+        Ok(First(25)),
         "every voter restarts from its snapshot with the same counter"
     );
-    let reading = nodes[0]
-        .counter(scope, invoices.clone(), Some(taken[3].0))
-        .await
-        .unwrap();
-    assert_eq!(reading.value, 27);
-    assert_eq!(reading.claim, Some(Lookup::Claimed(taken[3].1)));
+    assert_eq!(nodes[0].counter(scope, invoices.clone()).await, Ok(27));
+    assert_eq!(
+        nodes[0].claim(scope, invoices.clone(), taken[3].0).await,
+        Ok(First(taken[3].1))
+    );
     assert_eq!(
         claim_definitely(&nodes[1], scope, &invoices, claim(103)).await,
-        Ok(28)
+        Ok(First(28))
     );
 
     let stranger = cluster.client(&cluster.user);
@@ -410,17 +411,14 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
             "only the domain's admin nodes claim"
         );
         assert_eq!(
-            client.counter(scope, invoices.clone(), None).await,
+            client.counter(scope, invoices.clone()).await,
             Err(CoordinationError::Denied(Refusal::NotMember)),
             "only the domain's admin nodes read a counter"
         );
     }
     assert_eq!(
-        nodes[0]
-            .counter(scope, invoices.clone(), Some(claim(104)))
-            .await
-            .unwrap()
-            .claim,
-        Some(Lookup::Unclaimed)
+        nodes[0].counter(scope, invoices.clone()).await,
+        Ok(28),
+        "refused claims took no number"
     );
 }

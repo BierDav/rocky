@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireMessage<A, V, S> {
     /// A client request.
-    Client(Box<crate::machine::Request>),
+    Client(Box<crate::request::Request>),
     /// Raft log replication.
     Append(A),
     /// A Raft vote.
@@ -68,7 +68,7 @@ impl Envelope {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-wire.v7",
+            "rocky.coordination-wire.v8",
             &(self.genesis, self.key, self.nonce, self.time, &self.body),
         )
     }
@@ -79,11 +79,14 @@ impl Envelope {
         }
         Ok(())
     }
+}
+#[cfg(feature = "voter")]
+impl Envelope {
     /// Authenticates and decodes a client request, refusing any other message.
     pub fn client_request(
         &self,
         genesis: Commitment,
-    ) -> Result<crate::machine::Request, CoordinationError> {
+    ) -> Result<crate::request::Request, CoordinationError> {
         self.authenticate(genesis)?;
         match decode::<Message>(&self.body)? {
             WireMessage::Client(request) => Ok(*request),
@@ -101,18 +104,20 @@ impl Envelope {
         Ok(())
     }
 }
-pub(crate) const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
-
+#[cfg(all(feature = "voter", not(target_family = "wasm")))]
+const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
+#[cfg(feature = "voter")]
 const CLIENT_MESSAGE_TAG_BYTES: usize = 8;
-
+#[cfg(feature = "voter")]
 const ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE: usize = 2;
-
+#[cfg(feature = "voter")]
 const ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS: usize = 285;
 
 /// The largest frame a client request needs.
+#[cfg(feature = "voter")]
 pub const MAX_CLIENT_FRAME: usize = ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS
     + ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE
-        * (crate::machine::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES);
+        * (crate::request::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES);
 
 /// A fresh random nonce.
 pub fn nonce() -> Commitment {
@@ -186,7 +191,7 @@ pub enum NoRaft {}
 pub(crate) type Message = WireMessage<NoRaft, NoRaft, NoRaft>;
 
 /// Dials a voter over TCP and converses within three seconds.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "voter", not(target_family = "wasm")))]
 pub async fn exchange<T: Serialize + DeserializeOwned>(
     voter: &Voter,
     genesis: Commitment,
@@ -231,7 +236,7 @@ mod tests {
     fn the_client_frame_limit_holds_the_largest_answerable_request_in_its_worst_encoding()
     -> Result<(), CoordinationError> {
         let key = PrivateKey::new();
-        let request = crate::machine::Request::certified(
+        let request = crate::request::Request::certified(
             [0; 32],
             nonce(),
             crate::service::Operation::Usage,
@@ -244,7 +249,7 @@ mod tests {
             "a client message adds its tag to the request"
         );
         let largest_body =
-            vec![u8::MAX; crate::machine::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES];
+            vec![u8::MAX; crate::request::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES];
         let worst = Envelope::from_body([u8::MAX; 32], [u8::MAX; 32], largest_body, &key)?;
         let encoded = encode(&worst)?.len();
         assert!(
@@ -264,7 +269,7 @@ mod tests {
     fn a_client_request_is_authorized_by_its_own_signature_whatever_key_carries_it()
     -> Result<(), CoordinationError> {
         let (genesis, node, session) = ([9; 32], PrivateKey::new(), PrivateKey::new());
-        let request = crate::machine::Request::sign_at(
+        let request = crate::request::Request::sign_at(
             genesis,
             nonce(),
             crate::service::Operation::Usage,

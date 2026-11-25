@@ -244,6 +244,10 @@ pub enum SchemaError {
         table: String,
         reason: Incompatibility,
     },
+    ForeignKey {
+        key: ForeignKeyName,
+        rule: ForeignKeyRule,
+    },
     Change(crate::RefusedChange),
 }
 impl std::fmt::Display for SchemaError {
@@ -255,6 +259,7 @@ impl std::fmt::Display for SchemaError {
             Self::Incompatible { table, reason } => {
                 write!(f, "{table} cannot be installed: {reason:?}")
             }
+            Self::ForeignKey { key, rule } => write!(f, "foreign key {key} {rule}"),
             Self::Change(refusal) => write!(
                 f,
                 "the application schema cannot replace the installed one: {refusal}"
@@ -284,6 +289,26 @@ impl std::fmt::Display for ForeignKeyName {
             self.columns.join(","),
             self.parent
         )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForeignKeyRule {
+    SetNullOnRequired { column: String },
+    SetNullOnKey { column: String },
+}
+impl std::fmt::Display for ForeignKeyRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SetNullOnRequired { column } => write!(
+                f,
+                "deletes with SetNull, but {column} is required and none of its columns is optional; make the column optional or delete with Cascade"
+            ),
+            Self::SetNullOnKey { column } => write!(
+                f,
+                "deletes with SetNull, but {column} is part of the primary key, which never changes; delete with Cascade"
+            ),
+        }
     }
 }
 impl From<InvalidName> for SchemaError {
@@ -650,6 +675,27 @@ impl LogicalTable {
             table: self.sql_name.clone(),
             columns: key.columns.clone(),
             parent: key.table.clone(),
+        }
+    }
+    fn set_null_rule(&self, key: &LogicalForeignKey) -> Option<ForeignKeyRule> {
+        if key.on_delete != DELETE_SET_NULL
+            || key
+                .columns
+                .iter()
+                .any(|name| self.column(name).is_some_and(|column| !column.not_null))
+        {
+            return None;
+        }
+        match key.columns.iter().find(|name| !self.is_key_column(name)) {
+            Some(column) => Some(ForeignKeyRule::SetNullOnRequired {
+                column: column.clone(),
+            }),
+            None => key
+                .columns
+                .first()
+                .map(|column| ForeignKeyRule::SetNullOnKey {
+                    column: column.clone(),
+                }),
         }
     }
     pub fn foreign_key_sql(&self, key: &LogicalForeignKey) -> String {
@@ -1048,6 +1094,12 @@ impl LogicalSchema {
                         key.columns.join(","),
                         parent.sql_name
                     ));
+                }
+                if let Some(rule) = table.set_null_rule(key) {
+                    return Err(SchemaError::ForeignKey {
+                        key: table.foreign_key_name(key),
+                        rule,
+                    });
                 }
             }
             let mut partitions = BTreeSet::new();

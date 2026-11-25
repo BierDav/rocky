@@ -447,8 +447,10 @@ Other kinds an application meets:
 - `Sql { code, message, unsupported }`: SQLite refused the statement, or
   Rocky did for a replayed write when `unsupported` is set.
 - `Schema(SchemaError)`: `build()` refused the schema, or the installed version
-  cannot become it. `SchemaError::Change(RefusedChange)` names the table, field
-  or foreign key a new version may not change that way.
+  cannot become it. `SchemaError::ForeignKey { key, rule }` names a foreign key
+  SQLite could not enforce, such as `SetNull` over required columns, and
+  `SchemaError::Change(RefusedChange)` names the table, field or foreign key a
+  new version may not change that way.
 
 `Invite`, `Join`, `Link`, `Access` and `Service` carry the typed cause of an
 invitation, link, access or network failure, and `Internal` is never

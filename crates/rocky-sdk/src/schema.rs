@@ -237,8 +237,8 @@ impl SchemaBuilder {
         });
         self
     }
-    /// Validates the schema; an invalid name is `ErrorKind::Schema` with
-    /// `SchemaError::InvalidName`.
+    /// Validates the schema; a refusal is `ErrorKind::Schema`, such as `SchemaError::InvalidName`
+    /// for a bad name or `SchemaError::ForeignKey` for a foreign key SQLite could not enforce.
     pub fn build(self) -> Result<Schema, crate::Error> {
         Ok(self.0.validated()?)
     }

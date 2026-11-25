@@ -1,7 +1,7 @@
 use crate::common::{Device, Failure};
 use rocky_sdk::{
-    Affinity, Column, Database, ErrorKind, InvalidName, NameRule, Network, Schema, SchemaError,
-    SqlValue, Table, Unsupported, params, transport::memory::Hub,
+    Affinity, Column, Database, ErrorKind, ForeignKeyName, ForeignKeyRule, InvalidName, NameRule,
+    Network, Schema, SchemaError, SqlValue, Table, Unsupported, params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -292,6 +292,88 @@ fn an_invalid_name_in_a_schema_names_its_path_and_the_rule_it_breaks() {
             "{expected}: {refused:?}"
         );
     }
+}
+
+fn accounts() -> Table {
+    Table::replayed("accounts")
+        .column(Column::new("code", Affinity::Text).required())
+        .primary_key(["code"])
+}
+fn set_null(column: &str) -> rocky_sdk::ForeignKeyDefinition {
+    rocky_sdk::ForeignKeyDefinition {
+        columns: vec![column.into()],
+        table: "accounts".into(),
+        on_delete: rocky_sdk::DeleteAction::SetNull,
+        deferred: false,
+    }
+}
+fn refused_foreign_key(schema: rocky_sdk::SchemaBuilder) -> Option<SchemaError> {
+    match schema.build().err().map(|error| error.kind().clone()) {
+        Some(ErrorKind::Schema(error)) => Some(*error),
+        _ => None,
+    }
+}
+
+#[test]
+fn set_null_on_a_required_column_is_refused_at_build() {
+    let transactions = Table::replayed("transactions")
+        .column(Column::new("account", Affinity::Text).required())
+        .column(Column::new("cents", Affinity::Integer).required())
+        .foreign_key(set_null("account"));
+    assert_eq!(
+        refused_foreign_key(
+            Schema::builder("budget", 1)
+                .table(accounts())
+                .table(transactions)
+        ),
+        Some(SchemaError::ForeignKey {
+            key: ForeignKeyName {
+                table: "transactions".into(),
+                columns: vec!["account".into()],
+                parent: "accounts".into(),
+            },
+            rule: ForeignKeyRule::SetNullOnRequired {
+                column: "account".into(),
+            },
+        })
+    );
+    let optional = Table::replayed("transactions")
+        .column(Column::new("account", Affinity::Text))
+        .foreign_key(set_null("account"));
+    assert!(
+        Schema::builder("budget", 1)
+            .table(accounts())
+            .table(optional)
+            .build()
+            .is_ok(),
+        "SetNull on an optional column builds"
+    );
+}
+
+#[test]
+fn set_null_on_a_key_column_is_refused_at_build() {
+    let balances = Table::replayed("balances")
+        .column(Column::new("account", Affinity::Text).required())
+        .column(Column::new("month", Affinity::Integer).required())
+        .primary_key(["account", "month"])
+        .foreign_key(set_null("account"));
+    assert_eq!(
+        refused_foreign_key(
+            Schema::builder("budget", 1)
+                .table(accounts())
+                .table(balances)
+        ),
+        Some(SchemaError::ForeignKey {
+            key: ForeignKeyName {
+                table: "balances".into(),
+                columns: vec!["account".into()],
+                parent: "accounts".into(),
+            },
+            rule: ForeignKeyRule::SetNullOnKey {
+                column: "account".into(),
+            },
+        })
+    );
 }
 
 #[tokio::test]

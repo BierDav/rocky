@@ -98,7 +98,7 @@ pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{Affinity, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition};
 pub use rocky_core::{
-    ForeignKeyName, InvalidName, NameRule, RefusedChange, RoleError, SchemaError,
+    ForeignKeyName, ForeignKeyRule, InvalidName, NameRule, RefusedChange, RoleError, SchemaError,
 };
 pub use rocky_core::{NotANumber, RowIdentity, Scope, SqlValue};
 pub use rocky_credentials::{

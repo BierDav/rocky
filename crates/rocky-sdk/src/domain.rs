@@ -11,6 +11,7 @@ pub(crate) struct Domain {
     pub app: TypedRows,
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
+    names: BTreeMap<String, String>,
     pub whole_tables: rocky_credentials::WholeTables,
 }
 impl Domain {
@@ -46,7 +47,7 @@ impl Domain {
         let mut readers: BTreeMap<String, String> = logical
             .tables
             .iter()
-            .map(|table| (table.sql_name.clone(), table.sql_name.clone()))
+            .map(|table| (table.sql_name.clone(), table.identity().to_owned()))
             .collect();
         loop {
             let mut changed = false;
@@ -79,19 +80,24 @@ impl Domain {
             .iter()
             .map(|table| {
                 (
-                    table.sql_name.clone(),
+                    table.identity().to_owned(),
                     ResourceScope {
                         domain: scope,
                         encryption: rocky_core::commitment(
                             "rocky.sdk.readers.v1",
                             readers
                                 .get(&table.sql_name)
-                                .map_or(table.sql_name.as_bytes(), |name| name.as_bytes()),
+                                .map_or(table.identity().as_bytes(), |name| name.as_bytes()),
                         ),
                         table: logical.table_id(table),
                     },
                 )
             })
+            .collect();
+        let names = logical
+            .tables
+            .iter()
+            .map(|table| (table.sql_name.clone(), table.identity().to_owned()))
             .collect();
         let app = TypedRows::new(logical, vec![domain])?
             .at_generation(generation)?
@@ -105,6 +111,7 @@ impl Domain {
             whole_tables,
             scope,
             tables,
+            names,
         })
     }
     pub fn effective_partitions(
@@ -146,17 +153,14 @@ impl Domain {
     }
     pub fn partitioned_table(&self, scope: &ResourceScope) -> bool {
         let logical = self.logical();
-        self.scopes().any(|(name, own)| {
-            own == *scope
-                && logical
-                    .table(name)
-                    .is_some_and(|table| !table.partition_by.is_empty())
+        logical.tables.iter().any(|table| {
+            !table.partition_by.is_empty() && self.scope_of(&table.sql_name) == Some(*scope)
         })
     }
     pub fn readers(&self) -> BTreeMap<String, Commitment> {
-        self.tables
-            .iter()
-            .map(|(name, scope)| (name.clone(), scope.encryption))
+        self.names
+            .keys()
+            .filter_map(|name| Some((name.clone(), self.scope_of(name)?.encryption)))
             .collect()
     }
     pub fn registry(&self) -> ResourceScope {
@@ -164,7 +168,7 @@ impl Domain {
     }
 
     pub fn scope_of(&self, table: &str) -> Option<ResourceScope> {
-        self.tables.get(table).copied()
+        self.tables.get(self.names.get(table)?).copied()
     }
 }
 pub(crate) fn logical(schema: &Schema, publisher: [u8; 32]) -> Result<LogicalSchema, Failure> {
@@ -192,10 +196,10 @@ mod tests {
     use rocky_core::Affinity;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
-        let json = r#"{"format":7,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
+        let json = r#"{"format":8,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]);
         let descriptor = definition.build().unwrap();
-        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
             definition.format = format;
             assert!(
                 definition
@@ -204,7 +208,7 @@ mod tests {
                     .to_string()
                     .contains("unsupported schema definition format")
             );
-            let input = json.replace("\"format\":7", &format!("\"format\":{format}"));
+            let input = json.replace("\"format\":8", &format!("\"format\":{format}"));
             let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
@@ -224,7 +228,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":7,"application":"measurements","version":1,"tables":[{
+            r#"{"format":8,"application":"measurements","version":1,"tables":[{
             "name":"samples","class":"replayed",
             "columns":[{"name":"sensor","type":"text","not_null":true},
                        {"name":"sequence","type":"integer","not_null":true},
@@ -265,7 +269,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":7,"application":"references","version":1,"tables":[
+            r#"{"format":8,"application":"references","version":1,"tables":[
             {"name":"parents","class":"replayed","columns":[{"name":"next","type":"blob"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
             {"name":"children","class":"replayed","columns":[{"name":"parent","type":"blob"}],"primary_key":["id"],
@@ -298,7 +302,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_command_definitions_are_refused() {
-        let json = r#"{"format":7,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
+        let json = r#"{"format":8,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         assert!(Schema::parse(json).is_err());
         let confirmed = json.replace("command_controlled", "confirmed_read_only");
         assert!(Schema::parse(&confirmed).is_err());

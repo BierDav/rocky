@@ -333,6 +333,7 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
         LogicalColumn {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             affinity,
             not_null: true,
@@ -355,6 +356,7 @@ mod tests {
                 identity: "t".into(),
             },
             tables: vec![LogicalTable {
+                earlier_names: Vec::new(),
                 sql_name: "items".into(),
             explicit_access_only: false,
                 class: TableClass::Replayed,
@@ -440,7 +442,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_values_bind_a_row_to_its_scope() {
-        let definition = serde_json::json!({"format":7,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let definition = serde_json::json!({"format":8,"publisher":"01".repeat(32),"application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         let schema = crate::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()

@@ -47,7 +47,7 @@ async fn scopes_referencing_each_other_import_in_one_chain() {
     };
     let c = Constrained::with(
         serde_json::json!({
-            "format": 7,
+            "format": 8,
             "application": "replayed-cycle",
             "tables": [
                 pointing("eggs", "hens"),

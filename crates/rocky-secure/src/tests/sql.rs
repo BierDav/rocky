@@ -29,6 +29,7 @@ struct Typed {
 }
 fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     LogicalColumn {
+        earlier_names: Vec::new(),
         sql_name: name.into(),
         affinity,
         not_null,
@@ -41,6 +42,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
     columns.push(column("id", Affinity::Blob, true));
     let sql = format!("{},id BLOB NOT NULL)", sql.trim_end_matches(')'));
     LogicalTable {
+        earlier_names: Vec::new(),
         sql_name: name.into(),
         explicit_access_only: false,
         class: TableClass::Replayed,
@@ -1976,7 +1978,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":7, "publisher": "PUBLISHER",
+        "format":8, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"replayed", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -2103,7 +2105,7 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":7, "publisher": "PUBLISHER",
+        "format":8, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "replayed", "columns": [
                 {"name": "key", "type": "text", "not_null": true},

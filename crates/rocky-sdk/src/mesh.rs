@@ -473,7 +473,7 @@ mod tests {
     use rocky_credentials::testing::UntrustedIssuer as _;
     use rocky_credentials::{Revocation, SignedRevocation};
     use std::{collections::BTreeSet, sync::Arc};
-    const SCHEMA: &str = r#"{"application":"contacts","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+    const SCHEMA: &str = r#"{"application":"contacts","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn equal_sets_derive_equal_topics_missing_values_differ_and_substitution_is_refused()
     -> Result<(), Failure> {

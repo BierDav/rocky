@@ -19,7 +19,7 @@ mod restrictions;
 
 fn definition() -> serde_json::Value {
     serde_json::json!({
-        "format": 7,
+        "format": 8,
         "application": "replayed-constraints",
         "tables": [
             {"name": "teams", "class": "replayed",
@@ -85,7 +85,7 @@ fn graph() -> Constrained {
         rest
     };
     let definition = serde_json::json!({
-        "format": 7,
+        "format": 8,
         "application": "replayed-graph",
         "tables": [
             replayed("teams", serde_json::json!([tenant, {"name": "name", "type": "text", "not_null": true}]), partitioned(serde_json::json!({}))),

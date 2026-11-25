@@ -1804,7 +1804,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     fn held_schema() -> &'static Schema {
         static PARSED: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(|| {
-            Schema::parse(r#"{"application":"held","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
+            Schema::parse(r#"{"application":"held","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
         });
         &PARSED
     }
@@ -2074,7 +2074,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":7,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":8,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         for format in [0, 1, 2, 3, 5] {
             let directory = rocky_platform::fs::Scratch::new().await;
@@ -2129,7 +2129,7 @@ mod tests {
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
         let schema = Schema::parse(
-            r#"{"format":7,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":8,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         let directory = rocky_platform::fs::Scratch::new().await;
         let configuration = Configuration::new(directory.path(), &schema)?;
@@ -2179,7 +2179,7 @@ mod tests {
     async fn saturated_waits_cannot_block_close() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"saturation","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"saturation","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()
@@ -2211,7 +2211,7 @@ mod tests {
         use crate::SqlValue;
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"poolcheck","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"poolcheck","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()

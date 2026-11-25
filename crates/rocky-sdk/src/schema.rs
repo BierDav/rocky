@@ -121,7 +121,8 @@ impl Schema {
             }
             if tables
                 .iter()
-                .any(|table| table.name.eq_ignore_ascii_case(crate::domain::REGISTRY))
+                .flat_map(|table| std::iter::once(&table.name).chain(&table.renamed_from))
+                .any(|name| name.eq_ignore_ascii_case(crate::domain::REGISTRY))
             {
                 return Err(invalid(format!(
                     "{} is reserved for the SDK's issuer registry",
@@ -344,6 +345,7 @@ impl Table {
     fn of(name: impl Into<String>, class: rocky_core::TableClass) -> Self {
         Self(rocky_core::TableDefinition {
             name: name.into(),
+            renamed_from: Vec::new(),
             explicit_access_only: false,
             class,
             columns: Vec::new(),
@@ -397,6 +399,13 @@ impl Table {
         self.0.checks.push(expression.into());
         self
     }
+    /// Declares an earlier name of this table, so writes made under it land here; call it once
+    /// per earlier name, oldest first, and keep every call in later versions.
+    #[must_use]
+    pub fn renamed_from(mut self, old: impl Into<String>) -> Self {
+        self.0.renamed_from.push(old.into());
+        self
+    }
 }
 
 /// A table column.
@@ -412,6 +421,7 @@ impl Column {
             collation: rocky_core::Collation::Binary,
             derived: None,
             local_only: false,
+            renamed_from: Vec::new(),
         })
     }
     /// Makes the column `NOT NULL`.
@@ -430,6 +440,13 @@ impl Column {
             rocky_core::SqlValue::Text(value) => value.into(),
             rocky_core::SqlValue::Blob(value) => value.into(),
         });
+        self
+    }
+    /// Declares an earlier name of this column, so writes made under it land here; call it once
+    /// per earlier name, oldest first, and keep every call in later versions.
+    #[must_use]
+    pub fn renamed_from(mut self, old: impl Into<String>) -> Self {
+        self.0.renamed_from.push(old.into());
         self
     }
 }

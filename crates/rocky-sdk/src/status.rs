@@ -787,6 +787,13 @@ pub struct DatabaseStatus {
     /// Every device's health report, or `None` on a device that is not an admin's.
     pub mesh: Option<Vec<MeshDevice>>,
 }
+impl DatabaseStatus {
+    /// The schema version installed on this device, which can differ from the one the application
+    /// declares.
+    pub fn schema_version(&self) -> u32 {
+        self.data.generation.current.schema
+    }
+}
 /// What one scope exchanged with a peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {

@@ -65,7 +65,7 @@ fn blocked_table(node: &Node, sql: &str, error: &crate::Error) -> Option<crate::
     let prepared = rocky_storage::partition_sql::prepare(sql, &domain.logical().views).ok()?;
     let whole = rocky_core::domain_label(&domain.scope);
     let (table, blockers) = prepared.tables().iter().find_map(|referenced| {
-        let (_, scope) = domain.scopes().find(|(name, _)| name == referenced)?;
+        let scope = domain.scope_of(referenced)?;
         let label = rocky_core::scope_label(&scope);
         let own: Vec<_> = blockers
             .iter()

@@ -63,6 +63,7 @@ async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_par
     let mut schema = f.schema.clone();
     let table = &mut schema.tables[0];
     table.columns.push(LogicalColumn {
+        earlier_names: Vec::new(),
         sql_name: "rank".into(),
         affinity: Affinity::Integer,
         not_null: false,

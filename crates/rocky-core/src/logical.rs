@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 7;
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 8;
 pub const TYPED_RULE: &str = "rocky.sdk.typed.v2";
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -59,6 +59,13 @@ pub struct LogicalColumn {
     pub default: Option<String>,
     pub collation: Collation,
     pub class: ColumnClass,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier_names: Vec<String>,
+}
+impl LogicalColumn {
+    pub fn identity(&self) -> &str {
+        self.earlier_names.first().unwrap_or(&self.sql_name)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +179,8 @@ impl LogicalRestriction {
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
     pub sql_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier_names: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub explicit_access_only: bool,
     pub class: TableClass,
@@ -235,6 +244,10 @@ pub enum SchemaError {
         table: String,
         reason: Incompatibility,
     },
+    LostEarlierName {
+        renamed: String,
+        earlier: String,
+    },
 }
 impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -245,6 +258,10 @@ impl std::fmt::Display for SchemaError {
             Self::Incompatible { table, reason } => {
                 write!(f, "{table} cannot be installed: {reason:?}")
             }
+            Self::LostEarlierName { renamed, earlier } => write!(
+                f,
+                "{renamed} renames {earlier}, which had an earlier name; keep every earlier name with renamed_from, oldest first"
+            ),
         }
     }
 }
@@ -648,6 +665,24 @@ impl LogicalTable {
             .iter()
             .find(|column| column.sql_name.eq_ignore_ascii_case(sql_name))
     }
+    pub fn identity(&self) -> &str {
+        self.earlier_names.first().unwrap_or(&self.sql_name)
+    }
+    pub fn counterpart(&self, other: &LogicalColumn) -> Option<&LogicalColumn> {
+        self.columns
+            .iter()
+            .find(|column| column.identity() == other.identity())
+    }
+    pub fn column_once_named(&self, name: &str) -> Option<&LogicalColumn> {
+        self.column(name).or_else(|| {
+            self.columns.iter().find(|column| {
+                column
+                    .earlier_names
+                    .iter()
+                    .any(|earlier| earlier.eq_ignore_ascii_case(name))
+            })
+        })
+    }
     pub fn key(&self) -> impl Iterator<Item = &LogicalColumn> {
         self.primary_key.iter().filter_map(|name| self.column(name))
     }
@@ -678,6 +713,26 @@ impl LogicalTable {
                 &column.sql_name,
                 &mut names,
             )?;
+        }
+        for column in &self.columns {
+            if !column.earlier_names.is_empty()
+                && (self.class != TableClass::Replayed || column.class != ColumnClass::Replicated)
+            {
+                return invalid(format!(
+                    "{name}.{}: only replicated columns of replayed tables are renamed",
+                    column.sql_name
+                ));
+            }
+            for earlier in &column.earlier_names {
+                unique_name(
+                    format!("tables.{name}.columns.{}.renamed_from", column.sql_name),
+                    earlier,
+                    &mut names,
+                )?;
+            }
+        }
+        if !self.earlier_names.is_empty() && self.class != TableClass::Replayed {
+            return invalid(format!("{name}: only replayed tables are renamed"));
         }
         let mut key = BTreeSet::new();
         if self.primary_key.len() > usize::from(u8::MAX)
@@ -770,9 +825,14 @@ impl LogicalTable {
     }
 }
 
+fn field_identity(table: &LogicalTable, column: &LogicalColumn) -> String {
+    format!("{}.{}", table.identity(), column.identity())
+}
 #[derive(Serialize)]
 struct ReplicatedColumn<'a> {
     name: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    earlier_names: &'a [String],
     affinity: Affinity,
     not_null: bool,
     collation: Collation,
@@ -790,6 +850,8 @@ struct ReplicatedReference<'a> {
 struct ReplicatedTable<'a> {
     class: TableClass,
     name: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    earlier_names: &'a [String],
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     explicit_access_only: bool,
     key: Vec<ReplicatedColumn<'a>>,
@@ -816,6 +878,7 @@ struct Replicated<'a> {
 fn replicated_column(column: &LogicalColumn) -> ReplicatedColumn<'_> {
     ReplicatedColumn {
         name: &column.sql_name,
+        earlier_names: &column.earlier_names,
         affinity: column.affinity,
         not_null: column.not_null,
         collation: column.collation,
@@ -852,6 +915,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
     ReplicatedTable {
         class: table.class,
         name: &table.sql_name,
+        earlier_names: &table.earlier_names,
         explicit_access_only: table.explicit_access_only,
         key: table.key().map(replicated_column).collect(),
         fields,
@@ -859,7 +923,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         partition_by: table
             .partition_by
             .iter()
-            .filter_map(|name| table.column(name).map(|column| column.sql_name.as_str()))
+            .filter_map(|name| table.column(name).map(LogicalColumn::identity))
             .collect(),
         partition_group: table.partition_group.as_deref(),
         replayed: ReplayedConstraints {
@@ -983,7 +1047,7 @@ impl LogicalSchema {
                 let name = "id";
                 let column = table.column(name).ok_or_else(|| {
                     SchemaError::Invalid(format!(
-                        "{}.{} is required by descriptor format 7",
+                        "{}.{} is required by descriptor format {LOGICAL_SCHEMA_FORMAT}",
                         table.sql_name, name
                     ))
                 })?;
@@ -1022,6 +1086,15 @@ impl LogicalSchema {
                 if !names.insert(name.to_ascii_lowercase()) {
                     return invalid(format!("duplicate name {name}"));
                 }
+            }
+        }
+        for table in &self.tables {
+            for earlier in &table.earlier_names {
+                unique_name(
+                    format!("tables.{}.renamed_from", table.sql_name),
+                    earlier,
+                    &mut names,
+                )?;
             }
         }
         for view in &self.views {
@@ -1264,11 +1337,39 @@ impl LogicalSchema {
             .find(|table| table.sql_name.eq_ignore_ascii_case(sql_name))
     }
     pub fn table_id(&self, table: &LogicalTable) -> Commitment {
-        definition_item_id(self.publisher, self.app_id(), "entity", &table.sql_name)
+        definition_item_id(self.publisher, self.app_id(), "entity", table.identity())
     }
     pub fn field_id(&self, table: &LogicalTable, column: &LogicalColumn) -> Commitment {
-        let name = format!("{}.{}", table.sql_name, column.sql_name);
-        definition_item_id(self.publisher, self.app_id(), "field", &name)
+        definition_item_id(
+            self.publisher,
+            self.app_id(),
+            "field",
+            &field_identity(table, column),
+        )
+    }
+    pub fn counterpart(&self, other: &LogicalTable) -> Option<&LogicalTable> {
+        self.tables
+            .iter()
+            .find(|table| table.identity() == other.identity())
+    }
+    pub fn table_once_named(&self, name: &str) -> Option<&LogicalTable> {
+        self.table(name).or_else(|| {
+            self.tables.iter().find(|table| {
+                table
+                    .earlier_names
+                    .iter()
+                    .any(|earlier| earlier.eq_ignore_ascii_case(name))
+            })
+        })
+    }
+    pub fn renames(&self) -> bool {
+        self.tables.iter().any(|table| {
+            !table.earlier_names.is_empty()
+                || table
+                    .columns
+                    .iter()
+                    .any(|column| !column.earlier_names.is_empty())
+        })
     }
     pub fn manifest(&self, domains: &[DomainId]) -> ApplicationManifest {
         self.manifest_at(domains, 1, crate::EngineIdentity::current())
@@ -1287,12 +1388,18 @@ impl LogicalSchema {
         };
         let (mut entities, mut fields) = (Vec::new(), Vec::new());
         for table in self.typed() {
-            let replicated = replicated_table(self, table);
-            for column in replicated.key.iter().chain(&replicated.fields) {
-                let name = format!("{}.{}", table.sql_name, column.name);
-                fields.push(item("field", name, json(column)));
+            for column in table.key().chain(table.fields()) {
+                fields.push(item(
+                    "field",
+                    field_identity(table, column),
+                    json(&replicated_column(column)),
+                ));
             }
-            entities.push(item("entity", table.sql_name.clone(), json(&replicated)));
+            entities.push(item(
+                "entity",
+                table.identity().to_owned(),
+                json(&replicated_table(self, table)),
+            ));
         }
         let shape = TYPED_RULE.to_string();
         ApplicationManifest {
@@ -1331,6 +1438,7 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity) -> LogicalColumn {
         LogicalColumn {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             affinity,
             not_null: true,
@@ -1350,6 +1458,7 @@ mod tests {
                 identity: "abc".into(),
             },
             tables: vec![LogicalTable {
+                earlier_names: Vec::new(),
                 sql_name: "items".into(),
             explicit_access_only: false,
                 class: TableClass::Replayed,

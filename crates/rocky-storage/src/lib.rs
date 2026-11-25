@@ -6,6 +6,7 @@ pub mod files;
 pub mod observe;
 pub mod parsed;
 pub mod partition_sql;
+pub mod renamed;
 pub mod scoped_connection;
 pub mod sql;
 pub mod sqlite;

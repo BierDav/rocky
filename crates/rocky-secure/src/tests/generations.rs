@@ -12,6 +12,7 @@ const DOMAIN: DomainId = DomainId([1; 16]);
 
 fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     LogicalColumn {
+        earlier_names: Vec::new(),
         sql_name: name.into(),
         affinity,
         not_null,
@@ -65,6 +66,7 @@ fn referencing(
         })
         .collect();
     let mut table = LogicalTable {
+        earlier_names: Vec::new(),
         sql_name: name.into(),
         explicit_access_only: false,
         class: TableClass::Replayed,
@@ -267,6 +269,7 @@ impl Lineage {
                 items.push(
                     if self.local_note_from.is_some_and(|from| generation >= from) {
                         LogicalColumn {
+                            earlier_names: Vec::new(),
                             class: ColumnClass::LocalOnly,
                             ..note
                         }
@@ -281,6 +284,7 @@ impl Lineage {
         }
         if self.local_draft {
             items.push(LogicalColumn {
+                earlier_names: Vec::new(),
                 class: ColumnClass::LocalOnly,
                 ..column("draft", Affinity::Text, false)
             });

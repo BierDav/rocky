@@ -66,7 +66,7 @@ pub enum ErrorKind {
     MigrationFailed {
         /// The version the migration targeted.
         version: u32,
-        /// The failing step's index.
+        /// The failing step, counted from 1 in the order the migration lists its steps.
         step: usize,
     },
     /// The database is at a version that removed a table or field this application declares;

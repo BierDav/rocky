@@ -20,6 +20,7 @@ pub enum Unsupported {
     RequiredField(String),
     AddedReference(String),
     FilledReference(String),
+    LostEarlierName { renamed: String, earlier: String },
 }
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,6 +38,10 @@ impl std::fmt::Display for Unsupported {
             Self::FilledReference(key) => write!(
                 f,
                 "foreign key {key} would hold a required field's default on existing rows; keep the field optional or drop its default"
+            ),
+            Self::LostEarlierName { renamed, earlier } => write!(
+                f,
+                "{renamed} renames {earlier}, which had an earlier name; keep every earlier name with renamed_from, oldest first"
             ),
         }
     }
@@ -56,7 +61,7 @@ impl Removed {
 pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     let mut removed = Removed::default();
     for before in old.typed() {
-        let Some(after) = new.typed().find(|table| table.sql_name == before.sql_name) else {
+        let Some(after) = new.counterpart(before).filter(|table| table.class.typed()) else {
             removed.tables.insert(before.sql_name.clone());
             continue;
         };
@@ -65,8 +70,7 @@ pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
                 .columns
                 .iter()
                 .filter(|column| {
-                    column.class == ColumnClass::Replicated
-                        && after.column(&column.sql_name).is_none()
+                    column.class == ColumnClass::Replicated && after.counterpart(column).is_none()
                 })
                 .map(|column| format!("{}.{}", before.sql_name, column.sql_name)),
         );
@@ -85,6 +89,7 @@ pub fn classify_carrying(
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
     }
+    keeps_earlier_names(old, new)?;
     let change = if old == new {
         SchemaChange::Unchanged
     } else if old.replicated_fingerprint() == new.replicated_fingerprint() {
@@ -104,13 +109,15 @@ pub fn classify_carrying(
         return Ok(change);
     }
     let carried_parent = |key: &LogicalForeignKey| {
-        old.typed()
-            .find(|table| table.sql_name.eq_ignore_ascii_case(&key.table))
+        new.table(&key.table)
+            .and_then(|parent| old.counterpart(parent))
+            .filter(|parent| parent.class.typed())
             .is_some_and(|parent| {
                 carried(parent, None)
                     && key.references.iter().all(|name| {
-                        parent
-                            .column(name)
+                        new.table(&key.table)
+                            .and_then(|now| now.column(name))
+                            .and_then(|column| parent.counterpart(column))
                             .is_some_and(|column| carried(parent, Some(column)))
                     })
             })
@@ -123,12 +130,17 @@ pub fn classify_carrying(
     };
     for after in new.typed() {
         let Some(before) = old
-            .typed()
-            .find(|table| table.sql_name == after.sql_name && carried(table, None))
+            .counterpart(after)
+            .filter(|table| table.class.typed() && carried(table, None))
         else {
             continue;
         };
-        let held = |name: &str| before.column(name).filter(|was| carried(before, Some(was)));
+        let held = |name: &str| {
+            after
+                .column(name)
+                .and_then(|now| before.counterpart(now))
+                .filter(|was| carried(before, Some(was)))
+        };
         for now in after
             .columns
             .iter()
@@ -170,7 +182,8 @@ pub fn classify_carrying(
             };
             let kept = carried_parent(key)
                 && before.foreign_keys.iter().any(|was| {
-                    same_reference(was, key) && was.columns.iter().all(|name| held(name).is_some())
+                    same_reference((old, before, was), (new, after, key))
+                        && key.columns.iter().all(|name| held(name).is_some())
                 });
             if !kept {
                 return Err(Unsupported::AddedReference(named()));
@@ -182,13 +195,58 @@ pub fn classify_carrying(
     }
     Ok(change)
 }
-fn same_reference(was: &LogicalForeignKey, now: &LogicalForeignKey) -> bool {
-    let same = |a: &[String], b: &[String]| {
-        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.eq_ignore_ascii_case(b))
+type Reference<'a> = (&'a LogicalSchema, &'a LogicalTable, &'a LogicalForeignKey);
+fn same_reference((old, before, was): Reference<'_>, (new, after, now): Reference<'_>) -> bool {
+    let identities = |table: Option<&LogicalTable>, names: &[String]| -> Option<Vec<String>> {
+        let table = table?;
+        names
+            .iter()
+            .map(|name| {
+                table
+                    .column(name)
+                    .map(|column| column.identity().to_owned())
+            })
+            .collect()
     };
-    was.table.eq_ignore_ascii_case(&now.table)
-        && same(&was.columns, &now.columns)
-        && same(&was.references, &now.references)
+    let (was_parent, now_parent) = (old.table(&was.table), new.table(&now.table));
+    was_parent.map(LogicalTable::identity) == now_parent.map(LogicalTable::identity)
+        && was_parent.is_some()
+        && identities(Some(before), &was.columns).is_some()
+        && identities(Some(before), &was.columns) == identities(Some(after), &now.columns)
+        && identities(was_parent, &was.references) == identities(now_parent, &now.references)
+}
+fn keeps_earlier_names(old: &LogicalSchema, new: &LogicalSchema) -> Result<(), Unsupported> {
+    let lost = |renamed: String, earlier: &str| {
+        Err(Unsupported::LostEarlierName {
+            renamed,
+            earlier: earlier.to_owned(),
+        })
+    };
+    for after in new.typed() {
+        let before = std::iter::once(after.sql_name.as_str())
+            .chain(after.earlier_names.iter().map(String::as_str))
+            .find_map(|name| old.table(name).filter(|table| table.class.typed()));
+        let Some(before) = before else {
+            continue;
+        };
+        if before.identity() != after.identity() {
+            return lost(after.sql_name.clone(), &before.sql_name);
+        }
+        for now in &after.columns {
+            let was = std::iter::once(now.sql_name.as_str())
+                .chain(now.earlier_names.iter().map(String::as_str))
+                .find_map(|name| before.column(name));
+            if let Some(was) = was
+                && was.identity() != now.identity()
+            {
+                return lost(
+                    format!("{}.{}", after.sql_name, now.sql_name),
+                    &format!("{}.{}", before.sql_name, was.sql_name),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -206,6 +264,7 @@ mod tests {
 
     fn column(name: &str, not_null: bool) -> LogicalColumn {
         LogicalColumn {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             affinity: if name == "id" {
                 Affinity::Integer
@@ -240,6 +299,7 @@ mod tests {
             })
             .collect();
         LogicalTable {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             explicit_access_only: false,
             class: TableClass::Replayed,

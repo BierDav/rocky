@@ -806,7 +806,10 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<SetAside<'a>>, Error> {
         let mut copies = Vec::new();
         for table in tables {
-            let name = &table.sql_name;
+            let Some(before) = installed.counterpart(table) else {
+                continue;
+            };
+            let name = &before.sql_name;
             let created = !rows(
                 &self.conn,
                 &format!(
@@ -816,23 +819,23 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?
             .is_empty();
-            let Some(before) = installed.table(name).filter(|_| created) else {
+            if !created {
                 continue;
-            };
+            }
             let kept: Vec<(String, String)> = before
                 .columns
                 .iter()
                 .filter_map(|column| {
-                    let kept = table.column(&column.sql_name).filter(|kept| {
+                    let kept = table.counterpart(column).filter(|kept| {
                         !matches!(kept.class, rocky_core::ColumnClass::Derived { .. })
                             && column_carried(path, schema, table, column, kept)
                     })?;
                     let name = typed::quoted(&column.sql_name);
                     let value = match (&kept.default, kept.not_null && !column.not_null) {
                         (Some(default), true) => format!("COALESCE({name},{default})"),
-                        _ => name.clone(),
+                        _ => name,
                     };
-                    Some((name, value))
+                    Some((typed::quoted(&kept.sql_name), value))
                 })
                 .collect();
             self.conn
@@ -865,7 +868,7 @@ impl<A: RowApplication> Inner<A> {
         self.keep_trigger_bodies_on_rename(false).await?;
         let copies = set_aside?;
         for copy in &copies {
-            self.release_index_names(&set_aside_name(&copy.rebuilt.sql_name))
+            self.release_index_names(&set_aside_name(&copy.installed.sql_name))
                 .await?;
         }
         let (parent_keys, other_indexes): (Vec<_>, Vec<_>) = tables
@@ -893,15 +896,14 @@ impl<A: RowApplication> Inner<A> {
         for copy in copies {
             if !copy.copied.is_empty() {
                 let (columns, values): (Vec<_>, Vec<_>) = copy.copied.iter().cloned().unzip();
-                let name = &copy.rebuilt.sql_name;
                 self.conn
                     .execute(
                         format!(
                             "INSERT INTO {}({}) SELECT {} FROM {}",
-                            typed::quoted(name),
+                            typed::quoted(&copy.rebuilt.sql_name),
                             columns.join(","),
                             values.join(","),
-                            typed::quoted(&set_aside_name(name)),
+                            typed::quoted(&set_aside_name(&copy.installed.sql_name)),
                         ),
                         (),
                     )
@@ -1014,7 +1016,7 @@ impl<A: RowApplication> Inner<A> {
         for table in after.tables.iter().filter(|table| {
             table.class == TableClass::Replayed && table_carried(path, after, table)
         }) {
-            let Some(old) = before.table(&table.sql_name) else {
+            let Some(old) = before.counterpart(table) else {
                 continue;
             };
             let sources: Vec<Result<usize, SqlValue>> = table
@@ -1024,7 +1026,7 @@ impl<A: RowApplication> Inner<A> {
                     old.columns
                         .iter()
                         .enumerate()
-                        .find(|(_, o)| o.sql_name.eq_ignore_ascii_case(&column.sql_name))
+                        .find(|(_, o)| o.identity() == column.identity())
                         .filter(|(_, installed)| {
                             column_carried(path, after, table, installed, column)
                         })
@@ -1037,10 +1039,13 @@ impl<A: RowApplication> Inner<A> {
                     .iter()
                     .enumerate()
                     .all(|(index, source)| source.as_ref().is_ok_and(|from| *from == index));
-            if identity {
+            if identity && old.sql_name == table.sql_name {
                 continue;
             }
-            changed.insert(table.sql_name.to_ascii_lowercase(), sources);
+            changed.insert(
+                old.sql_name.to_ascii_lowercase(),
+                (table.sql_name.clone(), (!identity).then_some(sources)),
+            );
         }
         let removed: BTreeSet<String> = before
             .tables
@@ -1048,7 +1053,7 @@ impl<A: RowApplication> Inner<A> {
             .filter(|table| {
                 table.class == TableClass::Replayed
                     && after
-                        .table(&table.sql_name)
+                        .counterpart(table)
                         .is_none_or(|table| !table_carried(path, after, table))
             })
             .map(|table| table.sql_name.to_ascii_lowercase())
@@ -1075,10 +1080,15 @@ impl<A: RowApplication> Inner<A> {
             undo.retain(|entry| !removed.contains(&entry.table.to_ascii_lowercase()));
             let mut touched = undo.len() != kept;
             for entry in &mut undo {
-                let Some(sources) = changed.get(&entry.table.to_ascii_lowercase()) else {
+                let Some((renamed, sources)) = changed.get(&entry.table.to_ascii_lowercase())
+                else {
                     continue;
                 };
-                if let Some(before) = &entry.before {
+                if entry.table != *renamed {
+                    entry.table.clone_from(renamed);
+                    touched = true;
+                }
+                if let (Some(before), Some(sources)) = (&entry.before, sources) {
                     entry.before = Some(
                         sources
                             .iter()
@@ -1846,15 +1856,25 @@ impl<A: RowApplication> Inner<A> {
                 waiting: Vec::new(),
             },
         )]);
+        let renames = if schema.renames()
+            && self
+                .graph_for(scope.domain)?
+                .schema_any(header.extensions.tip)
+                .map_err(credential)?
+                != self.manifest
+        {
+            rocky_storage::renamed::Renames::of(schema)
+        } else {
+            rocky_storage::renamed::Renames::default()
+        };
         let mut copies = Vec::with_capacity(intent.statements.len());
         for statement in &intent.statements {
-            match split_intent(
-                &statement.sql,
-                &statement.params,
-                &schema.views,
-                &rules,
-                |_| Err::<Vec<Vec<SqlValue>>, _>(()),
-            ) {
+            let Ok(sql) = renames.apply(&statement.sql) else {
+                return Ok(Err(DropReason::Schema.into()));
+            };
+            match split_intent(&sql, &statement.params, &schema.views, &rules, |_| {
+                Err::<Vec<Vec<SqlValue>>, _>(())
+            }) {
                 Ok(split) if split.len() <= 1 => copies.extend(split),
                 _ => return Ok(Err(DropReason::Schema.into())),
             }

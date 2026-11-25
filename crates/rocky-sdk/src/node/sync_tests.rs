@@ -10,7 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-const SCHEMA: &str = r#"{"application":"sync","version":1,"format":7,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"sync","version":1,"format":8,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn link_sessions(
     dialer: &Node,
@@ -456,7 +456,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
-        r#"{"format":7,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        r#"{"format":8,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));

@@ -375,10 +375,36 @@ retryable.
 Raise the version in `Schema::builder(application, version)` with every change
 and declare the SQL that brings the data there with
 `SchemaBuilder::migration(version, steps)`. A step may read the previous
-version's rows as `parent.<table>`, but not correlated with the row it writes,
-so renaming a field takes two versions: one adds the new field and copies the
-old one into it (`UPDATE items SET label = title`), and a later one drops the
-old field once every device runs the first.
+version's rows, under that version's names, as `parent.<table>`, but not
+correlated with the row it writes. When a step fails, `MigrationFailed {
+version, step }` counts steps from 1.
+
+Rename a column or table in one version with `Column::renamed_from` or
+`Table::renamed_from`, with no copy step and no drop:
+
+```rust crates/rocky-sdk/examples/renamed_column.rs
+fn budget(version: u32) -> Result<Schema, rocky_sdk::Error> {
+    let memo = match version {
+        1 => Column::new("note", Affinity::Text),
+        _ => Column::new("memo", Affinity::Text).renamed_from("note"),
+    };
+    let expenses = Table::replayed("expenses")
+        .column(Column::new("cents", Affinity::Integer).required())
+        .column(memo);
+    Schema::builder("budget", version).table(expenses).build()
+}
+```
+
+The renamed field keeps its identity, so its rows, indexes, foreign keys,
+partition keys and role grants carry over. A write that a device made under an
+older version's names, such as `INSERT INTO expenses(note) ...` from a device
+that was offline during the rollout, is resolved in the schema it was written
+for and lands in `memo` on every device. Renaming again keeps every earlier name,
+oldest first: `Column::new("text", ..).renamed_from("note").renamed_from("memo")`.
+A version that drops an earlier name fails to open with `ErrorKind::Schema`
+and `SchemaError::LostEarlierName`, and an earlier name cannot be used again.
+`cargo run -p rocky-sdk --example renamed_column` walks through it with two
+devices.
 
 An admin device publishes a new version when it opens with it. A version that
 drops tables or fields or narrows a role fails to open with
@@ -387,12 +413,16 @@ it with `Configuration::open_confirmed(&impact.digest)`. A version that drops a
 role someone holds fails with `RoleInUse`.
 
 An application that declares an older version than the database runs
-(`DeclaredSchema::Behind` in `status`) keeps working. Only when a newer version
-removed a table or field it declares does open, or a statement using it, fail
-with `UpgradeRequired`.
+(`DeclaredSchema::Behind` in `status`, and `DatabaseStatus::schema_version`
+reads the installed version) keeps working. Only when a newer version removed
+or renamed a table or field it declares does open, or a statement using it,
+fail with `UpgradeRequired`: an application still on the old name has to
+upgrade, though the writes it made before the device learned of the rename
+still land under the new name.
 
 A write made under an earlier version that a later one can no longer apply,
-such as a late write into a removed field, is dropped on every device, loudly:
+such as a late write into a removed field, including one that a later version
+replaced with a new field declared without `renamed_from`, is dropped on every device, loudly:
 `observe` delivers a `DroppedTransaction` with `DropReason::Schema`, and the
 writer's device and every admin device raise a `WriteDropped` alert that
 survives restarts until `acknowledge_drop(token)`.

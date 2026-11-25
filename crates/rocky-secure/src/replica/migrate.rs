@@ -115,8 +115,8 @@ impl<A: RowApplication> Inner<A> {
                 None => table_carried(switch_path, &installed, table),
                 Some(column) => {
                     let rebuilt = schema
-                        .table(&table.sql_name)
-                        .and_then(|rebuilt| rebuilt.column(&column.sql_name))
+                        .counterpart(table)
+                        .and_then(|rebuilt| rebuilt.counterpart(column))
                         .unwrap_or(column);
                     column_carried(switch_path, &installed, table, column, rebuilt)
                 }
@@ -435,9 +435,10 @@ fn removed_replayed<'a>(
     installed: &'a LogicalSchema,
     schema: &'a LogicalSchema,
 ) -> impl Iterator<Item = &'a rocky_core::LogicalTable> {
-    installed.tables.iter().filter(|table| {
-        table.class == TableClass::Replayed && schema.table(&table.sql_name).is_none()
-    })
+    installed
+        .tables
+        .iter()
+        .filter(|table| table.class == TableClass::Replayed && schema.counterpart(table).is_none())
 }
 
 pub(super) fn stored_schema(descriptor: &[u8], record: &str) -> Result<LogicalSchema, Error> {

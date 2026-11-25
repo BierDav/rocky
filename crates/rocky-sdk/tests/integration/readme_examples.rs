@@ -15,6 +15,13 @@ mod refused_write {
     }
 }
 
+mod renamed_column {
+    include!("../../examples/renamed_column.rs");
+    pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+        main()
+    }
+}
+
 mod two_devices {
     include!("../../examples/two_devices.rs");
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,4 +81,10 @@ fn the_two_device_example_syncs_a_note_over_loopback_tcp() -> Result<(), Box<dyn
 fn the_refused_write_example_matches_a_clock_value_in_a_replayed_write()
 -> Result<(), Box<dyn std::error::Error>> {
     refused_write::run()
+}
+
+#[test]
+fn the_renamed_column_example_lands_an_offline_write_under_the_new_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    renamed_column::run()
 }

@@ -32,7 +32,7 @@ const SQLITE_READONLY: i32 = 8;
 const SQLITE_AUTH: i32 = 23;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 
-const SHOPPING: &str = r#"{"format":7,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":8,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},

@@ -42,7 +42,7 @@ fn schema(count: usize) -> String {
             "primary_key":["book","id"],"partition_by":["book"],"partition_group":"book"})
         })
         .collect();
-    json!({"format":7,"application":"wide_grants","version":1,"tables":tables}).to_string()
+    json!({"format":8,"application":"wide_grants","version":1,"tables":tables}).to_string()
 }
 fn open(
     directory: &Path,

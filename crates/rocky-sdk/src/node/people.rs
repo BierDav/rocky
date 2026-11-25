@@ -54,11 +54,15 @@ impl Node {
         let partitioned = domain.expand_partitions(&granted);
         let logical = domain.logical();
         let mut tables = BTreeMap::new();
-        for (name, scope) in domain.scopes() {
+        for table in &logical.tables {
+            let name = table.sql_name.as_str();
+            let Some(scope) = domain.scope_of(name) else {
+                continue;
+            };
             if name == crate::domain::REGISTRY {
                 continue;
             }
-            let table_id = logical.table(name).map(|table| logical.table_id(table));
+            let table_id = Some(logical.table_id(table));
             let rights: Vec<&Right> = whole
                 .iter()
                 .filter(|grant| grant.scope == scope)
@@ -348,11 +352,7 @@ impl Node {
             if partitioned.iter().any(|grant| grant.table == id) {
                 continue;
             }
-            let Some(scope) = domain
-                .scopes()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&table.sql_name))
-                .map(|(_, scope)| scope)
-            else {
+            let Some(scope) = domain.scope_of(&table.sql_name) else {
                 continue;
             };
             withheld.insert(

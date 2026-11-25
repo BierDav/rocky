@@ -10,8 +10,8 @@ fn member_chain(
     Ok(links.clone().complete(user, node)?)
 }
 
-const SCHEMA: &str = r#"{"format":7,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
-const PER_LIST_SCHEMA: &str = r#"{"format":7,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}],"roles":[{"name":"list_member","tables":[{"table":"lists","access":"read"}],"per_partition":["list"]}]}"#;
+const SCHEMA: &str = r#"{"format":8,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+const PER_LIST_SCHEMA: &str = r#"{"format":8,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}],"roles":[{"name":"list_member","tables":[{"table":"lists","access":"read"}],"per_partition":["list"]}]}"#;
 
 fn issuer_that_granted_nothing(issuer: &Settings) -> Settings {
     let mut other = issuer.clone();
@@ -236,7 +236,7 @@ fn only_admins_and_store_access_hold_the_registry() -> Result<(), Failure> {
     Ok(())
 }
 
-const TWO: &str = r#"{"format":7,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const TWO: &str = r#"{"format":8,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn issuer_at(
     schema: &str,

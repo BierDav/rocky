@@ -729,6 +729,7 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
         LogicalColumn {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             affinity,
             not_null: false,
@@ -739,6 +740,7 @@ mod tests {
     }
     fn table(name: &str, sql: &str, columns: Vec<LogicalColumn>, key: &[&str]) -> LogicalTable {
         LogicalTable {
+            earlier_names: Vec::new(),
             sql_name: name.into(),
             explicit_access_only: false,
             class: TableClass::Replayed,

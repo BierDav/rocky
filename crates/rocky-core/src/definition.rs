@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 7;
+pub const DEFINITION_FORMAT: u32 = 8;
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,6 +29,8 @@ pub struct SchemaDefinition {
 #[serde(deny_unknown_fields)]
 pub struct TableDefinition {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renamed_from: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub explicit_access_only: bool,
     pub class: TableClass,
@@ -76,6 +78,8 @@ pub struct ColumnDefinition {
     pub derived: Option<String>,
     #[serde(default)]
     pub local_only: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renamed_from: Vec<String>,
 }
 fn binary() -> Collation {
     Collation::Binary
@@ -277,6 +281,7 @@ impl TableDefinition {
                 default,
                 collation: column.collation,
                 class,
+                earlier_names: column.renamed_from.clone(),
             });
         }
         parts.push(format!("{} BLOB NOT NULL", quoted("id")));
@@ -287,6 +292,7 @@ impl TableDefinition {
             default: None,
             collation: Collation::Binary,
             class: ColumnClass::Replicated,
+            earlier_names: Vec::new(),
         });
         for check in &self.checks {
             if !crate::logical::single_expression(check) {
@@ -388,6 +394,7 @@ impl TableDefinition {
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(LogicalTable {
             sql_name: name.clone(),
+            earlier_names: self.renamed_from.clone(),
             explicit_access_only: self.explicit_access_only,
             class: self.class,
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
@@ -408,7 +415,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":7,
+        "format":8,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -471,7 +478,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -480,7 +487,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -570,7 +577,7 @@ mod identity_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -619,7 +626,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -642,7 +649,7 @@ mod partition_tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
-        let json = r#"{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
+        let json = r#"{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -664,7 +671,7 @@ mod partition_tests {
     fn removed_table_classes_are_refused() {
         let json = |class: &str| {
             format!(
-                r#"{{"format":7,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
+                r#"{{"format":8,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
             )
         };
         SchemaDefinition::parse(json("replayed").as_bytes()).unwrap();
@@ -701,7 +708,7 @@ mod replayed_tests {
 
     fn definition(extra: serde_json::Value) -> SchemaDefinition {
         let mut json = serde_json::json!({
-            "format": 7,
+            "format": 8,
             "publisher": "1111111111111111111111111111111111111111111111111111111111111111",
             "application": "replayed",
             "tables": [
@@ -813,7 +820,7 @@ mod replayed_tests {
     fn replayed_tables_declare_generated_columns_and_index_terms() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 7, "publisher": "00".repeat(32), "application": "terms",
+                "format": 8, "publisher": "00".repeat(32), "application": "terms",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true},
                                 {"name": "cap", "type": "integer", "not_null": true},
@@ -901,7 +908,7 @@ mod replayed_tests {
     fn conflict_policies_existence_logs_and_update_policies_are_refused() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 7, "publisher": "00".repeat(32), "application": "removed",
+                "format": 8, "publisher": "00".repeat(32), "application": "removed",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true}],
                     "indexes": [{"name": "by_name", "unique": true,
@@ -1105,5 +1112,203 @@ mod replayed_tests {
         );
         duplicate.restrictions.pop();
         duplicate.build().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use crate::{Unsupported, classify, removed};
+
+    fn version(items: &str, title: serde_json::Value, extra: serde_json::Value) -> LogicalSchema {
+        let mut json = serde_json::json!({
+            "format": 8, "publisher": "11".repeat(32), "application": "budget",
+            "tables": [
+                {"name": "lists", "class": "replayed", "primary_key": ["id"],
+                 "columns": [{"name": "name", "type": "text"}]},
+                {"name": items, "class": "replayed", "primary_key": ["list", "key", "id"],
+                 "partition_by": ["list"],
+                 "columns": [{"name": "list", "type": "text", "not_null": true},
+                             {"name": "key", "type": "text", "not_null": true},
+                             title],
+                 "indexes": [{"name": "items_by_key", "columns": [{"name": "key", "descending": false}]}]}
+            ]
+        });
+        if let serde_json::Value::Object(extra) = extra {
+            for (pointer, value) in extra {
+                let (parent, key) = pointer.rsplit_once('/').unwrap();
+                json.pointer_mut(parent)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .insert(key.to_owned(), value);
+            }
+        }
+        let definition = SchemaDefinition::parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let schema = definition.build().unwrap();
+        schema.supported_on(crate::Profile::Secure).unwrap();
+        schema
+    }
+    fn titled(name: &str, earlier: &[&str]) -> serde_json::Value {
+        serde_json::json!({"name": name, "type": "text", "renamed_from": earlier})
+    }
+    fn field(schema: &LogicalSchema, table: &str, column: &str) -> crate::Commitment {
+        let table = schema.table(table).unwrap();
+        schema.field_id(table, table.column(column).unwrap())
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_renamed_column_keeps_the_field_identity_of_its_first_name() {
+        let v1 = version("items", titled("title", &[]), serde_json::Value::Null);
+        let v2 = version(
+            "items",
+            titled("label", &["title"]),
+            serde_json::Value::Null,
+        );
+        let v3 = version(
+            "items",
+            titled("name", &["title", "label"]),
+            serde_json::Value::Null,
+        );
+        assert_eq!(field(&v1, "items", "title"), field(&v2, "items", "label"));
+        assert_eq!(field(&v1, "items", "title"), field(&v3, "items", "name"));
+        assert_ne!(
+            v1.manifest(&[]).hash(),
+            v2.manifest(&[]).hash(),
+            "a rename is a new schema version"
+        );
+        for (old, new) in [(&v1, &v2), (&v2, &v3), (&v1, &v3)] {
+            assert!(removed(old, new).is_empty(), "a rename removes nothing");
+            assert_eq!(classify(old, new), Ok(crate::SchemaChange::Replicated));
+        }
+        let field_names: Vec<_> = v3
+            .manifest(&[])
+            .fields
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(
+            field_names.contains(&"items.title".to_owned()),
+            "{field_names:?}"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_renamed_table_keeps_its_identity_and_its_references() {
+        let v1 = version("items", titled("title", &[]), serde_json::Value::Null);
+        let v2 = version(
+            "entries",
+            titled("title", &[]),
+            serde_json::json!({"/tables/1/renamed_from": ["items"]}),
+        );
+        assert_eq!(
+            v1.table_id(v1.table("items").unwrap()),
+            v2.table_id(v2.table("entries").unwrap())
+        );
+        assert_eq!(field(&v1, "items", "list"), field(&v2, "entries", "list"));
+        assert!(removed(&v1, &v2).is_empty());
+        let referencing = |items: &str, earlier: serde_json::Value| {
+            version(
+                items,
+                titled("title", &[]),
+                serde_json::json!({
+                    "/tables/0/foreign_keys": [{"columns": ["parent"], "table": items, "on_delete": "set_null"}],
+                    "/tables/0/columns": [{"name": "name", "type": "text"}, {"name": "parent", "type": "blob"}],
+                    "/tables/1/partition_by": [],
+                    "/tables/1/primary_key": ["id"],
+                    "/tables/1/renamed_from": earlier,
+                }),
+            )
+        };
+        let before = referencing("items", serde_json::json!([]));
+        let after = referencing("entries", serde_json::json!(["items"]));
+        assert_eq!(
+            classify(&before, &after),
+            Ok(crate::SchemaChange::Replicated),
+            "a foreign key to a renamed table is the same reference"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_renamed_partition_column_keeps_naming_its_field_in_the_manifest() {
+        let v1 = version("items", titled("title", &[]), serde_json::Value::Null);
+        let v2 = version(
+            "items",
+            titled("title", &[]),
+            serde_json::json!({
+                "/tables/1/columns/0/renamed_from": ["list"],
+                "/tables/1/columns/0/name": "household",
+                "/tables/1/partition_by": ["household"],
+                "/tables/1/primary_key": ["household", "key", "id"],
+            }),
+        );
+        assert_eq!(
+            field(&v1, "items", "list"),
+            field(&v2, "items", "household")
+        );
+        assert!(removed(&v1, &v2).is_empty());
+        let manifest = v2.manifest(&[]);
+        let items = manifest
+            .entities
+            .iter()
+            .find(|entity| entity.name == "items")
+            .unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&items.shape).unwrap();
+        assert_eq!(shape["partition_by"], serde_json::json!(["list"]));
+        assert!(
+            manifest
+                .fields
+                .iter()
+                .any(|field| field.name == "items.list"),
+            "a manifest names a partition column by the field it has always been"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_rename_that_drops_an_earlier_name_is_refused() {
+        let v2 = version(
+            "items",
+            titled("label", &["title"]),
+            serde_json::Value::Null,
+        );
+        let forgot = version("items", titled("name", &["label"]), serde_json::Value::Null);
+        assert_eq!(
+            classify(&v2, &forgot),
+            Err(Unsupported::LostEarlierName {
+                renamed: "items.name".into(),
+                earlier: "items.label".into(),
+            })
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_dropped_column_is_still_removed() {
+        let v1 = version("items", titled("title", &[]), serde_json::Value::Null);
+        let v2 = version("items", titled("label", &[]), serde_json::Value::Null);
+        assert_eq!(
+            removed(&v1, &v2).fields.into_iter().collect::<Vec<_>>(),
+            ["items.title"]
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_earlier_name_is_never_reused_or_the_row_identity() {
+        let parse = |title: serde_json::Value| {
+            let json = serde_json::json!({
+                "format": 8, "publisher": "11".repeat(32), "application": "budget",
+                "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
+                    "columns": [{"name": "key", "type": "text"}, title]}]
+            });
+            SchemaDefinition::parse(&serde_json::to_vec(&json).unwrap())
+                .unwrap()
+                .build()
+        };
+        for earlier in ["key", "id", "KEY", "not a name"] {
+            assert!(
+                parse(titled("label", &[earlier])).is_err(),
+                "{earlier} cannot be an earlier name"
+            );
+        }
+        assert!(parse(titled("label", &["title", "title"])).is_err());
+        parse(titled("label", &["title"])).unwrap();
     }
 }

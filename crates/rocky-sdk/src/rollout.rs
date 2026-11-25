@@ -78,20 +78,35 @@ impl std::error::Error for RoleInUse {}
 
 type HeldRights = BTreeMap<(String, Option<String>), BTreeSet<Right>>;
 
-fn held_rights(role: &RoleDefinition, target: &LogicalSchema) -> HeldRights {
+fn held_rights(
+    role: &RoleDefinition,
+    schema: &LogicalSchema,
+    target: &LogicalSchema,
+) -> HeldRights {
     let mut held = HeldRights::new();
-    for entry in role
-        .tables
-        .iter()
-        .filter(|entry| target.table(&entry.table).is_some())
-    {
+    for (table, entry) in role.tables.iter().filter_map(|entry| {
+        schema
+            .table(&entry.table)
+            .filter(|table| target.counterpart(table).is_some())
+            .map(|table| (table, entry))
+    }) {
         for grant in entry.access.grants() {
             let columns: Vec<Option<String>> = match grant.columns {
                 None => vec![None],
-                Some(columns) => columns.iter().cloned().map(Some).collect(),
+                Some(columns) => columns
+                    .iter()
+                    .map(|name| {
+                        Some(
+                            table
+                                .column(name)
+                                .map_or(name.as_str(), |column| column.identity())
+                                .to_owned(),
+                        )
+                    })
+                    .collect(),
             };
             for column in columns {
-                held.entry((entry.table.clone(), column))
+                held.entry((table.identity().to_owned(), column))
                     .or_default()
                     .extend(grant.rights.iter().copied());
             }
@@ -100,12 +115,15 @@ fn held_rights(role: &RoleDefinition, target: &LogicalSchema) -> HeldRights {
     held
 }
 
-fn narrows(before: &RoleDefinition, after: &RoleDefinition, target: &LogicalSchema) -> bool {
+fn narrows(
+    (before, current): (&RoleDefinition, &LogicalSchema),
+    (after, target): (&RoleDefinition, &LogicalSchema),
+) -> bool {
     let newly_per_partition = after
         .per_partition
         .iter()
         .any(|group| !before.per_partition.contains(group));
-    let kept = held_rights(after, target);
+    let kept = held_rights(after, target, target);
     let holds = |table: &str, column: Option<&String>, right: &Right| {
         [None, column]
             .into_iter()
@@ -113,7 +131,7 @@ fn narrows(before: &RoleDefinition, after: &RoleDefinition, target: &LogicalSche
             .any(|rights| rights.contains(right))
     };
     newly_per_partition
-        || held_rights(before, target)
+        || held_rights(before, current, target)
             .iter()
             .any(|((table, column), rights)| {
                 rights
@@ -129,7 +147,7 @@ pub(crate) fn narrowed_roles(current: &LogicalSchema, target: &LogicalSchema) ->
         .filter(|before| {
             target
                 .role(&before.name)
-                .is_some_and(|after| narrows(before, after, target))
+                .is_some_and(|after| narrows((before, current), (after, target)))
         })
         .filter_map(|role| RoleName::new(role.name.clone()).ok())
         .collect()
@@ -157,8 +175,15 @@ pub(crate) async fn confirm(
         settings.domain()?.logical().clone(),
         crate::domain::logical(schema, *settings.publisher.as_bytes())?,
     );
-    rocky_core::classify(&current, &target).map_err(|refusal| {
-        format!("the application schema cannot replace the installed one: {refusal}")
+    rocky_core::classify(&current, &target).map_err(|refusal| -> Failure {
+        match refusal {
+            rocky_core::Unsupported::LostEarlierName { renamed, earlier } => Box::new(
+                crate::Error::from(rocky_core::SchemaError::LostEarlierName { renamed, earlier }),
+            ),
+            refusal => {
+                format!("the application schema cannot replace the installed one: {refusal}").into()
+            }
+        }
     })?;
     let removed = rocky_core::removed(&current, &target);
     let narrowed_roles = narrowed_roles(&current, &target);

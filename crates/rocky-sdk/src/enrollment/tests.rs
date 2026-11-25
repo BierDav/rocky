@@ -252,6 +252,41 @@ async fn issuer_at(
 }
 
 #[tokio::test]
+async fn only_a_set_that_ends_an_author_revokes_new_authors() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let (issuer, vault, _) = issuer_at(TWO, directory.path()).await?;
+    let mut revoking = issuer.clone();
+    let mut rows = BTreeMap::new();
+    let (user, node) = (PrivateKey::new(), PrivateKey::new());
+    let (links, changes) = enroll(
+        &mut revoking,
+        &vault,
+        NodeKeys {
+            identity: user.public_key(),
+            node: node.public_key(),
+        },
+        Access::Read,
+        &Registry::default(),
+    )?;
+    let registry = Registry::merged(&mut rows, &changes)?;
+    let chain = member_chain(&links, &user, &node)?;
+    let mut enrolled = RevocationSet::new_in(issuer.database_context()?);
+    enrolled.link(chain.certificate().ok_or("member certificate")?.clone())?;
+    assert!(issuer.lacks(&enrolled)?);
+    assert!(
+        !issuer.revokes_new_authors(&enrolled)?,
+        "a new member's certificate ends no author"
+    );
+    revoking.begin_revocation(Revoke::Identity(user.public_key()), known(&registry), None)?;
+    revoking.rotate(&vault)?;
+    assert!(
+        issuer.revokes_new_authors(&revoking.revocations)?,
+        "a revocation statement ends its author"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 -> Result<(), Failure> {
     use fault::Stage;

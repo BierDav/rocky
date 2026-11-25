@@ -1233,7 +1233,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 .request_renewal(&vault, transport, false, None)
                 .await?;
             if Settings::exists(&path)? {
-                let revokes_new_authors = settings.lacks(&renewed.revocations)?;
+                let revokes_new_authors = settings.revokes_new_authors(&renewed.revocations)?;
                 if revokes_new_authors {
                     bootstrap_intent.request_checkpoint_import().await?;
                 }

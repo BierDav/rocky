@@ -477,6 +477,44 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     Ok(())
 }
 
+#[tokio::test]
+async fn a_renewal_that_learns_only_another_members_enrollment_imports_no_checkpoint()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let root = root.path();
+    let hub = Arc::new(Hub::default());
+    let a = create(&root.join("a"), memory(&hub, "a")).await?;
+    let b = join(
+        &root.join("b"),
+        memory(&hub, "b"),
+        &a.invite_as(issuer()).await,
+    )
+    .await?;
+    a.admit(&b).await;
+    a.database.add_peer(&b.contact().await).await?;
+    settle(&b).await;
+    let x = join(&root.join("x"), memory(&hub, "x"), &a.invite().await).await?;
+    settle(&x).await;
+    online(&x, false).await;
+    let y = join(&root.join("y"), memory(&hub, "y"), &b.invite().await).await?;
+    settle(&y).await;
+    learn_what_peer_issuers_recorded(&a).await?;
+    assert!(identities(&a).await.contains_key(&y.identity().await));
+
+    online(&x, true).await;
+    x.database.renew().await?;
+    let data = snap::ok(x.database.status()).await["data"].clone();
+    assert_eq!(
+        data["bootstrap_pending"], false,
+        "a new member's certificate ends no author, so nothing waits on a checkpoint: {}",
+        data["blockers"]
+    );
+    for device in [&a, &b, &x, &y] {
+        device.close().await;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct Faults {
     answer: Mutex<Option<Protocol>>,

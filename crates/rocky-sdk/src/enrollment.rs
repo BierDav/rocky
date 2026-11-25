@@ -722,6 +722,12 @@ impl Settings {
             statements: self.revocations.live(time) as u64,
         })
     }
+    pub(crate) fn revokes_new_authors(&self, set: &RevocationSet) -> Result<bool, Failure> {
+        let time = now()?;
+        let mut learned = self.clone();
+        learned.learn_revocations(set)?;
+        Ok(learned.revocations.digest(time)? != self.revocations.digest(time)?)
+    }
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
         let time = now()?;
         if set

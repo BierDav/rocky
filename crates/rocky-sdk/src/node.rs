@@ -1195,9 +1195,9 @@ impl Node {
         if !epochs_only && settings.issuer() && !current.issuer() {
             return Ok(false);
         }
-        let restores_revoked_authors =
-            (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)?;
-        if restores_revoked_authors {
+        let revokes_new_authors = (!epochs_only || !settings.issuer())
+            && settings.revokes_new_authors(&renewed.revocations)?;
+        if revokes_new_authors {
             self.bootstrap_intent.request_checkpoint_import().await?;
         }
         if epochs_only {

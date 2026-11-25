@@ -370,6 +370,14 @@ fn committed_row_exists(key: &str) -> io::Result<bool> {
     .map(|row| row.is_some())
 }
 
+pub fn remove_lock(path: &Path) -> io::Result<()> {
+    key(path).map(drop)
+}
+
+pub fn remove_dir_if_empty(directory: impl AsRef<Path>) -> io::Result<()> {
+    key(directory.as_ref()).map(drop)
+}
+
 pub struct Owner(String);
 impl Owner {
     pub async fn acquire(path: &Path) -> io::Result<Self> {

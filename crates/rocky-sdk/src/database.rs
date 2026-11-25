@@ -1169,7 +1169,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         Settings::load(&replica_path)?;
     }
     rocky_platform::fs::create_dir_all(&directory)?;
-    let _lock = rocky_platform::fs::Owner::acquire(&directory.join("sdk"))
+    let lock = rocky_platform::fs::Owner::acquire(&directory.join(SDK_LOCK))
         .await
         .map_err(|_| "data directory is already in use")?;
     rocky_secure::check_replica_format(&replica_path).await?;
@@ -1318,7 +1318,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     }
     let started = async {
         node.signed(async {
-            node.purge_if_removed().await;
+            node.purge_if_removed().await?;
             node.restore_line_signers().await?;
             node.complete_revocation().await?;
             node.refresh_importing().await?;
@@ -1599,6 +1599,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 .into(),
         );
     }
+    drop(lock);
     if purge && result.is_ok() {
         result = purge_directory(&directory).map_err(|e| e.to_string());
     }
@@ -1679,10 +1680,15 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
 fn purge_directory(directory: &Path) -> Result<(), Failure> {
     remove_installation(directory)?;
     match rocky_platform::fs::remove_dir_all(directory.join("secrets")) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
     }
+    for owned in [INSTALLATION_IDENTITY_FILE, SDK_LOCK] {
+        rocky_platform::fs::remove_lock(&directory.join(owned))?;
+    }
+    Ok(rocky_platform::fs::remove_dir_if_empty(directory)?)
 }
+const SDK_LOCK: &str = "sdk";
 const INSTALLATION_IDENTITY_FILE: &str = "rocky.sqlite";
 const INSTALLATION_DATA_FILES: [&str; 3] = ["rocky.sqlite-wal", "rocky.sqlite-shm", "mailbox.json"];
 fn remove_if_present(path: &Path) -> Result<(), Failure> {
@@ -2011,9 +2017,8 @@ mod tests {
         }
         std::fs::create_dir(directory.path().join("secrets"))?;
         purge_directory(directory.path())?;
-        assert_eq!(
-            std::fs::read_dir(directory.path())?.count(),
-            0,
+        assert!(
+            !directory.path().exists(),
             "a stale revocation notice left here fails every status of the next installation"
         );
         Ok(())

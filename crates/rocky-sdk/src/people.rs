@@ -318,7 +318,7 @@ pub enum Removal {
 pub enum Logout {
     /// Keeps the directory.
     KeepData,
-    /// Deletes the directory when the database closes.
+    /// Deletes Rocky's files when the database closes, and the directory unless it holds others.
     PurgeOnClose,
 }
 

@@ -1,7 +1,7 @@
 use crate::common::{Device, Failure};
 use rocky_sdk::{
-    Access, Affinity, Column, Configuration, DenyReason, ErrorKind, Invite, Network, Partition,
-    PersonId, Right, Role, RoleName, Schema, SqlValue, Table, transport::memory::Hub,
+    Access, Affinity, Column, Configuration, DenyReason, ErrorKind, Invite, Logout, Network,
+    Partition, PersonId, Right, Role, RoleName, Schema, SqlValue, Table, transport::memory::Hub,
 };
 use std::{
     path::{Path, PathBuf},
@@ -420,5 +420,23 @@ async fn a_removed_device_keeps_no_replicated_rows_on_disk() -> Result<(), Failu
         .ok_or("a removed device read")?;
     assert_eq!(refused.kind(), &ErrorKind::Removed, "{refused}");
     clinic.close([reopened]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_on_close_removes_the_directory() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    let member = clinic.invited("member", Access::Read).await?;
+    member.database.logout(Logout::PurgeOnClose).await?;
+    member.close().await;
+    let directory = clinic.directory("member");
+    assert!(
+        !directory.exists(),
+        "left behind: {:?}",
+        std::fs::read_dir(&directory)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()?
+    );
+    clinic.close([]).await;
     Ok(())
 }

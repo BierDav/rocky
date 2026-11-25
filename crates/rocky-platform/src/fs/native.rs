@@ -131,6 +131,27 @@ fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub fn remove_lock(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(lock_path(path)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+pub fn remove_dir_if_empty(directory: impl AsRef<Path>) -> io::Result<()> {
+    match std::fs::remove_dir(directory) {
+        Err(error)
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Err(error)
+        }
+        _ => Ok(()),
+    }
+}
+
 pub struct Owner(File);
 impl Owner {
     pub async fn acquire(path: &Path) -> io::Result<Self> {

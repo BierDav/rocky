@@ -1,6 +1,6 @@
 use super::*;
 use crate::status::{
-    ADMIN_STALE_AFTER, Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER,
+    Alert, AlertKind, BlockerCount, HealthReport, MeshDevice, SILENT_AFTER,
 };
 use live_links::io::Writer;
 use rocky_credentials::Signature;
@@ -20,7 +20,6 @@ pub(super) struct AdminWatch {
     stale_after: u64,
     membership_alerts: Vec<Alert>,
 }
-const ADMIN_STALE_AFTER_SECONDS: std::ops::RangeInclusive<u64> = 60..=10 * 366 * 24 * 60 * 60;
 const HEARD_SAVE: u64 = 3600;
 impl AdminWatch {
     fn hear(&mut self, node: &PublicKey, at: u64) {
@@ -246,7 +245,7 @@ impl Node {
         let saved = snapshot
             .authority
             .as_ref()
-            .map(|issuing| (issuing.heard.clone(), issuing.stale_after))
+            .map(|issuing| issuing.heard.clone())
             .unwrap_or_default();
         let time = self.status_time()?;
         let admins = registry
@@ -292,8 +291,8 @@ impl Node {
                 .admin_watch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            watch.stale_after = saved.1.unwrap_or(ADMIN_STALE_AFTER.as_secs());
-            for (node, at) in &saved.0 {
+            watch.stale_after = self.admin_stale_after;
+            for (node, at) in &saved {
                 let heard = watch.heard.entry(*node).or_default();
                 *heard = (*heard).max(*at);
             }
@@ -312,17 +311,16 @@ impl Node {
             let granularity = HEARD_SAVE.min(watch.stale_after / 8);
             let moved = watch.heard.iter().any(|(node, at)| {
                 saved
-                    .0
                     .get(node)
                     .is_none_or(|saved| at.saturating_sub(*saved) >= granularity)
             });
-            (moved || watch.heard.len() != saved.0.len()).then(|| watch.heard.clone())
+            (moved || watch.heard.len() != saved.len()).then(|| watch.heard.clone())
         };
         let mut settings = self.settings.lock().await;
         let snapshot_still_current = settings
             .authority
             .as_ref()
-            .is_some_and(|issuing| issuing.heard == saved.0 && issuing.trusted_nodes == base);
+            .is_some_and(|issuing| issuing.heard == saved && issuing.trusted_nodes == base);
         let observed_changed = snapshot_still_current && base != observed;
         if snapshot_still_current && (save.is_some() || observed_changed) {
             let mut draft = settings.clone();
@@ -378,31 +376,6 @@ impl Node {
         if cleared {
             self.observations.touch();
         }
-    }
-    pub(super) async fn set_admin_stale_after(&self, seconds: u64) -> Result<(), Failure> {
-        if !ADMIN_STALE_AFTER_SECONDS.contains(&seconds) {
-            return Err(Box::new(crate::node::Refused(
-                "stale_after must be a minute to ten years".into(),
-            )));
-        }
-        if !self.collects().await {
-            return Err(Box::new(crate::node::Refused(
-                "only an admin node watches other admin nodes".into(),
-            )));
-        }
-        {
-            let mut settings = self.settings.lock().await;
-            let mut draft = settings.clone();
-            draft
-                .authority
-                .as_mut()
-                .ok_or("an admin node issues")?
-                .stale_after = Some(seconds);
-            settings.commit(draft, &self.replica).await?;
-        }
-        self.refresh_admin_watch().await?;
-        self.observations.touch();
-        Ok(())
     }
     pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {
         self.admin_watch

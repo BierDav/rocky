@@ -27,19 +27,22 @@ pub(crate) enum Request {
     #[cfg(any(test, feature = "test-support"))]
     PartitionStatus(crate::PartitionTarget, Reply<crate::PartitionStatus>),
 
+    #[cfg(any(test, feature = "test-support"))]
     HeldChanges(Reply<Vec<crate::HeldChange>>),
+    #[cfg(any(test, feature = "test-support"))]
     DropHeld(rocky_core::Commitment, Reply<()>),
+    #[cfg(any(test, feature = "test-support"))]
     Retention(
         String,
         Option<crate::RetentionPolicy>,
         bool,
         Reply<crate::RetentionStatus>,
     ),
+    #[cfg(any(test, feature = "test-support"))]
     RetentionLimits(
         Option<crate::RetentionLimits>,
         Reply<crate::RetentionLimits>,
     ),
-    AdminStaleAfter(u64, Reply<()>),
     #[cfg(any(test, feature = "test-support"))]
     Activity(u64, Reply<crate::activity::ActivityPage>),
     #[cfg(any(test, feature = "test-support"))]
@@ -93,19 +96,20 @@ impl Request {
     }
     pub(crate) fn fail(self, error: crate::Failure) {
         match self {
+            #[cfg(any(test, feature = "test-support"))]
             Self::HeldChanges(reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::DropHeld(_, reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::Retention(_, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Self::RetentionLimits(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::AdminStaleAfter(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             #[cfg(any(test, feature = "test-support"))]

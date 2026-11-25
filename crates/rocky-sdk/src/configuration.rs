@@ -4,6 +4,9 @@ use crate::{
 };
 use std::{path::PathBuf, sync::Arc};
 
+const ADMIN_STALE_AFTER_RANGE: std::ops::RangeInclusive<std::time::Duration> =
+    std::time::Duration::from_secs(60)..=std::time::Duration::from_secs(10 * 366 * 24 * 60 * 60);
+
 /// Where a database lives, its schema, keys and network; `create`, `open`, `join` or `link` starts
 /// it.
 #[derive(Clone)]
@@ -14,6 +17,7 @@ pub struct Configuration {
     pub(crate) identity: Option<Arc<dyn IdentityProvider>>,
     pub(crate) network: Option<Network>,
     pub(crate) sync: SyncMode,
+    pub(crate) admin_stale_after: std::time::Duration,
 }
 impl Configuration {
     /// A database in `directory` with the application's schema, syncing `Live` and with no network
@@ -35,6 +39,7 @@ impl Configuration {
             identity: None,
             network: None,
             sync: SyncMode::Live,
+            admin_stale_after: crate::status::ADMIN_STALE_AFTER,
         }
     }
     /// Keeps this device's keys in `store` instead of files under `directory/secrets`.
@@ -61,6 +66,18 @@ impl Configuration {
     pub fn sync(mut self, mode: SyncMode) -> Self {
         self.sync = mode;
         self
+    }
+    /// How long an admin device waits to hear from another admin before raising `AdminStale`;
+    /// 30 days by default, and a minute to ten years.
+    pub fn admin_stale_after(mut self, after: std::time::Duration) -> Result<Self, crate::Error> {
+        if !ADMIN_STALE_AFTER_RANGE.contains(&after) {
+            return Err(crate::Error::new(
+                crate::ErrorKind::Rejected,
+                "admin_stale_after must be a minute to ten years",
+            ));
+        }
+        self.admin_stale_after = after;
+        Ok(self)
     }
     /// Creates a new database owned by a new root key and returns both keys once; Rocky never
     /// stores them.

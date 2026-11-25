@@ -274,7 +274,8 @@ pub struct GenerationStatus {
     /// Whether the device has not yet followed an admin's schema publications and needs a sync with
     /// one.
     pub follow_required: bool,
-    /// Changes held back because they do not apply yet; see `Database::held_changes`.
+    /// Changes held back because they do not apply yet, such as writes for a schema version not
+    /// installed.
     pub held: usize,
     /// The installed manifest digest.
     pub manifest: String,
@@ -728,7 +729,7 @@ pub enum AlertKind {
     },
 }
 /// How long an admin may stay unheard before `AdminStale`; 30 days unless
-/// `Database::set_admin_stale_after` changes it.
+/// `Configuration::admin_stale_after` changes it.
 pub const ADMIN_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);
 /// A device's signed health summary, shared with admin devices.
@@ -772,8 +773,8 @@ pub const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(300
 /// A snapshot of the database: who this device is, the data and the network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseStatus {
-    /// Identifies this snapshot for `StatusChanges`.
-    pub token: String,
+    #[serde(skip)]
+    pub(crate) token: String,
     /// When it was taken.
     pub observed_at_epoch_millis: Option<u64>,
     /// This device's credentials.

@@ -236,7 +236,7 @@ async fn clones_share_one_database_and_any_close_ends_every_wait() -> Result<(),
     second_changes.next().await?;
 
     add(&second, 1, "Milk").await;
-    assert_ne!(second_changes.next().await?.token, "");
+    second_changes.next().await?;
     assert_eq!(titles(&first).await, ["Milk"]);
 
     let waiting = tokio::spawn(async move {

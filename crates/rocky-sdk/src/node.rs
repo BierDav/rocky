@@ -6,6 +6,7 @@ mod discovery;
 mod exchange;
 use exchange::{Exchanged, PeerWork};
 mod health;
+#[cfg(any(test, feature = "test-support"))]
 mod held;
 mod invitations;
 mod linking;
@@ -266,6 +267,7 @@ pub(crate) struct Node {
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
     admin_watch: std::sync::Mutex<health::AdminWatch>,
+    admin_stale_after: u64,
     tip_chain: Arc<tokio::sync::Mutex<()>>,
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
     mesh_revision: watch::Sender<u64>,
@@ -337,6 +339,7 @@ impl Node {
             link_requests: Default::default(),
             mesh_revision: watch::channel(0).0,
             admin_watch: Default::default(),
+            admin_stale_after: crate::status::ADMIN_STALE_AFTER.as_secs(),
             seal_skipped: Default::default(),
             tip_chain: Default::default(),
             report_failing: AtomicBool::new(false),
@@ -407,6 +410,10 @@ impl Node {
     }
     pub fn with_declared(mut self, schema: crate::schema::Schema) -> Self {
         self.declared = schema;
+        self
+    }
+    pub(crate) fn with_admin_stale_after(mut self, after: std::time::Duration) -> Self {
+        self.admin_stale_after = after.as_secs();
         self
     }
     pub(crate) fn with_signer(
@@ -857,6 +864,7 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+    #[cfg(any(test, feature = "test-support"))]
     async fn retention(
         &self,
         collection: &str,

@@ -31,7 +31,8 @@ mod extension;
 mod generation;
 mod groups;
 mod identities;
-/// Held changes and history retention.
+/// Held changes and history retention, for Rocky's own tests.
+#[cfg(any(test, feature = "test-support"))]
 pub mod inspection;
 mod invitation;
 mod membership;
@@ -80,6 +81,7 @@ pub use database::{Created, Database};
 pub use delivery::State as DeliveryState;
 pub use error::{Blockers, DenyReason, Error, ErrorKind, Limit, Right, Unsupported};
 pub use extension::DeviceCredential;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use inspection::*;
 pub use invitation::{
     Invitation, InvitationCode, InvitationId, Invite, InviteError, JoinError, PendingInvitation,

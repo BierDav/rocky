@@ -318,10 +318,10 @@ impl Simulation {
                 Ok("admin".into())
             }
             Action::StaleAfter(node, after) => {
-                self.running(*node)?
-                    .database()?
-                    .set_admin_stale_after(after.as_secs())
-                    .await?;
+                self.running(*node)?;
+                self.members[*node].admin_stale_after = Some(*after);
+                self.members[*node].close().await?;
+                self.reopen(*node).await?;
                 Ok("set".into())
             }
             Action::Mesh(node) => {

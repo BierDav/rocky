@@ -30,6 +30,7 @@ pub(super) struct Member {
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
     pub(super) root: Option<Arc<crate::RootKey>>,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
+    pub(super) admin_stale_after: Option<std::time::Duration>,
 }
 
 impl Member {
@@ -45,6 +46,7 @@ impl Member {
             ahead: Arc::default(),
             root: None,
             identity: None,
+            admin_stale_after: None,
         }
     }
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
@@ -56,6 +58,9 @@ impl Member {
             .sync(crate::SyncMode::Manual);
         if let Some(identity) = &self.identity {
             configuration = configuration.identity(identity.clone());
+        }
+        if let Some(after) = self.admin_stale_after {
+            configuration = configuration.admin_stale_after(after)?;
         }
         let hosted = Database::host(&configuration, install, self.ahead.clone()).await?;
         self.running = Some(Running {

@@ -88,6 +88,7 @@ struct Setup {
     install: Install,
     confirmation: Option<String>,
     sync: crate::SyncMode,
+    admin_stale_after: std::time::Duration,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
@@ -397,6 +398,7 @@ impl Database {
             install,
             confirmation,
             sync: configuration.sync,
+            admin_stale_after: configuration.admin_stale_after,
             #[cfg(test)]
             expose: None,
         };
@@ -1322,7 +1324,9 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         path.clone(),
         bootstrap_intent,
     );
-    let node = node.with_signer(signer);
+    let node = node
+        .with_signer(signer)
+        .with_admin_stale_after(setup.admin_stale_after);
     let node = Arc::new(match &setup.schema {
         Some(schema) => node.with_declared(schema.clone()),
         None => node,

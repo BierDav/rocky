@@ -31,7 +31,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 47;
+pub const VERSION: u32 = 48;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -274,7 +274,6 @@ pub struct Issuing {
     pub heard: BTreeMap<PublicKey, u64>,
     pub trusted_nodes:
         BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::AdminObservation>>,
-    pub stale_after: Option<u64>,
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
     pub rights_change: Option<RightsChange>,
 }

@@ -11,15 +11,19 @@ impl Node {
             return;
         }
         match request {
+            #[cfg(any(test, feature = "test-support"))]
             Request::HeldChanges(reply) => {
                 let _ = reply.send(self.replica.held_changes().await.map_err(Into::into));
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::DropHeld(a, reply) => {
                 let _ = reply.send(self.drop_held(a).await);
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::Retention(a, b, c, reply) => {
                 let _ = reply.send(self.retention(&a, b, c).await);
             }
+            #[cfg(any(test, feature = "test-support"))]
             Request::RetentionLimits(a, reply) => {
                 let _ = reply.send(
                     async {
@@ -30,9 +34,6 @@ impl Node {
                     }
                     .await,
                 );
-            }
-            Request::AdminStaleAfter(a, reply) => {
-                let _ = reply.send(self.set_admin_stale_after(a).await);
             }
             #[cfg(any(test, feature = "test-support"))]
             Request::Activity(a, reply) => {

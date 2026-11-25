@@ -227,7 +227,7 @@ A promotion or access change reaches each of the person's devices at its next
 sync with an admin device, including a device still joining when it was made.
 Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
 an admin links or unlinks a device, and `AdminStale` when no device of an admin
-was heard from for 30 days (`set_admin_stale_after`).
+was heard from for 30 days (`Configuration::admin_stale_after`).
 
 A removed or unlinked device learns of it at its next sync. From then on it
 refuses every read, commit and sync with `ErrorKind::Removed`, also after

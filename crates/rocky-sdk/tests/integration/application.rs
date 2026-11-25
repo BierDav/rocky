@@ -433,18 +433,24 @@ async fn invite_refuses_a_label_over_256_bytes() -> Result<(), Failure> {
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn trusted_staleness_is_set_between_a_minute_and_ten_years() -> Result<(), Failure> {
     let directory = Scratch::new().await;
-    let database = Configuration::new(directory.path(), &schema()?)?
-        .create()
-        .await?
-        .database;
+    let configuration = Configuration::new(directory.path(), &schema()?)?;
     let ten_years = 10 * 366 * 24 * 60 * 60;
     for refused in [0, 59, ten_years + 1] {
         assert!(
-            database.set_admin_stale_after(refused).await.is_err(),
+            configuration
+                .clone()
+                .admin_stale_after(std::time::Duration::from_secs(refused))
+                .is_err(),
             "a staleness threshold of {refused} s is refused"
         );
     }
-    database.set_admin_stale_after(60).await?;
-    database.set_admin_stale_after(ten_years).await?;
+    configuration
+        .clone()
+        .admin_stale_after(std::time::Duration::from_secs(60))?;
+    let database = configuration
+        .admin_stale_after(std::time::Duration::from_secs(ten_years))?
+        .create()
+        .await?
+        .database;
     Ok(database.close().await?)
 }

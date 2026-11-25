@@ -59,11 +59,6 @@ impl Database {
         self.send(|reply| Request::RetentionLimits(Some(limits), reply))
             .await
     }
-    /// How long an admin may stay unheard before `AdminStale`.
-    pub async fn set_admin_stale_after(&self, seconds: u64) -> Result<(), crate::Error> {
-        self.send(|reply| Request::AdminStaleAfter(seconds, reply))
-            .await
-    }
     /// The activity log after `after`, for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn activity(

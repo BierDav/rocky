@@ -19,7 +19,7 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     device.add(1, "apples").await;
     let next = changes.next().await?;
     assert_ne!(
-        next.token, status.token,
+        next, status,
         "a revision racing registration is returned immediately, never lost"
     );
     assert_eq!(device.titles().await, ["apples"]);

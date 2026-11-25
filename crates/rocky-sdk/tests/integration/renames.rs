@@ -150,7 +150,7 @@ async fn write(device: &Device, sql: &str) -> Result<TransactionToken, Failure> 
     transaction.execute(sql, bound).await?;
     match transaction.commit().await? {
         Commit::Recorded(token) => Ok(token),
-        Commit::NoChanges => Err("the write changed nothing".into()),
+        Commit::NoWrites => Err("the write changed nothing".into()),
     }
 }
 async fn update(device: &Device, sql: &str) -> Result<TransactionToken, Failure> {
@@ -158,7 +158,7 @@ async fn update(device: &Device, sql: &str) -> Result<TransactionToken, Failure>
     transaction.execute(sql, params![]).await?;
     match transaction.commit().await? {
         Commit::Recorded(token) => Ok(token),
-        Commit::NoChanges => Err("the write changed nothing".into()),
+        Commit::NoWrites => Err("the write changed nothing".into()),
     }
 }
 async fn texts(device: &Device, sql: &str, columns: &[&str]) -> Result<Vec<Vec<String>>, Failure> {

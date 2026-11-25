@@ -1,10 +1,10 @@
 #![cfg(target_family = "wasm")]
 use rocky_platform::fs::Scratch;
-use rocky_sdk::{
-    Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, params,
-};
+use rocky_sdk::{Affinity, Column, Configuration, Database, Network, Schema, Table, params};
 use std::sync::Arc;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+type Failure = Box<dyn std::error::Error>;
 
 async fn bodies(db: &Database, pattern: &str) -> Result<Vec<String>, Failure> {
     let rows = db

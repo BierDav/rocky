@@ -483,6 +483,51 @@ async fn a_child_import_replays_a_child_once_though_a_later_parent_delete_cascad
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_child_held_from_frames_starts_from_the_seal_its_parent_base_sits_at() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "p", "parent").await;
+    let child = tag(&a, "t", "p").await;
+    delete(&a, "p").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    list_checkpoints(&lineage, &a).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    sync_scope(&lineage, &a, &b, &keys[1], tag_scope).await;
+    let needs = b.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert_eq!(
+        needs
+            .iter()
+            .map(|need| (need.scope, need.replay, need.listed.len()))
+            .collect::<Vec<_>>(),
+        vec![(tag_scope, crate::FrameReplay::Never, 1)],
+        "the child's covered frames never replay against a parent base past them"
+    );
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    assert!(
+        b.seal_rebootstraps(lineage.domain)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let outcome = b.transaction_outcome(child).await.unwrap();
+    assert!(
+        !matches!(outcome, Some(TransactionOutcome::Dropped { .. })),
+        "the base reports the child the author applied, never a drop against the parent's later base: {outcome:?}"
+    );
+    assert!(tags(&b).await.is_empty());
+    b.audit(items).await.unwrap();
+    b.audit(tag_scope).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn undoing_a_parent_insert_keeps_the_children_the_undo_does_not_own() {
     let lineage = linked();
     let dir = Scratch::new().await;

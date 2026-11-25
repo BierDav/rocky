@@ -176,6 +176,18 @@ impl<A: RowApplication> Inner<A> {
                 }));
             }
         }
+        if let Some(cut) = self.linked_cut(scope, path).await?
+            && self.base_precedes(id, path, cut).await?
+        {
+            let listed = self.listed_at(graph, scope, path[cut..].iter().rev())?;
+            if !listed.is_empty() {
+                return Ok(Some(SealRebootstrap {
+                    scope,
+                    listed,
+                    replay: FrameReplay::Never,
+                }));
+            }
+        }
         let unknown = plan.unverified.contains(&scope);
         let pruned = self.has_pruned_prefix(scope).await?;
         let base = match id {
@@ -227,6 +239,21 @@ impl<A: RowApplication> Inner<A> {
             listed,
             replay,
         }))
+    }
+    async fn linked_cut(
+        &self,
+        scope: ResourceScope,
+        path: &[Commitment],
+    ) -> Result<Option<usize>, Error> {
+        let mut cut = None;
+        for linked in self.linked_scopes_of(scope).await? {
+            if let Some(base) = self.base_seal(linked).await?
+                && let Some(at) = path.iter().position(|known| *known == base)
+            {
+                cut = cut.max(Some(at));
+            }
+        }
+        Ok(cut)
     }
     async fn replay_scope(
         &mut self,
@@ -437,9 +464,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             need.ok_or_else(|| denied("the scope's base sits at a seal of the followed path"))?;
         match need.replay {
             FrameReplay::Never => {
-                return Err(denied(
-                    "only a checkpoint listed at a removing seal restores this scope",
-                ));
+                return Err(denied("only a listed checkpoint restores this scope"));
             }
             FrameReplay::Peers if !reset => {
                 return Err(denied("pruned frames must come again from a peer"));

@@ -500,6 +500,18 @@ fn reason_named(name: &str) -> Result<DropReason, Error> {
 
 impl<A: RowApplication> Inner<A> {
     async fn linked_scopes(&self, scope: i64) -> Result<Vec<i64>, Error> {
+        let stored = collect_rows(
+            self.conn
+                .query("SELECT scope FROM secure_scope_state WHERE id=?", [scope])
+                .await?,
+        )
+        .await?;
+        let Some([SqlValue::Blob(blob)]) = stored.first().map(Vec::as_slice) else {
+            return Err(Error::Corrupt("replayed scope".into()));
+        };
+        self.linked_scopes_of(decode(blob)?).await
+    }
+    pub(super) async fn linked_scopes_of(&self, own: ResourceScope) -> Result<Vec<i64>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(Vec::new());
         };
@@ -515,17 +527,6 @@ impl<A: RowApplication> Inner<A> {
         if !links {
             return Ok(Vec::new());
         }
-        let corrupt = || Error::Corrupt("replayed scope".into());
-        let stored = collect_rows(
-            self.conn
-                .query("SELECT scope FROM secure_scope_state WHERE id=?", [scope])
-                .await?,
-        )
-        .await?;
-        let Some([SqlValue::Blob(blob)]) = stored.first().map(Vec::as_slice) else {
-            return Err(corrupt());
-        };
-        let own: ResourceScope = decode(blob)?;
         let Some(logical) = typed
             .rows
             .table(&own.table)

@@ -778,4 +778,73 @@ mod regressions {
         )
         .await
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_joiner_replays_a_card_whose_board_a_later_drop_removed() -> Result<(), Failure> {
+        holds_at(
+            20327,
+            soak_at(20327, Wall::Frozen),
+            vec![
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l0".into(),
+                        code: 2,
+                        cap: 9,
+                    },
+                ),
+                Change(
+                    0,
+                    Change::Board {
+                        list: "l1".into(),
+                        code: 1,
+                        cap: 4,
+                    },
+                ),
+                Change(
+                    1,
+                    Change::Card {
+                        list: "l0".into(),
+                        board: 3,
+                        pinned: None,
+                        name: 0,
+                        points: 3,
+                    },
+                ),
+                Sync(1),
+                Change(
+                    1,
+                    Change::Card {
+                        list: "l1".into(),
+                        board: 2,
+                        pinned: Some(4),
+                        name: 1,
+                        points: 0,
+                    },
+                ),
+                Change(
+                    1,
+                    Change::DropBoard {
+                        list: "l0".into(),
+                        board: 0,
+                    },
+                ),
+                Invite(0, 2),
+                SyncPair(0, 1),
+                Seal(0),
+                Compact(0),
+                Invite(0, 3),
+                Change(
+                    1,
+                    Change::Board {
+                        list: "l1".into(),
+                        code: 2,
+                        cap: 3,
+                    },
+                ),
+                Sync(2),
+            ],
+        )
+        .await
+    }
 }

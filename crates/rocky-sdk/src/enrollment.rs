@@ -740,15 +740,11 @@ impl Settings {
     }
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
         let time = now()?;
-        let known: BTreeSet<_> = self
-            .revocations
-            .certificates()
-            .map(SignedCapability::id)
-            .collect::<Result<_, _>>()?;
-        for certificate in set.certificates() {
-            if !known.contains(&certificate.id()?) {
-                return Ok(true);
-            }
+        if set
+            .certificate_ids()
+            .any(|id| !self.revocations.holds_certificate(id))
+        {
+            return Ok(true);
         }
         for signed in set.statements() {
             if signed.live(time) && self.revocations.get(&signed.id()?).is_none() {

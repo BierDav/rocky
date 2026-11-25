@@ -7,12 +7,19 @@ const NOW: u64 = 2_000_000_000;
 
 thread_local! {
     static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CERTIFICATE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 pub(super) fn count_derivation() {
     DERIVATIONS.with(|count| count.set(count.get() + 1));
 }
 fn derivations() -> usize {
     DERIVATIONS.with(std::cell::Cell::get)
+}
+pub(super) fn count_certificate_check() {
+    CERTIFICATE_CHECKS.with(|count| count.set(count.get() + 1));
+}
+fn certificate_checks() -> usize {
+    CERTIFICATE_CHECKS.with(std::cell::Cell::get)
 }
 
 fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
@@ -494,6 +501,49 @@ fn batched_links_hold_what_single_links_hold() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_held_membership_certificate_is_checked_once() {
+    let (root, certificates) = forked_links();
+    let before = certificate_checks();
+    let mut held = RevocationSet::new();
+    for certificate in &certificates {
+        held.link(certificate.clone()).unwrap();
+    }
+    assert_eq!(certificate_checks() - before, certificates.len());
+
+    let before = certificate_checks();
+    let database = crate::membership::node_database(&certificates[0]).unwrap();
+    held.verify(root.public_key(), APP).unwrap();
+    held.verify_in(database).unwrap();
+    assert!(!held.link(certificates[0].clone()).unwrap());
+    let mut merged = held.clone();
+    merged.merge_in(&held, database, NOW).unwrap();
+    let mut fresh = RevocationSet::new();
+    fresh.merge(&held, root.public_key(), APP, NOW).unwrap();
+    assert_eq!(fresh, held);
+    assert_eq!(
+        certificate_checks() - before,
+        0,
+        "verifying, relinking or merging certificates a set already holds checks none again"
+    );
+    let elsewhere = crate::DatabaseContext {
+        publisher: PrivateKey::new().public_key(),
+        ..database
+    };
+    assert!(held.verify(elsewhere.publisher, APP).is_err());
+    assert!(held.verify(root.public_key(), AppId([8; 16])).is_err());
+    assert!(held.verify_in(elsewhere).is_err());
+
+    let before = certificate_checks();
+    let decoded = RevocationSet::from_bytes(&held.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, held);
+    assert_eq!(
+        certificate_checks() - before,
+        certificates.len(),
+        "decoded bytes are checked like any untrusted certificate"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn whole_set_derivations_are_computed_once_per_change() {
     let (_, certificates) = forked_links();
     let mut set = RevocationSet::new();
@@ -625,8 +675,6 @@ fn a_membership_certificate_for_another_identitys_node_without_its_signature_is_
         gossiped
             .certificates
             .insert(forged.id().unwrap(), forged.clone());
-        assert!(known.merge(&gossiped, root.public_key(), APP, NOW).is_err());
-        assert_eq!(known, before);
         assert!(RevocationSet::from_bytes(&gossiped.to_bytes().unwrap()).is_err());
         let admitted = b_grant.clone().with_certificate(forged.clone());
         assert!(

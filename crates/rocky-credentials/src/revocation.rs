@@ -435,14 +435,7 @@ impl RevocationSet {
             return Err(denied("authority set belongs to another database"));
         }
         self.verify(database.publisher, database.scope.app)?;
-        if self.certificates.values().any(|certificate| {
-            certificate
-                .capability
-                .extended()
-                .ok()
-                .and_then(|extended| extended.database)
-                != Some(database)
-        }) || self
+        if self
             .statements
             .values()
             .any(|statement| statement.database != Some(database))
@@ -479,15 +472,21 @@ impl RevocationSet {
         Ok(true)
     }
     fn add_link(&mut self, certificate: SignedCapability) -> Result<Option<Commitment>, Error> {
+        let id = certificate.id()?;
+        if self.certificates.contains_key(&id) {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        tests::count_certificate_check();
         certificate.certifies(
             certificate.capability.subject,
             certificate.capability.not_before,
         )?;
         crate::membership::node_database(&certificate)?;
-        let id = certificate.id()?;
-        if self.certificates.contains_key(&id) {
-            return Ok(None);
-        }
+        self.hold_checked(id, certificate)?;
+        Ok(Some(id))
+    }
+    fn hold_checked(&mut self, id: Commitment, certificate: SignedCapability) -> Result<(), Error> {
         let database = certificate
             .capability
             .extended()?
@@ -496,7 +495,22 @@ impl RevocationSet {
         self.bind(Some(database))?;
         self.derived = Derived::default();
         self.certificates.insert(id, certificate);
-        Ok(Some(id))
+        Ok(())
+    }
+    fn certificates_database(&self) -> Result<Option<&crate::DatabaseContext>, Error> {
+        if self.certificates.is_empty() {
+            return Ok(None);
+        }
+        self.database
+            .as_deref()
+            .map(Some)
+            .ok_or_else(|| denied("membership certificate has no database"))
+    }
+    pub fn holds_certificate(&self, id: &Commitment) -> bool {
+        self.certificates.contains_key(id)
+    }
+    pub fn certificate_ids(&self) -> impl Iterator<Item = &Commitment> {
+        self.certificates.keys()
     }
     pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
         self.certificates.values()
@@ -659,15 +673,10 @@ impl RevocationSet {
         for signed in self.statements.values() {
             signed.verify_historic(publisher, app)?;
         }
-        for certificate in self.certificates.values() {
-            certificate.certifies(
-                certificate.capability.subject,
-                certificate.capability.not_before,
-            )?;
-            let database = crate::membership::node_database(certificate)?;
-            if database.publisher != publisher || database.scope.app != app {
-                return Err(denied("membership certificate belongs to another database"));
-            }
+        if let Some(database) = self.certificates_database()?
+            && (database.publisher != publisher || database.scope.app != app)
+        {
+            return Err(denied("membership certificate belongs to another database"));
         }
         self.check_size()
     }
@@ -697,8 +706,10 @@ impl RevocationSet {
                 added.push(signed.clone());
             }
         }
-        for certificate in other.certificates.values() {
-            next.add_link(certificate.clone())?;
+        for (id, certificate) in &other.certificates {
+            if !next.certificates.contains_key(id) {
+                next.hold_checked(*id, certificate.clone())?;
+            }
         }
         next = next.pruned(time);
         next.check_size()?;

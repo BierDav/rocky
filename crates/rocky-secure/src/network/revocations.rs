@@ -87,6 +87,7 @@ impl NativeSession {
         let mut pages = certificates.chunks(STATEMENTS_PAGE);
         let (mut sent, mut received) = (false, false);
         let mut learned_links = RevocationSet::new();
+        let mut received_links = BTreeSet::new();
         while !(sent && received) {
             let page = pages.next().unwrap_or_default();
             sent = pages.len() == 0;
@@ -106,8 +107,12 @@ impl NativeSession {
                 return Err(denied("membership certificates outside the exchange"));
             }
             for certificate in certificates {
-                if !learned_links.link(certificate).map_err(credential)? {
+                let id = certificate.id().map_err(credential)?;
+                if !received_links.insert(id) {
                     return Err(denied("duplicate membership certificate"));
+                }
+                if !held.holds_certificate(&id) {
+                    learned_links.link(certificate).map_err(credential)?;
                 }
             }
             received |= last;

@@ -30,8 +30,8 @@ pub struct Created {
     /// The offline root key; store its phrase offline, as only `make_admin` and `revoke_admin` need
     /// it.
     pub root: crate::RootKey,
-    /// The owner's person key; store it in the app's secure storage and pass it to
-    /// `Configuration::identity`.
+    /// The owner's person key, the one `root.identity()` derives; store it in the app's secure
+    /// storage and pass it to `Configuration::identity`.
     pub owner: crate::IdentityKey,
 }
 type Minted = Arc<std::sync::Mutex<Option<crate::IdentityKey>>>;

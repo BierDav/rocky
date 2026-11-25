@@ -745,8 +745,8 @@ async fn foreign_membership_and_unlinks_are_refused_before_runtime_mutation() ->
     for node in &nodes {
         let known = node.replica.revocations().await;
         let membership = known.membership()?;
-        assert_eq!(membership.next_sequence(identity.public_key())?, 1);
-        assert!(!membership.is_forked(identity.public_key()));
+        assert_eq!(membership.next_sequence(identity.person_key())?, 1);
+        assert!(!membership.is_forked(identity.person_key()));
     }
     Ok(())
 }
@@ -860,7 +860,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
     let invite = |profile: crate::Access| {
-        crate::Invite::new(profile).for_identity(crate::PersonId::new(person.public_key()))
+        crate::Invite::new(profile).for_identity(crate::PersonId::of(&person))
     };
     let open = |book: &mut Book, profile: crate::Access| {
         settings.invite(
@@ -929,14 +929,14 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     };
     assert_eq!(
         redeemer(issued.id),
-        Some(Some(crate::PersonId::new(person.public_key())))
+        Some(Some(crate::PersonId::of(&person)))
     );
     assert_eq!(redeemer(spare.id), Some(None));
     assert_eq!(redeemer(conflicting.id), Some(None));
     let snapshot = node.settings_snapshot().await;
     let recorded = node.registry(&snapshot).await?;
     let admitted = recorded
-        .get(&person.public_key())
+        .get(&person.person_key())
         .and_then(|record| record.admitted.as_ref())
         .ok_or("the invited identity is not admitted")?;
     assert_eq!(admitted.invitation, Some(issued.id));
@@ -964,7 +964,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     let directory = tempfile::tempdir()?;
     let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
     let person = IdentityKey::generate();
-    let identity = person.public_key();
+    let identity = person.person_key();
     let settings = node.settings.lock().await.clone();
     let registry = node.registry(&settings).await?;
     let narrow = crate::Access::Read;

@@ -97,7 +97,7 @@ async fn the_person_key_approves_a_link_of_the_owners_second_device_without_the_
     let owned = reopened_with_the_person_key_alone(&common::schema()).await?;
     let laptop = second_device(&owned).await?;
     let me = laptop.database.me().await?;
-    assert_eq!(me.person.key(), owned.person.public_key());
+    assert_eq!(me.person.key(), owned.person.person_key());
     assert!(me.admin);
     laptop.close().await;
     owned.owner.close().await;
@@ -189,5 +189,26 @@ async fn without_the_person_key_an_unlink_is_refused_as_identity_required() -> R
     );
     keyless.close().await?;
     laptop.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_is_the_person_the_root_derives_and_an_arc_shares_its_key() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let created = Configuration::new(root.path().join("owner"), common::parsed_schema())?
+        .create()
+        .await?;
+    let owner = rocky_sdk::PersonId::of(&created.owner);
+    assert_eq!(owner, rocky_sdk::PersonId::of(&created.root.identity()));
+    assert_eq!(created.database.me().await?.person, owner);
+    created.database.close().await?;
+    let shared = Arc::new(created.owner);
+    let reopened = Configuration::new(root.path().join("owner"), common::parsed_schema())?
+        .identity(shared.clone())
+        .open()
+        .await?;
+    assert_eq!(reopened.me().await?.person, rocky_sdk::PersonId::of(&shared));
+    reopened.close().await?;
     Ok(())
 }

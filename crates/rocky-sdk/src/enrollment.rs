@@ -530,7 +530,7 @@ impl Intent {
                 }
                 (true, None, true) => {
                     let minted = IdentityKey::from_secret(vault.get(MINTED_ROLE)?);
-                    (minted.public_key() == previous.identity).then(|| {
+                    (minted.person_key() == previous.identity).then(|| {
                         let provider: Arc<dyn IdentityProvider> =
                             Arc::new(IdentityKey::from_secret(minted.secret()));
                         (provider, Some(minted))

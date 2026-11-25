@@ -228,7 +228,7 @@ mod tests {
         ] {
             let supplied: Option<Arc<dyn crate::IdentityProvider>> = Some(Arc::new(supplied));
             supplying(supplied, async {
-                assert_eq!(settings.identity()?.public_key()?, key.public_key());
+                assert_eq!(settings.identity()?.public_key()?, key.person_key());
                 Ok::<_, Failure>(())
             })
             .await?;

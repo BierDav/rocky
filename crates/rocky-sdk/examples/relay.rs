@@ -1,4 +1,4 @@
-use rocky_sdk::{Configuration, Database, IdentityKey, IdentityProvider};
+use rocky_sdk::{Configuration, Database, IdentityKey, IdentityProvider, PersonId};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ async fn main() -> Result<(), Failure> {
         let identity = IdentityKey::generate();
         println!(
             "Invite relay identity {} with store-only access (Invite::new(Access::Store).for_identity(..)),",
-            identity.public_key().to_hex()
+            PersonId::of(&identity)
         );
         println!("then run with ROCKY_RELAY_PHRASE=\"{}\"", identity.phrase());
         return Ok(());

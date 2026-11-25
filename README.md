@@ -173,7 +173,11 @@ commit to Bob at once; `sync_now` makes the example deterministic. Run it with
 
 `create` returns the root and the owner's person key once, and `join` returns
 a minted person key in `Opened::identity`; each of those sessions signs with
-its key. Later opens get the person key from `Configuration::identity`, and a
+its key. The owner's person key is derived from the root, so
+`RootKey::identity` recovers it from the root phrase. `PersonId::of(&key)`
+names the person a key signs for, as `Invite::for_identity` and `remove` take
+it. An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
+`Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later opens get the person key from `Configuration::identity`, and a
 call that needs it without one is `Denied` with `IdentityRequired`.
 `create_with_root(root, owner)` takes signers the application keeps
 elsewhere, such as passkey-backed ones, and `FileIdentityProvider` keeps a

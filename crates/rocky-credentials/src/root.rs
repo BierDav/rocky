@@ -61,10 +61,10 @@ mod tests {
         let restored = RootKey::from_phrase(&root.phrase()).unwrap().identity();
         assert_eq!(restored.secret(), identity.secret());
         assert_ne!(identity.secret(), root.secret());
-        assert_ne!(identity.public_key(), root.public_key().unwrap());
+        assert_ne!(identity.person_key(), root.public_key().unwrap());
         assert_ne!(
-            RootKey::from_secret([8; 32]).identity().public_key(),
-            identity.public_key()
+            RootKey::from_secret([8; 32]).identity().person_key(),
+            identity.person_key()
         );
     }
 }

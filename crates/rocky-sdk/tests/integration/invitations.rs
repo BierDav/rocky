@@ -87,7 +87,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
         .ok_or("a joiner without an identity gets one")?;
     let member = Device::new(opened.database)?;
     let me = member.database.me().await?;
-    assert_eq!(me.person.key(), minted.public_key());
+    assert_eq!(me.person.key(), minted.person_key());
     assert_eq!(me.access, writer());
     common::introduce(&owner, &member).await;
     member.sync().await.map_err(|error| error.to_string())?;
@@ -98,14 +98,14 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     assert_eq!(pending[0].label.as_deref(), Some("Alice"));
     assert_eq!(
         pending[0].redeemed_by,
-        Some(PersonId::new(minted.public_key()))
+        Some(PersonId::of(&minted))
     );
     let recorded = owner
         .database
         .people()
         .await?
         .into_iter()
-        .find(|record| record.id == PersonId::new(minted.public_key()))
+        .find(|record| record.id == PersonId::of(&minted))
         .ok_or("the issuer recorded no admission")?;
     assert_eq!(recorded.invitation, Some(invitation.id));
     assert_eq!(recorded.label.as_deref(), Some("Alice"));
@@ -238,7 +238,7 @@ async fn a_cancelled_invitation_admits_no_one_and_leaves_no_record() -> Result<(
     let opened = join(&root.path().join("member"), &hub, None, &again.code).await?;
     assert_eq!(
         Some(opened.database.me().await?.person.key()),
-        opened.identity.as_ref().map(IdentityKey::public_key),
+        opened.identity.as_ref().map(IdentityKey::person_key),
         "the refused join resumes in the same directory with a newer invitation"
     );
     opened.database.close().await?;

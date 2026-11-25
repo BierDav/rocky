@@ -393,7 +393,7 @@ fn an_identity_phrase_and_secret_restore_the_same_signer() {
     let node = PrivateKey::new();
     let grant = CredentialChain(vec![
         Authority::owner(&RootKey::generate())
-            .issue_trusted(identity.public_key(), SCOPE, NOW)
+            .issue_trusted(identity.person_key(), SCOPE, NOW)
             .unwrap(),
     ]);
     let certify = |signer: &IdentityKey| grant.clone().certify(signer, &node).unwrap();

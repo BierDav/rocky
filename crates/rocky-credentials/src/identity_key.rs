@@ -27,7 +27,7 @@ impl IdentityKey {
     pub fn secret(&self) -> [u8; 32] {
         self.0.secret()
     }
-    pub fn public_key(&self) -> PublicKey {
+    pub fn person_key(&self) -> PublicKey {
         self.0.public_key()
     }
 }
@@ -41,6 +41,6 @@ impl IdentityProvider for IdentityKey {
 }
 impl std::fmt::Debug for IdentityKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "IdentityKey({})", self.public_key())
+        write!(f, "IdentityKey({})", self.person_key())
     }
 }

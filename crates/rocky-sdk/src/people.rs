@@ -12,6 +12,10 @@ impl PersonId {
     pub fn new(key: PublicKey) -> Self {
         Self(key)
     }
+    /// The person a person key signs for, as `Invite::for_identity` and `remove` take it.
+    pub fn of(key: &crate::IdentityKey) -> Self {
+        Self(key.person_key())
+    }
     /// The person key.
     pub fn key(&self) -> PublicKey {
         self.0

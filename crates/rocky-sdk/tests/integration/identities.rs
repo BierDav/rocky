@@ -276,16 +276,16 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
     let restored = rocky_sdk::RootKey::from_phrase(&key.phrase())?;
     assert_eq!(
         identity(root.path(), "owner")?["identity"],
-        json!(restored.identity().public_key())
+        json!(restored.identity().person_key())
     );
     assert_eq!(
-        opened.owner.public_key(),
-        restored.identity().public_key(),
+        opened.owner.person_key(),
+        restored.identity().person_key(),
         "create returns the owner's person key derived from the root"
     );
     assert_eq!(
-        IdentityKey::from_phrase(&opened.owner.phrase())?.public_key(),
-        opened.owner.public_key()
+        IdentityKey::from_phrase(&opened.owner.phrase())?.person_key(),
+        opened.owner.person_key()
     );
     no_identity_secret(&path, &[key.secret(), key.identity().secret()])?;
     opened.database.close().await?;
@@ -334,7 +334,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
     .await?;
     for (index, name) in ["first", "second", "third"].into_iter().enumerate() {
         let saved = identity(root.path(), name)?;
-        assert_eq!(saved["identity"], json!(key.public_key()));
+        assert_eq!(saved["identity"], json!(key.person_key()));
         let chain: rocky_credentials::CredentialChain =
             serde_json::from_value(saved["credentials"].clone())?;
         assert_eq!(
@@ -388,7 +388,7 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
     let minted = joined.identity.ok_or("minted identity")?;
     assert_eq!(
         joined.database.me().await?.person.key(),
-        minted.public_key()
+        minted.person_key()
     );
     no_identity_secret(&path, &[minted.secret()])?;
     joined.database.close().await?;
@@ -442,7 +442,7 @@ async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> 
         .await?;
     assert_eq!(
         self::identity(root.path(), "custom")?["identity"],
-        json!(identity.public_key())
+        json!(identity.person_key())
     );
     no_identity_secret(&path, &[identity.secret()])?;
     opened.close().await?;

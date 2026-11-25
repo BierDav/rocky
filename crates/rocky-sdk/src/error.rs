@@ -109,6 +109,13 @@ pub enum ErrorKind {
         /// Whether the peer says a retry may succeed.
         retryable: bool,
     },
+    /// `open` found no database in the directory; `create` or `join` one there.
+    NoDatabase,
+    /// `create` or `join` found a database in the directory; `open` it instead.
+    DatabaseExists,
+    /// A join or link into the directory did not finish; repeating it with the same or a newer
+    /// invitation, or the same contact, resumes it.
+    JoinUnfinished,
     /// The database or transaction is closed.
     Closed,
     /// Local storage failed.
@@ -231,6 +238,9 @@ impl ErrorKind {
             Self::RolloutConfirmation(_) => "rollout_confirmation_required",
             Self::RoleInUse(_) => "role_in_use",
             Self::Remote { .. } => "remote",
+            Self::NoDatabase => "no_database",
+            Self::DatabaseExists => "database_exists",
+            Self::JoinUnfinished => "join_unfinished",
             Self::Closed => "closed",
             Self::Storage => "storage",
             Self::Internal => "internal",
@@ -349,6 +359,27 @@ impl Error {
             format!(
                 "the application declares schema version {declared}, but this database is at version {current}, which removed a table or field it uses; upgrade the application"
             ),
+        )
+    }
+
+    pub(crate) fn no_database() -> Self {
+        Self::new(
+            ErrorKind::NoDatabase,
+            "no database in this directory: create or join one",
+        )
+    }
+
+    pub(crate) fn database_exists() -> Self {
+        Self::new(
+            ErrorKind::DatabaseExists,
+            "a database exists in this directory: open it instead",
+        )
+    }
+
+    pub(crate) fn join_unfinished() -> Self {
+        Self::new(
+            ErrorKind::JoinUnfinished,
+            "a join or link in this directory is unfinished: repeat it to resume",
         )
     }
 

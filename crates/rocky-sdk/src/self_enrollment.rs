@@ -154,7 +154,7 @@ impl Settings {
     ) -> Result<crate::enrollment::Prepared, Failure> {
         let record = crate::enrollment::ContactRecord::parse(contact)?;
         Intent::resume(
-            &Intent::path(path, false),
+            &Intent::path(path),
             rocky_core::commitment("rocky.sdk.identity-join.v2", record.node.as_bytes()),
             store,
             Some(provider),
@@ -255,7 +255,7 @@ impl Settings {
             .revocations
             .ends_node_of(identity, node.public_key(), false)
         {
-            rocky_platform::fs::remove_file(Intent::path(path, false))?;
+            rocky_platform::fs::remove_file(Intent::path(path))?;
             vault.forget(["node", "transport"].into_iter().map(String::from))?;
             return Err("the previous membership link is void; retry to link a fresh node".into());
         }
@@ -333,7 +333,7 @@ impl Settings {
                 .revocations
                 .ends_node_of(identity, node.public_key(), false)
         {
-            rocky_platform::fs::remove_file(Intent::path(path, false))?;
+            rocky_platform::fs::remove_file(Intent::path(path))?;
             vault.forget(settings.roles())?;
             return Err("the membership link is void; retry to link a fresh node".into());
         }

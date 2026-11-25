@@ -780,7 +780,7 @@ impl Settings {
             }
             _ => {}
         }
-        Intent::resume(&Intent::path(path, false), code.intent(), store, provider)
+        Intent::resume(&Intent::path(path), code.intent(), store, provider)
     }
 
     pub(crate) async fn enroll_invited(

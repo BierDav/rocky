@@ -772,10 +772,10 @@ async fn identity(
     } = setup;
     let exists = Settings::exists(path)?;
     if exists && !matches!(install, Install::Installed) {
-        return Err("a domain exists in this directory: open it instead".into());
+        return Err(Box::new(crate::Error::database_exists()));
     }
     if !exists && matches!(install, Install::Installed) {
-        return Err("no domain in this directory: create or join one".into());
+        return Err(Box::new(crate::Error::no_database()));
     }
     match install {
         Install::Create { root, owner } => {
@@ -1176,14 +1176,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     rocky_secure::check_replica_format(&replica_path).await?;
     if matches!(setup.install, Install::Installed) {
         if !Settings::exists(&replica_path)? {
-            return Err(
-                if rocky_platform::fs::exists(directory.join("identity.join.json")) {
-                    "a join in this directory is unfinished: join again with its or a newer invitation"
+            return Err(Box::new(
+                if rocky_platform::fs::exists(crate::enrollment::Intent::path(&replica_path)) {
+                    crate::Error::join_unfinished()
                 } else {
-                    "no domain in this directory: create or join one"
-                }
-                .into(),
-            );
+                    crate::Error::no_database()
+                },
+            ));
         }
         Settings::load(&replica_path)?;
     }

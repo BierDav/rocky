@@ -87,6 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 clones share it, every call is a future the caller may drop, and `close` ends
 it for every clone.
 
+`open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
+and `create` or `join` on one that does with `DatabaseExists`, so a host that
+boots unattended opens first and joins on `NoDatabase`. A join that fails, for
+example with `JoinError::IssuerUnreachable`, keeps its device key so the issuer
+can recognize a retry: `open` then fails with `JoinUnfinished`, and `join` with
+the same or a newer invitation resumes it.
+
 ## Two devices
 
 Alice creates the database and invites Bob over TCP on loopback. Bob joins,
@@ -340,6 +347,8 @@ why the device lacks it:
 Other kinds an application meets:
 
 - `Removed`: the person or device was removed; nothing clears it.
+- `NoDatabase`, `DatabaseExists` and `JoinUnfinished`: the directory holds no
+  database, already holds one, or holds a join to repeat.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
   named blockers clear. It always names at least one.
 - `TooLarge { limit, size, max }`: a write exceeds a size limit.

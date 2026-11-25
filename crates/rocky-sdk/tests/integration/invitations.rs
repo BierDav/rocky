@@ -511,3 +511,64 @@ async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> R
     owner.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_tells_a_directory_without_a_database_from_one_with_a_database() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let empty = root.path().join("empty");
+    let missing = joining(&empty, &hub, None)?
+        .open()
+        .await
+        .err()
+        .ok_or("an empty directory opened")?;
+    assert_eq!(missing.kind(), &ErrorKind::NoDatabase);
+    assert!(!missing.retryable());
+    assert!(!empty.exists(), "a refused open creates nothing");
+    let owner = issuer(&root.path().join("issuer"), &hub).await?;
+    let invitation = owner.database.invite(Invite::new(writer())).await?;
+    owner.close().await;
+    let existing = Configuration::new(root.path().join("issuer"), common::parsed_schema())?
+        .create()
+        .await
+        .err()
+        .ok_or("a second database was created over the first")?;
+    assert_eq!(existing.kind(), &ErrorKind::DatabaseExists);
+    let joined_over = join(&root.path().join("issuer"), &hub, None, &invitation.code)
+        .await
+        .err()
+        .ok_or("a join replaced an existing database")?;
+    assert_eq!(joined_over.kind(), &ErrorKind::DatabaseExists);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = issuer(&root.path().join("issuer"), &hub).await?;
+    let invitation = owner.database.invite(Invite::new(writer())).await?;
+    owner.close().await;
+    let member = root.path().join("member");
+    let failed = join(&member, &hub, None, &invitation.code)
+        .await
+        .err()
+        .ok_or("a join reached an issuer that is offline")?;
+    assert_eq!(failed.kind(), &ErrorKind::Join(JoinError::IssuerUnreachable));
+    let unfinished = joining(&member, &hub, None)?
+        .open()
+        .await
+        .err()
+        .ok_or("an unfinished join opened")?;
+    assert_eq!(unfinished.kind(), &ErrorKind::JoinUnfinished);
+    let owner = reopened(&root.path().join("issuer"), &hub).await?;
+    owner.add(1, "Milk").await;
+    let joined = join(&member, &hub, None, &invitation.code).await?;
+    assert!(joined.identity.is_some(), "the resumed join keeps its minted key");
+    let member = Device::new(joined)?;
+    assert_eq!(member.titles().await, ["Milk"]);
+    member.close().await;
+    owner.close().await;
+    Ok(())
+}

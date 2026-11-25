@@ -505,15 +505,11 @@ pub(crate) struct Prepared {
 }
 const MINTED_ROLE: &str = "identity.minted";
 impl Intent {
-    pub(crate) fn path(identity: &Path, supplied: bool) -> std::path::PathBuf {
+    pub(crate) fn path(identity: &Path) -> std::path::PathBuf {
         identity
             .parent()
             .unwrap_or_else(|| Path::new(""))
-            .join(if supplied {
-                "identity.install.json"
-            } else {
-                "identity.join.json"
-            })
+            .join("identity.join.json")
     }
     pub(crate) fn resume(
         path: &Path,
@@ -585,7 +581,7 @@ impl Intent {
         })
     }
     pub(crate) fn finish(&self, path: &Path, vault: &Vault) -> Result<(), Failure> {
-        rocky_platform::fs::remove_file(Self::path(path, false))?;
+        rocky_platform::fs::remove_file(Self::path(path))?;
         if self.minted {
             vault.forget([MINTED_ROLE.to_owned()])?;
         }

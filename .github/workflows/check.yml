@@ -40,6 +40,9 @@ env:
   ROCKY_CRANELIFT: '0'
   # Smaller test binaries and build cache; backtraces keep line numbers.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # Fresh builds gain nothing from incremental state, and sccache caches only
+  # crates built without it.
+  CARGO_PROFILE_DEV_INCREMENTAL: 'false'
 
 jobs:
   lint:

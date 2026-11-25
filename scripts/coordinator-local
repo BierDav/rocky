@@ -7,8 +7,14 @@ repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 dir=${1:?usage: coordinator-local DIR [BASE_PORT]}
 port=${2:-7300}
 
-cargo build --manifest-path "$repo_root/Cargo.toml" -p rocky-voter --bin rocky-voter --locked
-voter="$repo_root/target/debug/rocky-voter"
+# The executable path comes from Cargo, so CARGO_TARGET_DIR and build.target-dir hold.
+voter=$(cargo build --manifest-path "$repo_root/Cargo.toml" -p rocky-voter --bin rocky-voter \
+    --locked --message-format=json-render-diagnostics |
+    sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
+if [ ! -x "$voter" ]; then
+    echo "coordinator-local: cargo built no rocky-voter executable" >&2
+    exit 1
+fi
 
 if [ ! -f "$dir/admin.json" ]; then
     "$voter" local "$dir" "$port" >/dev/null

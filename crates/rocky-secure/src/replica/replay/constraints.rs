@@ -49,6 +49,31 @@ pub(in crate::replica) fn cascades(
     reached
 }
 
+pub(in crate::replica) fn referenced(
+    schema: &rocky_core::LogicalSchema,
+    table: &str,
+) -> BTreeSet<String> {
+    let own = table.to_ascii_lowercase();
+    let mut reached = BTreeSet::new();
+    let mut work = vec![own.clone()];
+    while let Some(child) = work.pop() {
+        let Some(child) = schema.table(&child) else {
+            continue;
+        };
+        for key in &child.foreign_keys {
+            let parent = key.table.to_ascii_lowercase();
+            let replayed = schema
+                .table(&parent)
+                .is_some_and(|table| table.class == TableClass::Replayed);
+            if replayed && reached.insert(parent.clone()) {
+                work.push(parent);
+            }
+        }
+    }
+    reached.remove(&own);
+    reached
+}
+
 pub(in crate::replica) fn linked(
     schema: &rocky_core::LogicalSchema,
     table: &str,

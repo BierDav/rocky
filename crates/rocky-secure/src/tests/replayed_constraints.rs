@@ -12,6 +12,7 @@ use std::path::Path;
 mod clock;
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
+mod import_order;
 mod orphans;
 mod records;
 mod restrictions;

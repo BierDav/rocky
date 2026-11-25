@@ -6,6 +6,7 @@ use rocky_storage::partition_sql::{TablePartitions, split_intent};
 mod base;
 mod bystanders;
 mod constraints;
+mod import_order;
 pub(crate) mod outcomes;
 mod rebuild;
 mod references;
@@ -512,6 +513,18 @@ impl<A: RowApplication> Inner<A> {
         self.linked_scopes_of(decode(blob)?).await
     }
     pub(super) async fn linked_scopes_of(&self, own: ResourceScope) -> Result<Vec<i64>, Error> {
+        let mut ids = Vec::new();
+        for scope in self.linked_resource_scopes(own)? {
+            if let Some(id) = self.find_scope_id(scope).await? {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+    pub(super) fn linked_resource_scopes(
+        &self,
+        own: ResourceScope,
+    ) -> Result<Vec<ResourceScope>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(Vec::new());
         };
@@ -570,13 +583,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        let mut ids = Vec::with_capacity(scopes.len());
-        for scope in scopes {
-            if let Some(id) = self.find_scope_id(scope).await? {
-                ids.push(id);
-            }
-        }
-        Ok(ids)
+        Ok(scopes)
     }
 
     async fn rewind(&self, starts: Vec<(i64, Order)>) -> Result<Vec<Redo>, Error> {

@@ -257,6 +257,57 @@ fn a_claim_past_its_expiry_takes_no_number_and_an_expired_key_claims_anew() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_retry_rebuilt_from_its_row_after_the_window_is_refused_as_expired_and_takes_no_number() {
+    let mut counters = Counters::default();
+    let invoices = name("invoices");
+    let created = rocky_platform::time::UNIX_EPOCH + std::time::Duration::from_secs(T);
+    let from_the_row = |order: &str| Claim::new(order, order, created);
+    let end = T + CLAIM_WINDOW;
+    let mut take = |claim, time| counters.claim(&invoices, claim, time, usize::MAX);
+    assert_eq!(take(from_the_row("order-1"), T), Ok(First(1)));
+    assert_eq!(
+        take(from_the_row("order-1"), end - 1),
+        Ok(First(1)),
+        "a retry inside the window answers the number its first attempt took"
+    );
+    for late in [end, end + 1, end + 365 * DAY] {
+        let refused = take(from_the_row("order-1"), late);
+        assert_eq!(
+            refused,
+            Err(CoordinationError::Expired),
+            "a retry after the window is refused, never given a new number"
+        );
+        assert!(refused.is_err_and(|error| !error.retryable()));
+    }
+    assert_eq!(
+        take(from_the_row("order-2"), end),
+        Err(CoordinationError::Expired),
+        "a sale whose first claim is sent after its window takes no number"
+    );
+    assert_eq!(counters.read(&invoices), 1);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn the_state_machine_refuses_a_late_retry_at_its_own_time_and_the_counter_keeps_its_value() {
+    let mut fixture = Fixture::new(Limits::default());
+    let created = rocky_platform::time::UNIX_EPOCH + std::time::Duration::from_secs(T);
+    let from_the_row = || {
+        Claim::new("order-1", "till-1", created)
+            .expires(created + std::time::Duration::from_secs(3_600))
+    };
+    assert_eq!(
+        fixture.claim(0, "invoices", from_the_row(), T),
+        Ok(First(1))
+    );
+    assert_eq!(
+        fixture.claim(0, "invoices", from_the_row(), T + 3_600),
+        Err(CoordinationError::Expired),
+        "the till retries after the window it stored with the row"
+    );
+    assert_eq!(fixture.reading("invoices", T + 3_600), 1);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_full_counter_refuses_new_keys_and_never_admits_a_ticket_in_force_twice() {
     let mut counters = Counters::default();
     let door = name("door");

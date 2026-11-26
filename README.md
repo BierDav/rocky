@@ -731,41 +731,163 @@ Rocky's encryption and authorization apply on top of every transport.
 
 ## Coordinator
 
+```toml
+[dependencies]
+rocky-coordinator = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.3" }
+
+[dev-dependencies]
+rocky-voter = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.3", default-features = false }
+```
+
 `rocky-coordinator` adds gap-free counters and admit-once claims to a
-`Database`. `Counters::connect(database, &bundle).await` reaches the
-coordinator a `TrustBundle` names through an iroh client endpoint of its own.
-That endpoint uses the relay the voters' routes name; with none named, it
-dials their direct addresses with no relay or lookup when every route has
-one, and otherwise uses n0's relays and lookup. It never takes part in
-discovery or sync. Clones of `Counters` share the endpoint;
-`counters.close().await` stops it for every clone, and so does dropping the
-last clone. A claim after it is an error, never a number, so to come back
-online, connect again.
-The owner registers the database once with
-`counters.register(&root, &tenant, lifetime)`, where `tenant` is the
-coordinator account (`Tenant::generate()`, kept through `Tenant::secret`), and
-renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
+`Database`. `rocky-voter` runs the coordinator's voters; as a dev-dependency
+it gives tests an authority in-process (`LocalCluster`, below), and
+`default-features = false` leaves out the relay server its `server` feature
+builds into the `rocky-voter` executable.
+
+This till records a sale, then claims the sale's invoice number. Run it
+against `scripts/coordinator-local DIR`, which builds `rocky-voter`, starts
+three voters on loopback and prints the trust bundle: `cargo run -p
+rocky-coordinator --example counters -- DIR/service/bundle.json EMPTY_DIR`.
 
 ```rust crates/rocky-coordinator/examples/counters.rs
-    let counters = Counters::connect(created.database.clone(), &bundle).await?;
+use rocky_coordinator::{
+    Claim, Claimed, ControlReceipt, CounterError, Counters, Name, Tenant, TrustBundle,
+};
+use rocky_sdk::{Affinity, Column, Configuration, Database, Schema, Table, Timestamp, params};
+use std::{path::Path, time::SystemTime};
+
+type Failure = Box<dyn std::error::Error + Send + Sync>;
+
+const USAGE: &str = "usage: counters BUNDLE.json EMPTY_DIRECTORY";
+const CONTROL_LIFETIME_SECONDS: u64 = 86_400;
+
+#[tokio::main]
+async fn main() -> Result<(), Failure> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let [bundle, directory] = arguments.as_slice() else {
+        return Err(USAGE.into());
+    };
+    let bundle = TrustBundle::from_json(&std::fs::read_to_string(bundle)?)?;
+    let schema = Schema::builder("till", 1)
+        .table(
+            Table::replayed("sales")
+                .column(Column::new("sale", Affinity::Text).required())
+                .column(Column::new("created", Affinity::Integer).required())
+                .column(Column::new("invoice", Affinity::Integer))
+                .primary_key(["sale"]),
+        )
+        .build()?;
+    let created = Configuration::new(Path::new(directory), &schema)?
+        .create()
+        .await?;
+    let database = created.database;
+
+    let counters = Counters::connect(database.clone(), &bundle).await?;
+    let tenant = Tenant::generate();
+    let receipt = counters
+        .register(&created.root, &tenant, CONTROL_LIFETIME_SECONDS)
+        .await?;
+    let kept = (tenant.secret(), receipt.to_bytes());
+    let receipt = ControlReceipt::from_bytes(&kept.1)?;
     counters
-        .register(&created.root, &Tenant::generate(), CONTROL_LIFETIME_SECONDS)
+        .renew(
+            &Tenant::from_secret(kept.0),
+            &receipt,
+            CONTROL_LIFETIME_SECONDS,
+        )
         .await?;
-    let admissions = Name::new("admissions")?;
-    let east = counters
-        .claim(&admissions, &Claim::new("ticket-1", "east-scan-1"))
-        .await?;
-    admitted_once(&counters, &admissions, east).await?;
+
+    let invoices = Name::new("invoices")?;
+    record_sale(&database, "sale-1").await?;
+    let first = invoice(&database, &counters, &invoices, "sale-1").await?;
+    let retried = invoice(&database, &counters, &invoices, "sale-1").await?;
+    println!("sale-1 is invoice {first}; its retry is invoice {retried}");
+    if retried != first {
+        return Err("a retry took a second number".into());
+    }
 
     counters.close().await;
-    let offline = counters
-        .claim(&admissions, &Claim::new("ticket-2", "east-scan-2"))
-        .await;
-    if offline.is_ok() {
-        return Err("closed counters still took a number".into());
+    record_sale(&database, "sale-2").await?;
+    match invoice(&database, &counters, &invoices, "sale-2").await {
+        Err(closed) if matches!(closed.downcast_ref(), Some(CounterError::Closed)) => {}
+        other => return Err(format!("closed counters answered {other:?}").into()),
     }
-    created.database.close().await?;
+    database.close().await?;
+    Ok(())
+}
+
+async fn record_sale(database: &Database, sale: &str) -> Result<(), Failure> {
+    let created = Timestamp::try_from(SystemTime::now())?;
+    let mut transaction = database.transaction().await?;
+    transaction
+        .execute(
+            "INSERT INTO sales(sale, created) VALUES(?, ?)",
+            params![sale, created],
+        )
+        .await?;
+    transaction.commit().await?;
+    database.flush().await?;
+    Ok(())
+}
+
+async fn invoice(
+    database: &Database,
+    counters: &Counters,
+    invoices: &Name,
+    sale: &str,
+) -> Result<i64, Failure> {
+    let rows = database
+        .query("SELECT created FROM sales WHERE sale = ?", params![sale])
+        .await?;
+    let created: Timestamp = rows
+        .collect()
+        .await?
+        .first()
+        .ok_or("no sale")?
+        .get("created")?;
+    let claim = Claim::new(sale, sale, created.system_time().ok_or("sale time")?);
+    let Claimed::First(number) = counters.claim(invoices, &claim).await? else {
+        return Err("another attempt holds this sale's number".into());
+    };
+    let mut transaction = database.transaction().await?;
+    transaction
+        .execute(
+            "UPDATE sales SET invoice = ? WHERE sale = ?",
+            params![number, sale],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(number)
+}
 ```
+
+`Counters::connect(database, &bundle).await` reaches the coordinator a
+`TrustBundle` names through an iroh client endpoint of its own. That endpoint
+is a pure client: it serves no protocol and refuses every inbound connection,
+and it never takes part in discovery or sync. iroh still binds wildcard UDP
+sockets for it, as for any QUIC client. It uses the relay the voters' routes
+name; with none named, it dials their direct addresses with no relay or lookup
+when every route has one, and otherwise uses n0's relays and lookup. Clones of
+`Counters` share the endpoint, and dropping the last clone stops it.
+
+`SyncMode::Off` stops sync, not claims. `counters.close().await` is the
+offline switch: it stops the endpoint for every clone, and every later call
+fails at once with `CounterError::Closed`, which is not retryable, so generic
+retry code stops instead of waiting for an authority that is not down. To
+come back online, connect again. A till keeps its switch in a `Table::local`
+row, which stays on the device and holds across restarts.
+
+The owner registers the database once with
+`counters.register(&root, &tenant, lifetime)`. `root` is the owner's root key
+(`Created::root`), because the coordinator admits a database only on a grant
+its root key signed: the first registration holds the database's counters, so
+no admin or device may register it under a tenant of its own. `tenant` is the
+coordinator account (`Tenant::generate()`). `renew(&tenant, &receipt,
+lifetime)` extends the registration before it expires and needs both, so keep
+`tenant.secret()` (restored with `Tenant::from_secret`) and the returned
+`ControlReceipt` as `receipt.to_bytes()` (read back with
+`ControlReceipt::from_bytes`).
 
 A counter is the unit of uniqueness: a key is admitted once per counter, so
 every door, till or device that must agree claims against the same name, such
@@ -776,21 +898,30 @@ ticket once at each door.
 whose access holds insert, update or delete rights; a reader is refused with
 `Refusal::ReadOnly` and a removed person with `Refusal::Revoked`. The
 application writes the number, an `i64` from 1 up, in its own transaction.
-`Claim::new(key, attempt)` names the business key, such as a ticket or an
-order id, and the application's own id for this try, such as the scan row's
-id. The answer is `Claimed::First(n)` for the attempt that holds the key, on
-every retry, and `Claimed::Taken(n)` for any other attempt while the key is in
-force. A retry rebuilds the same `Claim` from the application's rows, so
-nothing about a claim needs storing before it is sent. `Claim::new(id, id)`
-takes a number no other key shares, such as an invoice number.
+Commit the business row and `flush` before claiming: the claim takes its
+number on the coordinator at once, so a device that crashes before its row is
+durable consumes a number for a sale it lost.
 
-A key stays in force for seven days (`CLAIM_WINDOW`), or until
-`Claim::expires(at)`, at most 366 days ahead. A counter holds 16,384 keys in
-force (`MAX_CLAIMS`); a new key beyond them is refused with
-`CoordinationError::Full` and takes no number, and only expired keys are ever
-forgotten. A counter's last number is `i64::MAX`; after it, a claim is refused
-with `Exhausted`. A database holds 64 counters, and the tenant's storage limit
-may refuse a claim earlier with `Backpressure`.
+`Claim::new(key, attempt, created)` names the business key, such as a ticket
+or an order id, the application's own id for this try, such as the scan row's
+id, and `created`, the time stored with that row. The answer is
+`Claimed::First(n)` for the attempt that holds the key, on every retry, and
+`Claimed::Taken(n)` for any other attempt while the key is in force. A retry
+rebuilds the same `Claim` from the application's rows, so nothing about a
+claim needs storing before it is sent. `Claim::new(id, id, created)` takes a
+number no other key shares, such as an invoice number.
+
+A key stays in force for seven days from `created` (`CLAIM_WINDOW`), or until
+`Claim::expires(at)`, at most 366 days ahead; `at` too comes from the row,
+never from the clock at claim time. A claim after its window is refused with
+`CoordinationError::Expired`, which is not retryable, and takes no number, so
+a device that retries a week late never takes a second number for one sale:
+it learns loudly that the sale's number, if its first attempt took one, is
+lost. A counter holds 16,384 keys in force (`MAX_CLAIMS`); a new key beyond
+them is refused with `CoordinationError::Full` and takes no number, and only
+expired keys are ever forgotten. A counter's last number is `i64::MAX`; after
+it, a claim is refused with `Exhausted`. A database holds 64 counters, and the
+tenant's storage limit may refuse a claim earlier with `Backpressure`.
 
 Each call waits up to 12 seconds (`CALL_DEADLINE`);
 `counters.deadline(std::time::Duration)` sets another bound.
@@ -800,15 +931,22 @@ request may have reached the coordinator without an answer: send the same
 `Claim` again, which answers the same `Claimed` the first one took, never a
 new one.
 
-`scripts/coordinator-local DIR` builds `rocky-voter`, starts three voters on
-loopback and prints the trust bundle that `cargo run -p rocky-coordinator
---example counters -- BUNDLE EMPTY_DIR` claims from. For tests and local
-development, `rocky_voter::LocalCluster::start(dir, 3)` runs three to seven
-voters in-process on loopback, keeping their state under `dir`;
-`cluster.bundle()` is the trust bundle to connect with and
-`cluster.shutdown()` stops them. The voters log through `tracing`. Depend on
-`rocky-voter` with `default-features = false` to leave out the relay server
-its `server` feature builds into the `rocky-voter` executable.
+`rocky_voter::LocalCluster` is the authority for tests and local development.
+The voters log through `tracing`.
+
+- `LocalCluster::start(dir, voters).await` runs 3 to 7 voters in-process on
+  loopback, keeping their keys, genesis and state under `dir`, and refuses a
+  `dir` that already holds a cluster.
+- `cluster.bundle()` is the trust bundle to connect with.
+- `cluster.shutdown().await` stops every voter and waits until they stopped.
+  Dropping a cluster without it stops them in the background, so call
+  `shutdown` before opening the same `dir` again.
+- `LocalCluster::open(dir).await` starts the voters `dir` holds again, with
+  the same genesis, trust bundle, addresses and counters, so a test stops and
+  reopens the authority to exercise an outage and the retries after it.
+- `cluster.lose_next_claim_reply()` lets the next claim any voter receives
+  commit and loses every reply to it, so that call fails with
+  `OutcomeUnknown`; the same `Claim` sent again answers the number it took.
 
 ## Browser (wasm)
 

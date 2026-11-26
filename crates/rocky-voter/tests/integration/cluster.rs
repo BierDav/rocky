@@ -262,7 +262,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
 const RETRIES_PAST_THE_LAGGING_LOG: usize = 80;
 
 fn claim(n: u8) -> Claim {
-    Claim::new([n], [n])
+    Claim::new([n], [n], *ROW_CREATED)
 }
 async fn claim_definitely(
     client: &NetworkCoordinator,

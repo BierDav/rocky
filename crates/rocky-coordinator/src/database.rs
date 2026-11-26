@@ -10,7 +10,10 @@ use crate::{
 use rocky_core::Commitment;
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher};
 use rocky_sdk::{Database, DeviceCredential};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 const GRANT_LIFETIME_SECONDS: u64 = 3600;
@@ -27,6 +30,43 @@ pub struct ControlReceipt {
     /// Unix seconds when it expires; renew before then.
     pub expires: u64,
 }
+const RECEIPT_FORMAT: u8 = 1;
+const RECEIPT_BYTES: usize = 1 + 32 + 8 + 32 + 8;
+impl ControlReceipt {
+    /// Its 81-byte encoding, to store with `Tenant::secret` until the next `renew`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(RECEIPT_BYTES);
+        bytes.push(RECEIPT_FORMAT);
+        bytes.extend_from_slice(self.tenant.as_bytes());
+        bytes.extend_from_slice(&self.revision.to_be_bytes());
+        bytes.extend_from_slice(&self.control);
+        bytes.extend_from_slice(&self.expires.to_be_bytes());
+        bytes
+    }
+    /// Reads `to_bytes` back; another format is `UnsupportedFormat` and other damage `Corrupt`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CoordinationError> {
+        let (&format, rest) = bytes.split_first().ok_or(CoordinationError::Corrupt)?;
+        if format != RECEIPT_FORMAT {
+            return Err(CoordinationError::UnsupportedFormat);
+        }
+        let (tenant, rest) = rest
+            .split_first_chunk::<32>()
+            .ok_or(CoordinationError::Corrupt)?;
+        let (revision, rest) = rest
+            .split_first_chunk::<8>()
+            .ok_or(CoordinationError::Corrupt)?;
+        let (control, rest) = rest
+            .split_first_chunk::<32>()
+            .ok_or(CoordinationError::Corrupt)?;
+        let expires: &[u8; 8] = rest.try_into().map_err(|_| CoordinationError::Corrupt)?;
+        Ok(Self {
+            tenant: PublicKey::from_bytes(tenant).map_err(|_| CoordinationError::Corrupt)?,
+            revision: u64::from_be_bytes(*revision),
+            control: *control,
+            expires: u64::from_be_bytes(*expires),
+        })
+    }
+}
 
 /// A failed `Counters` call: the coordinator's answer, the database's or the client endpoint's.
 #[derive(Debug)]
@@ -37,6 +77,8 @@ pub enum CounterError {
     Database(rocky_sdk::Error),
     /// `Counters::connect` could not bind its iroh client endpoint.
     Endpoint(rocky_core::net::Failure),
+    /// `Counters::close` switched these counters off; connect again to come back online.
+    Closed,
 }
 impl CounterError {
     /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
@@ -44,7 +86,7 @@ impl CounterError {
     pub fn retryable(&self) -> bool {
         match self {
             Self::Coordination(error) => error.retryable(),
-            Self::Database(_) | Self::Endpoint(_) => false,
+            Self::Database(_) | Self::Endpoint(_) | Self::Closed => false,
         }
     }
 }
@@ -54,6 +96,7 @@ impl std::fmt::Display for CounterError {
             Self::Coordination(error) => write!(f, "coordinator: {error}"),
             Self::Database(error) => write!(f, "database: {error}"),
             Self::Endpoint(error) => write!(f, "client endpoint: {error}"),
+            Self::Closed => f.write_str("counters closed"),
         }
     }
 }
@@ -80,6 +123,7 @@ struct Shared {
     database: Database,
     client: NetworkCoordinator,
     endpoint: ClientEndpoint,
+    closed: AtomicBool,
 }
 struct ClientEndpoint {
     attachment: rocky_iroh::Attachment,
@@ -131,13 +175,22 @@ impl Counters {
                 database,
                 client,
                 endpoint,
+                closed: AtomicBool::new(false),
             }),
             deadline: CALL_DEADLINE,
         })
     }
-    /// Stops the client endpoint for every clone, so each later call fails with `Unavailable`.
+    /// Stops the client endpoint for every clone, so each later call fails at once with `Closed`,
+    /// which is not retryable.
     pub async fn close(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
         self.shared.endpoint.attachment.close().await;
+    }
+    async fn device(&self) -> Result<DeviceCredential, CounterError> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(CounterError::Closed);
+        }
+        Ok(self.shared.database.device_credential().await?)
     }
     /// Bounds how long each call waits, 12 seconds (`CALL_DEADLINE`) by default.
     pub fn deadline(self, deadline: Duration) -> Self {
@@ -151,7 +204,7 @@ impl Counters {
         tenant: &Tenant,
         lifetime: u64,
     ) -> Result<ControlReceipt, CounterError> {
-        let device = self.shared.database.device_credential().await?;
+        let device = self.device().await?;
         if owner.public_key().ok() != Some(device.publisher) {
             return Err(CoordinationError::Denied(Refusal::InvalidGrant).into());
         }
@@ -181,7 +234,7 @@ impl Counters {
         current: &ControlReceipt,
         lifetime: u64,
     ) -> Result<ControlReceipt, CounterError> {
-        let device = self.shared.database.device_credential().await?;
+        let device = self.device().await?;
         let revision = current
             .revision
             .checked_add(1)
@@ -194,7 +247,7 @@ impl Counters {
     /// delete rights; only `Claimed::First` admits, and after `OutcomeUnknown` the same `Claim`
     /// sent again answers the same `Claimed`.
     pub async fn claim(&self, counter: &Name, claim: &Claim) -> Result<Claimed, CounterError> {
-        let device = self.shared.database.device_credential().await?;
+        let device = self.device().await?;
         let operation = Operation::claim(device.scope, counter.clone(), *claim);
         match self.submit(device, operation).await? {
             Outcome::Claimed(claimed) => Ok(claimed),
@@ -203,7 +256,7 @@ impl Counters {
     }
     /// The counter's last number, or 0 before any.
     pub async fn read(&self, counter: &Name) -> Result<i64, CounterError> {
-        let device = self.shared.database.device_credential().await?;
+        let device = self.device().await?;
         let operation = Operation::Counter {
             scope: device.scope,
             counter: counter.clone(),
@@ -215,7 +268,7 @@ impl Counters {
     }
     /// Tells the coordinator which devices this database revoked, so their claims are refused.
     pub async fn share_revocations(&self) -> Result<Commitment, CounterError> {
-        let device = self.shared.database.device_credential().await?;
+        let device = self.device().await?;
         Ok(self
             .shared
             .client
@@ -302,6 +355,33 @@ impl Counters {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_control_receipt_reads_back_from_its_bytes_and_refuses_another_format() {
+        let receipt = ControlReceipt {
+            tenant: PrivateKey::new().public_key(),
+            revision: 7,
+            control: [9; 32],
+            expires: 1_900_000_000,
+        };
+        let bytes = receipt.to_bytes();
+        assert_eq!(bytes.len(), RECEIPT_BYTES);
+        assert_eq!(ControlReceipt::from_bytes(&bytes), Ok(receipt));
+        let mut other_format = bytes.clone();
+        other_format[0] = RECEIPT_FORMAT + 1;
+        assert_eq!(
+            ControlReceipt::from_bytes(&other_format),
+            Err(CoordinationError::UnsupportedFormat)
+        );
+        assert_eq!(
+            ControlReceipt::from_bytes(&bytes[..RECEIPT_BYTES - 1]),
+            Err(CoordinationError::Corrupt)
+        );
+        assert_eq!(
+            ControlReceipt::from_bytes(&[bytes.as_slice(), &[0]].concat()),
+            Err(CoordinationError::Corrupt)
+        );
+    }
 
     #[tokio::test]
     async fn dropping_the_last_handle_on_a_client_endpoint_stops_it() {

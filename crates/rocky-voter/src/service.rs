@@ -138,6 +138,7 @@ pub struct VoterService {
 }
 mod clients;
 use clients::Admission;
+pub(crate) use clients::Faults;
 impl VoterService {
     pub async fn open(
         path: &Path,

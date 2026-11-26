@@ -728,11 +728,11 @@ async fn a_cancelled_client_admission_frees_its_unadmitted_slot() {
         .connection_slot(&voter.admission.unadmitted_client_streams)
         .expect("an idle voter has a free unadmitted slot");
     let (_caller, stream) = tokio::io::duplex(2 * MAX_FRAME);
-    let mut cancelled = Box::pin(
-        voter
-            .clone()
-            .serve_client(rocky_core::net::Stream::new(stream), unadmitted),
-    );
+    let mut cancelled = Box::pin(voter.clone().serve_client(
+        rocky_core::net::Stream::new(stream),
+        unadmitted,
+        None,
+    ));
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx)))
             .await

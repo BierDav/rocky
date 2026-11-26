@@ -38,8 +38,40 @@ impl Admission {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Faults {
+    lose_next_claim_reply: AtomicBool,
+    unanswered: std::sync::Mutex<Option<Commitment>>,
+}
+impl Faults {
+    pub(crate) fn lose_next_claim_reply(&self) {
+        self.lose_next_claim_reply.store(true, Ordering::SeqCst);
+    }
+    fn loses(&self, request: Commitment, committed_claim: bool) -> bool {
+        let mut unanswered = self
+            .unanswered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *unanswered == Some(request) {
+            return true;
+        }
+        if committed_claim && self.lose_next_claim_reply.swap(false, Ordering::SeqCst) {
+            *unanswered = Some(request);
+            return true;
+        }
+        false
+    }
+}
+
 impl VoterService {
     pub async fn serve_clients(self: Arc<Self>, transport: Arc<dyn Transport>) {
+        self.serve_clients_with(transport, None).await;
+    }
+    pub(crate) async fn serve_clients_with(
+        self: Arc<Self>,
+        transport: Arc<dyn Transport>,
+        faults: Option<Arc<Faults>>,
+    ) {
         if transport.listen(None, true).is_err() {
             return;
         }
@@ -54,7 +86,10 @@ impl VoterService {
             else {
                 continue;
             };
-            tokio::spawn(self.clone().serve_client(stream, unadmitted));
+            tokio::spawn(
+                self.clone()
+                    .serve_client(stream, unadmitted, faults.clone()),
+            );
         }
         log_lifecycle(self.node, "client transport closed");
     }
@@ -62,6 +97,7 @@ impl VoterService {
         self: Arc<Self>,
         mut stream: rocky_core::net::Stream,
         slot: OwnedSemaphorePermit,
+        faults: Option<Arc<Faults>>,
     ) {
         let unadmitted = Unadmitted {
             _slot: slot,
@@ -76,7 +112,20 @@ impl VoterService {
             .await
             .map_err(|_| CoordinationError::Unavailable)??;
             let reply = match envelope.client_request(genesis) {
-                Ok(request) => self.admit(request, Some(unadmitted)).await,
+                Ok(request) => {
+                    let (id, claim) = (
+                        request.id,
+                        matches!(request.operation, Operation::Claim { .. }),
+                    );
+                    let reply = self.admit(request, Some(unadmitted)).await;
+                    if faults
+                        .as_ref()
+                        .is_some_and(|faults| faults.loses(id, claim && reply.result.is_ok()))
+                    {
+                        return Ok(());
+                    }
+                    reply
+                }
                 Err(error) => self.refuse_unadmitted(error),
             };
             let response = crate::transport::Envelope::from_body(

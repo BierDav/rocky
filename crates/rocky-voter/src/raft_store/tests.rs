@@ -3,6 +3,9 @@ use p2panda_core::PrivateKey;
 use rocky_coordinator::{Limits, service::Operation};
 use rocky_core::*;
 use std::collections::BTreeSet;
+
+static ROW_CREATED: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
 fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
     let root = PrivateKey::new();
     let directory = PrivateKey::new();
@@ -184,7 +187,11 @@ async fn claims_recover_from_logs_and_snapshot_and_retry_identically() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         store.apply([entry]).await.unwrap().remove(0)
     }
-    let claim = Operation::claim(scope, invoices(), rocky_coordinator::Claim::new([7], [7]));
+    let claim = Operation::claim(
+        scope,
+        invoices(),
+        rocky_coordinator::Claim::new([7], [7], *ROW_CREATED),
+    );
     let claimed = write(&mut store, request(claim.clone()), 1, time)
         .await
         .unwrap();

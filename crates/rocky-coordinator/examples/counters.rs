@@ -1,6 +1,8 @@
-use rocky_coordinator::{Claim, Claimed, Counters, Name, Tenant, TrustBundle};
-use rocky_sdk::{Affinity, Column, Configuration, Schema, Table};
-use std::path::Path;
+use rocky_coordinator::{
+    Claim, Claimed, ControlReceipt, CounterError, Counters, Name, Tenant, TrustBundle,
+};
+use rocky_sdk::{Affinity, Column, Configuration, Database, Schema, Table, Timestamp, params};
+use std::{path::Path, time::SystemTime};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -14,56 +16,94 @@ async fn main() -> Result<(), Failure> {
         return Err(USAGE.into());
     };
     let bundle = TrustBundle::from_json(&std::fs::read_to_string(bundle)?)?;
-    let schema = Schema::builder("tickets", 1)
+    let schema = Schema::builder("till", 1)
         .table(
-            Table::replayed("admissions")
-                .column(Column::new("ticket", Affinity::Text).required())
-                .column(Column::new("number", Affinity::Integer).required())
-                .primary_key(["ticket"]),
+            Table::replayed("sales")
+                .column(Column::new("sale", Affinity::Text).required())
+                .column(Column::new("created", Affinity::Integer).required())
+                .column(Column::new("invoice", Affinity::Integer))
+                .primary_key(["sale"]),
         )
         .build()?;
     let created = Configuration::new(Path::new(directory), &schema)?
         .create()
         .await?;
+    let database = created.database;
 
-    let counters = Counters::connect(created.database.clone(), &bundle).await?;
+    let counters = Counters::connect(database.clone(), &bundle).await?;
+    let tenant = Tenant::generate();
+    let receipt = counters
+        .register(&created.root, &tenant, CONTROL_LIFETIME_SECONDS)
+        .await?;
+    let kept = (tenant.secret(), receipt.to_bytes());
+    let receipt = ControlReceipt::from_bytes(&kept.1)?;
     counters
-        .register(&created.root, &Tenant::generate(), CONTROL_LIFETIME_SECONDS)
+        .renew(
+            &Tenant::from_secret(kept.0),
+            &receipt,
+            CONTROL_LIFETIME_SECONDS,
+        )
         .await?;
-    let admissions = Name::new("admissions")?;
-    let east = counters
-        .claim(&admissions, &Claim::new("ticket-1", "east-scan-1"))
-        .await?;
-    admitted_once(&counters, &admissions, east).await?;
+
+    let invoices = Name::new("invoices")?;
+    record_sale(&database, "sale-1").await?;
+    let first = invoice(&database, &counters, &invoices, "sale-1").await?;
+    let retried = invoice(&database, &counters, &invoices, "sale-1").await?;
+    println!("sale-1 is invoice {first}; its retry is invoice {retried}");
+    if retried != first {
+        return Err("a retry took a second number".into());
+    }
 
     counters.close().await;
-    let offline = counters
-        .claim(&admissions, &Claim::new("ticket-2", "east-scan-2"))
-        .await;
-    if offline.is_ok() {
-        return Err("closed counters still took a number".into());
+    record_sale(&database, "sale-2").await?;
+    match invoice(&database, &counters, &invoices, "sale-2").await {
+        Err(closed) if matches!(closed.downcast_ref(), Some(CounterError::Closed)) => {}
+        other => return Err(format!("closed counters answered {other:?}").into()),
     }
-    created.database.close().await?;
+    database.close().await?;
     Ok(())
 }
 
-async fn admitted_once(
-    counters: &Counters,
-    admissions: &Name,
-    east: Claimed,
-) -> Result<(), Failure> {
-    let west = counters
-        .claim(admissions, &Claim::new("ticket-1", "west-scan-1"))
+async fn record_sale(database: &Database, sale: &str) -> Result<(), Failure> {
+    let created = Timestamp::try_from(SystemTime::now())?;
+    let mut transaction = database.transaction().await?;
+    transaction
+        .execute(
+            "INSERT INTO sales(sale, created) VALUES(?, ?)",
+            params![sale, created],
+        )
         .await?;
-    let east_retry = counters
-        .claim(admissions, &Claim::new("ticket-1", "east-scan-1"))
-        .await?;
-    println!("east door: {east:?}; west door: {west:?}; east retry: {east_retry:?}");
-    if !matches!(east, Claimed::First(_))
-        || !matches!(west, Claimed::Taken(_))
-        || east_retry != east
-    {
-        return Err("a ticket was admitted twice or a retry lost its admission".into());
-    }
+    transaction.commit().await?;
+    database.flush().await?;
     Ok(())
+}
+
+async fn invoice(
+    database: &Database,
+    counters: &Counters,
+    invoices: &Name,
+    sale: &str,
+) -> Result<i64, Failure> {
+    let rows = database
+        .query("SELECT created FROM sales WHERE sale = ?", params![sale])
+        .await?;
+    let created: Timestamp = rows
+        .collect()
+        .await?
+        .first()
+        .ok_or("no sale")?
+        .get("created")?;
+    let claim = Claim::new(sale, sale, created.system_time().ok_or("sale time")?);
+    let Claimed::First(number) = counters.claim(invoices, &claim).await? else {
+        return Err("another attempt holds this sale's number".into());
+    };
+    let mut transaction = database.transaction().await?;
+    transaction
+        .execute(
+            "UPDATE sales SET invoice = ? WHERE sale = ?",
+            params![number, sale],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(number)
 }

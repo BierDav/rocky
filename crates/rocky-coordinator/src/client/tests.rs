@@ -12,10 +12,12 @@ use rocky_credentials::Publisher;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(crate) const SCHEME: &str = "memory";
+static ROW_CREATED: std::sync::LazyLock<rocky_platform::time::SystemTime> =
+    std::sync::LazyLock::new(rocky_platform::time::SystemTime::now);
 
 fn unique() -> Claim {
     let id: Commitment = rocky_platform::entropy::random();
-    Claim::new(id, id)
+    Claim::new(id, id, *ROW_CREATED)
 }
 
 pub(crate) struct Memory {
@@ -310,8 +312,8 @@ async fn two_doors_racing_one_ticket_admit_it_exactly_once() {
     let doors = [service.client(&service.node), service.client(&service.node)];
     let door = Name::new("door").unwrap();
     let scans = [
-        Claim::new(b"ticket-42", b"east-scan-1"),
-        Claim::new(b"ticket-42", b"west-scan-1"),
+        Claim::new(b"ticket-42", b"east-scan-1", *ROW_CREATED),
+        Claim::new(b"ticket-42", b"west-scan-1", *ROW_CREATED),
     ];
     let (east, west) = tokio::join!(
         doors[0].claim(service.scope, door.clone(), scans[0]),
@@ -326,8 +328,8 @@ async fn two_doors_racing_one_ticket_admit_it_exactly_once() {
         "exactly one door admits the ticket, and both see its one number"
     );
     let rescans = [
-        Claim::new(b"ticket-42", b"east-scan-1"),
-        Claim::new(b"ticket-42", b"west-scan-1"),
+        Claim::new(b"ticket-42", b"east-scan-1", *ROW_CREATED),
+        Claim::new(b"ticket-42", b"west-scan-1", *ROW_CREATED),
     ];
     for ((door_client, scan), answer) in doors.iter().zip(rescans).zip(answers) {
         assert_eq!(
@@ -348,7 +350,7 @@ async fn a_lost_reply_is_outcome_unknown_and_the_same_claim_learns_its_number() 
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    let order = Claim::new(b"order-17", b"checkout-3");
+    let order = Claim::new(b"order-17", b"checkout-3", *ROW_CREATED);
     service.voter.loses_replies.store(true, Ordering::Relaxed);
     assert_eq!(
         client.claim(service.scope, invoices.clone(), order).await,
@@ -367,7 +369,7 @@ async fn a_lost_reply_is_outcome_unknown_and_the_same_claim_learns_its_number() 
         Ok(1),
         "the unanswered claim took its number"
     );
-    let rebuilt_from_the_order_row = Claim::new(b"order-17", b"checkout-3");
+    let rebuilt_from_the_order_row = Claim::new(b"order-17", b"checkout-3", *ROW_CREATED);
     assert_eq!(
         client
             .claim(service.scope, invoices.clone(), rebuilt_from_the_order_row)
@@ -389,7 +391,7 @@ async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    let stale = Claim::new(b"order-5", b"order-5").expires(
+    let stale = Claim::new(b"order-5", b"order-5", *ROW_CREATED).expires(
         rocky_platform::time::SystemTime::now() - rocky_platform::time::Duration::from_secs(60),
     );
     assert_eq!(

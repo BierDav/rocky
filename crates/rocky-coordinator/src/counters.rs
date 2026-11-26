@@ -12,7 +12,8 @@ pub(crate) use state::Counters;
 pub const MAX_COUNTERS: usize = 64;
 /// The longest counter name in bytes.
 pub const MAX_NAME: usize = 64;
-/// Seconds a claim stays in force unless `Claim::expires` sets another time: seven days.
+/// Seconds a claim stays in force after its row's creation unless `Claim::expires` sets another
+/// time: seven days.
 pub const CLAIM_WINDOW: u64 = 7 * 86_400;
 /// The furthest ahead of the coordinator's clock a claim may expire, in seconds: 366 days.
 pub const MAX_CLAIM_LIFETIME: u64 = 366 * 86_400;
@@ -51,7 +52,8 @@ impl From<Name> for Vec<u8> {
 
 /// One attempt to take a counter's number for a key such as a ticket or an order id. Build it
 /// again from the application's own rows to retry: the same key and attempt answer `First` with
-/// the attempt's number, while another attempt on a key still in force answers `Taken`.
+/// the attempt's number, another attempt on a key in force answers `Taken`, and any claim after
+/// its window is refused as `Expired` and takes no number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Claim {
     pub(crate) key: Commitment,
@@ -59,17 +61,19 @@ pub struct Claim {
     pub(crate) expires: u64,
 }
 impl Claim {
-    /// An attempt on `key` named by the application's own id for this try, such as a scan row or
-    /// an order id, in force for `CLAIM_WINDOW` from now; `Claim::new(id, id)` takes a number no
-    /// other key shares.
-    pub fn new(key: impl AsRef<[u8]>, attempt: impl AsRef<[u8]>) -> Self {
+    /// An attempt on `key` named by the application's own id for this try, in force for
+    /// `CLAIM_WINDOW` from `created`, the time stored with the row it claims for, so a retry
+    /// rebuilt from that row never outlives the window; `Claim::new(id, id, created)` takes a
+    /// number no other key shares.
+    pub fn new(key: impl AsRef<[u8]>, attempt: impl AsRef<[u8]>, created: SystemTime) -> Self {
         Self {
             key: rocky_core::commitment("rocky.counter-claim-key.v2", key.as_ref()),
             attempt: rocky_core::commitment("rocky.counter-claim-attempt.v1", attempt.as_ref()),
-            expires: unix_seconds(SystemTime::now()).saturating_add(CLAIM_WINDOW),
+            expires: unix_seconds(created).saturating_add(CLAIM_WINDOW),
         }
     }
-    /// Keeps the key in force until `at` instead, at most `MAX_CLAIM_LIFETIME` ahead.
+    /// Keeps the key in force until `at` instead, a time stored with the row like `created`, at
+    /// most `MAX_CLAIM_LIFETIME` ahead of the coordinator's clock.
     pub fn expires(self, at: SystemTime) -> Self {
         Self {
             expires: unix_seconds(at),
@@ -81,10 +85,7 @@ impl Claim {
 impl Claim {
     pub(crate) fn unique_until(expires: u64) -> Self {
         let id: Commitment = rocky_platform::entropy::random();
-        Self {
-            expires,
-            ..Self::new(id, id)
-        }
+        Self::new(id, id, UNIX_EPOCH).expires(UNIX_EPOCH + std::time::Duration::from_secs(expires))
     }
     pub(crate) fn keyed_for_test((key, attempt): (Commitment, u8), expires: u64) -> Self {
         Self {

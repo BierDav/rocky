@@ -11,6 +11,9 @@ use std::{
 };
 use tempfile::TempDir;
 
+pub static ROW_CREATED: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let database = rocky_credentials::DatabaseContext {
@@ -272,7 +275,7 @@ pub fn invoices() -> rocky_coordinator::counters::Name {
     rocky_coordinator::counters::Name::new("invoices").unwrap()
 }
 pub fn fresh_claim(n: u8) -> rocky_coordinator::Claim {
-    rocky_coordinator::Claim::new([n], [n])
+    rocky_coordinator::Claim::new([n], [n], *ROW_CREATED)
 }
 pub async fn reading(client: &NetworkCoordinator, scope: Scope) -> Result<i64, CoordinationError> {
     client.counter(scope, invoices()).await

@@ -660,7 +660,7 @@ impl<A: RowApplication> Inner<A> {
             by_txn
                 .entry(*transaction)
                 .and_modify(|group| {
-                    if *order > group.order {
+                    if *order < group.order {
                         group.order = order.clone();
                     }
                     group.hashes.push(*hash);
@@ -1029,12 +1029,12 @@ impl<A: RowApplication> Inner<A> {
         work: impl AsyncFnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
         if self.is_deferring_foreign_keys().await? {
-            return work().await;
+            return Box::pin(work()).await;
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
-        let result = work().await;
+        let result = Box::pin(work()).await;
         let checked = match &result {
             Ok(_) => self.check_deferred_foreign_keys().await,
             Err(_) => Ok(()),
@@ -1050,12 +1050,12 @@ impl<A: RowApplication> Inner<A> {
         work: impl AsyncFnOnce() -> Result<Result<T, R>, Error>,
     ) -> Result<Result<T, R>, Error> {
         if self.is_deferring_foreign_keys().await? {
-            return work().await;
+            return Box::pin(work()).await;
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
-        let result = work().await;
+        let result = Box::pin(work()).await;
         let checked = match &result {
             Ok(Ok(_)) => self.check_deferred_foreign_keys().await,
             Ok(Err(_)) | Err(_) => Ok(()),

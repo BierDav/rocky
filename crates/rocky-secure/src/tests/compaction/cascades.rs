@@ -1717,7 +1717,8 @@ async fn rewinding_multi_table_restricted_transaction_with_interleaved_peer_fram
     let mut lineage = restricted_lineage(1);
     lineage.children_first = true;
     let dir = Scratch::new().await;
-    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let mut keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    keys.sort_by_key(|key| *key.public_key().as_bytes());
     let a = open(&lineage, &dir, "a", &keys[0]).await;
     let b = open(&lineage, &dir, "b", &keys[1]).await;
     let c = open(&lineage, &dir, "c", &keys[2]).await;
@@ -1728,45 +1729,66 @@ async fn rewinding_multi_table_restricted_transaction_with_interleaved_peer_fram
     c.follow_bookmark(lineage.domain, "main").await.unwrap();
 
     let (items, badges) = (lineage.scope("items"), lineage.scope("badges"));
-    insert(&a, "a0", "earliest").await;
+    assert!(badges < items);
+    crate::CLOCK_SKEW.with(|skew| skew.set(60));
+    insert(&a, "p1", "v0").await;
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+    sync_scope(&lineage, &a, &b, &keys[1], items).await;
+    sync_scope(&lineage, &a, &c, &keys[2], items).await;
 
-    insert(&b, "b0", "bump").await;
+    let p1_id = item_id(&b, "p1").await;
     let s_b = session(&b).await;
     s_b.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
-    identity_insert(
-        &s_b,
-        "INSERT INTO items(key,title) VALUES(?,'parent')",
-        vec![text("b1")],
+    s_b.run(
+        "UPDATE items SET title = title || '+b' WHERE key = 'p1'",
+        vec![],
     )
     .await
     .unwrap();
-    let b_id = s_b
-        .run("SELECT id FROM items WHERE key='b1'", vec![])
-        .await
-        .unwrap()
-        .rows
-        .remove(0)
-        .remove(0);
     identity_insert(
         &s_b,
         "INSERT INTO badges(key,label,item,also) VALUES(?,'l',?,?)",
-        vec![text("bb1"), b_id.clone(), b_id],
+        vec![text("bb1"), p1_id.clone(), p1_id],
     )
     .await
     .unwrap();
     s_b.run("COMMIT", vec![]).await.unwrap();
 
-    insert(&c, "c0", "interleaved").await;
+    session(&c)
+        .await
+        .run(
+            "UPDATE items SET title = title || '+c' WHERE key = 'p1'",
+            vec![],
+        )
+        .await
+        .unwrap();
     sync_scope(&lineage, &c, &b, &keys[1], items).await;
+    assert_eq!(
+        select(&b, "SELECT title FROM items WHERE key = 'p1'").await,
+        vec![vec![text("v0+b+c")]]
+    );
+
+    session(&a)
+        .await
+        .run(
+            "UPDATE items SET title = title || '+a' WHERE key = 'p1'",
+            vec![],
+        )
+        .await
+        .unwrap();
     sync_scope(&lineage, &a, &b, &keys[1], items).await;
     sync_scope(&lineage, &a, &b, &keys[1], badges).await;
 
+    assert_eq!(
+        select(&b, "SELECT title FROM items WHERE key = 'p1'").await,
+        vec![vec![text("v0+a+b+c")]]
+    );
     let rows = select(
         &b,
         "SELECT b.key,i.key FROM badges b JOIN items i ON i.id=b.item ORDER BY b.key",
     )
     .await;
-    assert_eq!(rows, vec![vec![text("bb1"), text("b1")]]);
+    assert_eq!(rows, vec![vec![text("bb1"), text("p1")]]);
     assert!(
         stored(&b, "SELECT * FROM pragma_foreign_key_check")
             .await

@@ -40,8 +40,7 @@ pub(crate) async fn accept(stream: TcpStream) -> Result<Io<TcpStream>, Failure> 
     ))
 }
 
-/// Wraps an already upgraded server-side connection as a byte stream Rocky frames over.
-pub async fn stream<S>(io: S) -> Io<S>
+pub(crate) async fn stream<S>(io: S) -> Io<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -122,8 +121,7 @@ fn client_config(roots: rustls::RootCertStore) -> Result<Arc<rustls::ClientConfi
     Ok(Arc::new(config))
 }
 
-/// A WebSocket connection read and written as a byte stream, in binary messages of at most 64 KiB.
-pub struct Io<S> {
+pub(crate) struct Io<S> {
     socket: WebSocketStream<S>,
     read: Bytes,
     write: Vec<u8>,

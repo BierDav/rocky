@@ -395,7 +395,7 @@ mod websocket {
     ) {
         let (client, server) = tokio::io::duplex(1 << 20);
         let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-        (client, websocket_stream(server).await)
+        (client, crate::websocket::stream(server).await)
     }
 
     #[tokio::test]

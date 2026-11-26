@@ -24,12 +24,9 @@ use tokio::{
     sync::{Mutex, Semaphore, mpsc, watch},
 };
 
-/// How long a dial or a connection's opening handshake may take before it fails.
-pub const TIMEOUT: Duration = Duration::from_secs(15);
-/// Incoming connections a database scope queues before new ones are refused as busy.
-pub const PENDING: usize = 32;
-/// Requests one attachment serves at once; more are refused as busy.
-pub const RPC_REQUESTS: usize = 32;
+const TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING: usize = 32;
+const RPC_REQUESTS: usize = 32;
 const VERSION: u32 = 1;
 const MAX_HEADER: usize = 512;
 #[cfg(not(target_family = "wasm"))]
@@ -408,9 +405,7 @@ mod platform;
 #[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
 mod websocket;
 #[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
-pub use websocket::{
-    Io as WebSocketIo, accept_key as websocket_accept_key, stream as websocket_stream,
-};
+pub use websocket::accept_key as websocket_accept_key;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;

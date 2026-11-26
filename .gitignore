@@ -5,6 +5,9 @@ target
 
 # Local application data and credentials.
 /local/
+
+# wasm-bindgen output of the browser example.
+/examples/browser-notes/www/pkg/
 .env
 .env.*
 !.env.example

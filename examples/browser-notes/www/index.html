@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rocky notes</title>
+<form id="add"><input name="body" required autofocus> <button>Add</button></form>
+<p id="error"></p>
+<ul id="notes"></ul>
+<script type="module">
+  const worker = new Worker(`worker.js${location.hash}`, { type: "module" });
+  worker.onmessage = ({ data }) => {
+    document.getElementById("error").textContent = data.error ?? "";
+    if (!data.notes) return;
+    document.getElementById("notes").replaceChildren(
+      ...data.notes.map((note) => Object.assign(document.createElement("li"), { textContent: note })),
+    );
+  };
+  document.getElementById("add").onsubmit = (event) => {
+    event.preventDefault();
+    worker.postMessage({ add: event.target.body.value });
+    event.target.reset();
+  };
+</script>

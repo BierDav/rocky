@@ -1099,7 +1099,8 @@ dedicated Worker, where it keeps each database in the origin's private file
 system (OPFS); the directory you pass to `Configuration` names it there. In the
 browser, a database dials a WebSocket server with
 `rocky_tcp::Options::browser()`, or reaches any peer through `rocky-iroh`'s
-relays; see [who can reach whom](#who-can-reach-whom).
+relays; see [who can reach whom](#who-can-reach-whom) and
+[a browser app](#a-browser-app).
 
 Building compiles C (SQLite, ring), so it needs a clang that targets wasm32 and
 an `llvm-ar` that indexes wasm objects, which Apple's `ar` does not (`rustup
@@ -1127,6 +1128,36 @@ Browser tests are `wasm-bindgen-test` tests in a dedicated Worker:
 1. Install the `wasm-bindgen-test-runner` of the `wasm-bindgen` version in
    your `Cargo.lock` (`cargo install wasm-bindgen-cli --version <it>`) and set
    it as the runner under `[target.wasm32-unknown-unknown]`.
+### A browser app
+
+[examples/browser-notes](examples/browser-notes) is a notes app to copy. Its
+[`src/lib.rs`](examples/browser-notes/src/lib.rs) owns the `Database`, keeps it
+in OPFS, dials with `rocky_tcp::Options::browser()` and exports `Notes.open`,
+`add`, `list` and `watch` to JavaScript through wasm-bindgen;
+[`www/worker.js`](examples/browser-notes/www/worker.js) runs it in a dedicated
+Worker, and [`www/index.html`](examples/browser-notes/www/index.html) talks to
+the Worker with messages. Its peer is the `websocket_server` example, which
+serves the page and its files beside the sync route `/rocky`:
+
+```sh
+cargo build -p browser-notes --target wasm32-unknown-unknown
+scripts/tools wasm-bindgen
+local/bin/wasm-bindgen --target web --out-dir examples/browser-notes/www/pkg \
+    target/wasm32-unknown-unknown/debug/browser_notes.wasm
+cargo run -p rocky-sdk --example websocket_server
+```
+
+Open the `http://127.0.0.1:8080/#…` link it prints. The first visit joins with
+the invitation code after `#`; later visits open the database from OPFS and
+need no code. The server keeps its database in `local/notes-server` and the
+owner's phrase in `local/notes-server.owner-phrase`, so it invites again on
+every start. A deployed page sits behind an HTTPS proxy and syncs over
+`wss://`, which the same dialer opens. `join` mints the browser's person key in
+`Opened::identity` and the example drops it, so the browser reads and writes
+but cannot link another device; keep its phrase if it should. Outside this
+repository, install the `wasm-bindgen` CLI of the version in your `Cargo.lock`
+with `cargo install wasm-bindgen-cli --version <it>`.
+
 2. Install headless Firefox with `geckodriver`, or a Chrome with the
    `chromedriver` of its major version, and name the driver in `GECKODRIVER`
    or `CHROMEDRIVER`.
@@ -1183,8 +1214,9 @@ and the tests in a headless browser, and `--all` adds e2e. `--changed` scopes to
 jj's current change. `./scripts/lint --fix` formats.
 
 More examples: `cargo run -p rocky-sdk --example notes -- ./local/notes
---create` keeps a notes database, and `cargo run -p todo-desktop` runs several
-devices of a shared todo app in one window.
+--create` keeps a notes database, `cargo run -p todo-desktop` runs several
+devices of a shared todo app in one window, and
+[examples/browser-notes](#a-browser-app) runs one in a browser.
 
 ## License
 

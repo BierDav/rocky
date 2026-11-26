@@ -83,6 +83,7 @@ const ELSEWHERE: &[&str] = &[
     "Exhausted",
     "FromStr",
     "LocalCluster",
+    "Notes",
     "Ok",
     "Options",
     "Refusal",

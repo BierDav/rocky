@@ -83,10 +83,11 @@ fi
 # same on every target and runs natively, while the browser's seams (files,
 # storage, timers, transport) run in the other packages' browser tests.
 # rocky-tcp's browser dialer runs in rocky-sdk's browser_sync against a native
-# WebSocket listener, so its own tests only compile for wasm32 too.
+# WebSocket listener, so its own tests only compile for wasm32 too, as does the
+# browser-notes example, which has no tests.
 browser_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-credentials
     rocky-storage rocky-iroh rocky-coordinator rocky-sdk"
-wasm_packages="$browser_packages rocky-secure rocky-tcp"
+wasm_packages="$browser_packages rocky-secure rocky-tcp browser-notes"
 run_wasm() {
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done

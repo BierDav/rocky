@@ -588,6 +588,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-notes"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "rocky-sdk",
+ "rocky-tcp",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

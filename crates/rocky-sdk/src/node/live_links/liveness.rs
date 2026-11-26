@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 pub(super) const CLOSE: Duration = Duration::from_millis(100);
 enum Exit {
-    Finished(Result<&'static str, Failure>),
+    Finished(Result<CloseReason, Failure>),
     Close(CloseReason),
 }
 impl Node {
@@ -14,7 +14,7 @@ impl Node {
         mut close: watch::Receiver<Option<CloseReason>>,
         changed: watch::Sender<Option<ChangeHint>>,
         mut authority: watch::Receiver<u64>,
-    ) -> Result<&'static str, Failure> {
+    ) -> Result<CloseReason, Failure> {
         let peer = opened.peer;
         let direction = opened.direction;
         let expires = opened.expires;
@@ -152,7 +152,7 @@ impl Node {
                         Message::Close {
                             reason: CloseReason::Authority | CloseReason::Busy,
                         } => return Err("peer closed link".into()),
-                        Message::Close { reason } => return Ok::<_, Failure>(close_reason(reason)),
+                        Message::Close { reason } => return Ok::<_, Failure>(reason),
                         _ => return Err("invalid link direction".into()),
                     }
                 }
@@ -220,7 +220,7 @@ impl Node {
                 if reason == CloseReason::Authority {
                     self.reopen_link(peer);
                 }
-                Ok(close_reason(reason))
+                Ok(reason)
             }
         }
     }
@@ -256,7 +256,7 @@ fn take_signal(changed: &watch::Sender<Option<ChangeHint>>) -> Option<ChangeHint
     pending
 }
 
-fn close_reason(reason: CloseReason) -> &'static str {
+pub(super) fn close_reason(reason: CloseReason) -> &'static str {
     match reason {
         CloseReason::Authority => "authority",
         CloseReason::Duplicate => "duplicate",

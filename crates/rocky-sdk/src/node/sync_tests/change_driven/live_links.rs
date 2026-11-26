@@ -523,6 +523,153 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
         .await
 }
 
+struct DialOnly(Arc<dyn Transport>);
+impl Transport for DialOnly {
+    fn schemes(&self) -> &[&str] {
+        self.0.schemes()
+    }
+    fn dial_only(&self) -> bool {
+        true
+    }
+    fn address(&self) -> crate::transport::BoxFuture<'_, Result<Option<String>, Failure>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
+    ) -> crate::transport::BoxFuture<'a, Result<Stream, Failure>> {
+        self.0.connect(address, protocol, scope)
+    }
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> rocky_core::net::BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        self.0.request(addresses, scope, request)
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> rocky_core::net::BoxFuture<'a, Result<Stream, Failure>> {
+        self.0.session(addresses, scope)
+    }
+    fn accept(&self) -> crate::transport::BoxFuture<'_, Option<rocky_core::net::Incoming>> {
+        Box::pin(async { None })
+    }
+    fn close(&self) -> crate::transport::BoxFuture<'_, ()> {
+        self.0.close()
+    }
+}
+
+async fn relink(
+    node: &Arc<Node>,
+    hub: &Arc<Hub>,
+    name: &str,
+    dial_only: bool,
+) -> Result<(), Failure> {
+    node.detach().await;
+    let connected = hub
+        .connector(name)
+        .start(!dial_only, Settings::route_secret(&node.vault)?)
+        .await?;
+    let connected = match dial_only {
+        true => crate::transport::Connected::new(Arc::new(DialOnly(connected.transport))),
+        false => connected,
+    };
+    node.link(connected, true).await
+}
+
+fn unreachable_link_dials(hub: &Hub, from: &str, to: &str) -> usize {
+    let dial = format!("unreachable {from}>{to} Link ");
+    hub.events()
+        .iter()
+        .filter(|event| event.starts_with(&dial))
+        .count()
+}
+
+async fn advance_seconds(seconds: u64) {
+    for _ in 0..seconds {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dial_only_device_redials_a_peer_that_closed_its_link_until_it_detaches()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let server = enrolled(&root.path().join("server"), &hub, "server", None).await?;
+            let device = enrolled(
+                &root.path().join("device"),
+                &hub,
+                "device",
+                Some((&server, crate::Access::Read)),
+            )
+            .await?;
+            relink(&device, &hub, "device", true).await?;
+            assert!(transport(&device).await?.dial_only());
+            targets(&device, std::slice::from_ref(&server)).await?;
+            server.automatic.store(true, Ordering::SeqCst);
+            start(&device, true).await?;
+            let server_key = PrivateKey::from_bytes(&server.vault.get("node")?).public_key();
+            let links = device.current().ok_or("service")?;
+            until(|| links.live.contains(server_key)).await;
+            settled(&device).await;
+
+            server.detach().await;
+            until(|| links.live.len() == 0).await;
+            assert!(
+                snap::Snapshot::snapshot(device.activity.after(0))["events"]
+                    .as_array()
+                    .ok_or("events")?
+                    .iter()
+                    .any(|event| event["kind"] == "link_closed" && event["reason"] == "detached"),
+                "the stopping server closes the link cleanly"
+            );
+            hub.set_down("device", "server", true);
+            advance_seconds(600).await;
+            let redials = unreachable_link_dials(&hub, "device", "server");
+            assert!(
+                (2..=30).contains(&redials),
+                "a closed peer is redialed with bounded backoff, not once or in a busy loop: {redials}"
+            );
+
+            hub.set_down("device", "server", false);
+            relink(&server, &hub, "server", false).await?;
+            add(&server, 1).await?;
+            let mut waited = 0;
+            while rows(&device).await? != ["1"] {
+                assert!(waited < 120, "the device never redialed the restarted server");
+                advance_seconds(1).await;
+                waited += 1;
+            }
+            assert!(links.live.contains(server_key));
+
+            server.detach().await;
+            until(|| links.live.len() == 0).await;
+            hub.set_down("device", "server", true);
+            device.detach().await;
+            let dials = unreachable_link_dials(&hub, "device", "server");
+            advance_seconds(600).await;
+            assert_eq!(
+                unreachable_link_dials(&hub, "device", "server"),
+                dials,
+                "a detached device stops redialing"
+            );
+            Ok(())
+        }))
+        .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failure> {
     tokio::task::LocalSet::new()

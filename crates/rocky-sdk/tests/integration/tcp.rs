@@ -1,5 +1,5 @@
 use crate::common::{Device, Failure};
-use rocky_sdk::{Configuration, ErrorKind, Network, ServiceError};
+use rocky_sdk::{Configuration, ErrorKind, Network, ServiceError, SyncMode};
 use std::{net::SocketAddr, sync::Arc};
 
 fn tcp() -> Network {
@@ -110,6 +110,53 @@ async fn known_peers_and_complete(device: &Device) -> Result<(usize, bool), Fail
             _ => Err(error.into()),
         },
     }
+}
+
+#[tokio::test]
+async fn a_live_dial_only_device_redials_a_server_that_restarted_on_its_route()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let route = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let listening = || -> Network { rocky_tcp::Options::new(route).into() };
+    let server = Device::create(&root.path().join("server"), Some(listening())).await?;
+    server.database.set_sync(SyncMode::Live).await?;
+    let device = Device::join(
+        &root.path().join("device"),
+        &server.invite().await,
+        dial_only(),
+    )
+    .await?;
+    device.database.set_sync(SyncMode::Live).await?;
+    let mut changes = device.database.observe(&["items"]).await?;
+
+    server.add(1, "Milk").await;
+    received(&device, &mut changes, "Milk").await?;
+
+    server.close().await;
+    let server = Device::open(&root.path().join("server"), Some(listening())).await?;
+    server.database.set_sync(SyncMode::Live).await?;
+    server.add(2, "Eggs").await;
+    received(&device, &mut changes, "Eggs").await?;
+
+    server.close().await;
+    device.close().await;
+    Ok(())
+}
+
+async fn received(
+    device: &Device,
+    changes: &mut rocky_sdk::TableEvents,
+    title: &str,
+) -> Result<(), Failure> {
+    let outlasts_a_loaded_ci_host = std::time::Duration::from_secs(60);
+    tokio::time::timeout(outlasts_a_loaded_ci_host, async {
+        while !device.titles().await.iter().any(|seen| seen == title) {
+            changes.next().await?;
+        }
+        Ok::<_, Failure>(())
+    })
+    .await
+    .map_err(|_| format!("the live device never received {title}"))?
 }
 
 #[tokio::test]

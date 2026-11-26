@@ -844,7 +844,10 @@ impl Node {
                 node.activity
                     .record(crate::activity::ActivityKind::LinkClosed {
                         peer: (peer).to_owned(),
-                        reason: (result.as_ref().copied().unwrap_or("error")).to_owned(),
+                        reason: result
+                            .as_ref()
+                            .map_or("error", |reason| liveness::close_reason(*reason))
+                            .to_owned(),
                         error: result.as_ref().err().map(ToString::to_string),
                     });
                 node.link_status_changed();
@@ -852,8 +855,13 @@ impl Node {
                 {
                     node.link_pending(peer);
                 }
+                let still_open = *service.stage.borrow() == Stage::Open;
+                let authority_reopens_it = matches!(result, Ok(CloseReason::Authority));
+                if result.is_ok() && !authority_reopens_it && still_open && persistent && dialed {
+                    node.redial_closed_link(peer, started.elapsed());
+                }
                 if let Err(error) = &result
-                    && *service.stage.borrow() == Stage::Open
+                    && still_open
                 {
                     if let Ok(mut reached) = node.reached() {
                         let last = reached.entry(peer).or_insert_with(|| Reached {
@@ -1074,6 +1082,20 @@ impl Node {
             .entry(peer)
             .or_default()
             .link = true;
+        self.link_events.send_replace(());
+    }
+    fn redial_closed_link(&self, peer: PublicKey, lived: Duration) {
+        if self.sync_mode() != crate::SyncMode::Live {
+            return;
+        }
+        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(kept_peer) = retries.get_mut(&peer) else {
+            return;
+        };
+        kept_peer.link_retry.survived(lived);
+        kept_peer.link_retry.failed();
+        kept_peer.link = true;
+        drop(retries);
         self.link_events.send_replace(());
     }
     fn link_pending_scopes(&self, peer: PublicKey, scopes: &[ResourceScope]) {

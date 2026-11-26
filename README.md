@@ -584,6 +584,11 @@ changes it:
 | `Manual` | Yes | Only on `sync_now` |
 | `Off` | No | Never |
 
+When a peer drops or closes its live link, for example because it restarts, a
+`Live` device that dialed the peer redials it on its own, with a backoff that
+starts near a second and doubles up to a minute, until the peer answers or the
+database closes.
+
 `sync_now` runs one pass and fails with `ServiceError::SyncOff` when sync is
 off and with `NoPeerReached(report)` when no peer reconciled, which is also
 what an owner with no other device yet gets. Its `SyncReport` prints as one

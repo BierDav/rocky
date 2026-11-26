@@ -1305,7 +1305,14 @@ async fn a_late_write_a_removal_no_longer_applies_is_dropped_loudly() -> Result<
         late.bob.database.transaction_outcome(tea).await?,
         Some(rocky_sdk::TransactionOutcome::Dropped {
             reason: rocky_sdk::DropReason::Schema,
-            sealed: false,
+            sealed: true,
+        })
+    );
+    assert_eq!(
+        late.owner.database.transaction_outcome(tea).await?,
+        Some(rocky_sdk::TransactionOutcome::Dropped {
+            reason: rocky_sdk::DropReason::Schema,
+            sealed: true,
         })
     );
     assert_eq!(

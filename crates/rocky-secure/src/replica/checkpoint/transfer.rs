@@ -2313,7 +2313,7 @@ impl<A: RowApplication> Inner<A> {
             true => Some(self.rewind_linked_replay(id).await?),
             false => None,
         };
-        let reapply = self.supersede(scope, &statement, &mut report).await?;
+        let (reapply, reindex_held) = self.supersede(scope, &statement, &mut report).await?;
         if let Some(linked) = linked {
             Box::pin(self.replace_replayed_with_staged(scope, statement.tip, id)).await?;
             Box::pin(self.redo_linked_replay(linked, time)).await?;
@@ -2498,6 +2498,37 @@ impl<A: RowApplication> Inner<A> {
                 | incoming::Outcome::Ahead(_) => report.pending.push(hash),
             }
         }
+        if !reindex_held.is_empty() {
+            for hash in reindex_held {
+                let frame = self
+                    .frame(hash)
+                    .await?
+                    .ok_or_else(|| Error::Corrupt("retained operation".into()))?;
+                self.conn
+                    .execute(
+                        "INSERT INTO secure_applied(scope,hash) VALUES(?,?)",
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(hash.as_bytes().to_vec()),
+                        ]),
+                    )
+                    .await?;
+                self.note_row_positions(id, &frame, &self.row_payload(&frame)?)
+                    .await?;
+            }
+            if replayed {
+                self.mark_rederive(Some(id)).await?;
+            } else {
+                self.rebuilding_tip = true;
+                self.tip_base = true;
+                let rebuilt = self.rebuild_rows(scope).await.and_then(|rebuilt| {
+                    rebuilt.map_err(|broken| broken.refuses(Rebuilding::TipSwitch))
+                });
+                self.rebuilding_tip = false;
+                self.tip_base = false;
+                rebuilt?;
+            }
+        }
         self.reseed_ledger(scope, id).await?;
         Box::pin(self.rederive_replayed(Some(scope), time)).await?;
         self.clear_staging(id).await?;
@@ -2607,9 +2638,10 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         statement: &CheckpointStatement,
         report: &mut RebootstrapReport,
-    ) -> Result<Vec<Hash>, Error> {
+    ) -> Result<(Vec<Hash>, Vec<Hash>), Error> {
         let id = self.scope_id(scope).await?;
         let mut reapply = Vec::new();
+        let mut reindex_held = Vec::new();
         let mut cursor = Vec::new();
         let mut bytes = 0;
         let mut covered = BTreeMap::new();
@@ -2667,35 +2699,9 @@ impl<A: RowApplication> Inner<A> {
                         .chain(header.backlink.iter())
                         .copied(),
                 );
-                let visible_held = if status == "held" && self.graphs.contains_key(&scope.domain) {
-                    let e = &header.extensions;
-                    let author = e
-                        .author(&header.public_key)
-                        .ok_or_else(|| denied("node author missing"))?;
-                    self.visible_frame(
-                        self.graph_for(scope.domain)?,
-                        e.tip,
-                        author,
-                        e.author_sequence,
-                        self.workspace.tip,
-                    )? && !matches!(
-                        self.frame_reach_at(
-                            scope.domain,
-                            e.tip,
-                            author,
-                            e.author_sequence,
-                            header.timestamp,
-                        )?,
-                        tips::FrameReach::Held | tips::FrameReach::Unfollowed
-                    )
-                } else {
-                    false
-                };
-                if status == "applied" || visible_held {
-                    let order = match position {
-                        SqlValue::Integer(position) => *position,
-                        SqlValue::Null if visible_held => i64::MAX,
-                        _ => return Err(Error::Corrupt("applied position".into())),
+                if status == "applied" {
+                    let SqlValue::Integer(position) = position else {
+                        return Err(Error::Corrupt("applied position".into()));
                     };
                     self.conn
                         .execute(
@@ -2706,7 +2712,14 @@ impl<A: RowApplication> Inner<A> {
                     self.conn
                         .execute("DELETE FROM secure_applied WHERE hash=?", [hash.clone()])
                         .await?;
-                    reapply.push((order, hash_of(hash)?));
+                    reapply.push((*position, hash_of(hash)?));
+                } else if status == "held"
+                    && let SqlValue::Integer(position) = position
+                {
+                    self.conn
+                        .execute("DELETE FROM secure_applied WHERE hash=?", [hash.clone()])
+                        .await?;
+                    reindex_held.push((*position, hash_of(hash)?));
                 }
             }
         }
@@ -2726,7 +2739,11 @@ impl<A: RowApplication> Inner<A> {
             self.sweep_chains().await?;
         }
         reapply.sort();
-        Ok(reapply.into_iter().map(|(_, hash)| hash).collect())
+        reindex_held.sort();
+        Ok((
+            reapply.into_iter().map(|(_, hash)| hash).collect(),
+            reindex_held.into_iter().map(|(_, hash)| hash).collect(),
+        ))
     }
 }
 

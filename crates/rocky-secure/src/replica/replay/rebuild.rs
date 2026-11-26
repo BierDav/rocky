@@ -1,4 +1,12 @@
 use super::*;
+
+type ReplayChecked<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Result<Vec<i64>, BrokenReference>, Error>>
+            + Send
+            + 'a,
+    >,
+>;
 use rocky_credentials::SignedSeal;
 
 pub(in crate::replica) const KEPT_OUTCOMES: i64 = 4096;
@@ -118,7 +126,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(super) async fn mark_rederive(&self, id: Option<i64>) -> Result<(), Error> {
+    pub(in crate::replica) async fn mark_rederive(&self, id: Option<i64>) -> Result<(), Error> {
         if let Some(id) = id {
             self.conn
                 .execute(
@@ -230,10 +238,9 @@ impl<A: RowApplication> Inner<A> {
                     .iter()
                     .map(|index| row.get(*index).cloned())
                     .collect::<Option<Vec<_>>>()
+                    && initial.insert((parent_lower.clone(), values_blob(&key)))
                 {
-                    if initial.insert((parent_lower.clone(), values_blob(&key))) {
-                        parent_keys.push(key);
-                    }
+                    parent_keys.push(key);
                 }
             }
         }
@@ -966,17 +973,7 @@ impl<A: RowApplication> Inner<A> {
             .map(|_| ()))
     }
 
-    fn replay_checked(
-        &self,
-        time: u64,
-        publish_outcomes: bool,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Result<Vec<i64>, BrokenReference>, Error>>
-                + Send
-                + '_,
-        >,
-    > {
+    fn replay_checked(&self, time: u64, publish_outcomes: bool) -> ReplayChecked<'_> {
         Box::pin(async move {
             self.deferring_foreign_keys_or_rollback(async || {
                 self.conn.execute("SAVEPOINT replay_checked", ()).await?;

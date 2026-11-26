@@ -2286,9 +2286,6 @@ impl Settings {
         let mut next = self.clone();
         next.learn_revocations(&renewal.revocations)?;
         let chain = next.certify(vault, renewal.chain(), &domain)?;
-        let widened_grants = domain.expand(&crate::access::granted_of(
-            chain.held().ok_or("missing identity capability")?,
-        )?);
         let Sealed {
             keys: received,
             groups,
@@ -2297,6 +2294,12 @@ impl Settings {
             naming,
             trusted,
         } = Sealed::parse(&sealed)?;
+        let widened_grants = match trusted {
+            Some(_) => domain.expand(&domain.administer()),
+            None => domain.expand(&crate::access::granted_of(
+                chain.held().ok_or("missing identity capability")?,
+            )?),
+        };
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
             if !reads(&widened_grants, scope) {
@@ -2456,16 +2459,22 @@ impl Settings {
         }
         let node = Self::node_key(vault)?;
         let authority = self.authority(&node)?;
+        let trusted = registry
+            .admins
+            .get(&prior.subject)
+            .map(|record| record.grant.clone());
+        let readable = match trusted {
+            Some(_) => domain.expand(&domain.administer()),
+            None => granted,
+        };
+        let keys = self.keys_for(vault, &domain, &readable)?;
         let sealed = Sealed {
             groups: self.groups_for(vault, request.node, &held_by, false)?,
-            epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
-            keys: self.keys_for(vault, &domain, &granted)?,
+            epoch_statements: self.statements_for(&keys),
+            keys,
             issuers: self.issuer_contacts(&[request.node])?,
             naming: None,
-            trusted: registry
-                .admins
-                .get(&prior.subject)
-                .map(|record| record.grant.clone()),
+            trusted,
         };
         let renewal = self.unrevoked_renewal(&authority, &request, prior, &sealed, time)?;
         let mut changes = Changes::default();

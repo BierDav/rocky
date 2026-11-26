@@ -275,3 +275,33 @@ async fn a_promotion_made_while_the_person_joins_reaches_their_device() -> Resul
     owner.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_live_promotion_reaches_the_promoted_device_without_a_sync_call() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = wide()?;
+    let live = |name: &str| -> Result<Configuration, Failure> {
+        Ok(configuration(&root.path().join(name), &schema, &hub)?.sync(crate::SyncMode::Live))
+    };
+    let created = live("owner")?.create().await?;
+    let owner = created.database;
+    let invitation = owner.invite(Invite::new(Access::Full)).await?;
+    let member = live("member")?.join(&invitation.code).await?.database;
+    member.sync_now().await?;
+    owner.sync_now().await?;
+    let mut changes = member.status_changes();
+    let before = changes.next().await?.authority;
+    assert!(!before.is_issuer);
+    owner
+        .make_admin(before.principal, Arc::new(created.root))
+        .await?;
+    while !changes.next().await?.authority.is_issuer {}
+    assert!(
+        member.me().await?.admin,
+        "a device that reports itself an issuer reads the registry"
+    );
+    member.close().await?;
+    owner.close().await?;
+    Ok(())
+}

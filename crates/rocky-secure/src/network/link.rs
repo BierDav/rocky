@@ -778,7 +778,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v39",
+            "rocky.link.v40",
             "the cryptographic handshake accepts one current version"
         );
     }

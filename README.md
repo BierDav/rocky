@@ -727,23 +727,22 @@ Rocky's encryption and authorization apply on top of every transport.
 ## Coordinator
 
 `rocky-coordinator` adds gap-free counters and admit-once claims to a
-`Database`. `Counters::connect(database, &bundle, transport)` reaches the
-coordinator a `TrustBundle` names. Voters accept only iroh connections, so pass
-a `rocky-iroh` transport. The application owns that transport: closing it ends
-its open streams, refuses every later dial and stops an endpoint that
-`Options::client()` bound, so a claim after it is an error, never a number.
+`Database`. `Counters::connect(database, &bundle).await` reaches the
+coordinator a `TrustBundle` names through an iroh client endpoint of its own.
+That endpoint uses the relay the voters' routes name; with none named, it
+dials their direct addresses with no relay or lookup when every route has
+one, and otherwise uses n0's relays and lookup. It never takes part in
+discovery or sync. Clones of `Counters` share the endpoint;
+`counters.close().await` stops it for every clone, and so does dropping the
+last clone. A claim after it is an error, never a number, so to come back
+online, connect again.
 The owner registers the database once with
 `counters.register(&root, &tenant, lifetime)`, where `tenant` is the
 coordinator account (`Tenant::generate()`, kept through `Tenant::secret`), and
 renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
 
 ```rust crates/rocky-coordinator/examples/counters.rs
-
-    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
-        .client()
-        .await?
-        .transport();
-    let counters = Counters::connect(created.database.clone(), &bundle, transport.clone())?;
+    let counters = Counters::connect(created.database.clone(), &bundle).await?;
     counters
         .register(&created.root, &Tenant::generate(), CONTROL_LIFETIME_SECONDS)
         .await?;
@@ -753,13 +752,14 @@ renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
         .await?;
     admitted_once(&counters, &admissions, east).await?;
 
-    transport.close().await;
+    counters.close().await;
     let offline = counters
         .claim(&admissions, &Claim::new("ticket-2", "east-scan-2"))
         .await;
     if offline.is_ok() {
-        return Err("a closed transport still took a number".into());
+        return Err("closed counters still took a number".into());
     }
+    created.database.close().await?;
 ```
 
 A counter is the unit of uniqueness: a key is admitted once per counter, so

@@ -26,11 +26,7 @@ async fn main() -> Result<(), Failure> {
         .create()
         .await?;
 
-    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
-        .client()
-        .await?
-        .transport();
-    let counters = Counters::connect(created.database.clone(), &bundle, transport.clone())?;
+    let counters = Counters::connect(created.database.clone(), &bundle).await?;
     counters
         .register(&created.root, &Tenant::generate(), CONTROL_LIFETIME_SECONDS)
         .await?;
@@ -40,12 +36,12 @@ async fn main() -> Result<(), Failure> {
         .await?;
     admitted_once(&counters, &admissions, east).await?;
 
-    transport.close().await;
+    counters.close().await;
     let offline = counters
         .claim(&admissions, &Claim::new("ticket-2", "east-scan-2"))
         .await;
     if offline.is_ok() {
-        return Err("a closed transport still took a number".into());
+        return Err("closed counters still took a number".into());
     }
     created.database.close().await?;
     Ok(())

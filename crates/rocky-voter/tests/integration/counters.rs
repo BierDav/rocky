@@ -1,5 +1,5 @@
 use crate::support::{
-    public::{DAY, PublicCluster, transport},
+    public::{DAY, PublicCluster},
     timestamp,
 };
 use rocky_coordinator::{
@@ -121,7 +121,9 @@ impl Office {
             .database
     }
     async fn counters(&self, database: &Database) -> Counters {
-        Counters::connect(database.clone(), &self.bundle, transport().await).unwrap()
+        Counters::connect(database.clone(), &self.bundle)
+            .await
+            .unwrap()
     }
     async fn registered(&self) -> (Counters, ControlReceipt) {
         let counters = self.counters(&self.publisher).await;
@@ -370,35 +372,36 @@ async fn two_doors_scanning_one_ticket_at_once_admit_it_exactly_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_till_whose_transport_closed_gets_an_error_and_takes_no_number() {
+async fn closed_counters_get_an_error_on_every_clone_and_take_no_number() {
     let office = Office::in_process().await;
     office.registered().await;
-    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
-        .client()
-        .await
-        .unwrap()
-        .transport();
-    let till =
-        Counters::connect(office.publisher.clone(), &office.bundle, transport.clone()).unwrap();
+    let till = office.counters(&office.publisher).await;
+    let other_till = till.clone();
     let order = |id: &str| Claim::new(id, id);
     assert_eq!(
         till.claim(&invoices(), &order("order-1")).await.unwrap(),
         First(1)
     );
+    drop(till.clone());
+    assert_eq!(
+        till.claim(&invoices(), &order("order-2")).await.unwrap(),
+        First(2),
+        "a dropped clone leaves the endpoint to the others"
+    );
 
-    transport.close().await;
-    let offline = till.claim(&invoices(), &order("order-2")).await;
+    till.close().await;
+    let offline = other_till.claim(&invoices(), &order("order-3")).await;
     assert!(
         matches!(
             offline,
             Err(CounterError::Coordination(CoordinationError::Unavailable))
         ),
-        "a claim through a closed transport reaches no voter: {offline:?}"
+        "closing one handle closes the endpoint every clone shares: {offline:?}"
     );
     let online = office.counters(&office.publisher).await;
     assert_eq!(
         online.read(&invoices()).await.unwrap(),
-        1,
+        2,
         "the offline claim took no number"
     );
     if let Voters::InProcess(cluster) = office.voters {

@@ -9,7 +9,7 @@ use crate::{
 };
 use rocky_core::Commitment;
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher};
-use rocky_sdk::{Database, DeviceCredential, transport::Transport};
+use rocky_sdk::{Database, DeviceCredential};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,13 +28,15 @@ pub struct ControlReceipt {
     pub expires: u64,
 }
 
-/// A failed `Counters` call: the coordinator's answer or the database's.
+/// A failed `Counters` call: the coordinator's answer, the database's or the client endpoint's.
 #[derive(Debug)]
 pub enum CounterError {
     /// The coordinator was unreachable, refused or did not answer; see `CoordinationError`.
     Coordination(CoordinationError),
     /// The database could not supply or sign the device's credentials.
     Database(rocky_sdk::Error),
+    /// `Counters::connect` could not bind its iroh client endpoint.
+    Endpoint(rocky_core::net::Failure),
 }
 impl CounterError {
     /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
@@ -42,7 +44,7 @@ impl CounterError {
     pub fn retryable(&self) -> bool {
         match self {
             Self::Coordination(error) => error.retryable(),
-            Self::Database(_) => false,
+            Self::Database(_) | Self::Endpoint(_) => false,
         }
     }
 }
@@ -51,6 +53,7 @@ impl std::fmt::Display for CounterError {
         match self {
             Self::Coordination(error) => write!(f, "coordinator: {error}"),
             Self::Database(error) => write!(f, "database: {error}"),
+            Self::Endpoint(error) => write!(f, "client endpoint: {error}"),
         }
     }
 }
@@ -68,25 +71,73 @@ impl From<rocky_sdk::Error> for CounterError {
 
 /// Gap-free named counters for one database, claimed through a coordinator; each counter is
 /// one unit of uniqueness, so every door or till that must agree claims against the same name.
+#[derive(Clone)]
 pub struct Counters {
-    database: Database,
-    client: NetworkCoordinator,
+    shared: Arc<Shared>,
     deadline: Duration,
 }
-impl Counters {
-    /// Reaches the coordinator a trust bundle names over `transport`, which the application keeps
-    /// and closes; `rocky-voter` serves iroh only, so pass a `rocky-iroh` transport.
-    pub fn connect(
-        database: Database,
-        bundle: &TrustBundle,
-        transport: Arc<dyn Transport>,
-    ) -> Result<Self, CounterError> {
-        let session = PrivateKey::new();
+struct Shared {
+    database: Database,
+    client: NetworkCoordinator,
+    endpoint: ClientEndpoint,
+}
+struct ClientEndpoint {
+    attachment: rocky_iroh::Attachment,
+    #[cfg(not(target_family = "wasm"))]
+    home: Option<rocky_platform::task::Home>,
+}
+impl ClientEndpoint {
+    async fn bind(bundle: &TrustBundle) -> Result<Self, CounterError> {
+        let genesis = bundle.genesis()?;
+        let public = genesis
+            .genesis
+            .public
+            .as_ref()
+            .ok_or(CoordinationError::Configuration)?;
+        let options =
+            rocky_iroh::Options::reaching(public.endpoints.iter().map(|e| e.route.as_str()))
+                .map_err(|_| CoordinationError::Configuration)?;
         Ok(Self {
-            database,
-            client: NetworkCoordinator::connect(bundle, session, transport)?,
+            attachment: options.client().await.map_err(CounterError::Endpoint)?,
+            #[cfg(not(target_family = "wasm"))]
+            home: rocky_platform::task::Home::current(),
+        })
+    }
+}
+impl Drop for ClientEndpoint {
+    fn drop(&mut self) {
+        let attachment = self.attachment.clone();
+        let close = async move { attachment.close().await };
+        #[cfg(target_family = "wasm")]
+        drop(rocky_platform::task::spawn(close));
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(home) = &self.home {
+            drop(home.spawn(close));
+        }
+    }
+}
+impl Counters {
+    /// Binds its own iroh client endpoint, with the relay or direct addresses the trust bundle's
+    /// voters name, and reaches the coordinator through it until `close` or the last clone drops.
+    pub async fn connect(database: Database, bundle: &TrustBundle) -> Result<Self, CounterError> {
+        let endpoint = ClientEndpoint::bind(bundle).await?;
+        let client = NetworkCoordinator::connect(
+            bundle,
+            PrivateKey::new(),
+            endpoint.attachment.transport(),
+        )?;
+        Ok(Self {
+            shared: Arc::new(Shared {
+                database,
+                client,
+                endpoint,
+            }),
             deadline: CALL_DEADLINE,
         })
+    }
+    /// Stops the client endpoint for every clone, so each later call fails with `Unavailable`.
+    pub async fn close(&self) {
+        self.shared.endpoint.attachment.close().await;
     }
     /// Bounds how long each call waits, 12 seconds (`CALL_DEADLINE`) by default.
     pub fn deadline(self, deadline: Duration) -> Self {
@@ -100,7 +151,7 @@ impl Counters {
         tenant: &Tenant,
         lifetime: u64,
     ) -> Result<ControlReceipt, CounterError> {
-        let device = self.database.device_credential().await?;
+        let device = self.shared.database.device_credential().await?;
         if owner.public_key().ok() != Some(device.publisher) {
             return Err(CoordinationError::Denied(Refusal::InvalidGrant).into());
         }
@@ -130,7 +181,7 @@ impl Counters {
         current: &ControlReceipt,
         lifetime: u64,
     ) -> Result<ControlReceipt, CounterError> {
-        let device = self.database.device_credential().await?;
+        let device = self.shared.database.device_credential().await?;
         let revision = current
             .revision
             .checked_add(1)
@@ -143,7 +194,7 @@ impl Counters {
     /// delete rights; only `Claimed::First` admits, and after `OutcomeUnknown` the same `Claim`
     /// sent again answers the same `Claimed`.
     pub async fn claim(&self, counter: &Name, claim: &Claim) -> Result<Claimed, CounterError> {
-        let device = self.database.device_credential().await?;
+        let device = self.shared.database.device_credential().await?;
         let operation = Operation::claim(device.scope, counter.clone(), *claim);
         match self.submit(device, operation).await? {
             Outcome::Claimed(claimed) => Ok(claimed),
@@ -152,7 +203,7 @@ impl Counters {
     }
     /// The counter's last number, or 0 before any.
     pub async fn read(&self, counter: &Name) -> Result<i64, CounterError> {
-        let device = self.database.device_credential().await?;
+        let device = self.shared.database.device_credential().await?;
         let operation = Operation::Counter {
             scope: device.scope,
             counter: counter.clone(),
@@ -164,8 +215,12 @@ impl Counters {
     }
     /// Tells the coordinator which devices this database revoked, so their claims are refused.
     pub async fn share_revocations(&self) -> Result<Commitment, CounterError> {
-        let device = self.database.device_credential().await?;
-        Ok(self.client.revoke(device.scope, device.revocations).await?)
+        let device = self.shared.database.device_credential().await?;
+        Ok(self
+            .shared
+            .client
+            .revoke(device.scope, device.revocations)
+            .await?)
     }
     fn control(
         &self,
@@ -175,7 +230,7 @@ impl Counters {
         time: u64,
         lifetime: u64,
     ) -> Result<ControlCertificate, CoordinationError> {
-        let genesis = &self.client.certified_genesis().genesis;
+        let genesis = &self.shared.client.certified_genesis().genesis;
         let (not_before, expires) = genesis.control_window(time, lifetime)?;
         ControlCertificate::sign(
             DomainControl {
@@ -198,13 +253,18 @@ impl Counters {
     ) -> Result<ControlReceipt, CounterError> {
         let id = rocky_core::commitment("rocky.counters-control.v1", &encode(&certificate)?);
         let request = Request::certified(
-            self.client.genesis()?,
+            self.shared.client.genesis()?,
             id,
             operation,
             (tenant.key(), None),
             now()?,
         )?;
-        match self.client.submit_within(&request, self.deadline).await? {
+        match self
+            .shared
+            .client
+            .submit_within(&request, self.deadline)
+            .await?
+        {
             Outcome::Controlled(control) => Ok(ControlReceipt {
                 tenant: certificate.issuer,
                 revision: certificate.control.revision,
@@ -220,19 +280,48 @@ impl Counters {
         operation: Operation,
     ) -> Result<Outcome, CounterError> {
         let request = Request::unsigned(
-            self.client.genesis()?,
+            self.shared.client.genesis()?,
             nonce(),
             operation,
             (device.node, None, Some(device.chain)),
             now()?,
         );
         let signature = self
+            .shared
             .database
             .sign_extension(REQUEST_LABEL, &request.extension_body()?)
             .await?;
         Ok(self
+            .shared
             .client
             .submit_within(&request.with_signature(signature), self.deadline)
             .await?)
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_last_handle_on_a_client_endpoint_stops_it() {
+        let attachment = rocky_iroh::Options::isolated("127.0.0.1:0")
+            .client()
+            .await
+            .unwrap();
+        let endpoint = attachment.endpoint();
+        let shared_by_two_clones = Arc::new(ClientEndpoint {
+            attachment,
+            home: rocky_platform::task::Home::current(),
+        });
+        drop(shared_by_two_clones.clone());
+        assert!(
+            !endpoint.is_closed(),
+            "a clone dropping leaves the endpoint to the others"
+        );
+        drop(shared_by_two_clones);
+        rocky_platform::time::timeout(Duration::from_secs(30), endpoint.closed())
+            .await
+            .expect("the last handle dropping closes the endpoint");
     }
 }

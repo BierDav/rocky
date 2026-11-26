@@ -1445,6 +1445,25 @@ impl Options {
         }
         Ok(builder.bind().await?)
     }
+    /// Options for a client that only dials the peers at `routes`: the first relay a route names,
+    /// else no relay or lookup when every route names a direct address, else n0's relays and lookup.
+    pub fn reaching<'a>(routes: impl IntoIterator<Item = &'a str>) -> Result<Self, Failure> {
+        let mut relay = None;
+        let mut direct = true;
+        for route in routes {
+            let address = endpoint_addr(route)?;
+            relay = relay.or_else(|| address.relay_urls().next().map(ToString::to_string));
+            direct &= address.ip_addrs().next().is_some();
+        }
+        let closed = relay.is_none() && direct;
+        Ok(Self {
+            relay: relay.or_else(|| closed.then(|| "disabled".into())),
+            lookup: closed.then(|| "disabled".into()),
+            topic: false,
+            local: false,
+            bind: None,
+        })
+    }
     /// Binds under a fresh random key and serves no protocol, for a client such as a coordinator
     /// connection; closing the attachment or any of its transports stops the endpoint.
     pub async fn client(&self) -> Result<Attachment, Failure> {
@@ -1732,6 +1751,37 @@ mod tests {
             Ok::<_, Failure>(())
         })
         .await?
+    }
+
+    #[test]
+    fn a_client_reaching_routes_uses_their_relay_or_stays_closed_when_they_are_direct()
+    -> Result<(), Failure> {
+        let id = SecretKey::from_bytes(&[86; 32]).public();
+        let direct = route(&EndpointAddr::new(id).with_ip_addr("127.0.0.1:7000".parse()?))?;
+        let relayed = route(
+            &EndpointAddr::new(id).with_relay_url("https://relay.example/".parse::<RelayUrl>()?),
+        )?;
+        let bare = route(&EndpointAddr::new(id))?;
+
+        let closed = Options::reaching([direct.as_str()])?;
+        assert_eq!(closed.relay.as_deref(), Some("disabled"));
+        assert_eq!(closed.lookup.as_deref(), Some("disabled"));
+        let through_relay = Options::reaching([direct.as_str(), relayed.as_str()])?;
+        assert_eq!(
+            through_relay.relay.as_deref(),
+            Some("https://relay.example/")
+        );
+        assert_eq!(
+            through_relay.lookup, None,
+            "a relayed voter may move, so lookup stays on"
+        );
+        let looked_up = Options::reaching([bare.as_str()])?;
+        assert_eq!((looked_up.relay, looked_up.lookup), (None, None));
+        assert!(
+            !looked_up.topic && !looked_up.local,
+            "a client discovers nobody"
+        );
+        Ok(())
     }
 
     #[tokio::test(start_paused = true)]

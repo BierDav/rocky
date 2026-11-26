@@ -15,6 +15,7 @@ type Queued = (Vec<u8>, OwnedSemaphorePermit);
 pub struct Traffic {
     pub sessions: usize,
     pub signed_bytes: usize,
+    pub data_frames: usize,
     pub families: BTreeMap<&'static str, usize>,
     pub publication_parts: BTreeMap<&'static str, usize>,
     pub intakes: usize,
@@ -963,6 +964,15 @@ impl Io {
                     },
                 )
                 .await?;
+        }
+        #[cfg(any(test, feature = "qualification"))]
+        {
+            let mut state = self
+                .handle
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.traffic.data_frames = state.traffic.data_frames.saturating_add(count);
         }
         Ok(())
     }

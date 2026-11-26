@@ -8,6 +8,7 @@ struct PublicationTraffic {
     families: BTreeMap<&'static str, usize>,
     messages: BTreeMap<&'static str, usize>,
     signed_bytes: usize,
+    data_frames: Vec<usize>,
     queue_us: Vec<u64>,
     receipts: usize,
     repair_scopes: usize,
@@ -34,6 +35,9 @@ impl PublicationTraffic {
         for (before, after) in before.iter().zip(after) {
             delta.sessions += after.sessions - before.sessions;
             delta.signed_bytes += after.signed_bytes - before.signed_bytes;
+            delta
+                .data_frames
+                .push(after.data_frames - before.data_frames);
             delta.receipts += after.receipts - before.receipts;
             delta.repair_scopes += after.repair_scopes - before.repair_scopes;
             delta.repair_all += after.repair_all - before.repair_all;
@@ -88,6 +92,18 @@ impl PublicationTraffic {
         assert_eq!(self.repair_all, 0, "{self:?}");
         assert!(self.repair_reasons.is_empty(), "{self:?}");
         assert_eq!(self.queue_us.len(), 1, "{self:?}");
+    }
+    fn assert_framed(&self, link_messages: [usize; 2]) {
+        assert_eq!(
+            self.data_frames.len(),
+            2,
+            "one live link per node: {self:?}"
+        );
+        assert_eq!(
+            link_messages,
+            [self.data_frames[0] + 2, self.data_frames[1] + 1],
+            "the publisher frames its declaration, its message fragments and the channel close; the receiver its receipt fragments and the channel close: {self:?}"
+        );
     }
 }
 
@@ -204,16 +220,10 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
             );
             assert_eq!(hub.dials_to("b"), before[1], "publisher must not dial");
             assert_eq!(hub.dials_to("a"), before[0], "receiver must not dial");
-            assert_eq!(
-                hub.link_messages("a"),
-                messages[0] + 6,
-                "one declaration, four native messages, and channel close"
-            );
-            assert_eq!(
-                hub.link_messages("b"),
-                messages[1] + 2,
-                "one receipt and channel close"
-            );
+            traffic.assert_framed([
+                hub.link_messages("a") - messages[0],
+                hub.link_messages("b") - messages[1],
+            ]);
             assert!(
                 snap::Snapshot::snapshot(b.activity.after(activity))["events"]
                     .as_array()
@@ -2110,11 +2120,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             let traffic = PublicationTraffic::between(&traffic_before, traffic_snapshot(&service_a, &service_b));
             traffic.assert_complete();
             eprintln!("publication native traffic: {traffic:?}");
-            assert_eq!(
-                [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
-                [6, 2],
-                "one fragmented publication and receipt"
-            );
+            traffic.assert_framed([hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]]);
             let notification_us = if notified >= committed {
                 notified.duration_since(committed).as_micros() as i128
             } else {

@@ -45,7 +45,7 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
     address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{Connection, LocalTransportAddr, PortmapperConfig, RecvStream, SendStream, presets},
-    protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
+    protocol::{AcceptError, IncomingFilterOutcome, ProtocolHandler, Router, RouterBuilder},
 };
 
 /// The ALPN that carries one Rocky protocol over iroh.
@@ -560,10 +560,21 @@ impl Attachment {
                 Err(error) => return Err(error),
             }
         };
-        let router = self.register(Router::builder(replacement.clone())).spawn();
+        let router = self.route_inbound(replacement.clone());
         self.0.endpoint.send_replace(replacement);
-        *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
+        self.keep_router(router);
         Ok(())
+    }
+    fn keep_router(&self, router: Router) {
+        *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
+    }
+    fn route_inbound(&self, endpoint: Endpoint) -> Router {
+        let router = Router::builder(endpoint);
+        match self.0.protocols.is_empty() {
+            true => router.incoming_filter(Arc::new(|_| IncomingFilterOutcome::Reject)),
+            false => self.register(router),
+        }
+        .spawn()
     }
     async fn drop_endpoint_clones(&self) {
         let router = self
@@ -1464,12 +1475,14 @@ impl Options {
             bind: None,
         })
     }
-    /// Binds under a fresh random key and serves no protocol, for a client such as a coordinator
-    /// connection; closing the attachment or any of its transports stops the endpoint.
+    /// Binds under a fresh random key and refuses every inbound connection, for a client such as
+    /// a coordinator connection; closing the attachment or any of its transports stops the endpoint.
     pub async fn client(&self) -> Result<Attachment, Failure> {
         let secret = rocky_platform::entropy::random();
-        let attachment = Attachment::serving(self.bind(secret).await?, Vec::new());
+        let endpoint = self.bind(secret).await?;
+        let attachment = Attachment::serving(endpoint.clone(), Vec::new());
         *attachment.0.restart.lock().await = Some((self.clone(), secret));
+        attachment.keep_router(attachment.route_inbound(endpoint));
         Ok(attachment)
     }
     /// Binds and serves every Rocky protocol, returning an attachment the application keeps.
@@ -1492,12 +1505,7 @@ impl Options {
             Some(self.relay.clone().unwrap_or_else(|| "default".into())),
         );
         *attachment.0.restart.lock().await = Some((self.clone(), route_secret));
-        let router = attachment.register(Router::builder(endpoint)).spawn();
-        *attachment
-            .0
-            .router
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(router);
+        attachment.keep_router(attachment.route_inbound(endpoint));
         Ok(attachment)
     }
 }
@@ -1782,6 +1790,27 @@ mod tests {
             "a client discovers nobody"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_client_endpoint_refuses_every_inbound_connection() -> Result<(), Failure> {
+        rocky_platform::time::timeout(Duration::from_secs(30), async {
+            let client = Options::isolated("127.0.0.1:0").client().await?;
+            let dialer = Options::isolated("127.0.0.1:0").bind([88; 32]).await?;
+            for protocol in Protocol::ALL {
+                let inbound = dialer
+                    .connect(client.endpoint().addr(), alpn(protocol))
+                    .await;
+                assert!(
+                    inbound.is_err(),
+                    "a client endpoint serves no {protocol:?} to peers that dial it"
+                );
+            }
+            dialer.close().await;
+            client.close().await;
+            Ok(())
+        })
+        .await?
     }
 
     #[tokio::test(start_paused = true)]

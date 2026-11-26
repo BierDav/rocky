@@ -27,7 +27,7 @@ use tokio::{
 const TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING: usize = 32;
 const RPC_REQUESTS: usize = 32;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_HEADER: usize = 512;
 #[cfg(not(target_family = "wasm"))]
 const TCP: &str = "tcp";

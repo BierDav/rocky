@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoverySecret {
     pub scope: Scope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub statement: Option<Commitment>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub value: [u8; 32],
     endorsement: Endorsement,
 }

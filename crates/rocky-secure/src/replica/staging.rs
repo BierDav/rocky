@@ -11,6 +11,7 @@ pub(super) const SCHEMA: &[&str] = &[
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchemaStage {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub publication: Commitment,
     pub scope: Scope,
     pub bookmark: String,
@@ -18,6 +19,7 @@ pub struct SchemaStage {
     pub target: TipId,
     pub from_version: u32,
     pub statements: Vec<TipStatement>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub program: Vec<u8>,
     pub parents: Vec<String>,
 }

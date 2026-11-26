@@ -11,16 +11,18 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-pub const SEAL_FORMAT: u32 = 4;
-pub const TIP_OPENING_FORMAT: u32 = 4;
-pub const BOOKMARK_MOVE_FORMAT: u32 = 2;
+pub const SEAL_FORMAT: u32 = 5;
+pub const TIP_OPENING_FORMAT: u32 = 5;
+pub const BOOKMARK_MOVE_FORMAT: u32 = 3;
 pub const MAX_BOOKMARK_NAME: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChainLink {
     pub lane: PublicKey,
     pub sequence: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub previous: Option<Commitment>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub stage: Option<Commitment>,
 }
 impl ChainLink {
@@ -80,6 +82,7 @@ pub struct Equivocation {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PastCut {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub id: Commitment,
     pub identity: PublicKey,
     pub link: ChainLink,
@@ -124,7 +127,10 @@ pub struct AuthorMark {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SealAction {
-    Continue { schema: Commitment },
+    Continue {
+        #[serde(with = "rocky_core::byte_arrays::one")]
+        schema: Commitment,
+    },
     Close,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +165,9 @@ impl SealStatement {
 pub struct TipOpeningStatement {
     pub format: u32,
     pub scope: Scope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub seal: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub schema: Commitment,
 }
 impl TipOpeningStatement {
@@ -604,6 +612,7 @@ impl TipAuthority {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipGraph {
     pub scope: Scope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub genesis_schema: Commitment,
     pub seals: Vec<SignedSeal>,
     pub openings: Vec<SignedTipOpening>,

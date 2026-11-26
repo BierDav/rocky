@@ -7,7 +7,7 @@ use crate::{
 use rocky_core::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const CONTEXT: &str = "rocky.envelope-delivery.context.v1";
 const WRAPPING: &str = "rocky.envelope-delivery.key.v1";
 const DIGEST: &str = "rocky.envelope-delivery.digest.v1";
@@ -21,6 +21,7 @@ const RECEIPT_BYTES: usize = 256;
 pub struct SealedDelivery {
     version: u32,
     recipient: PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     ephemeral: [u8; 32],
     #[serde(with = "serde_bytes")]
     sealed: Vec<u8>,
@@ -29,6 +30,7 @@ pub struct SealedDelivery {
 struct Context<'a> {
     version: u32,
     recipient: &'a PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     ephemeral: &'a [u8; 32],
 }
 impl SealedDelivery {
@@ -107,6 +109,7 @@ pub struct DeliveryReceipt {
 struct ReceiptBody {
     version: u32,
     recipient: PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     digest: Commitment,
 }
 impl DeliveryReceipt {

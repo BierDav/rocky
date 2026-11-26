@@ -92,8 +92,10 @@ impl State {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Retained {
     key: PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     id: Commitment,
     time: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     digest: Commitment,
     result: Result<Outcome, CoordinationError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

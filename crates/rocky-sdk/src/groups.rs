@@ -14,7 +14,9 @@ pub(crate) const MAX_GROUP_EPOCHS: usize = 256;
 pub struct GroupRecord {
     pub group: String,
     pub values: Vec<PartitionValue>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub address: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub name: rocky_core::PartitionName,
     pub epochs: Vec<rocky_core::KeyEpoch>,
 }

@@ -5,14 +5,16 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope, Scope};
 use serde::{Deserialize, Serialize};
 
-pub const CHECKPOINT_RECORD_FORMAT: u32 = 2;
+pub const CHECKPOINT_RECORD_FORMAT: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordStatement {
     pub format: u32,
     pub scope: Scope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub seal: Commitment,
     pub table: ResourceScope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub checkpoint: Commitment,
     pub signer: PublicKey,
     pub rows: u64,

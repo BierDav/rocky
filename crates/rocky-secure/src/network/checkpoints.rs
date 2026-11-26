@@ -18,6 +18,7 @@ pub(super) enum CheckpointMessage {
     },
     SealOffer {
         scope: ResourceScope,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         seal: Commitment,
     },
     Checkpoint {
@@ -25,7 +26,9 @@ pub(super) enum CheckpointMessage {
     },
     CheckpointPull {
         scope: ResourceScope,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         checkpoint: Commitment,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         after: Option<Commitment>,
         quota: usize,
         window: u8,

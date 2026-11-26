@@ -22,7 +22,7 @@ pub(crate) const DEPOSIT_LIFETIME: u64 = 30 * 24 * 60 * 60;
 pub(crate) const MAX_DEPOSIT_PAYLOAD: usize = rocky_credentials::MAX_DELIVERY_PAYLOAD;
 pub(crate) const MAX_OUTBOX: usize = 16_384;
 pub const MAILBOX_FULL: &str = "mailbox_full";
-const CONTENTS_VERSION: u32 = 2;
+const CONTENTS_VERSION: u32 = 3;
 const MAILBOX_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

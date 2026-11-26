@@ -205,6 +205,7 @@ pub struct LogicalTable {
 #[serde(deny_unknown_fields)]
 pub struct LogicalSchema {
     pub format: u32,
+    #[serde(with = "crate::byte_arrays::one")]
     pub publisher: [u8; 32],
     pub application: String,
     pub source: SchemaSource,

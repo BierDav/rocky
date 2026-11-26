@@ -1,6 +1,6 @@
 use super::*;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_HEADER: usize = 512;
 
 pub(super) struct Route {
@@ -127,11 +127,12 @@ mod tests {
         assert_eq!(protocol_named(b"rocky/rpc"), Some(Protocol::Rpc));
         assert_eq!(protocol_named(b"rocky/link"), Some(Protocol::Link));
         assert_eq!(
-            protocol_named(b"rocky/coordinator/3"),
+            protocol_named(b"rocky/coordinator/4"),
             Some(Protocol::Coordinate)
         );
         for old in [
-            b"rocky/sdk-pair/1".as_slice(),
+            b"rocky/coordinator/3".as_slice(),
+            b"rocky/sdk-pair/1",
             b"rocky/sdk-renew/2",
             b"rocky/link/5",
         ] {

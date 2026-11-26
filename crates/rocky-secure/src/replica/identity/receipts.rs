@@ -23,7 +23,7 @@ const CONTEXT: &str = "rocky.admission-context.v1";
 const HEAD: &str = "rocky.admission-head.v1";
 const ENTRY: &str = "rocky.admission-entry.v1";
 const CHAIN: &str = "rocky.admission-chain.v1";
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

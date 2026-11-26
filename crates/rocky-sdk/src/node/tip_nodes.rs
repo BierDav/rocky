@@ -14,6 +14,7 @@ struct SavedNodes {
 #[serde(deny_unknown_fields)]
 struct SavedNode {
     line: String,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     key: [u8; 32],
     credentials: CredentialChain,
 }

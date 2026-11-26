@@ -40,9 +40,11 @@ pub enum Operation {
         /// The counter.
         counter: crate::counters::Name,
         /// The commitment to the application's key.
+        #[serde(with = "rocky_core::byte_arrays::one")]
         key: Commitment,
         /// The commitment to the application's attempt id, which decides between a first and a
         /// taken number.
+        #[serde(with = "rocky_core::byte_arrays::one")]
         attempt: Commitment,
         /// Unix seconds when the key stops being in force.
         expires: u64,
@@ -92,6 +94,7 @@ pub struct Registration {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
     /// The genesis id it is bound to.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub genesis: Commitment,
     /// The signing key.
     pub key: PublicKey,
@@ -100,6 +103,7 @@ pub struct Request {
     /// The device's membership chain, for device calls.
     pub credentials: Option<CredentialChain>,
     /// Makes a retry apply once.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub id: Commitment,
     /// Unix seconds when it was made; more than 30 seconds off the coordinator's clock is refused.
     pub time: u64,
@@ -317,9 +321,9 @@ pub enum Outcome {
     /// A counter's last number, or 0 before any.
     Counter(i64),
     /// The digest of the merged revocations.
-    Revoked(Commitment),
+    Revoked(#[serde(with = "rocky_core::byte_arrays::one")] Commitment),
     /// The reference of the accepted control certificate.
-    Controlled(Commitment),
+    Controlled(#[serde(with = "rocky_core::byte_arrays::one")] Commitment),
     /// The voters after a membership change.
     Membership(BTreeSet<u64>),
     /// The registration was closed.

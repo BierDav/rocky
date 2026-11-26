@@ -6,7 +6,7 @@ pub const BUNDLED_SQLITE_VERSION: &str = "3.53.2";
 pub const REPLAY_SEMANTICS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct EngineIdentity(pub Commitment);
+pub struct EngineIdentity(#[serde(with = "crate::byte_arrays::one")] pub Commitment);
 impl EngineIdentity {
     pub fn current() -> Self {
         static CURRENT: std::sync::OnceLock<EngineIdentity> = std::sync::OnceLock::new();

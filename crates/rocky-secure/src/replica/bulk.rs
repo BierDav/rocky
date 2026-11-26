@@ -18,6 +18,7 @@ pub(super) const SCHEMA: &[&str] = &[
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MigrationMembership {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub publication: Commitment,
     pub proof: MigrationProof,
     pub descriptor: Option<Box<SignedMigrationPublication>>,

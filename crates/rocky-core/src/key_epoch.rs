@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 #[serde(deny_unknown_fields)]
 pub struct KeyEpoch {
     pub generation: u64,
+    #[serde(with = "crate::byte_arrays::one")]
     pub secret_hash: Commitment,
 }
 impl KeyEpoch {

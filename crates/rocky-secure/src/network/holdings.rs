@@ -6,6 +6,7 @@ const HOLDING_DENIED: &str = "ciphertext custody denied";
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct HoldingProof {
     pub epoch: rocky_core::KeyEpoch,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub value: [u8; 16],
 }
 #[derive(Clone, Serialize, Deserialize)]

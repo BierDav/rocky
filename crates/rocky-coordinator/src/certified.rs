@@ -39,6 +39,7 @@ pub struct DomainControl {
     /// The database.
     pub scope: Scope,
     /// The coordinator deployment it is for.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub configuration: Configuration,
     /// Starts at 1 and rises with each renewal.
     pub revision: u64,
@@ -180,6 +181,7 @@ pub struct Genesis {
     /// The mesh its databases belong to.
     pub mesh: MeshId,
     /// Its deployment id; all zeros is refused.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub configuration: Configuration,
     /// Three to seven voters.
     pub voters: Vec<Voter>,
@@ -338,7 +340,7 @@ pub struct TrustBundle {
     pub genesis: String,
 }
 /// The bundle format this version reads.
-pub const BUNDLE_FORMAT: u32 = 3;
+pub const BUNDLE_FORMAT: u32 = 4;
 impl TrustBundle {
     /// The bundle for a certified genesis.
     pub fn new(genesis: &CertifiedGenesis) -> Result<Self, CoordinationError> {

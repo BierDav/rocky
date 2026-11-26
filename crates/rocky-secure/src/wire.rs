@@ -25,6 +25,7 @@ pub(crate) struct Extensions {
     pub tip: rocky_core::TipId,
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub chain: Commitment,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authored: bool,
@@ -39,7 +40,7 @@ impl Extensions {
     }
 }
 
-pub(crate) const ROW_FORMAT: u8 = 19;
+pub(crate) const ROW_FORMAT: u8 = 20;
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
 #[derive(Clone, Debug)]
@@ -377,6 +378,7 @@ pub(crate) fn author(key: &PrivateKey, draft: FrameDraft<'_>) -> Result<Encrypte
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Membership {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub transaction: Commitment,
     pub index: u16,
     #[serde(with = "member_bytes")]
@@ -409,7 +411,9 @@ mod member_bytes {
 #[derive(Serialize, Deserialize)]
 struct BundleBody {
     version: u8,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
     writes: Vec<RowWrite>,
@@ -421,6 +425,7 @@ struct WitnessBody {
     version: u8,
     #[serde(with = "serde_bytes")]
     body: Vec<u8>,
+    #[serde(with = "rocky_core::byte_arrays::pairs")]
     creations: Vec<(Commitment, Commitment)>,
 }
 #[derive(Clone)]
@@ -644,6 +649,7 @@ pub struct EncryptedPackage {
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
     pub kind: PackageKind,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub(crate) bytes: Vec<u8>,
 }
 impl EncryptedPackage {

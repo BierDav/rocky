@@ -13,9 +13,11 @@ pub(super) enum PublicationMessage {
         upper: Vec<ScopeFrontier>,
         parts: usize,
         items: usize,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         digest: Commitment,
     },
     Migration {
+        #[serde(with = "rocky_core::byte_arrays::one")]
         chain: Commitment,
         descriptor: Box<rocky_credentials::SignedMigrationPublication>,
     },
@@ -26,6 +28,7 @@ pub(super) enum PublicationMessage {
     Finish {
         parts: usize,
         items: usize,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         digest: Commitment,
     },
     Receipt(PublicationReceipt),

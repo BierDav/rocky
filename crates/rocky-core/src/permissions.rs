@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceScope {
     pub domain: Scope,
+    #[serde(with = "crate::byte_arrays::one")]
     pub encryption: Commitment,
+    #[serde(with = "crate::byte_arrays::one")]
     pub table: Commitment,
 }
 
@@ -29,7 +31,7 @@ pub enum Right {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowSelection {
     All,
-    Only(BTreeSet<Commitment>),
+    Only(#[serde(with = "crate::byte_arrays::each")] BTreeSet<Commitment>),
 }
 impl RowSelection {
     pub fn contains(&self, row: &Commitment) -> bool {
@@ -54,7 +56,7 @@ impl RowSelection {
 )]
 pub enum FieldSelection {
     All,
-    Only(BTreeSet<Commitment>),
+    Only(#[serde(with = "crate::byte_arrays::each")] BTreeSet<Commitment>),
 }
 impl FieldSelection {
     pub fn contains(&self, field: &Commitment) -> bool {
@@ -123,6 +125,7 @@ pub type RowFields = BTreeMap<Commitment, Vec<u8>>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowChange {
     pub scope: ResourceScope,
+    #[serde(with = "crate::byte_arrays::one")]
     pub row: Commitment,
     pub before: Option<RowFields>,
     pub after: Option<RowFields>,
@@ -172,6 +175,7 @@ impl RowChange {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowWrite {
     pub change: RowChange,
+    #[serde(with = "crate::byte_arrays::each")]
     pub assigned: BTreeSet<Commitment>,
 }
 impl RowWrite {

@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum HeldMessage {
     Token {
         scope: ResourceScope,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         digest: Commitment,
     },
     Pull {

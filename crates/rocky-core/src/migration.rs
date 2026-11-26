@@ -1,7 +1,7 @@
 use crate::{Commitment, Scope, TipId, commitment};
 use serde::{Deserialize, Serialize};
 
-pub const MIGRATION_PUBLICATION_FORMAT: u32 = 2;
+pub const MIGRATION_PUBLICATION_FORMAT: u32 = 3;
 pub const MIGRATION_PROOF_FORMAT: u32 = 1;
 pub const MAX_MIGRATION_PROOF_DEPTH: usize = 64;
 
@@ -10,18 +10,25 @@ pub struct MigrationPublicationStatement {
     pub format: u32,
     pub scope: Scope,
     pub tip: TipId,
+    #[serde(with = "crate::byte_arrays::one")]
     pub opening: Commitment,
+    #[serde(with = "crate::byte_arrays::one")]
     pub parent: Commitment,
+    #[serde(with = "crate::byte_arrays::one")]
     pub schema: Commitment,
+    #[serde(with = "crate::byte_arrays::one")]
     pub publication: Commitment,
+    #[serde(with = "crate::byte_arrays::one")]
     pub writer: [u8; 32],
     pub frames: u64,
     pub bytes: u64,
+    #[serde(with = "crate::byte_arrays::one")]
     pub root: Commitment,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationSum {
+    #[serde(with = "crate::byte_arrays::one")]
     pub hash: Commitment,
     pub frames: u64,
     pub bytes: u64,

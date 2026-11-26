@@ -3,7 +3,7 @@ use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-const BINDING_VERSION: u8 = 5;
+const BINDING_VERSION: u8 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +12,7 @@ pub struct AuthorBinding {
     issuer: PublicKey,
     subject: PublicKey,
     kind: PrincipalKind,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     tables: BTreeSet<Commitment>,
     issues: bool,
     attestation: Attestation,

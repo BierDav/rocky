@@ -65,6 +65,7 @@ pub struct RenewRequest {
     pub node: PublicKey,
     time: u64,
     pub chain: CredentialChain,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: [u8; 32],
     signature: Signature,
 }
@@ -75,10 +76,11 @@ struct RenewBody<'a> {
     node: &'a PublicKey,
     time: u64,
     chain: &'a CredentialChain,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: &'a [u8; 32],
 }
 impl RenewRequest {
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     fn body(&self) -> Result<Vec<u8>, Error> {
         signing_bytes(
             "rocky.credentials.renew.v2",
@@ -154,7 +156,9 @@ pub struct Renewal {
     pub capability: SignedCapability,
     pub issuers: CredentialChain,
     pub revocations: RevocationSet,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: [u8; 32],
+    #[serde(with = "rocky_core::byte_arrays::one")]
     sealed: Vec<u8>,
     attestation: Attestation,
 }
@@ -331,6 +335,7 @@ pub struct IdentityRequest {
     pub identity: PublicKey,
     pub node: PublicKey,
     time: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: [u8; 32],
     node_signature: Signature,
     identity_signature: Signature,
@@ -343,10 +348,11 @@ struct IdentityBody<'a> {
     identity: &'a PublicKey,
     node: &'a PublicKey,
     time: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: &'a [u8; 32],
 }
 impl IdentityRequest {
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     fn body(&self) -> Result<Vec<u8>, Error> {
         signing_bytes(
             "rocky.credentials.identity-request.v2",
@@ -457,7 +463,9 @@ impl IdentityRequest {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityAnswer {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: [u8; 32],
+    #[serde(with = "rocky_core::byte_arrays::one")]
     sealed: Vec<u8>,
     signature: Signature,
 }

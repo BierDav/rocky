@@ -35,7 +35,7 @@ enum StoredValue {
     Integer(i64),
     Real(u64),
     Text(String),
-    Blob(Vec<u8>),
+    Blob(#[serde(with = "rocky_core::byte_arrays::one")] Vec<u8>),
 }
 impl StoredValue {
     fn of(value: &SqlValue) -> Self {

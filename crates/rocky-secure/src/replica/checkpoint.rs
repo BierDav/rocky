@@ -135,6 +135,7 @@ pub struct LogPosition {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetSummary {
     pub count: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub digest: Commitment,
 }
 impl SetSummary {
@@ -163,6 +164,7 @@ pub enum SealedOutcome {
 #[serde(deny_unknown_fields)]
 pub struct SealedTransaction {
     pub stamp: Stamp,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub transaction: Commitment,
     pub outcome: SealedOutcome,
 }
@@ -228,20 +230,23 @@ impl SealedOutcomes {
         }
     }
 }
-pub(crate) const CHECKPOINT_FORMAT: u32 = 20;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 21;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub seal: Option<Commitment>,
     pub partition: Option<rocky_core::PartitionTuple>,
     pub identities: Vec<CoveredMark>,
     pub moves: SetSummary,
     pub tip: rocky_core::TipId,
     pub schema: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub revocations: Commitment,
     pub scope: ResourceScope,
     pub state: CheckpointState,
     pub sequence: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub previous: Option<Commitment>,
     pub frontier: Vec<LogPosition>,
     #[serde(deserialize_with = "rocky_core::bounded_clock")]

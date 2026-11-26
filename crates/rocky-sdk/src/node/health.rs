@@ -8,7 +8,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 #[derive(Default)]
 pub(super) struct AdminWatch {

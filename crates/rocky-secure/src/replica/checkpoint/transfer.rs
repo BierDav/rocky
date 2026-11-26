@@ -11,10 +11,13 @@ pub struct PrunedPage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointPage {
     pub scope: ResourceScope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub checkpoint: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub after: Option<Commitment>,
     #[serde(with = "sealed")]
     pub rows: EncryptedPackage,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub next: Option<Commitment>,
 }
 mod sealed {
@@ -63,8 +66,11 @@ struct PageRow {
 const ROW_OVERHEAD: usize = 64;
 #[derive(Serialize, Deserialize)]
 struct PagePlain {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     checkpoint: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     after: Option<Commitment>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     next: Option<Commitment>,
     rows: Vec<PageRow>,
     legend: Vec<String>,

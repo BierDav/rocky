@@ -5,6 +5,7 @@ pub(super) const MAX_SECURE_PAGE: usize = 32;
 #[derive(Serialize, Deserialize)]
 pub(super) enum RowMessage {
     MigrationQuery {
+        #[serde(with = "rocky_core::byte_arrays::one")]
         publication: Commitment,
     },
     MigrationRecord {

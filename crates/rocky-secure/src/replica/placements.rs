@@ -14,6 +14,7 @@ const MAX_REQUESTS: usize = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlacementRequest {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub seal: Commitment,
     pub author: WriterId,
     pub from: u64,

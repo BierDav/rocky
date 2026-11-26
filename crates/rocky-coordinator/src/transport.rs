@@ -27,14 +27,17 @@ pub enum WireMessage<A, V, S> {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Envelope {
     /// The genesis id it is bound to.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub genesis: Commitment,
     /// The signing key.
     pub key: PublicKey,
     /// Pairs a reply with its request.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub nonce: Commitment,
     /// Unix seconds when it was signed.
     pub time: u64,
     /// The encoded message.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub body: Vec<u8>,
     signature: Signature,
 }
@@ -109,9 +112,9 @@ const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
 #[cfg(feature = "voter")]
 const CLIENT_MESSAGE_TAG_BYTES: usize = 8;
 #[cfg(feature = "voter")]
-const ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE: usize = 2;
+const ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE: usize = 1;
 #[cfg(feature = "voter")]
-const ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS: usize = 285;
+const ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS: usize = 221;
 
 /// The largest frame a client request needs.
 #[cfg(feature = "voter")]

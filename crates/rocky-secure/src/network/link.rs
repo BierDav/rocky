@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 38;
+pub(super) const HANDSHAKE_VERSION: u32 = 39;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -24,6 +24,7 @@ pub enum CloseReason {
 pub enum Message {
     Changed {
         scopes: Vec<ResourceScope>,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         token: [u8; 32],
         control: bool,
     },
@@ -777,7 +778,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v38",
+            "rocky.link.v39",
             "the cryptographic handshake accepts one current version"
         );
     }

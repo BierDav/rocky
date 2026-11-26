@@ -24,7 +24,7 @@ pub struct Proposal {
 
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
-const FORMAT: u32 = 18;
+const FORMAT: u32 = 19;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -32,6 +32,7 @@ const MAX_LOG_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Hard {
     format: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     identity: Commitment,
     limits: rocky_coordinator::Limits,
     vote: Option<Vote<u64>>,
@@ -41,6 +42,7 @@ struct Hard {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SnapshotFile {
     format: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     identity: Commitment,
     meta: SnapshotMeta<u64, BasicNode>,
     metadata: Encoded,
@@ -81,6 +83,7 @@ const FENCE: &str = "RESTORED";
 const FENCE_LABEL: &str = "rocky.voter-fence.v1";
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Backup {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub identity: Commitment,
     pub node: u64,
     pub index: u64,

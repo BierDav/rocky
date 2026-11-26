@@ -64,8 +64,10 @@ const AUTHENTICATION_FAILED: &str = "link authentication failed";
 struct Hello {
     version: u32,
     node: PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     challenge: [u8; 32],
     credentials: CredentialChain,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     exchange: [u8; 32],
     clock: u64,
 }
@@ -177,7 +179,7 @@ enum Message {
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
-    LinkState(Vec<(ResourceScope, Commitment)>),
+    LinkState(#[serde(with = "rocky_core::byte_arrays::tagged")] Vec<(ResourceScope, Commitment)>),
     HeldChanges(HeldMessage),
     Tips(TipMessage),
     Placements(PlacementMessage),

@@ -9,6 +9,7 @@ const ACCOUNTED_CLAIM_BYTES: usize = 96;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Held {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     attempt: Commitment,
     value: i64,
     expires: u64,
@@ -22,6 +23,7 @@ impl Held {
 struct Counter {
     name: Name,
     value: i64,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     claims: BTreeMap<Commitment, Held>,
 }
 impl Counter {

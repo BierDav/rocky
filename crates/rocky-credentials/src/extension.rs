@@ -1,7 +1,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 17;
+const EXTENSION_VERSION: u32 = 18;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,12 +14,14 @@ struct Body {
     node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
     whole: Option<crate::WholeAccess>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     role: Option<rocky_core::Commitment>,
     issues: bool,
     trusted: Option<rocky_core::Scope>,
     owner: bool,
     origin: Option<Origin>,
     sequence: Option<u64>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     previous: Option<rocky_core::Commitment>,
     database: Option<DatabaseContext>,
     possession: Option<crate::NodePossession>,
@@ -132,27 +134,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-            12,
-            13,
-            14,
-            15,
-            16,
-            18,
-            u32::MAX,
-        ] {
+        for version in (0..EXTENSION_VERSION).chain([EXTENSION_VERSION + 1, u32::MAX]) {
             let other = Extension(
                 encode(&Body {
                     node: None,

@@ -116,7 +116,9 @@ pub(crate) fn validate_frontiers(frontiers: &[ScopeFrontier]) -> Result<(), Erro
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateAdvice {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub seal: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub checkpoint: Commitment,
     pub signer: PublicKey,
     pub rows: u64,

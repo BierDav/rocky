@@ -35,7 +35,7 @@ impl std::error::Error for PartitionError {}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PartitionValue(Vec<u8>);
+pub struct PartitionValue(#[serde(with = "crate::byte_arrays::one")] Vec<u8>);
 impl PartitionValue {
     pub fn new(column: KeyColumn, value: SqlValue) -> Result<Self, PartitionError> {
         let bytes = key_components(&[column], &[value])
@@ -225,18 +225,22 @@ mod components {
         values: &BTreeMap<Commitment, V>,
         to: S,
     ) -> Result<S::Ok, S::Error> {
-        values.iter().collect::<Vec<_>>().serialize(to)
+        values
+            .iter()
+            .map(|(column, value)| (serde_bytes::Bytes::new(column), value))
+            .collect::<Vec<_>>()
+            .serialize(to)
     }
     pub fn deserialize<'de, D: Deserializer<'de>, V: Deserialize<'de>>(
         from: D,
     ) -> Result<BTreeMap<Commitment, V>, D::Error> {
-        let pairs = Vec::<(Commitment, V)>::deserialize(from)?;
+        let pairs = Vec::<(serde_bytes::ByteArray<32>, V)>::deserialize(from)?;
         if pairs.is_empty() || pairs.len() > 16 {
             return Err(D::Error::custom("a partition has 1 to 16 columns"));
         }
         let mut values = BTreeMap::new();
         for (column, value) in pairs {
-            if values.insert(column, value).is_some() {
+            if values.insert(column.into_array(), value).is_some() {
                 return Err(D::Error::custom("duplicate partition column"));
             }
         }

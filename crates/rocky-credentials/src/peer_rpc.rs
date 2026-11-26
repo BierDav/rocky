@@ -21,7 +21,9 @@ pub struct IdentityEnrollmentRequest {
 #[serde(deny_unknown_fields)]
 pub struct InvitedEnrollmentRequest {
     pub request: IdentityRequest,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub invitation: Commitment,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     proof: Option<Commitment>,
     binding: Signature,
 }
@@ -95,17 +97,19 @@ impl IdentityEnrollment {
     }
 }
 
-const RESOLUTION_VERSION: u32 = 1;
+const RESOLUTION_VERSION: u32 = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerResolutionRequest {
     version: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     challenge: Commitment,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerResolutionProof {
     version: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     challenge: Commitment,
     node: PublicKey,
     signature: Signature,
@@ -210,7 +214,7 @@ fn receipt_bytes(
     )
 }
 
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -222,7 +226,10 @@ pub enum PeerRequest {
     LinkEnroll(Box<SignedCapability>),
     Unlink(Box<RevocationSet>),
     Resolve(PeerResolutionRequest),
-    TipSchema { manifest: Commitment },
+    TipSchema {
+        #[serde(with = "rocky_core::byte_arrays::one")]
+        manifest: Commitment,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,7 +299,7 @@ pub enum PeerReply {
     LinkEnroll(RevocationSet),
     Unlink(Box<UnlinkReply>),
     Resolve(PeerResolutionProof),
-    TipSchema(Option<Vec<u8>>),
+    TipSchema(#[serde(with = "rocky_core::byte_arrays::one")] Option<Vec<u8>>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

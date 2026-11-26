@@ -7,26 +7,30 @@ use diff::{graph_statements, ids_digest, range_ids};
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum TipMessage {
-    Digest(Commitment),
+    Digest(#[serde(with = "rocky_core::byte_arrays::one")] Commitment),
     Statements {
         statements: Vec<TipStatement>,
         last: bool,
     },
     Followed(rocky_core::TipId),
     Range {
+        #[serde(with = "rocky_core::byte_arrays::one")]
         prefix: Commitment,
         depth: u16,
     },
     Summary {
+        #[serde(with = "rocky_core::byte_arrays::one")]
         digest: Commitment,
         count: usize,
     },
     Ids {
+        #[serde(with = "rocky_core::byte_arrays::one")]
         prefix: Commitment,
         depth: u16,
     },
-    Identifiers(Vec<Commitment>),
+    Identifiers(#[serde(with = "rocky_core::byte_arrays::each")] Vec<Commitment>),
     Fetch {
+        #[serde(with = "rocky_core::byte_arrays::each")]
         ids: Vec<Commitment>,
     },
     Push {

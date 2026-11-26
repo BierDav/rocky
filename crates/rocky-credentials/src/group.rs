@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 pub const GROUP_SECRET_LEN: usize = 32;
 pub const MAX_GROUP_ENVELOPE_BYTES: usize = 128 * 1024;
 const SEALED_LEN: usize = 2 * GROUP_SECRET_LEN + SEAL_OVERHEAD;
-const ENVELOPE_VERSION: u32 = 4;
+const ENVELOPE_VERSION: u32 = 5;
 const SIGNED: &str = "rocky.group-secret-envelope.v4";
 const CONTEXT: &str = "rocky.group-secret-envelope.context.v4";
 const WRAPPING: &str = "rocky.group-secret-envelope.key.v4";
@@ -87,22 +87,29 @@ pub struct GroupSecretEnvelope {
 #[serde(deny_unknown_fields)]
 struct Body {
     version: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     group: Commitment,
     epoch: rocky_core::KeyEpoch,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     statements: Vec<Commitment>,
     issuer: PublicKey,
     recipient: PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     ephemeral: [u8; 32],
+    #[serde(with = "rocky_core::byte_arrays::one")]
     sealed: Vec<u8>,
 }
 #[derive(Serialize)]
 struct Context<'a> {
     version: u32,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     group: &'a Commitment,
     epoch: rocky_core::KeyEpoch,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     statements: Vec<Commitment>,
     issuer: &'a PublicKey,
     recipient: &'a PublicKey,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     ephemeral: &'a [u8; 32],
 }
 impl Body {

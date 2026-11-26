@@ -142,6 +142,7 @@ struct Stored {
 struct StoredIntent {
     intent: HeldIntent,
     tip: TipId,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     author: [u8; 32],
     sequence: u64,
 }
@@ -160,9 +161,15 @@ impl Stored {
 struct StoredRow {
     scope: ResourceScope,
     table: String,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     row: Commitment,
     kind: HeldKind,
-    fields: Vec<(Commitment, String, serde_bytes::ByteBuf, bool)>,
+    fields: Vec<(
+        serde_bytes::ByteArray<32>,
+        String,
+        serde_bytes::ByteBuf,
+        bool,
+    )>,
 }
 struct Unoffered {
     hash: Hash,
@@ -1013,6 +1020,7 @@ impl<A: RowApplication> Inner<A> {
                 .fields
                 .into_iter()
                 .map(|(field, name, value, written)| {
+                    let field = field.into_array();
                     let removed = removed || !self.fields.contains(&field);
                     HeldField {
                         current: (written && !removed)
@@ -1079,7 +1087,7 @@ fn stored_row(
             .flatten()
             .map(|(field, value)| {
                 (
-                    *field,
+                    serde_bytes::ByteArray::new(*field),
                     name(field),
                     serde_bytes::ByteBuf::from(value.clone()),
                     kind != HeldKind::Delete && written.contains(field),

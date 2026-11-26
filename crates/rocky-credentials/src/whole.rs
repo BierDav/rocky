@@ -48,6 +48,7 @@ pub struct WholeTables {
 #[derive(Clone, Debug, Serialize)]
 struct Covered {
     scope: Option<ResourceScope>,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     slots: Vec<Commitment>,
 }
 #[derive(Default, Deserialize)]

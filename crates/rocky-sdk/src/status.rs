@@ -194,6 +194,7 @@ pub struct VerifiedRevocation {
     /// The revocation's id.
     pub id: String,
     /// The signed statement.
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub statement: Vec<u8>,
     /// What it revoked.
     pub reason: RevocationReason,

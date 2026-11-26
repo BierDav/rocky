@@ -17,8 +17,9 @@ const AUDIT_MARK_KEY_LABEL: &str = "rocky.audit-mark-key.v1";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Basis {
     scope: ResourceScope,
-    checkpoint: Option<(i64, Option<Commitment>)>,
+    checkpoint: Option<(i64, Option<serde_bytes::ByteArray<32>>)>,
     tip: TipId,
+    #[serde(with = "rocky_core::byte_arrays::tagged")]
     keys: BTreeSet<(rocky_core::KeyEpoch, Commitment)>,
 }
 
@@ -54,7 +55,10 @@ impl<A: RowApplication> Inner<A> {
         let checkpoint = match self.checkpoint_record(id, true).await? {
             Some(record) => Some((
                 record.position,
-                record.signed.map(|signed| signed.id()).transpose()?,
+                record
+                    .signed
+                    .map(|signed| signed.id().map(serde_bytes::ByteArray::new))
+                    .transpose()?,
             )),
             None if self
                 .staging(id)

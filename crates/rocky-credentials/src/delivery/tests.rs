@@ -42,7 +42,7 @@ fn a_changed_recipient_ephemeral_or_ciphertext_is_refused() {
     sealed.sealed[last] ^= 1;
     assert!(sealed.open(&recipient).is_err());
     let mut version = delivery;
-    version.version = 2;
+    version.version = VERSION + 1;
     assert!(SealedDelivery::from_bytes(&encode(&version).unwrap()).is_err());
     assert!(SealedDelivery::seal(recipient.public_key(), &[]).is_err());
     assert!(

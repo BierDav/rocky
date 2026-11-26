@@ -31,6 +31,7 @@ pub struct Revocation {
     pub mode: RevocationMode,
     pub nodes: BTreeSet<crate::PeerId>,
     pub identities: BTreeSet<PublicKey>,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     pub capabilities: BTreeSet<Commitment>,
     pub cut: Vec<Cut>,
 }
@@ -43,6 +44,7 @@ pub struct Cut {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Head {
     pub sequence: u64,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub id: Commitment,
 }
 pub const MAX_CUT_LANES: usize = 32;
@@ -296,10 +298,13 @@ impl SignedRevocation {
 #[serde(into = "ReplicatedAuthority", try_from = "ReplicatedAuthority")]
 pub struct RevocationSet {
     database: Option<Box<crate::DatabaseContext>>,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     certificates: BTreeMap<Commitment, SignedCapability>,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     capabilities: BTreeSet<Commitment>,
     root: Ended,
     compromised: BTreeSet<PublicKey>,
@@ -345,7 +350,7 @@ struct ReplicatedAuthority {
     statements: Vec<SignedRevocation>,
     certificates: Vec<SignedCapability>,
 }
-const AUTHORITY_FORMAT: u32 = 8;
+const AUTHORITY_FORMAT: u32 = 9;
 impl From<RevocationSet> for ReplicatedAuthority {
     fn from(set: RevocationSet) -> Self {
         Self {

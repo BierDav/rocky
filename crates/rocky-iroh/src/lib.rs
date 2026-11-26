@@ -51,7 +51,7 @@ fn alpn(protocol: Protocol) -> &'static [u8] {
     match protocol {
         Protocol::Rpc => b"rocky/rpc",
         Protocol::Link => b"rocky/link",
-        Protocol::Coordinate => b"rocky/coordinator/3",
+        Protocol::Coordinate => b"rocky/coordinator/4",
     }
 }
 fn protocol_named(name: &[u8]) -> Option<Protocol> {

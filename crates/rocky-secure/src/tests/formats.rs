@@ -229,7 +229,9 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     #[derive(Serialize)]
     struct Body {
         version: u8,
+        #[serde(with = "rocky_core::byte_arrays::keys")]
         proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+        #[serde(with = "rocky_core::byte_arrays::keys")]
         carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
         membership: Option<crate::wire::Membership>,
         writes: Vec<RowWrite>,
@@ -239,6 +241,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         version: u8,
         #[serde(with = "serde_bytes")]
         body: Vec<u8>,
+        #[serde(with = "rocky_core::byte_arrays::pairs")]
         creations: Vec<(Commitment, Commitment)>,
     }
     let f = Fixture::new();
@@ -384,6 +387,7 @@ async fn a_parent_checkpoint_binding_is_refused_even_with_the_same_version_label
     #[derive(Serialize)]
     struct Binding {
         cuts: u64,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         cut: Option<Commitment>,
         highest: u64,
     }

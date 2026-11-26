@@ -23,6 +23,7 @@ pub struct Seen {
 #[serde(deny_unknown_fields)]
 pub struct DeviceRevocationReceipt {
     pub node: rocky_credentials::PeerId,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub statement: rocky_core::Commitment,
     pub local: bool,
     pub delivered: std::collections::BTreeSet<rocky_credentials::PeerId>,

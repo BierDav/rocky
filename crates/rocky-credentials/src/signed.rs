@@ -353,6 +353,7 @@ impl Endorsement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedManifest {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     body: Vec<u8>,
     endorsement: Endorsement,
 }

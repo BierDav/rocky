@@ -31,7 +31,7 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 48;
+pub const VERSION: u32 = 49;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
@@ -281,6 +281,7 @@ pub struct Issuing {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RightsChange {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub publication: Option<Commitment>,
     pub version: u32,
     pub people: BTreeSet<PublicKey>,
@@ -293,6 +294,7 @@ pub struct Rotation {
     pub nodes: Vec<PublicKey>,
     pub statement: Revocation,
     pub signed: Option<SignedRevocation>,
+    #[serde(with = "rocky_core::byte_arrays::each")]
     pub statements: Vec<Commitment>,
     pub keys: BTreeMap<String, RotationEpoch>,
     pub groups: BTreeMap<String, RotationEpoch>,
@@ -503,6 +505,7 @@ impl Sealed {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
+    #[serde(with = "rocky_core::byte_arrays::one")]
     purpose: Commitment,
     pub(crate) installation: String,
     nonce: String,

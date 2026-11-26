@@ -7,7 +7,7 @@ macro_rules! ids {
     ($($name:ident),+) => {$ (
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[derive(serde::Serialize, serde::Deserialize)]
-        pub struct $name(pub [u8; 16]);
+        pub struct $name(#[serde(with = "crate::byte_arrays::one")] pub [u8; 16]);
     )+};
 }
 ids!(MeshId, AppId, DomainId, NodeId, PrincipalId);

@@ -28,6 +28,7 @@ struct Discovery {
     version: u32,
     root: Option<DiscoverySecret>,
     values: BTreeMap<String, DiscoverySecret>,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     current: Option<Commitment>,
     previous: Option<(Commitment, u64)>,
 }

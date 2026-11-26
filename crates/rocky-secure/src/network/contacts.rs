@@ -33,6 +33,7 @@ pub enum ContactRequest {
     Discovery {
         root: Option<Box<DiscoverySecret>>,
         values: Vec<DiscoverySecret>,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         after: Option<rocky_core::Commitment>,
     },
 }
@@ -47,6 +48,7 @@ pub enum ContactResponse {
     Discovery {
         root: Option<Box<DiscoverySecret>>,
         values: Vec<DiscoverySecret>,
+        #[serde(with = "rocky_core::byte_arrays::one")]
         next: Option<rocky_core::Commitment>,
     },
 }

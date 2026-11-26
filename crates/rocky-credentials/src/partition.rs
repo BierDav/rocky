@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 #[serde(deny_unknown_fields)]
 pub struct PartitionGrant {
     pub domain: Scope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub table: Commitment,
     pub selector: PartitionSelector,
     pub rows: RowSelection,

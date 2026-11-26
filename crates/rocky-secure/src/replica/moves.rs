@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 mod compact;
 
-const PROOF_VERSION: u8 = 3;
+const PROOF_VERSION: u8 = 4;
 
 struct VerifiedBindings<'a> {
     chain: &'a [rocky_credentials::AuthorBinding],
@@ -389,8 +389,10 @@ impl CreationProof {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Carried {
     pub(crate) proof: CreationProof,
+    #[serde(with = "rocky_core::byte_arrays::keys")]
     pub(crate) stamps: BTreeMap<Commitment, Stamp>,
     pub(crate) authors: stamp_authors::Authors,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub(crate) moved_from: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

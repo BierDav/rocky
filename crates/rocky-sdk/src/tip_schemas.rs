@@ -45,6 +45,7 @@ impl<'de> Deserialize<'de> for Record {
 #[serde(deny_unknown_fields)]
 pub struct Pending {
     pub tip: TipId,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub manifest: Commitment,
 }
 impl Record {

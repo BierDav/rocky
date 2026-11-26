@@ -543,7 +543,7 @@ fn a_person_signs_no_link_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 18,
+        version: u32::MAX,
         rotation: 9,
     })
     .expect("bytes");

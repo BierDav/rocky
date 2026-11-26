@@ -23,7 +23,7 @@ pub const MAX_CLAIMS: usize = 16_384;
 /// A counter name of 1 to 64 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
-pub struct Name(Vec<u8>);
+pub struct Name(#[serde(with = "rocky_core::byte_arrays::one")] Vec<u8>);
 impl Name {
     /// Refuses an empty name or one over `MAX_NAME` with `Configuration`.
     pub fn new(name: impl Into<Vec<u8>>) -> Result<Self, CoordinationError> {

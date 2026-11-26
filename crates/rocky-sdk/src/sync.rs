@@ -182,6 +182,7 @@ pub(crate) async fn reconcile(
 #[serde(deny_unknown_fields)]
 pub(crate) struct Planned {
     pub scope: ResourceScope,
+    #[serde(with = "rocky_core::byte_arrays::one")]
     pub checkpoint: rocky_core::Commitment,
     pub rows: u64,
 }

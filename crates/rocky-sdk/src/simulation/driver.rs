@@ -541,10 +541,15 @@ impl Simulation {
         let database = self.database(node)?;
         let (authored, committed) = relational::author(&database, node, index, change).await?;
         let token = authored.token;
-        self.authored.push(authored);
         match committed {
-            Ok(()) => Ok("committed".into()),
+            Ok(()) => {
+                if database.transaction_outcome(token).await?.is_some() {
+                    self.authored.push(authored);
+                }
+                Ok("committed".into())
+            }
             Err(error) => {
+                self.authored.push(authored);
                 self.may_vanish.insert(token);
                 Err(error)
             }

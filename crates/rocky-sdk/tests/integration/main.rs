@@ -48,6 +48,8 @@ mod natural_keys;
 #[cfg(not(target_family = "wasm"))]
 mod node_writers;
 #[cfg(not(target_family = "wasm"))]
+mod noop_dml;
+#[cfg(not(target_family = "wasm"))]
 mod notes_example;
 #[cfg(not(target_family = "wasm"))]
 mod partitions;

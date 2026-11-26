@@ -523,8 +523,8 @@ pub struct Transaction {
     token: TransactionToken,
 }
 impl Transaction {
-    /// The token the transaction commits under, for `transaction_outcome`; a transaction that ran
-    /// no write statement records nothing, so its token never gets an outcome.
+    /// The token the transaction commits under, for `transaction_outcome`; a transaction that
+    /// changes no replayed row records nothing, so its token never gets an outcome.
     pub fn token(&self) -> TransactionToken {
         self.token
     }

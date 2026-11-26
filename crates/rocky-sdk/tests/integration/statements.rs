@@ -402,12 +402,10 @@ async fn only_a_transaction_without_a_write_statement_records_nothing() -> Resul
         .await?;
     assert_eq!(database.transaction_outcome(empty).await?, None);
     assert_eq!(database.transaction_outcome(read).await?, None);
-    assert!(
-        matches!(
-            database.transaction_outcome(blind).await?,
-            Some(rocky_sdk::TransactionOutcome::Applied { .. })
-        ),
-        "a write that matches no row still records an intent, which every device replays"
+    assert_eq!(
+        database.transaction_outcome(blind).await?,
+        None,
+        "a write that changes no replayed row records no intent or frame"
     );
     database.close().await?;
     Ok(())

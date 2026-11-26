@@ -514,9 +514,10 @@ numbers come from `rocky-coordinator`. A `RowIdentity` prints as hex and parses
 back with `str::parse`, and a `Timestamp` column value prints as RFC 3339 in
 UTC. `Transaction::token()` names the transaction for `transaction_outcome`
 and drop reports, already inside the body, so an outbox row can store it. A
-transaction that ran no write statement records and syncs nothing, so its token
-never gets an outcome; a write that matched no row still records an intent.
-`flush` makes every write that returned durable.
+transaction that changes no replayed row—whether it ran no write statement,
+matched zero rows, or left every touched row identical—records and syncs
+nothing, so its token never gets an outcome. `flush` makes every write that
+returned durable.
 
 `Database::status_changes()` streams snapshots as status changes; in
 `SyncMode::Live`, await partition grants or revocations on
@@ -528,6 +529,30 @@ never sync, are kept across reopening, are not governed by roles, and are
 deleted with the rest when the device is removed. A local table has no
 generated `id` and must declare its own `primary_key`. It holds per-device
 state, such as a till's parked sales or its offline switch.
+
+### Cost model for `Table::replayed`
+
+Every write transaction that changes at least one row in a `Table::replayed`
+table seals and stores a signed, encrypted intent frame for each changed scope
+(table or partition), appends it to that scope's replicated log, and ships it
+to every peer that holds the scope. Until a scope compacts, each frame stays
+in the replica's history, adds to sync traffic and replay work on peers, and
+contributes to cross-scope ordering when one transaction mutates multiple
+scopes.
+
+Design schemas and write loops accordingly:
+
+- **Avoid high-frequency ephemeral telemetry in `Table::replayed`:** periodic
+  heartbeats (`seen_at`), live metrics blobs, or polling snapshots that fire
+  every few seconds amplify into continuous frame creation, storage growth,
+  and sync churn across every peer. Keep ephemeral telemetry outside Rocky
+  (for example in an in-memory cache, metrics backend, or transient RPC), or
+  in `Table::local` when it is only needed on the local device.
+- **Mutate only what changed:** prefer targeted `UPDATE`s or `UPSERT`s over
+  blanket `DELETE` + re-`INSERT` loops, and batch related changes into one
+  transaction rather than many tiny commits. Scopes whose rows are untouched
+  or unchanged by a transaction emit no frame, so periodic pruning queries
+  that match zero rows are free on the sync log.
 
 A write must replay identically everywhere, so Rocky refuses some SQL in a
 transaction with `ErrorKind::Sql { unsupported, .. }`:

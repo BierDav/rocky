@@ -205,8 +205,8 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     let after = published(root.path())?;
     assert_eq!(
         after,
-        (before.0 + 2, before.1 + 5),
-        "an insert deleted in the same transaction still replicates: another replay may differ"
+        (before.0 + 1, before.1 + 4),
+        "an insert deleted in the same transaction leaves no net change and publishes no frame"
     );
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(&writer, "END TRANSACTION").await?;

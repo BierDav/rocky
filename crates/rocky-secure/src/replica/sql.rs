@@ -1314,7 +1314,7 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         admit(inner, &self.session)?;
-        let intents = super::intents::grouped(intents)?;
+        let mut intents = super::intents::grouped(intents)?;
         if intents.len() > 1 {
             let named: Vec<(&str, &[rocky_core::replay::IntentStatement])> = intents
                 .iter()
@@ -1327,6 +1327,7 @@ impl<A: RowApplication> SecureSql<A> {
                 .collect();
             super::replay::check_member_order(typed.rows.schema(), named.iter().copied())?;
         }
+        intents.retain(|scope, _| undo.contains_key(scope));
         let undone: Vec<&[super::replay::Undo]> = undo.values().map(Vec::as_slice).collect();
         if let Some(violated) = inner.replayed_violation(&written, &undone, false).await? {
             return Err(Error::Sql(SqlError::Statement {

@@ -959,24 +959,83 @@ async fn an_update_to_equal_values_needs_no_right() {
             &both,
         )
         .await;
-    let bob = t
+    let _created = create(&alice, &both, 10).await;
+    let committed = sql(&alice, &both)
+        .await
+        .run(
+            "UPDATE salaries SET amount=amount+? WHERE key='ann'",
+            vec![SqlValue::Integer(0)],
+        )
+        .await
+        .unwrap()
+        .committed
+        .unwrap();
+    assert!(committed.frames.is_empty());
+    assert_eq!(undo_records(&alice).await, 1);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn zero_row_and_unchanged_dml_emit_no_frames_for_untouched_scopes() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let alice = t
         .open(
-            &dir.path().join("b.db"),
+            &dir.path().join("a.db"),
             &PrivateKey::new(),
             t.full(),
             &both,
         )
         .await;
-    let created = create(&alice, &both, 10).await;
-    let same = raise(&sql(&alice, &both).await, 0).await;
-    for frame in [created, same.clone()] {
-        assert_eq!(bob.receive(frame).await.unwrap(), ReceiveStatus::Applied);
-    }
-    assert_eq!(
-        bob.transaction_outcome(transaction(&t, &same))
-            .await
-            .unwrap(),
-        Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
-    );
-    assert_eq!(undo_records(&bob).await, 1);
+    let _created = create(&alice, &both, 10).await;
+    let session = sql(&alice, &both).await;
+
+    let zero_delete = session
+        .run("DELETE FROM salaries WHERE key='nobody'", Vec::new())
+        .await
+        .unwrap()
+        .committed
+        .unwrap();
+    assert!(zero_delete.frames.is_empty());
+
+    session.run("BEGIN", Vec::new()).await.unwrap();
+    session
+        .run("DELETE FROM salaries WHERE key='ann'", Vec::new())
+        .await
+        .unwrap();
+    session
+        .run(
+            "INSERT INTO salaries(key,amount) VALUES('ann',10)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let unchanged = session
+        .run("COMMIT", Vec::new())
+        .await
+        .unwrap()
+        .committed
+        .unwrap();
+    assert!(unchanged.frames.is_empty());
+
+    session.run("BEGIN", Vec::new()).await.unwrap();
+    session
+        .run("DELETE FROM items WHERE key='missing'", Vec::new())
+        .await
+        .unwrap();
+    session
+        .run(
+            "UPDATE salaries SET amount=amount+5 WHERE key='ann'",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mixed = session
+        .run("COMMIT", Vec::new())
+        .await
+        .unwrap()
+        .committed
+        .unwrap();
+    assert_eq!(mixed.frames.len(), 1);
+    assert_eq!(mixed.frames[0].scope().unwrap(), t.salaries);
 }

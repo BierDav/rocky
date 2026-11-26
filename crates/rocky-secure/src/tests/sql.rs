@@ -1287,7 +1287,7 @@ async fn a_handle_recovers_its_commit_after_restart() {
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
         .await
         .unwrap();
-    let first = session.commit([7; 32]).await.unwrap().committed.unwrap();
+    let _first = session.commit([7; 32]).await.unwrap().committed.unwrap();
     session.run("BEGIN", vec![]).await.unwrap();
     session
         .run("UPDATE items SET title='apples'", vec![])
@@ -1331,8 +1331,8 @@ async fn a_handle_recovers_its_commit_after_restart() {
     let republished = session.commit([8; 32]).await.unwrap().committed.unwrap();
     assert_eq!(
         republished.frames.len(),
-        1,
-        "deleting and reinserting a key republishes its row in a new transaction"
+        0,
+        "deleting and reinserting an identical row emits no frame"
     );
     session.run("BEGIN", vec![]).await.unwrap();
     session
@@ -1342,12 +1342,8 @@ async fn a_handle_recovers_its_commit_after_restart() {
     let assigned = session.commit([9; 32]).await.unwrap().committed.unwrap();
     assert_eq!(
         assigned.frames.len(),
-        1,
-        "an intent publishes its statement, even an equal assignment"
-    );
-    assert_ne!(
-        assigned.frames[0].id().unwrap(),
-        first.frames[0].id().unwrap()
+        0,
+        "updating a row to its existing value emits no frame"
     );
     session.run("BEGIN", vec![]).await.unwrap();
     session
@@ -1355,7 +1351,7 @@ async fn a_handle_recovers_its_commit_after_restart() {
         .await
         .unwrap();
     assert!(
-        matches!(session.commit([9; 32]).await, Err(Error::Conflict)),
+        matches!(session.commit([7; 32]).await, Err(Error::Conflict)),
         "reusing a handle with other rows conflicts"
     );
     assert_eq!(
@@ -1369,10 +1365,9 @@ async fn a_handle_recovers_its_commit_after_restart() {
         .await
         .unwrap();
     let replayed = session.commit([9; 32]).await.unwrap().committed.unwrap();
-    assert_eq!(
-        replayed.frames[0].id().unwrap(),
-        assigned.frames[0].id().unwrap(),
-        "the same rows under the same handle replay the recorded frame"
+    assert!(
+        replayed.frames.is_empty(),
+        "replaying a no-op update emits no frame"
     );
 }
 

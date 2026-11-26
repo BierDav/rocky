@@ -3200,13 +3200,7 @@ pub(crate) async fn exchange(
     let reply = transport
         .request(addresses, scope, &bytes)
         .await
-        .map_err(|error| -> Failure {
-            if error.is::<rocky_core::net::ScopeRefusal>() {
-                error
-            } else {
-                ServiceError::Unreachable(error.to_string()).into()
-            }
-        })?;
+        .map_err(ServiceError::dial_failed)?;
     let reply = ReplyFrame::from_bytes(&reply)?;
     let reply = reply
         .result

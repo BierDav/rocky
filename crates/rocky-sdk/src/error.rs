@@ -447,7 +447,6 @@ impl Error {
             | ErrorKind::AuthorityChanged
             | ErrorKind::Conflict
             | ErrorKind::Busy => true,
-            ErrorKind::Join(error) => error.retryable(),
             ErrorKind::Link(error) => error.retryable(),
             ErrorKind::Service(error) => error.retryable(),
             ErrorKind::Remote { retryable } => *retryable,

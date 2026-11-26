@@ -51,10 +51,11 @@ pub enum ServiceError {
         /// The route schemes the attached transport claims.
         schemes: Vec<String>,
     },
-    /// The peer did not answer; retry.
-    Unreachable(String),
-    /// The dial timed out; retry.
-    TimedOut(String),
+    /// The peer did not answer, and `std::error::Error::source` yields the transport's error, such as
+    /// a refused connection or an untrusted TLS certificate; retry.
+    Unreachable(Cause),
+    /// The dial timed out, and `std::error::Error::source` yields the transport's error; retry.
+    TimedOut(Cause),
     /// This device's credentials expired and it needs a network to renew them with an admin device.
     CredentialsExpired,
     /// The database or network is closed.
@@ -65,7 +66,47 @@ pub enum ServiceError {
     /// device yet; the pass's report says why each known peer failed.
     NoPeerReached(Box<SyncReport>),
 }
+/// The error a transport returned for a failed dial; `ServiceError`'s `source` yields it.
+#[derive(Clone)]
+pub struct Cause(Arc<dyn std::error::Error + Send + Sync>);
+impl Cause {
+    pub(crate) fn new(error: Failure) -> Self {
+        Self(Arc::from(error))
+    }
+}
+impl PartialEq for Cause {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.to_string() == other.0.to_string()
+    }
+}
+impl Eq for Cause {}
+impl std::fmt::Debug for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 impl ServiceError {
+    pub(crate) fn dial_failed(error: Failure) -> Failure {
+        if error.is::<rocky_core::net::ScopeRefusal>() || error.is::<Self>() {
+            return error;
+        }
+        let timed_out = error.is::<rocky_platform::time::error::Elapsed>()
+            || error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut);
+        let cause = Cause::new(error);
+        Box::new(if timed_out {
+            Self::TimedOut(cause)
+        } else {
+            Self::Unreachable(cause)
+        })
+    }
     pub(crate) fn no_route(peer: &'static str, transport: &dyn Transport) -> Self {
         Self::NoRoute {
             peer,
@@ -136,7 +177,14 @@ impl std::fmt::Display for ServiceError {
         }
     }
 }
-impl std::error::Error for ServiceError {}
+impl std::error::Error for ServiceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreachable(cause) | Self::TimedOut(cause) => Some(&*cause.0),
+            _ => None,
+        }
+    }
+}
 
 /// How a database syncs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

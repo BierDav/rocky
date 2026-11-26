@@ -2081,13 +2081,7 @@ impl Node {
             let stream = transport
                 .session(&addresses, self.domain().scope)
                 .await
-                .map_err(|error| -> Failure {
-                    if error.is::<rocky_core::net::ScopeRefusal>() || error.is::<ServiceError>() {
-                        error
-                    } else {
-                        ServiceError::Unreachable(error.to_string()).into()
-                    }
-                })?;
+                .map_err(ServiceError::dial_failed)?;
             let owner = self
                 .owner
                 .get()
@@ -2139,7 +2133,10 @@ impl Node {
                     service.peer_admission[class as usize]
                         .try_acquire()
                         .map_err(|_| -> Failure {
-                            ServiceError::Unreachable("peer RPC admission budget".into()).into()
+                            ServiceError::Unreachable(crate::service::Cause::new(
+                                "peer RPC admission budget".into(),
+                            ))
+                            .into()
                         })
                 })
                 .transpose()?;

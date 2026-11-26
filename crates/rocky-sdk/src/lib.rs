@@ -109,7 +109,7 @@ pub use schema::{
     Column, ForeignKey, Index, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,
 };
 pub use secrets::{FileSecretStore, SecretStore};
-pub use service::{ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
+pub use service::{Cause, ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
 pub use sql::{
     Commit, DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction,
     TransactionToken,

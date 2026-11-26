@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
     Configuration, DenyReason, DeviceId, ErrorKind, IdentityKey, IdentityProvider, Invite,
-    InviteError, JoinError, Network, Opened, PersonId, Right, transport::memory::Hub,
+    InviteError, JoinError, Network, Opened, PersonId, Right, ServiceError, transport::memory::Hub,
 };
 use serde_json::json;
 use std::{path::Path, sync::Arc};
@@ -551,10 +551,14 @@ async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
         .await
         .err()
         .ok_or("a join reached an issuer that is offline")?;
-    assert_eq!(
-        failed.kind(),
-        &ErrorKind::Join(JoinError::IssuerUnreachable)
+    assert!(
+        matches!(
+            failed.kind(),
+            ErrorKind::Service(ServiceError::Unreachable(_))
+        ),
+        "{failed:?}"
     );
+    assert!(failed.retryable());
     let unfinished = joining(&member, &hub, None)?
         .open()
         .await
@@ -571,6 +575,34 @@ async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
     let member = Device::new(joined)?;
     assert_eq!(member.titles().await, ["Milk"]);
     member.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_no_attached_transport_routes_is_refused_as_no_route() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = issuer(&root.path().join("issuer"), &hub).await?;
+    let invitation = owner.database.invite(Invite::new(writer())).await?;
+    let refused = Configuration::new(root.path().join("member"), common::parsed_schema())?
+        .network(rocky_tcp::Options::dialer().into())
+        .join(&invitation.code)
+        .await
+        .err()
+        .ok_or("a TCP transport redeemed a code that names only a memory route")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Service(ServiceError::NoRoute { schemes, .. })
+                if schemes.iter().any(|scheme| scheme == "tcp")
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        !refused.retryable(),
+        "a missing transport is a configuration error"
+    );
     owner.close().await;
     Ok(())
 }

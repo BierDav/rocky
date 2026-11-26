@@ -98,10 +98,14 @@ it for every clone.
 
 `open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
 and `create` or `join` on one that does with `DatabaseExists`, so a host that
-boots unattended opens first and joins on `NoDatabase`. A join that fails, for
-example with `JoinError::IssuerUnreachable`, keeps its device key so the issuer
-can recognize a retry: `open` then fails with `JoinUnfinished`, and `join` with
-the same or a newer invitation resumes it.
+boots unattended opens first and joins on `NoDatabase`. A join that cannot reach
+the issuing device fails with `ErrorKind::Service(ServiceError::Unreachable)` or
+`TimedOut`, which are retryable and whose `source()` is the transport's error,
+such as a refused connection or an untrusted TLS certificate; a code whose
+routes no attached transport dials, as a `wss://` route without rocky-tcp's
+`websocket` feature, fails with `NoRoute`, which is not. A join that fails keeps
+its device key so the issuer can recognize a retry: `open` then fails with
+`JoinUnfinished`, and `join` with the same or a newer invitation resumes it.
 
 ## Two devices
 

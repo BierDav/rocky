@@ -1,6 +1,6 @@
 use crate::common::{Device, Failure};
-use rocky_sdk::{ErrorKind, Network, ServiceError};
-use std::net::SocketAddr;
+use rocky_sdk::{Configuration, ErrorKind, Network, ServiceError};
+use std::{net::SocketAddr, sync::Arc};
 
 fn tcp() -> Network {
     rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0))).into()
@@ -137,6 +137,74 @@ async fn the_issuer_reaches_its_joiner_without_add_peer() -> Result<(), Failure>
     assert_eq!(issuer.titles().await, ["Bread", "Eggs", "Milk"]);
 
     reopened.close().await;
+    issuer.close().await;
+    Ok(())
+}
+
+fn untrusted_tls() -> Result<Arc<rustls::ServerConfig>, Failure> {
+    let key = rcgen::KeyPair::generate()?;
+    let certificate =
+        rcgen::CertificateParams::new(vec!["localhost".to_owned()])?.self_signed(&key)?;
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![certificate.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+    )?;
+    Ok(Arc::new(config))
+}
+
+#[tokio::test]
+async fn a_join_the_issuer_certificate_fails_names_the_tls_error_as_its_source()
+-> Result<(), Failure> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let route = format!("wss://localhost:{}", listener.local_addr()?.port());
+    let acceptor = tokio_rustls::TlsAcceptor::from(untrusted_tls()?);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let _ = acceptor.accept(tcp).await;
+        }
+    });
+    let root = tempfile::tempdir()?;
+    let issuer = Device::create(
+        &root.path().join("issuer"),
+        Some(
+            rocky_tcp::Options::new(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .advertise(route)
+                .into(),
+        ),
+    )
+    .await?;
+    let code = issuer.invite().await;
+    let failed = Configuration::new(root.path().join("member"), crate::common::parsed_schema())?
+        .network(websocket())
+        .join(&code)
+        .await
+        .err()
+        .ok_or("joined through a certificate no root signed")?;
+    assert!(
+        matches!(
+            failed.kind(),
+            ErrorKind::Service(ServiceError::Unreachable(_))
+        ),
+        "{failed:?}"
+    );
+    let tls = std::iter::successors(
+        Some(&failed as &(dyn std::error::Error + 'static)),
+        |error| error.source(),
+    )
+    .filter_map(|error| error.downcast_ref::<std::io::Error>())
+    .find_map(|io| io.get_ref()?.downcast_ref::<rustls::Error>());
+    assert_eq!(
+        tls,
+        Some(&rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer
+        )),
+        "{failed:?}"
+    );
     issuer.close().await;
     Ok(())
 }

@@ -65,6 +65,10 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+# A wss server whose certificate the joiner does not trust.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # Needs the native side that scripts/browser-sync starts, so `cargo test`
 # runs it only when named.

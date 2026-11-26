@@ -253,8 +253,6 @@ pub enum JoinError {
     OtherApplication,
     /// The person is already a member; link a device instead.
     AlreadyMember,
-    /// The issuing device is offline; retry when it is online.
-    IssuerUnreachable,
 }
 impl JoinError {
     const CARRIED: [Self; 6] = [
@@ -275,33 +273,17 @@ impl JoinError {
             Self::OtherIdentity => "invitation_other_identity",
             Self::OtherApplication => "invitation_other_application",
             Self::AlreadyMember => "already_member",
-            Self::IssuerUnreachable => "issuer_unreachable",
         }
-    }
-    /// Whether a retry may succeed.
-    pub fn retryable(&self) -> bool {
-        matches!(self, Self::IssuerUnreachable)
     }
     fn carried(error: Failure) -> Failure {
-        if let Some(code) = error
-            .downcast_ref::<PeerError>()
-            .map(|peer| peer.code.clone())
-        {
-            return match Self::CARRIED
+        let refusal = error.downcast_ref::<PeerError>().and_then(|peer| {
+            Self::CARRIED
                 .into_iter()
-                .find(|refusal| refusal.code() == code)
-            {
-                Some(refusal) => Box::new(refusal),
-                None => error,
-            };
-        }
-        match error.downcast_ref::<ServiceError>() {
-            Some(
-                ServiceError::Unreachable(_)
-                | ServiceError::TimedOut(_)
-                | ServiceError::NoRoute { .. },
-            ) => Box::new(Self::IssuerUnreachable),
-            _ => error,
+                .find(|refusal| refusal.code() == peer.code)
+        });
+        match refusal {
+            Some(refusal) => Box::new(refusal),
+            None => error,
         }
     }
 }
@@ -317,7 +299,6 @@ impl std::fmt::Display for JoinError {
             Self::AlreadyMember => {
                 "the identity is already a member; link this device from another of its devices"
             }
-            Self::IssuerUnreachable => "the admin that issued the invitation is not reachable",
         })
     }
 }
@@ -798,7 +779,7 @@ impl Settings {
             .map(|route| route.as_str().to_owned())
             .collect::<Vec<_>>();
         if addresses.is_empty() {
-            return Err(Box::new(JoinError::IssuerUnreachable));
+            return Err(ServiceError::no_route("the issuer", transport).into());
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let (request, secret) =

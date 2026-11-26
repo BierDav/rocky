@@ -7,8 +7,8 @@ use rocky_sdk::{
     Created, Database, DatabaseStatus, DeclaredSchema, DeleteAction, DenyReason, Device, DeviceId,
     DropReason, DroppedTransaction, Error, ErrorKind, ForeignKey, IdentityKey, IdentityProvider,
     Index, Invitation, Invite, JoinError, Limit, MigrationStep, Network, Opened, Partition,
-    PendingLink, PersonId, RefusedChange, Removal, Right, Role, RoleInUse, RolloutImpact, RootKey,
-    RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport,
+    PendingLink, Person, PersonId, RefusedChange, Removal, Right, Role, RoleInUse, RolloutImpact,
+    RootKey, RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport,
     TRANSACTION_TIMEOUT, Table, TableChange, TableEvents, Timestamp, Transaction,
     TransactionOutcome, TransactionToken, Unsupported,
 };
@@ -26,6 +26,7 @@ const VARIANTS: &[&str] = &[
     "Blocked",
     "Busy",
     "Cascade",
+    "Closed",
     "DatabaseExists",
     "Denied",
     "Full",

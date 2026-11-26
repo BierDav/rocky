@@ -1,6 +1,7 @@
 use crate::common::Failure;
 use rocky_sdk::{
-    Affinity, Column, Database, ErrorKind, Index, Role, RoleName, Schema, Table, params,
+    Access, Affinity, Column, Database, DenyReason, ErrorKind, Index, Partition, PersonId, Role,
+    RoleName, Schema, Table, params,
 };
 use std::path::Path;
 
@@ -11,17 +12,43 @@ fn clinic() -> Result<Schema, rocky_sdk::Error> {
         .column(Column::new("ward", Affinity::Text).required())
         .column(Column::new("note", Affinity::Text).required())
         .primary_key(["ward", "id"])
-        .partition_by(["ward"]);
+        .partition_by(["ward"])
+        .partition_group("ward");
     let doctor = Role::new(DOCTOR)
         .read("wards")
         .append("charts")
         .update_columns("charts", ["note"])
-        .per_partition("charts");
+        .per_partition("ward");
     Schema::builder("clinic", 1)
         .table(Table::replayed("wards").column(Column::new("name", Affinity::Text).required()))
         .table(charts)
         .role(doctor)
         .build()
+}
+
+async fn open_ward(admin: &Database, doctor: PersonId, ward: &str) -> Result<(), rocky_sdk::Error> {
+    let partition = Partition::new("ward", params![ward]);
+    admin.create_partition(&partition).await?;
+    admin.grant_partition(doctor, &partition).await?;
+    let admit = "INSERT INTO charts(ward, note) VALUES(?, 'admitted')";
+    admin
+        .write(async |tx| tx.execute(admit, params![ward]).await)
+        .await
+}
+
+async fn readers(
+    admin: &Database,
+    partition: &Partition,
+) -> Result<Vec<PersonId>, rocky_sdk::Error> {
+    let people = admin.people().await?;
+    Ok(people
+        .into_iter()
+        .filter(|person| {
+            person.partitions.contains(partition)
+                || matches!(person.access, Access::Full | Access::Read)
+        })
+        .map(|person| person.id)
+        .collect())
 }
 
 fn ledger() -> Result<Schema, rocky_sdk::Error> {
@@ -132,9 +159,68 @@ fn every_rust_block_in_the_readme_appears_verbatim_in_its_example_file() -> Resu
     Ok(())
 }
 
-#[test]
-fn the_readme_role_recipe_names_its_partition_group_after_the_table() -> Result<(), Failure> {
-    clinic()?;
+async fn charts(database: &Database) -> Result<Vec<String>, rocky_sdk::Error> {
+    database
+        .query("SELECT note FROM charts", params![])
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|row| Ok(row.get("note")?))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_readme_partition_flow_denies_a_read_before_the_grant_and_lists_its_readers()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = std::sync::Arc::new(rocky_sdk::transport::memory::Hub::default());
+    let schema = clinic()?;
+    let configure = |name: &str| {
+        rocky_sdk::Configuration::new(root.path().join(name), &schema).map(|configuration| {
+            configuration.network(rocky_sdk::Network::Owned(hub.connector(name)))
+        })
+    };
+    let admin = configure("admin")?.create().await?;
+    let admin = crate::common::Device::new(admin)?;
+    let invitation = admin
+        .database
+        .invite(rocky_sdk::Invite::new(Access::Role(DOCTOR)))
+        .await?;
+    let doctor = crate::common::Device::new(configure("doctor")?.join(&invitation.code).await?)?;
+    let refused = charts(&doctor.database)
+        .await
+        .err()
+        .ok_or("a per-partition role read charts before any grant")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Denied { reason: DenyReason::PartitionNotGranted { group }, .. } if group == "ward"
+        ),
+        "{refused:?}"
+    );
+    let person = doctor.database.me().await?.person;
+    open_ward(&admin.database, person, "A").await?;
+    for _ in 0..2 {
+        crate::support::peerless_ok(doctor.database.sync_now().await)?;
+    }
+    let seen = "INSERT INTO charts(ward, note) VALUES('A', 'seen')";
+    doctor
+        .database
+        .write(async |tx| tx.execute(seen, params![]).await)
+        .await?;
+    assert_eq!(charts(&doctor.database).await?.len(), 2);
+    let ward = Partition::new("ward", params!["A"]);
+    let mut listed = readers(&admin.database, &ward).await?;
+    listed.sort_by_key(ToString::to_string);
+    let mut expected = vec![admin.database.me().await?.person, person];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(
+        listed, expected,
+        "the owner reads every partition and the doctor holds A"
+    );
+    doctor.close().await;
+    admin.close().await;
     Ok(())
 }
 

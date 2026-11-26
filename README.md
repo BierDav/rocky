@@ -118,17 +118,6 @@ would match rows or none, so a refused statement records nothing; partition
 rights are checked as soon as the statement knows its rows. A statement refused
 before it runs leaves the transaction open for the body to go on.
 
-`open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
-and `create` or `join` on one that does with `DatabaseExists`, so a host that
-boots unattended opens first and joins on `NoDatabase`. A join that cannot reach
-the issuing device fails with `ErrorKind::Service(ServiceError::Unreachable)` or
-`TimedOut`, which are retryable and whose `source()` is the transport's error,
-such as a refused connection or an untrusted TLS certificate; a code whose
-routes no attached transport dials, as a `wss://` route without rocky-tcp's
-`websocket` feature, fails with `NoRoute`, which is not. A join that fails keeps
-its device key so the issuer can recognize a retry: `open` then fails with
-`JoinUnfinished`, and `join` with the same or a newer invitation resumes it.
-
 ## Two devices
 
 Alice creates the database and invites Bob over TCP on loopback. Bob joins,
@@ -196,6 +185,53 @@ read already sees Alice's rows. `SyncMode::Live`, the default, pushes Alice's
 commit to Bob at once; `sync_now` makes the example deterministic. Run it with
 `cargo run -p rocky-sdk --example two_devices`.
 
+`open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
+and `create` or `join` on one that does with `DatabaseExists`, so a host that
+boots unattended opens first and joins on `NoDatabase`. A join that cannot reach
+the issuing device fails with `ErrorKind::Service(ServiceError::Unreachable)` or
+`TimedOut`, which are retryable and whose `source()` is the transport's error,
+such as a refused connection or an untrusted TLS certificate; a code whose
+routes no attached transport dials, as a `wss://` route without rocky-tcp's
+`websocket` feature, fails with `NoRoute`, which is not. A join that fails keeps
+its device key so the issuer can recognize a retry: `open` then fails with
+`JoinUnfinished`, and `join` with the same or a newer invitation resumes it.
+
+## API map
+
+`Configuration` opens a database and `Database` is everything after. Run
+`cargo doc -p rocky-sdk --open` for every type and method; this table names the
+ones an application calls, and the sections below explain each.
+
+| Group | Method | For |
+| --- | --- | --- |
+| Lifecycle | `Configuration::create` | A new database; returns the root and owner keys once |
+| | `Configuration::open` | The database already in the directory |
+| | `Configuration::join` | Redeems an invitation code on a new device |
+| | `Configuration::link` | Adds a device to a person who holds another |
+| | `close` | Ends the database for every clone |
+| | `flush` | Makes every returned write durable |
+| | `logout` | Ends this device's session, optionally deleting its data |
+| | `attach`, `detach` | Changes the network after open |
+| SQL | `write` | One transaction: `Transaction::execute`, `query`, `next_id` and `token` |
+| | `query` | A read outside a transaction |
+| | `observe` | A `Stream` of changes to named tables |
+| | `transaction_outcome` | Whether a commit applied or was dropped on replay |
+| | `acknowledge_drop` | Clears a `WriteDropped` alert |
+| Sync | `sync_now` | One sync pass, returning a `SyncReport` |
+| | `set_sync` | Switches `SyncMode` |
+| | `contact` | How other devices reach this one |
+| | `add_peer`, `remove_peer` | Adds or forgets a peer by contact or `DeviceId` |
+| People | `me` | Who this device belongs to and what it may do per table |
+| | `people` | Every member, their access, partitions and devices; admins only |
+| | `invite`, `invitations`, `cancel_invitation` | Issues, lists and cancels invitations |
+| | `set_access`, `remove` | Changes or ends a member's access |
+| | `make_admin`, `revoke_admin` | Promotes or ends an admin, with the root key |
+| | `create_partition`, `grant_partition`, `revoke_partition` | Opens a partition and gives or takes it |
+| | `link_requests`, `approve_link`, `unlink` | Adds or ends one of a person's devices |
+| Status | `status`, `status_changes` | Blockers, alerts, network and schema, now or as they change |
+| | `schema_version` | The schema version installed on this device |
+| | `renew` | Renews this device's credentials with an admin device now |
+
 ## Keys
 
 | Key | What it is | Who holds it | Needed for |
@@ -204,19 +240,19 @@ commit to Bob at once; `sync_now` makes the example deterministic. Run it with
 | Person key (`Created::owner`, `Opened::identity`, `IdentityKey`) | One person's identity | The app, in its secure storage; `IdentityKey::phrase` and `IdentityKey::from_phrase` move it as 24 words | Every open, through `Configuration::identity`: it signs the session's invitations, links, unlinks and schema publications |
 | Device key | One device's identity | Rocky, under the database directory or in `Configuration::secrets` | Opening and renewing the device's credentials; it never leaves the device |
 
-`create` returns the root and the owner's person key once, and `join` returns
-a minted person key in `Opened::identity`; each of those sessions signs with
-its key. The owner's person key is derived from the root, so
-`RootKey::identity` recovers it from the root phrase. `PersonId::of(&key)?`
-names the person any `IdentityProvider` signs for, as `Invite::for_identity`
-and `remove` take it. An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
+`create` returns the root and the owner's person key once, and `join` returns a
+minted person key in `Opened::identity`; each of those sessions signs with its
+key. The owner's person key is derived from the root, so `RootKey::identity`
+recovers it from the root phrase. `PersonId::of(&key)?` names the person any
+`IdentityProvider` signs for, as `Invite::for_identity` and `remove` take it.
+An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
 `Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later
 opens get the person key from `Configuration::identity`, and a call that needs
-it without one is `Denied` with `IdentityRequired`.
-`create_with_root(root, owner)` takes signers the application keeps
-elsewhere, such as passkey-backed ones. Rocky never stores a person key: its
-one persisted form is the 24-word phrase, which the app keeps in its own
-storage and reopens with `IdentityKey::from_phrase`.
+it without one is `Denied` with `IdentityRequired`. `create_with_root(root,
+owner)` takes signers the application keeps elsewhere, such as passkey-backed
+ones. Rocky never stores a person key: its one persisted form is the 24-word
+phrase, which the app keeps in its own storage and reopens with
+`IdentityKey::from_phrase`.
 
 ## People, access and partitions
 
@@ -236,10 +272,11 @@ or application; the joiner learns them from the issuing device's answer and
 fails with `JoinError::OtherApplication` when its schema is another
 application's. The issuing device has then admitted the device, so the join
 stays unfinished: repeating it in the same directory with the right schema
-resumes it. A device's credentials last 180 days and renew at every
-sync with an admin device; a device that meets none for 180 days holds expired
-credentials (`status().authority.expired`) until it does. `Database::invitations` lists open and redeemed
-invitations, and `cancel_invitation` ends an unused one.
+resumes it. A device's credentials last 180 days and renew at every sync with
+an admin device; a device that meets none for 180 days holds expired
+credentials (`status().authority.expired`) until it does.
+`Database::invitations` lists open and redeemed invitations, and
+`cancel_invitation` ends an unused one.
 
 `Access` is `Full`, `Read`, `Store` or a `Role` the schema declares with
 `SchemaBuilder::role`. A role reads, writes, appends to or updates named
@@ -253,12 +290,13 @@ fn clinic() -> Result<Schema, rocky_sdk::Error> {
         .column(Column::new("ward", Affinity::Text).required())
         .column(Column::new("note", Affinity::Text).required())
         .primary_key(["ward", "id"])
-        .partition_by(["ward"]);
+        .partition_by(["ward"])
+        .partition_group("ward");
     let doctor = Role::new(DOCTOR)
         .read("wards")
         .append("charts")
         .update_columns("charts", ["note"])
-        .per_partition("charts");
+        .per_partition("ward");
     Schema::builder("clinic", 1)
         .table(Table::replayed("wards").column(Column::new("name", Affinity::Text).required()))
         .table(charts)
@@ -267,20 +305,73 @@ fn clinic() -> Result<Schema, rocky_sdk::Error> {
 }
 ```
 
-A partitioned table's partition group is its own name unless
-`Table::partition_group` names one that several tables share. A role declared
-`per_partition` holds no
-partition of that group until an admin calls `grant_partition(person,
-&partition)`; until then a read of its tables is `Denied` with
-`PartitionNotGranted` and `status` lists a matching blocker. Once it holds one,
-a read returns the rows of the partitions it holds, also when its filter names
-others, and a write into a partition it does not hold is `Denied` with
-`PartitionNotGranted`. Grants reach every device of the person,
-including devices that join or link later. `revoke_partition` takes one back
-like any narrowing of access: it rotates the partition's key and revokes the
-credentials of each of the person's devices, which get new ones without the
-partition at their next sync with an admin device. `Full` and `Read` reach
-every partition.
+### Partitions
+
+`Table::partition_by(columns)` splits a table into partitions by those
+columns' values, each encrypted under its own key. Each partition belongs to a
+partition group, which is the table's own name unless
+`Table::partition_group` names one that several tables share, so that one
+grant covers all of them. `Role::per_partition(group)` takes the name of a
+partition group, not of a table: above, `charts` is in the group `ward`. A
+role declared `per_partition` holds no partition of that group until an admin
+grants one.
+
+An admin device opens a partition in this order: `create_partition` creates
+its key, `grant_partition(person, &partition)` gives it to a person whose role
+is `per_partition`, and then the first write lands in it. A write before
+`create_partition` is `Denied` with `PartitionNotCreated`, and
+`Invite::partition` grants a partition with the invitation instead of
+`grant_partition`.
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+async fn open_ward(admin: &Database, doctor: PersonId, ward: &str) -> Result<(), rocky_sdk::Error> {
+    let partition = Partition::new("ward", params![ward]);
+    admin.create_partition(&partition).await?;
+    admin.grant_partition(doctor, &partition).await?;
+    let admit = "INSERT INTO charts(ward, note) VALUES(?, 'admitted')";
+    admin
+        .write(async |tx| tx.execute(admit, params![ward]).await)
+        .await
+}
+```
+
+A person whose role is `per_partition` and who holds no partition of the
+group is refused every read of the group's tables, a plain `SELECT note FROM
+charts` included, with `Denied` and `PartitionNotGranted { group }`, and
+`status().data.blockers` lists a matching blocker. Rocky refuses on purpose
+rather than return no rows, which would look like a ward with no charts: show
+the person that they wait for an admin's grant, and read again when
+`status_changes()` drops the blocker. Once the person holds a partition, a
+read returns the rows of the partitions they hold, also when its filter names
+others, and a write into a partition they do not hold is `Denied` with
+`PartitionNotGranted`.
+
+`people()` lists each `Person` with the partitions granted to them in
+`Person::partitions`. `Full` and `Read` reach every partition without a
+grant, so an admin asking who reads a partition counts them too:
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+async fn readers(
+    admin: &Database,
+    partition: &Partition,
+) -> Result<Vec<PersonId>, rocky_sdk::Error> {
+    let people = admin.people().await?;
+    Ok(people
+        .into_iter()
+        .filter(|person| {
+            person.partitions.contains(partition)
+                || matches!(person.access, Access::Full | Access::Read)
+        })
+        .map(|person| person.id)
+        .collect())
+}
+```
+
+Grants reach every device of the person, including devices that join or link
+later. `revoke_partition` takes one back like any narrowing of access: it
+rotates the partition's key and revokes the credentials of each of the
+person's devices, which get new ones without the partition at their next sync
+with an admin device.
 
 A device that learns its access narrowed, at its next sync with an admin
 device, deletes what it can no longer read: the rows of a revoked partition or
@@ -289,6 +380,8 @@ encrypted history, including its own writes there that never synced, since the
 credentials they were written under are revoked. A device that loses its last
 partition of a table reopens and reads none until it is granted one again, and
 then syncs that partition's rows anew.
+
+### Devices, admins and removal
 
 A person links another device with `Configuration::link(contact)` on the new
 device, configured with their person key, where `contact` is
@@ -570,6 +663,8 @@ why the device lacks it:
 Other kinds an application meets:
 
 - `Removed`: the person was removed or the device unlinked; nothing clears it.
+- `Closed`: the call came after `close`, from any clone; open the database
+  again.
 - `NoDatabase`, `DatabaseExists` and `JoinUnfinished`: the directory holds no
   database, already holds one, or holds a join to repeat.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
@@ -693,10 +788,10 @@ version and this device syncs with it.
 
 A write made under an earlier version that a later one can no longer apply,
 such as a late write into a removed field, including one that a later version
-replaced with a new field declared without `renamed_from`, is dropped on every device, loudly:
-`observe` delivers a `DroppedTransaction` with `DropReason::Schema`, and the
-writer's device and every admin device raise a `WriteDropped` alert that
-survives restarts until `acknowledge_drop(token)`.
+replaced with a new field declared without `renamed_from`, is dropped on every
+device, loudly: `observe` delivers a `DroppedTransaction` with
+`DropReason::Schema`, and the writer's device and every admin device raise a
+`WriteDropped` alert that survives restarts until `acknowledge_drop(token)`.
 
 A device whose data predates a version that removed a table or field starts
 from the checkpoint taken there. Until it has it, `status` and the `Blocked`

@@ -811,7 +811,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     member.sync().await.expect("join");
     member.close().await;
     let intent_awaiting_an_unmet_inviter = format!(
-        r#"{{"version":1,"imports":{{"scopes":[]}},"totals":[],"inviter":"{unmet_inviter}"}}"#
+        r#"{{"version":2,"imports":{{"scopes":[]}},"totals":[],"inviter":"{unmet_inviter}"}}"#
     );
     common::write_authority(
         &path,
@@ -874,7 +874,7 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     common::write_authority(
         root.path(),
         "bootstrap",
-        br#"{"version":1,"imports":{"scopes":[]},"totals":[],"inviter":null}"#,
+        br#"{"version":2,"imports":{"scopes":[]},"totals":[],"inviter":null}"#,
     )
     .await?;
     let device = Device::open(root.path(), None).await?;

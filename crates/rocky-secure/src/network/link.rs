@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 39;
+pub(crate) const HANDSHAKE_VERSION: u32 = 40;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;

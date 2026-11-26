@@ -230,7 +230,7 @@ impl SealedOutcomes {
         }
     }
 }
-pub(crate) const CHECKPOINT_FORMAT: u32 = 21;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 22;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,

@@ -214,7 +214,7 @@ fn receipt_bytes(
     )
 }
 
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]

@@ -52,7 +52,7 @@ impl Domain {
                     ResourceScope {
                         domain: scope,
                         encryption: rocky_core::commitment(
-                            "rocky.sdk.readers.v1",
+                            "rocky.sdk.readers.v2",
                             table.identity().as_bytes(),
                         ),
                         table: logical.table_id(table),
@@ -250,16 +250,23 @@ mod tests {
         assert_ne!(child.table, parent.table);
         assert_eq!(
             child.encryption,
-            rocky_core::commitment("rocky.sdk.readers.v1", b"children")
+            rocky_core::commitment("rocky.sdk.readers.v2", b"children")
         );
         assert_eq!(
             parent.encryption,
-            rocky_core::commitment("rocky.sdk.readers.v1", b"parents")
+            rocky_core::commitment("rocky.sdk.readers.v2", b"parents")
         );
         assert_eq!(
             resources.get("other").ok_or("other")?.encryption,
-            rocky_core::commitment("rocky.sdk.readers.v1", b"other")
+            rocky_core::commitment("rocky.sdk.readers.v2", b"other")
         );
+        assert_ne!(
+            child.encryption,
+            rocky_core::commitment("rocky.sdk.readers.v1", b"children")
+        );
+        assert_eq!(crate::enrollment::VERSION, 50);
+        assert_eq!(crate::bootstrap_intent::BOOTSTRAP_INTENT_VERSION, 2);
+        assert_eq!(crate::self_enrollment::BUNDLE_FORMAT, 9);
         let mut reordered = schema.clone();
         reordered.tables.reverse();
         assert_eq!(

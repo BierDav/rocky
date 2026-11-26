@@ -5,7 +5,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope, Scope};
 use serde::{Deserialize, Serialize};
 
-pub const CHECKPOINT_RECORD_FORMAT: u32 = 3;
+pub const CHECKPOINT_RECORD_FORMAT: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordStatement {

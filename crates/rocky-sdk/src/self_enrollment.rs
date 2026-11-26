@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 const SKEW: u64 = 300;
-const BUNDLE_FORMAT: u32 = 8;
+pub(crate) const BUNDLE_FORMAT: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

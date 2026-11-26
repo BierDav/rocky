@@ -40,7 +40,7 @@ impl Extensions {
     }
 }
 
-pub(crate) const ROW_FORMAT: u8 = 20;
+pub(crate) const ROW_FORMAT: u8 = 21;
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
 #[derive(Clone, Debug)]

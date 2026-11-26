@@ -31,7 +31,7 @@ mod crash;
 #[cfg(any(test, feature = "qualification"))]
 pub use crash::CrashPoint;
 mod frontiers;
-mod generation;
+pub(crate) mod generation;
 mod schemas;
 mod staging;
 pub use staging::SchemaStage;

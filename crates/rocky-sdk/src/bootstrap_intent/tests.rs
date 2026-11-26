@@ -205,8 +205,9 @@ async fn an_intent_in_another_format_is_rejected() -> Result<(), Failure> {
     for other in [
         &b"true"[..],
         br#"{"intent":true,"inviter":"00"}"#,
-        br#"{"version":2,"imports":"granted","totals":[],"inviter":null}"#,
-        br#"{"version":1,"imports":"granted","totals":[],"inviter":null,"pending":[]}"#,
+        br#"{"version":1,"imports":"granted","totals":[],"inviter":null}"#,
+        br#"{"version":3,"imports":"granted","totals":[],"inviter":null}"#,
+        br#"{"version":2,"imports":"granted","totals":[],"inviter":null,"pending":[]}"#,
     ] {
         rocky_secure::write_authority_entry(&database, AUTHORITY_BOOTSTRAP_KEY, other, 1).await?;
         assert!(
@@ -238,7 +239,7 @@ async fn the_persisted_intent_has_one_shape() -> Result<(), Failure> {
     let written: serde_json::Value = serde_json::from_slice(&bytes)?;
     assert_eq!(
         written,
-        serde_json::json!({"version": 1, "imports": "granted", "totals": [], "inviter": null})
+        serde_json::json!({"version": 2, "imports": "granted", "totals": [], "inviter": null})
     );
     Ok(())
 }

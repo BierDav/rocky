@@ -75,7 +75,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..70).chain([71]) {
+    for version in (0..71).chain([72]) {
         let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
         rocky_platform::fs::copy(&source, &path).unwrap();
@@ -439,4 +439,17 @@ async fn a_parent_checkpoint_binding_is_refused_even_with_the_same_version_label
     };
     let bytes = encode(&parent).unwrap();
     assert!(SignedCheckpoint::from_bytes(&bytes).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn pinned_persisted_and_wire_formats() {
+    assert_eq!(
+        crate::replica::generation::FILE_IDENTITY,
+        "rocky.encrypted-replica.v71"
+    );
+    assert_eq!(crate::wire::ROW_FORMAT, 21);
+    assert_eq!(crate::replica::checkpoint::CHECKPOINT_FORMAT, 22);
+    assert_eq!(crate::network::link::HANDSHAKE_VERSION, 40);
+    assert_eq!(rocky_credentials::CHECKPOINT_RECORD_FORMAT, 4);
+    assert_eq!(rocky_credentials::PEER_RPC_VERSION, 13);
 }

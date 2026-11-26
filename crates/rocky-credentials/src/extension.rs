@@ -1,7 +1,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 18;
+const EXTENSION_VERSION: u32 = 19;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +133,7 @@ mod tests {
         let current = Extension::new(Extended::default()).unwrap();
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
+        assert_eq!(EXTENSION_VERSION, 19);
         assert_eq!(body.version, EXTENSION_VERSION);
         for version in (0..EXTENSION_VERSION).chain([EXTENSION_VERSION + 1, u32::MAX]) {
             let other = Extension(

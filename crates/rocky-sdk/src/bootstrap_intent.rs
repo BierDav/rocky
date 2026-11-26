@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::sync::{Mutex, MutexGuard};
 
-const BOOTSTRAP_INTENT_VERSION: u32 = 1;
+pub(crate) const BOOTSTRAP_INTENT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

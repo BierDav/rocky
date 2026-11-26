@@ -93,6 +93,21 @@ async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
         assert_eq!(epochs, expected, "{table}");
     }
 }
+async fn learned_its_removal(device: &Device) -> Result<(), Failure> {
+    let mut after = 0;
+    loop {
+        let page = device.database.next_activity(after).await?;
+        if page.events.iter().any(|event| {
+            matches!(
+                event.detail,
+                crate::activity::ActivityKind::IdentityRevoked { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        after = page.token;
+    }
+}
 async fn exercise(count: usize) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(&schema(count))?;
@@ -229,7 +244,14 @@ async fn exercise(count: usize) -> Result<(), Failure> {
     snap::ok(owner.database.remove(members[0].1)).await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
-    assert_epochs(&members[0].0, count, &[1]).await;
+    let removed = &members[0].0;
+    let refusal = removed
+        .sync()
+        .await
+        .expect_err("a removed device no longer syncs");
+    assert_eq!(refusal["code"], "removed");
+    learned_its_removal(removed).await?;
+    assert_epochs(removed, count, &[]).await;
     let after = metric(
         &format!("{label} owner after rotation"),
         &settings(&owner_dir).credentials,

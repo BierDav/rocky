@@ -71,8 +71,8 @@ async fn a_browser_node_syncs_with_a_native_node_over_a_relay() -> Result<(), Fa
     let invitation = peer["invitation"].as_str().ok_or("no invitation")?;
     let directory = Scratch::new().await;
     let network = rocky_iroh::Options {
-        relay: Some(relay.into()),
-        lookup: Some("disabled".into()),
+        relay: rocky_iroh::Relay::Custom(relay.parse()?),
+        lookup: rocky_iroh::Lookup::Disabled,
         topic: false,
         local: false,
         bind: None,

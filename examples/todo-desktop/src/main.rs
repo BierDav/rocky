@@ -25,8 +25,8 @@ fn launch() -> Result<Launch, String> {
             "--device" => demo = false,
             "--lan" => {
                 transport = rocky_iroh::Options {
-                    relay: Some("disabled".into()),
-                    lookup: Some("disabled".into()),
+                    relay: rocky_iroh::Relay::Disabled,
+                    lookup: rocky_iroh::Lookup::Disabled,
                     topic: false,
                     local: true,
                     bind: args.next_if(|next| !next.starts_with("--")),

@@ -17,8 +17,8 @@ type Packets = Arc<Mutex<HashMap<EndpointId, SignedPacket>>>;
 type Stored = Arc<tokio::sync::watch::Sender<u64>>;
 /// A local pkarr lookup server for tests, stopped on drop.
 pub struct LookupServer {
-    /// The pkarr URL for `Options::lookup`.
-    pub url: String,
+    /// The pkarr URL for `Lookup::Custom`.
+    pub url: url::Url,
     packets: Packets,
     stored: Stored,
     task: tokio::task::JoinHandle<()>,
@@ -32,7 +32,7 @@ impl LookupServer {
     /// Starts the server on a free loopback port.
     pub async fn start() -> Result<Self, Failure> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("http://{}/pkarr", listener.local_addr()?);
+        let url = url::Url::parse(&format!("http://{}/pkarr", listener.local_addr()?))?;
         let packets = Packets::default();
         let stored = Stored::new(tokio::sync::watch::channel(0).0);
         let (served, storing) = (packets.clone(), stored.clone());
@@ -59,15 +59,6 @@ impl LookupServer {
                 return;
             }
         }
-    }
-    /// The keys of every published record.
-    pub fn keys(&self) -> Vec<EndpointId> {
-        self.packets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys()
-            .copied()
-            .collect()
     }
     /// Contacts a topic's rendezvous record lists now.
     pub fn contacts(&self, topic: &[u8; 32]) -> usize {

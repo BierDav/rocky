@@ -22,16 +22,11 @@ use std::{
 use tokio::sync::{Mutex, mpsc, watch};
 
 mod local;
-pub use local::LOCAL_SERVICE;
 
-/// How often a device republishes its rendezvous record, before jitter.
-pub const RENDEZVOUS_INTERVAL: Duration = Duration::from_secs(300);
-/// Contacts one rendezvous record holds.
-pub const RENDEZVOUS_CONTACTS: usize = 6;
-/// The largest encrypted rendezvous record in bytes.
-pub const RENDEZVOUS_BYTES: usize = 560;
-/// Seconds after which a rendezvous contact counts as stale.
-pub const RENDEZVOUS_AGE: u64 = 3600;
+pub(crate) const RENDEZVOUS_INTERVAL: Duration = Duration::from_secs(300);
+pub(crate) const RENDEZVOUS_CONTACTS: usize = 6;
+pub(crate) const RENDEZVOUS_BYTES: usize = 560;
+pub(crate) const RENDEZVOUS_AGE: u64 = 3600;
 const RECORD_VERSION: u8 = 1;
 const RECORD_NAME: &str = "_rocky";
 const RECORD_TTL: u32 = 30;
@@ -41,8 +36,7 @@ const FOUND: usize = 64;
 const LOCAL_RETRY: Duration = Duration::from_secs(30);
 const RENDEZVOUS_JITTER: Duration = Duration::from_secs(30);
 
-/// n0's public pkarr relay, where topic discovery publishes by default.
-pub const DEFAULT_RENDEZVOUS: &str = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD;
+pub(crate) const DEFAULT_RENDEZVOUS: &str = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD;
 
 /// Whether peers find each other through a rendezvous record on a lookup service.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,8 +44,8 @@ pub enum Topic {
     /// No topic discovery.
     #[default]
     Off,
-    /// Publishes and reads rendezvous records at this pkarr relay URL.
-    On(String),
+    /// Publishes and reads rendezvous records at this pkarr relay.
+    On(url::Url),
     /// Topic discovery was asked for but cannot run, for the stated reason.
     Unavailable(String),
 }
@@ -68,8 +62,7 @@ pub struct Discover {
 fn derive(label: &str, topic: &[u8; 32]) -> [u8; 32] {
     commitment(label, topic)
 }
-/// The key that signs a topic's rendezvous record.
-pub fn rendezvous_key(topic: &[u8; 32]) -> SecretKey {
+pub(crate) fn rendezvous_key(topic: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(&derive("rocky.discovery-rendezvous-key.v1", topic))
 }
 fn cipher(label: &str, topic: &[u8; 32]) -> ChaCha20Poly1305 {
@@ -292,16 +285,16 @@ fn absent(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn relay_client(endpoint: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
+fn relay_client(endpoint: &Endpoint, relay: &url::Url) -> Result<PkarrRelayClient, Failure> {
     Ok(PkarrRelayClient::new(
-        relay.parse()?,
+        relay.clone(),
         endpoint.tls_config().clone(),
         endpoint.dns_resolver()?.clone(),
     ))
 }
 #[cfg(target_family = "wasm")]
-fn relay_client(_: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
-    Ok(PkarrRelayClient::new(relay.parse()?))
+fn relay_client(_: &Endpoint, relay: &url::Url) -> Result<PkarrRelayClient, Failure> {
+    Ok(PkarrRelayClient::new(relay.clone()))
 }
 
 fn rendezvous_jitter() -> Duration {
@@ -415,7 +408,7 @@ impl Finder {
         }
     }
 
-    async fn rendezvous(self, node: [u8; 32], topics: Vec<[u8; 32]>, relay: String) {
+    async fn rendezvous(self, node: [u8; 32], topics: Vec<[u8; 32]>, relay: url::Url) {
         let mut endpoints = self.0.endpoint.clone();
         loop {
             let endpoint = endpoints.borrow_and_update().clone();
@@ -447,7 +440,7 @@ impl Finder {
         endpoint: &Endpoint,
         node: [u8; 32],
         topic: &[u8; 32],
-        relay: &str,
+        relay: &url::Url,
     ) -> Result<(), Failure> {
         let client = relay_client(endpoint, relay)?;
         let held = match client.resolve(rendezvous_key(topic).public()).await {

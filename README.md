@@ -837,7 +837,9 @@ syncs.
 
 - **iroh**: `rocky_iroh::Options::default()` uses n0's public relays and
   lookup service, finds the database's other devices by topic and on the local
-  network, and runs in the browser through relays. It claims `iroh:` routes. An
+  network, and runs in the browser through relays; its `relay` takes a
+  `rocky_iroh::Relay` and its `lookup` a `rocky_iroh::Lookup`, each `Default`,
+  `Disabled` or `Custom(url)`. It claims `iroh:` routes. An
   application with its own iroh endpoint registers
   `rocky_iroh::Attachment::new(endpoint)` on its router and passes
   `attachment.transport()` as `Network::Borrowed`. On iOS, also copy the

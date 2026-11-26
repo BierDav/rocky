@@ -6079,6 +6079,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "wasm-bindgen-test",
  "web-time",
 ]

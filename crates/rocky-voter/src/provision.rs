@@ -112,7 +112,7 @@ pub struct Configuration {
 pub struct ClientLane {
     pub secret: String,
     #[serde(default)]
-    pub relay: Option<String>,
+    pub relay: rocky_iroh::Relay,
     #[serde(default)]
     pub discovery: bool,
     #[serde(default)]
@@ -123,7 +123,7 @@ impl ClientLane {
     pub fn loopback(secret: &[u8; 32], bind: SocketAddr) -> Self {
         Self {
             secret: hex(secret),
-            relay: Some("disabled".into()),
+            relay: rocky_iroh::Relay::Disabled,
             discovery: false,
             bind: Some(bind.to_string()),
         }
@@ -131,7 +131,11 @@ impl ClientLane {
     pub async fn start(&self) -> Result<rocky_iroh::Attachment, Failure> {
         let options = rocky_iroh::Options {
             relay: self.relay.clone(),
-            lookup: (!self.discovery).then(|| "disabled".into()),
+            lookup: if self.discovery {
+                rocky_iroh::Lookup::Default
+            } else {
+                rocky_iroh::Lookup::Disabled
+            },
             topic: ANNOUNCES_A_TOPIC,
             local: false,
             bind: self.bind.clone(),

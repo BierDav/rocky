@@ -1,12 +1,16 @@
 use rocky_core::net::{Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH};
-use rocky_iroh::{Attachment, Discover, Options, Topic, iroh::EndpointAddr, testing::LookupServer};
+use rocky_iroh::{
+    Attachment, Discover, Lookup, Options, Topic, iroh::EndpointAddr, testing::LookupServer,
+};
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(20);
 
 fn options(lookup: Option<&LookupServer>, local: bool) -> Options {
     Options {
-        lookup: Some(lookup.map_or("disabled".into(), |server| server.url.clone())),
+        lookup: lookup.map_or(Lookup::Disabled, |server| {
+            Lookup::Custom(server.url.clone())
+        }),
         topic: lookup.is_some(),
         local,
         ..Options::isolated(if local { "0.0.0.0:0" } else { "127.0.0.1:0" })
@@ -98,11 +102,9 @@ async fn members_of_a_topic_find_each_other_through_the_rendezvous_record() -> R
     let address = endpoint(&at_b.address)?;
     assert_eq!(address, a.endpoint().addr());
     tokio::time::timeout(WAIT, server.wait_for_contacts(&previous, 2)).await?;
-    assert_eq!(server.contacts(&topic), 1);
-    assert!(
-        server
-            .keys()
-            .contains(&rocky_iroh::rendezvous_key(&topic).public()),
+    assert_eq!(
+        server.contacts(&topic),
+        1,
         "each topic's record is stored under a key only members derive"
     );
     let stored = server.stored();

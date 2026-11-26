@@ -13,10 +13,12 @@ use crate::common;
 
 const WAIT: Duration = Duration::from_secs(60);
 
-fn starter(lookup: Option<&str>, local: bool) -> Network {
+fn starter(lookup: Option<&rocky_iroh::Url>, local: bool) -> Network {
     Network::Owned(Arc::new(rocky_iroh::Options {
-        relay: Some("disabled".into()),
-        lookup: Some(lookup.unwrap_or("disabled").into()),
+        relay: rocky_iroh::Relay::Disabled,
+        lookup: lookup.map_or(rocky_iroh::Lookup::Disabled, |url| {
+            rocky_iroh::Lookup::Custom(url.clone())
+        }),
         topic: lookup.is_some(),
         local,
         bind: Some(if local { "0.0.0.0:0" } else { "127.0.0.1:0" }.into()),
@@ -70,7 +72,11 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     tokio::join!(a.close(), b.close(), issuer.close());
     Ok(())
 }
-async fn second_process(root: &Path, lookup: Option<&str>, local: bool) -> Result<Value, Failure> {
+async fn second_process(
+    root: &Path,
+    lookup: Option<&rocky_iroh::Url>,
+    local: bool,
+) -> Result<Value, Failure> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .args([
@@ -83,7 +89,7 @@ async fn second_process(root: &Path, lookup: Option<&str>, local: bool) -> Resul
         .env("ROCKY_DISCOVERY_REPORT", root.join("report.json"))
         .env("ROCKY_DISCOVERY_LOCAL", local.to_string());
     if let Some(lookup) = lookup {
-        command.env("ROCKY_DISCOVERY_LOOKUP", lookup);
+        command.env("ROCKY_DISCOVERY_LOOKUP", lookup.as_str());
     }
     let output = tokio::task::spawn_blocking(move || command.output()).await??;
     assert!(
@@ -102,13 +108,12 @@ async fn second_process(root: &Path, lookup: Option<&str>, local: bool) -> Resul
 async fn member_process() -> Result<(), Failure> {
     let directory = std::env::var_os("ROCKY_DISCOVERY_MEMBER").ok_or("member directory")?;
     let report = std::env::var_os("ROCKY_DISCOVERY_REPORT").ok_or("report path")?;
-    let lookup = std::env::var("ROCKY_DISCOVERY_LOOKUP").ok();
+    let lookup = std::env::var("ROCKY_DISCOVERY_LOOKUP")
+        .ok()
+        .map(|url| url.parse::<rocky_iroh::Url>())
+        .transpose()?;
     let local = std::env::var("ROCKY_DISCOVERY_LOCAL").is_ok_and(|local| local == "true");
-    let b = Device::open(
-        Path::new(&directory),
-        Some(starter(lookup.as_deref(), local)),
-    )
-    .await?;
+    let b = Device::open(Path::new(&directory), Some(starter(lookup.as_ref(), local))).await?;
     let found = tokio::time::timeout(WAIT, async {
         loop {
             if let Some(found) = discovered(&b).await {
@@ -248,7 +253,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     let root = tempfile::tempdir()?;
     let server = LookupServer::start().await?;
     let options = Options {
-        lookup: Some(server.url.clone()),
+        lookup: rocky_iroh::Lookup::Custom(server.url.clone()),
         topic: true,
         ..Options::isolated("127.0.0.1:0")
     };

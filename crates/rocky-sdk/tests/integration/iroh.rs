@@ -29,8 +29,8 @@ impl ProtocolHandler for Echo {
 }
 fn local() -> Options {
     Options {
-        relay: Some("disabled".into()),
-        lookup: Some("disabled".into()),
+        relay: rocky_iroh::Relay::Disabled,
+        lookup: rocky_iroh::Lookup::Disabled,
         topic: false,
         local: false,
         bind: Some("127.0.0.1:0".into()),
@@ -65,8 +65,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     )
     .await?;
     let starter = Network::Owned(Arc::new(rocky_iroh::Options {
-        relay: Some("disabled".into()),
-        lookup: Some("disabled".into()),
+        relay: rocky_iroh::Relay::Disabled,
+        lookup: rocky_iroh::Lookup::Disabled,
         topic: false,
         local: false,
         bind: Some("127.0.0.1:0".into()),

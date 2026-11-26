@@ -32,10 +32,9 @@ mod discovery;
 /// A local relay and lookup server for tests; never enable `test-utils` in a shipped build.
 #[cfg(feature = "test-utils")]
 pub mod testing;
-pub use discovery::{
-    DEFAULT_RENDEZVOUS, Discover, LOCAL_SERVICE, RENDEZVOUS_AGE, RENDEZVOUS_BYTES,
-    RENDEZVOUS_CONTACTS, RENDEZVOUS_INTERVAL, Topic, rendezvous_key,
-};
+use discovery::DEFAULT_RENDEZVOUS;
+pub use discovery::{Discover, Topic};
+pub use url::Url;
 
 #[cfg(not(target_family = "wasm"))]
 use iroh::address_lookup::DnsAddressLookup;
@@ -48,25 +47,21 @@ use iroh::{
     protocol::{AcceptError, IncomingFilterOutcome, ProtocolHandler, Router, RouterBuilder},
 };
 
-/// The ALPN that carries one Rocky protocol over iroh.
-pub fn alpn(protocol: Protocol) -> &'static [u8] {
+fn alpn(protocol: Protocol) -> &'static [u8] {
     match protocol {
         Protocol::Rpc => b"rocky/rpc",
         Protocol::Link => b"rocky/link",
         Protocol::Coordinate => b"rocky/coordinator/3",
     }
 }
-/// The Rocky protocol an ALPN names, or `None` for a foreign one.
-pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
+fn protocol_named(name: &[u8]) -> Option<Protocol> {
     Protocol::ALL
         .into_iter()
         .chain([Protocol::Coordinate])
         .find(|protocol| alpn(*protocol) == name)
 }
 
-/// The route scheme this crate claims: its routes are `iroh:` URLs that name an endpoint and its
-/// relay and direct addresses.
-pub const SCHEME: &str = "iroh";
+const SCHEME: &str = "iroh";
 
 /// The `iroh:` route that names an endpoint, its relay and its direct addresses.
 pub fn route(address: &EndpointAddr) -> Result<String, Failure> {
@@ -85,20 +80,13 @@ fn endpoint_addr(route: &str) -> Result<EndpointAddr, Failure> {
         &data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?,
     )?)
 }
-/// How long a dial or a connection's opening handshake may take before it fails.
-pub const TIMEOUT: Duration = Duration::from_secs(15);
-/// Incoming streams a database scope queues before new ones are refused as busy.
-pub const PENDING: usize = 32;
-/// Inbound connections, and inbound link connections, an attachment accepts at once.
-pub const CONNECTIONS: usize = 64;
-/// Outbound connections an attachment keeps open for reuse.
-pub const CACHED: usize = 64;
-/// Streams one connection carries at once.
-pub const STREAMS_PER_CONNECTION: usize = 4;
-/// Requests one attachment serves at once; more are refused as busy.
-pub const RPC_REQUESTS: usize = 32;
-/// How long an unused connection stays open.
-pub const IDLE: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING: usize = 32;
+const CONNECTIONS: usize = 64;
+const CACHED: usize = 64;
+const STREAMS_PER_CONNECTION: usize = 4;
+const RPC_REQUESTS: usize = 32;
+const IDLE: Duration = Duration::from_secs(30);
 const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
 const REBIND: Duration = Duration::from_secs(3);
@@ -445,7 +433,7 @@ struct Shared {
     refused: AtomicU64,
     router: std::sync::Mutex<Option<Router>>,
     relays: bool,
-    initial_relay_configuration: Option<String>,
+    initial_relay_configuration: Option<Relay>,
     protocols: Vec<Protocol>,
     finder: Option<discovery::Finder>,
     discover: Discover,
@@ -479,7 +467,7 @@ impl Attachment {
         relays: bool,
         protocols: Vec<Protocol>,
         discover: Discover,
-        initial_relay_configuration: Option<String>,
+        initial_relay_configuration: Option<Relay>,
     ) -> Self {
         let endpoint = watch::channel(endpoint).0;
         let finder = (discover != Discover::default())
@@ -504,10 +492,6 @@ impl Attachment {
             initial_relay_configuration,
             protocols,
         }))
-    }
-    /// Every ALPN Rocky accepts, for an application's own router.
-    pub fn alpns() -> impl Iterator<Item = &'static [u8]> {
-        Protocol::ALL.into_iter().map(alpn)
     }
     /// The protocol handler for an application's own iroh router.
     pub fn handler(&self) -> Handler {
@@ -774,7 +758,7 @@ impl Attachment {
     }
 
     /// The relay setting the attachment started with, or `None` for an application's own endpoint.
-    pub fn initial_relay_configuration(&self) -> Option<String> {
+    pub fn initial_relay_configuration(&self) -> Option<Relay> {
         self.0.initial_relay_configuration.clone()
     }
     /// The state of each home relay connection.
@@ -1331,36 +1315,53 @@ impl Attachment {
     }
 }
 
+/// The relays an endpoint keeps a home connection to, which reach it behind NATs and from browsers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relay {
+    /// n0's public relays.
+    #[default]
+    Default,
+    /// n0's staging relays.
+    Staging,
+    /// No relay, so peers reach the endpoint only at a direct address.
+    Disabled,
+    /// The relay at this URL.
+    Custom(RelayUrl),
+}
+/// The service an endpoint publishes its addresses to and resolves other endpoints through.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Lookup {
+    /// n0's public lookup service.
+    #[default]
+    Default,
+    /// No lookup, so peers are dialed only at the addresses their routes name.
+    Disabled,
+    /// The pkarr relay at this URL.
+    Custom(Url),
+}
+
 /// How a started endpoint reaches peers; pass it to `Network::Owned`, and the default uses n0's
 /// public relays and lookup.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Options {
-    /// `None` or `"default"` for n0's relays, `"staging"`, `"disabled"`, or a relay URL.
-    #[serde(default)]
-    pub relay: Option<String>,
-    /// `None` or `"default"` for n0's lookup service, `"disabled"`, or a pkarr relay URL.
-    #[serde(default)]
-    pub lookup: Option<String>,
+    /// The relays the endpoint uses.
+    pub relay: Relay,
+    /// The lookup service the endpoint uses.
+    pub lookup: Lookup,
     /// Finds the database's other devices through a rendezvous record on the lookup service; on by
     /// default.
-    #[serde(default = "enabled")]
     pub topic: bool,
     /// Finds peers on the local network with mDNS; on by default.
-    #[serde(default = "enabled")]
     pub local: bool,
     /// A socket address to bind instead of every interface; a browser binds none.
-    #[serde(default)]
     pub bind: Option<String>,
-}
-fn enabled() -> bool {
-    true
 }
 impl Default for Options {
     fn default() -> Self {
         Self {
-            relay: None,
-            lookup: None,
+            relay: Relay::Default,
+            lookup: Lookup::Default,
             topic: true,
             local: true,
             bind: None,
@@ -1371,8 +1372,8 @@ impl Options {
     /// Binds only `bind`, with no relay, lookup or discovery, for tests and closed networks.
     pub fn isolated(bind: &str) -> Self {
         Self {
-            relay: Some("disabled".into()),
-            lookup: Some("disabled".into()),
+            relay: Relay::Disabled,
+            lookup: Lookup::Disabled,
             topic: false,
             local: false,
             bind: Some(bind.into()),
@@ -1380,13 +1381,16 @@ impl Options {
     }
     /// The discovery these options turn on.
     pub fn discover(&self) -> Discover {
-        let topic = match (self.topic, self.lookup.as_deref().unwrap_or("default")) {
+        let topic = match (self.topic, &self.lookup) {
             (false, _) => Topic::Off,
-            (true, "disabled") => {
+            (true, Lookup::Disabled) => {
                 Topic::Unavailable("the topic needs the lookup service, which is disabled".into())
             }
-            (true, "default") => Topic::On(DEFAULT_RENDEZVOUS.into()),
-            (true, url) => Topic::On(url.into()),
+            (true, Lookup::Default) => match Url::parse(DEFAULT_RENDEZVOUS) {
+                Ok(url) => Topic::On(url),
+                Err(error) => Topic::Unavailable(error.to_string()),
+            },
+            (true, Lookup::Custom(url)) => Topic::On(url.clone()),
         };
         Discover {
             topic,
@@ -1394,18 +1398,18 @@ impl Options {
         }
     }
     fn relays(&self) -> bool {
-        self.relay.as_deref() != Some("disabled")
+        self.relay != Relay::Disabled
     }
     fn allows_multicast(&self) -> bool {
         self.local && !cfg!(target_os = "ios")
     }
     /// Binds an endpoint whose iroh key is derived from the database's route secret.
     pub async fn bind(&self, route_secret: [u8; 32]) -> Result<Endpoint, Failure> {
-        let relay_mode = match self.relay.as_deref().unwrap_or("default") {
-            "default" => RelayMode::Default,
-            "staging" => RelayMode::Staging,
-            "disabled" => RelayMode::Disabled,
-            url => RelayMode::Custom(url.parse::<RelayUrl>()?.into()),
+        let relay_mode = match &self.relay {
+            Relay::Default => RelayMode::Default,
+            Relay::Staging => RelayMode::Staging,
+            Relay::Disabled => RelayMode::Disabled,
+            Relay::Custom(url) => RelayMode::Custom(url.clone().into()),
         };
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&route_secret))
@@ -1424,9 +1428,9 @@ impl Options {
         if !self.allows_multicast() {
             builder = builder.portmapper_config(PortmapperConfig::Disabled);
         }
-        match self.lookup.as_deref().unwrap_or("default") {
-            "disabled" => {}
-            "default" => {
+        match &self.lookup {
+            Lookup::Disabled => {}
+            Lookup::Default => {
                 builder = builder
                     .address_lookup(PkarrPublisher::n0_dns())
                     .address_lookup(PkarrResolver::n0_dns());
@@ -1435,10 +1439,10 @@ impl Options {
                     builder = builder.address_lookup(DnsAddressLookup::n0_dns());
                 }
             }
-            url => {
+            Lookup::Custom(url) => {
                 builder = builder
-                    .address_lookup(PkarrPublisher::builder(url.parse()?))
-                    .address_lookup(PkarrResolver::builder(url.parse()?));
+                    .address_lookup(PkarrPublisher::builder(url.clone()))
+                    .address_lookup(PkarrResolver::builder(url.clone()));
             }
         }
         if let Some(bind) = &self.bind {
@@ -1463,13 +1467,21 @@ impl Options {
         let mut direct = true;
         for route in routes {
             let address = endpoint_addr(route)?;
-            relay = relay.or_else(|| address.relay_urls().next().map(ToString::to_string));
+            relay = relay.or_else(|| address.relay_urls().next().cloned());
             direct &= address.ip_addrs().next().is_some();
         }
         let closed = relay.is_none() && direct;
         Ok(Self {
-            relay: relay.or_else(|| closed.then(|| "disabled".into())),
-            lookup: closed.then(|| "disabled".into()),
+            relay: match relay {
+                Some(url) => Relay::Custom(url),
+                None if closed => Relay::Disabled,
+                None => Relay::Default,
+            },
+            lookup: if closed {
+                Lookup::Disabled
+            } else {
+                Lookup::Default
+            },
             topic: false,
             local: false,
             bind: None,
@@ -1502,7 +1514,7 @@ impl Options {
             self.relays(),
             protocols,
             self.discover(),
-            Some(self.relay.clone().unwrap_or_else(|| "default".into())),
+            Some(self.relay.clone()),
         );
         *attachment.0.restart.lock().await = Some((self.clone(), route_secret));
         attachment.keep_router(attachment.route_inbound(endpoint));
@@ -1772,19 +1784,23 @@ mod tests {
         let bare = route(&EndpointAddr::new(id))?;
 
         let closed = Options::reaching([direct.as_str()])?;
-        assert_eq!(closed.relay.as_deref(), Some("disabled"));
-        assert_eq!(closed.lookup.as_deref(), Some("disabled"));
+        assert_eq!(closed.relay, Relay::Disabled);
+        assert_eq!(closed.lookup, Lookup::Disabled);
         let through_relay = Options::reaching([direct.as_str(), relayed.as_str()])?;
         assert_eq!(
-            through_relay.relay.as_deref(),
-            Some("https://relay.example/")
+            through_relay.relay,
+            Relay::Custom("https://relay.example/".parse()?)
         );
         assert_eq!(
-            through_relay.lookup, None,
+            through_relay.lookup,
+            Lookup::Default,
             "a relayed voter may move, so lookup stays on"
         );
         let looked_up = Options::reaching([bare.as_str()])?;
-        assert_eq!((looked_up.relay, looked_up.lookup), (None, None));
+        assert_eq!(
+            (looked_up.relay, looked_up.lookup),
+            (Relay::Default, Lookup::Default)
+        );
         assert!(
             !looked_up.topic && !looked_up.local,
             "a client discovers nobody"

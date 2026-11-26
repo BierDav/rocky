@@ -36,8 +36,8 @@ mod native {
             &directory.path().join("relayed"),
             &schema,
             rocky_iroh::Options {
-                relay: Some(url.clone()),
-                lookup: Some("disabled".into()),
+                relay: rocky_iroh::Relay::Custom(url.parse()?),
+                lookup: rocky_iroh::Lookup::Disabled,
                 topic: false,
                 local: false,
                 bind: None,

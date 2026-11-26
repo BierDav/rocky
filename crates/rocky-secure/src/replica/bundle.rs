@@ -811,7 +811,7 @@ impl<A: RowApplication> Inner<A> {
         let mut result = self
             .conn
             .query(
-                "SELECT header,body,status FROM secure_operations WHERE author=? AND scope=? AND sequence=?",
+                "SELECT o.header,o.body,o.status,a.hash IS NOT NULL FROM secure_operations o LEFT JOIN secure_applied a ON a.hash=o.hash WHERE o.author=? AND o.scope=? AND o.sequence=?",
                 bindings(vec![
                     SqlValue::Blob(author.as_bytes().to_vec()),
                     SqlValue::Blob(encode(&opening.scope)?),
@@ -820,15 +820,17 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         if let Some(row) = result.next().await? {
-            let (header, body, status) = (
+            let (header, body, status, applied) = (
                 row.get::<Vec<u8>>(0)?,
                 row.get::<Vec<u8>>(1)?,
                 row.get::<String>(2)?,
+                row.get::<i64>(3)? != 0,
             );
             drop(result);
             let frame = self.stored_frame(header, body).await?;
             return Ok(match status.as_str() {
                 "applied" | "abandoned" => Member::Settled(Some(frame)),
+                "held" if applied => Member::Settled(Some(frame)),
                 "rejected" => Member::Rejected,
                 _ => Member::Pending(frame),
             });

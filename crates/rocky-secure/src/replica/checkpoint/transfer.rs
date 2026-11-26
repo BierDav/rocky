@@ -2667,9 +2667,35 @@ impl<A: RowApplication> Inner<A> {
                         .chain(header.backlink.iter())
                         .copied(),
                 );
-                if status == "applied" {
-                    let SqlValue::Integer(position) = position else {
-                        return Err(Error::Corrupt("applied position".into()));
+                let visible_held = if status == "held" && self.graphs.contains_key(&scope.domain) {
+                    let e = &header.extensions;
+                    let author = e
+                        .author(&header.public_key)
+                        .ok_or_else(|| denied("node author missing"))?;
+                    self.visible_frame(
+                        self.graph_for(scope.domain)?,
+                        e.tip,
+                        author,
+                        e.author_sequence,
+                        self.workspace.tip,
+                    )? && !matches!(
+                        self.frame_reach_at(
+                            scope.domain,
+                            e.tip,
+                            author,
+                            e.author_sequence,
+                            header.timestamp,
+                        )?,
+                        tips::FrameReach::Held | tips::FrameReach::Unfollowed
+                    )
+                } else {
+                    false
+                };
+                if status == "applied" || visible_held {
+                    let order = match position {
+                        SqlValue::Integer(position) => *position,
+                        SqlValue::Null if visible_held => i64::MAX,
+                        _ => return Err(Error::Corrupt("applied position".into())),
                     };
                     self.conn
                         .execute(
@@ -2680,7 +2706,7 @@ impl<A: RowApplication> Inner<A> {
                     self.conn
                         .execute("DELETE FROM secure_applied WHERE hash=?", [hash.clone()])
                         .await?;
-                    reapply.push((*position, hash_of(hash)?));
+                    reapply.push((order, hash_of(hash)?));
                 }
             }
         }

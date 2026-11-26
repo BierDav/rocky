@@ -114,8 +114,6 @@ pub struct LinkRequest {
 pub enum LinkError {
     /// Linking needs an attached network.
     NetworkRequired,
-    /// The other device is not reachable; retry when it is online.
-    Unreachable,
     /// The other device has not approved the link yet; retry after it does.
     NotApproved,
     /// The approved code is not the one the new device shows.
@@ -130,7 +128,6 @@ impl LinkError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NetworkRequired => "network_required",
-            Self::Unreachable => "unreachable",
             Self::NotApproved => "link_not_approved",
             Self::CodeMismatch => "link_code_mismatch",
             Self::UnknownRequest => "link_request_unknown",
@@ -139,29 +136,20 @@ impl LinkError {
     }
     /// Whether a retry may succeed.
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Unreachable | Self::NotApproved)
+        matches!(self, Self::NotApproved)
     }
     const CARRIED: [Self; 3] = [Self::NotApproved, Self::CodeMismatch, Self::UnknownRequest];
     pub(crate) fn carried(error: crate::Failure) -> crate::Failure {
-        if let Some(code) = error
+        let refusal = error
             .downcast_ref::<crate::peer::PeerError>()
-            .map(|peer| peer.code.clone())
-        {
-            return match Self::CARRIED
-                .into_iter()
-                .find(|refusal| refusal.code() == code)
-            {
-                Some(refusal) => Box::new(refusal),
-                None => error,
-            };
-        }
-        match error.downcast_ref::<crate::ServiceError>() {
-            Some(
-                crate::ServiceError::Unreachable(_)
-                | crate::ServiceError::TimedOut(_)
-                | crate::ServiceError::NoRoute { .. },
-            ) => Box::new(Self::Unreachable),
-            _ => error,
+            .and_then(|peer| {
+                Self::CARRIED
+                    .into_iter()
+                    .find(|refusal| refusal.code() == peer.code)
+            });
+        match refusal {
+            Some(refusal) => Box::new(refusal),
+            None => error,
         }
     }
 }
@@ -169,7 +157,6 @@ impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::NetworkRequired => "linking a device needs an attached network",
-            Self::Unreachable => "the other device is not reachable",
             Self::NotApproved => "the other device has not approved this link yet",
             Self::CodeMismatch => "the link code does not match",
             Self::UnknownRequest => "no such link request; it expired or never arrived",

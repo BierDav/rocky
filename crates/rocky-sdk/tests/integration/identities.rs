@@ -796,6 +796,42 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_link_to_an_unreachable_device_keeps_the_transport_error_as_its_source()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let created = open(&directory.path().join("owner"), &hub, "owner", None)
+        .create()
+        .await?;
+    let key: Arc<dyn IdentityProvider> =
+        Arc::new(IdentityKey::from_phrase(&created.owner.phrase())?);
+    let owner = Device::new(created)?;
+    let contact = owner.contact().await;
+    owner.close().await;
+    let schema = common::parsed_schema().clone();
+    let failed = rocky_sdk::Configuration::new(directory.path().join("new"), &schema)?
+        .network(Network::Owned(hub.connector("new")))
+        .identity(key)
+        .link(&contact)
+        .await
+        .err()
+        .ok_or("a link reached a closed device")?;
+    assert!(
+        matches!(
+            failed.kind(),
+            rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::Unreachable(_))
+        ),
+        "{failed:?}"
+    );
+    assert!(failed.retryable());
+    assert!(
+        std::error::Error::source(&failed).is_some_and(|service| service.source().is_some()),
+        "the link keeps the transport's error: {failed:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn linking_requires_both_codes_before_credentials_are_released() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());

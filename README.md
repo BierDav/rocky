@@ -202,6 +202,8 @@ routes no attached transport dials, as a `wss://` route without rocky-tcp's
 `websocket` feature, fails with `NoRoute`, which is not. A join that fails keeps
 its device key so the issuer can recognize a retry: `open` then fails with
 `JoinUnfinished`, and `join` with the same or a newer invitation resumes it.
+`Configuration::link` and `PendingLink::confirm` fail the same way when the
+other device cannot be reached.
 
 ## API map
 

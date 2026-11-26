@@ -641,7 +641,6 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                     .decode(uri.strip_prefix(prefix).ok_or("URI prefix")?.as_bytes())?,
             )?)
         };
-        let foreign_contact = decode(&owners[1].contact().await, "rocky://peer/")?;
         let mut foreign_link = decode(&members[0].contact().await, "rocky://peer/")?;
         let other_member = decode(&members[1].contact().await, "rocky://peer/")?;
         foreign_link["database"] = other_member["database"].clone();
@@ -671,13 +670,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         );
         assert_eq!(identity(path, "member0")?, before);
 
-        let mut foreign_invitation = decode(&invitation.to_string(), "rocky://invite/")?;
-        foreign_invitation["database"] = foreign_contact["database"].clone();
-        foreign_invitation["publisher"] = foreign_contact["publisher"].clone();
-        let foreign_uri = format!(
-            "rocky://invite/{}",
-            data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(&foreign_invitation)?)
-        );
+        let foreign_uri = common::with_database_of(&invitation, &owners[1].invite().await)?;
         let rejected = path.join("foreign_join");
         assert!(
             open(&rejected, &hub, "foreign_join", Some(personals[0].clone()))

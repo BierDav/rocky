@@ -205,7 +205,16 @@ needs the issuing device online when it redeems the code. An invite can add
 person, and a validity from one minute to 30 days (`Invite::valid_for`, ten
 minutes by default). Every code admits one device once. A default code admits
 whoever holds it, as a person key Rocky mints and returns in
-`Opened::identity`. A device's credentials last 180 days and renew at every
+`Opened::identity`. A code prints as one URL-safe line of about 250 characters
+(`Display`, and `FromStr` to read it back) holding a secret, the database, the
+issuing device and its routes at issue time: an admin device that issues codes
+for later binds a fixed port or sets `rocky_tcp::Options::advertise` to a
+stable URL, while iroh routes are keys and stay valid. The code holds no access
+or application; the joiner learns them from the issuing device's answer and
+fails with `JoinError::OtherApplication` when its schema is another
+application's. The issuing device has then admitted the device, so the join
+stays unfinished: repeating it in the same directory with the right schema
+resumes it. A device's credentials last 180 days and renew at every
 sync with an admin device; a device that meets none for 180 days holds expired
 credentials (`status().authority.expired`) until it does. `Database::invitations` lists open and redeemed
 invitations, and `cancel_invitation` ends an unused one.

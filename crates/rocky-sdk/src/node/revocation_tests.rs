@@ -880,16 +880,16 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .await?;
     let audience = Settings::node_key(&node.vault)?.public_key();
     let database = settings.database_context()?;
-    let ask_for = |key: &PrivateKey, invitation: crate::InvitationId| {
+    let ask_for = |key: &PrivateKey, invitation: &crate::invitation::Issued| {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
         Ok::<_, Failure>(InvitedEnrollmentRequest::sign(
             request,
-            invitation.0,
-            None,
+            invitation.id.0,
+            Some(invitation.code.secret()),
             key,
         )?)
     };
-    let ask = |key: &PrivateKey| ask_for(key, issued.id);
+    let ask = |key: &PrivateKey| ask_for(key, &issued);
     let joiner = PrivateKey::new();
     let mut substituted = ask(&joiner)?;
     substituted.invitation = spare.id.0;
@@ -916,7 +916,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         Some(&crate::JoinError::Used)
     );
     assert!(
-        node.answer_invitation(ask_for(&PrivateKey::new(), conflicting.id)?)
+        node.answer_invitation(ask_for(&PrivateKey::new(), &conflicting)?)
             .await
             .is_err(),
         "an invitation issued before the identity was admitted keeps the admitted profile"
@@ -992,12 +992,12 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
         .await?;
     let audience = Settings::node_key(&node.vault)?.public_key();
     let database = settings.database_context()?;
-    let ask = |key: &PrivateKey, invitation: crate::InvitationId| {
+    let ask = |key: &PrivateKey, invitation: &crate::invitation::Issued| {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
         Ok::<_, Failure>(InvitedEnrollmentRequest::sign(
             request,
-            invitation.0,
-            None,
+            invitation.id.0,
+            Some(invitation.code.secret()),
             key,
         )?)
     };
@@ -1031,7 +1031,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(super::invitations::RedemptionHook::Fail);
     assert!(
-        node.answer_invitation(ask(&joiner, invited.id)?)
+        node.answer_invitation(ask(&joiner, &invited)?)
             .await
             .is_err()
     );
@@ -1050,7 +1050,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
         .lock()
         .unwrap_or_else(PoisonError::into_inner) =
         Some(super::invitations::RedemptionHook::Pause(gate.clone()));
-    let (admitted, ()) = tokio::join!(node.answer_invitation(ask(&joiner, invited.id)?), async {
+    let (admitted, ()) = tokio::join!(node.answer_invitation(ask(&joiner, &invited)?), async {
         gate.reached.notified().await;
         assert!(
             node.redeeming.try_lock().is_err(),
@@ -1060,7 +1060,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     });
     assert!(matches!(admitted?, IdentityReply::Enrolled(_)));
     assert!(
-        node.answer_invitation(ask(&rival_node, rival.id)?)
+        node.answer_invitation(ask(&rival_node, &rival)?)
             .await
             .is_err(),
         "of two invitations into different profiles only one admits the identity"
@@ -1078,7 +1078,7 @@ async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_
     relabeled.label(&identity, b"Alice Smith")?;
     node.commit(relabeled).await?;
     assert!(matches!(
-        node.answer_invitation(ask(&joiner, invited.id)?).await?,
+        node.answer_invitation(ask(&joiner, &invited)?).await?,
         IdentityReply::Enrolled(_)
     ));
     let record = node.registry(&*node.settings_snapshot().await).await?;

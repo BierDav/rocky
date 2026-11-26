@@ -468,6 +468,17 @@ impl Enrollment {
     pub(crate) fn issuer(&self) -> PublicKey {
         self.issuer
     }
+    pub(crate) fn refused_by(&self, schema: Option<&Schema>) -> Option<Failure> {
+        match schema {
+            Some(schema) if schema.application != self.record.schema.application => {
+                Some(Box::new(crate::JoinError::OtherApplication))
+            }
+            None if self.access != Access::Store => {
+                Some(crate::StoreOnlyRefusal::ReadableAccess.into())
+            }
+            _ => None,
+        }
+    }
 }
 type Keys = BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>;
 #[derive(Serialize, Deserialize)]

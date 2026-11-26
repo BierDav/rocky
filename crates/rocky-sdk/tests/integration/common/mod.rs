@@ -436,3 +436,51 @@ pub async fn link(
     responder.approve_link(shown.device, &shown.code).await?;
     Ok(pending.confirm().await?.database)
 }
+
+const INVITE_PREFIX: &str = "rocky://invite/";
+const INVITE_DATABASE: std::ops::Range<usize> = 33..113;
+const INVITE_CHECK: usize = 4;
+pub fn invitation_bytes(code: &rocky_sdk::InvitationCode) -> Result<Vec<u8>, Failure> {
+    let text = code.to_string();
+    let encoded = text
+        .strip_prefix(INVITE_PREFIX)
+        .ok_or("invitation prefix")?;
+    Ok(data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?)
+}
+fn resealed(mut body: Vec<u8>) -> String {
+    let check = rocky_core::commitment("rocky.sdk.invitation-code.v6", &body);
+    body.extend_from_slice(&check[..INVITE_CHECK]);
+    format!(
+        "{INVITE_PREFIX}{}",
+        data_encoding::BASE64URL_NOPAD.encode(&body)
+    )
+}
+fn unsealed(code: &rocky_sdk::InvitationCode) -> Result<Vec<u8>, Failure> {
+    let mut bytes = invitation_bytes(code)?;
+    bytes.truncate(
+        bytes
+            .len()
+            .checked_sub(INVITE_CHECK)
+            .ok_or("invitation length")?,
+    );
+    Ok(bytes)
+}
+pub fn with_version(code: &rocky_sdk::InvitationCode, version: u8) -> Result<String, Failure> {
+    let mut body = unsealed(code)?;
+    *body.first_mut().ok_or("empty invitation")? = version;
+    Ok(resealed(body))
+}
+pub fn with_database_of(
+    code: &rocky_sdk::InvitationCode,
+    other: &rocky_sdk::InvitationCode,
+) -> Result<String, Failure> {
+    let mut body = unsealed(code)?;
+    let database = unsealed(other)?
+        .get(INVITE_DATABASE)
+        .ok_or("invitation database")?
+        .to_vec();
+    body.get_mut(INVITE_DATABASE)
+        .ok_or("invitation database")?
+        .copy_from_slice(&database);
+    Ok(resealed(body))
+}

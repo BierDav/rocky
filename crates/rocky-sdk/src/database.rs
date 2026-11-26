@@ -76,6 +76,17 @@ impl Install {
     fn unwinds_on_failure(&self) -> bool {
         matches!(self, Self::Create { .. })
     }
+    fn unwinds_after(&self, error: &Failure) -> bool {
+        match self {
+            Self::Create { .. } => true,
+            Self::Invited { .. } => {
+                error.is::<crate::StoreOnlyRefusal>()
+                    || error.downcast_ref::<crate::JoinError>()
+                        == Some(&crate::JoinError::OtherApplication)
+            }
+            Self::Identity { .. } | Self::Installed => false,
+        }
+    }
     fn discards_secrets(&self) -> bool {
         matches!(self, Self::Create { .. })
     }
@@ -351,15 +362,6 @@ impl Database {
                     crate::Right::Sign,
                     crate::DenyReason::IdentityRequired,
                 )));
-            }
-            match &configuration.schema {
-                None if *code.access() != crate::Access::Store => {
-                    return Err(crate::StoreOnlyRefusal::ReadableAccess.into());
-                }
-                Some(schema) if schema.application != code.application() => {
-                    return Err(Box::new(crate::JoinError::OtherApplication));
-                }
-                _ => {}
             }
         }
         if let Install::Identity { .. } = &install
@@ -1181,10 +1183,11 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if matches!(setup.install, Install::Installed) {
         confirm_removals(&setup, &directory, &path).await?;
     }
-    let fresh = setup.install.unwinds_on_failure() && !Settings::exists(&path)?;
+    let installing = !Settings::exists(&path)?;
+    let fresh = setup.install.unwinds_on_failure() && installing;
     let (mut settings, link, signer) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
-        Err(error) if fresh => {
+        Err(error) if installing && setup.install.unwinds_after(&error) => {
             drop(wal_index);
             return Err(unwind(&directory, None, error));
         }

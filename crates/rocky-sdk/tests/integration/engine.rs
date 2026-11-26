@@ -443,10 +443,10 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         .is_err(),
         "a wrong application schema is refused"
     );
-    let bob = Db::join(&root.path().join("c"), &invitation, iroh())
+    let bob = Db::join(&root.path().join("wrong"), &invitation, iroh())
         .await
         .map_err(|error| {
-            format!("a refused schema does not prevent installing the bundle: {error}")
+            format!("the refused device resumes its join with the right schema: {error}")
         })?;
 
     let status = snap::ok(snap::device(&alice.engine)).await;

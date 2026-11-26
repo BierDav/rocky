@@ -379,14 +379,12 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer"))).await?;
-    let invite = decode(&a.invite().await.to_string(), "rocky://invite/")?;
-    assert_eq!(invite["v"], 5);
-    for version in [0, 4, 6, u32::MAX] {
-        let mut other = invite.clone();
-        other["v"] = json!(version);
+    let invite = a.invite().await;
+    assert_eq!(common::invitation_bytes(&invite)?[0], 6);
+    for version in [0, 5, 7, u8::MAX] {
         let directory = root.path().join(format!("join-{version}"));
         assert!(
-            encode(&other, "rocky://invite/")
+            common::with_version(&invite, version)?
                 .parse::<rocky_sdk::InvitationCode>()
                 .is_err()
         );

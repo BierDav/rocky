@@ -11,6 +11,7 @@ use crate::{
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::Commitment;
+use rocky_core::{AppId, DomainId, MeshId};
 use rocky_credentials::{
     DatabaseContext, IdentityAnswer, IdentityEnrollment, IdentityProvider, IdentityReply,
     IdentityRequest, InvitedEnrollmentRequest, PublicKey,
@@ -20,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, time::Duration};
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
-const BOOK_VERSION: u32 = 3;
-const INVITE_VERSION: u32 = 5;
+const BOOK_VERSION: u32 = 4;
+const INVITE_VERSION: u8 = 6;
 const INVITE_PREFIX: &str = "rocky://invite/";
+const CHECK_LEN: usize = 4;
 const SKEW: u64 = 300;
 const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
 const MAX_OPEN: usize = 64;
@@ -32,8 +34,8 @@ const MAX_LABEL: usize = crate::registry::MAX_LABEL;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvitationId(pub(crate) Commitment);
 impl InvitationId {
-    fn fresh() -> Self {
-        Self(rocky_platform::entropy::random())
+    fn of(secret: &[u8; 32]) -> Self {
+        Self(rocky_core::commitment("rocky.sdk.invitation-id.v1", secret))
     }
 }
 impl std::fmt::Display for InvitationId {
@@ -108,8 +110,8 @@ impl Invite {
         self.valid_for = validity;
         self
     }
-    /// Admits only this person's configured person key, with no secret in the code; use it to
-    /// re-invite a person who lost their only device.
+    /// Admits only a joiner configured with this person's key; use it to re-invite a person who
+    /// lost their only device.
     #[must_use]
     pub fn for_identity(mut self, person: PersonId) -> Self {
         self.person = Some(person);
@@ -135,7 +137,7 @@ impl Invite {
 pub struct Invitation {
     /// Its id.
     pub id: InvitationId,
-    /// The code to hand to the joiner; a default code admits whoever holds it, once.
+    /// The code to hand to the joiner; it admits one device of whoever holds it, once.
     pub code: InvitationCode,
     /// When it stops being redeemable.
     pub expires: Timestamp,
@@ -304,94 +306,163 @@ impl std::fmt::Display for JoinError {
 }
 impl std::error::Error for JoinError {}
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Holder {
-    Person(PublicKey),
-    Token(#[serde(with = "crate::registry::hex32")] [u8; 32]),
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq)]
 struct Code {
-    v: u32,
-    id: InvitationId,
-    publisher: PublicKey,
+    secret: [u8; 32],
     database: DatabaseContext,
     issuer: PublicKey,
-    routes: Vec<Route>,
-    holder: Holder,
-    access: Access,
-    application: String,
+    person: Option<PublicKey>,
     expires: u64,
+    routes: Vec<Route>,
+}
+impl Code {
+    fn fits(routes: &[Route]) -> bool {
+        !routes.is_empty()
+            && Contact::checked(routes.to_vec()).is_ok()
+            && routes
+                .iter()
+                .all(|route| u8::try_from(route.as_str().len()).is_ok())
+    }
+    fn body(&self) -> Vec<u8> {
+        let scope = &self.database.scope;
+        let mut bytes = vec![INVITE_VERSION];
+        bytes.extend_from_slice(&self.secret);
+        bytes.extend_from_slice(self.database.publisher.as_bytes());
+        bytes.extend_from_slice(&scope.mesh.0);
+        bytes.extend_from_slice(&scope.app.0);
+        bytes.extend_from_slice(&scope.domain.0);
+        bytes.extend_from_slice(self.issuer.as_bytes());
+        bytes.extend_from_slice(&self.expires.to_be_bytes());
+        match &self.person {
+            Some(person) => {
+                bytes.push(1);
+                bytes.extend_from_slice(person.as_bytes());
+            }
+            None => bytes.push(0),
+        }
+        for route in &self.routes {
+            let route = route.as_str().as_bytes();
+            bytes.extend(u8::try_from(route.len()));
+            bytes.extend_from_slice(route);
+        }
+        bytes
+    }
+    fn check(body: &[u8]) -> [u8; CHECK_LEN] {
+        let digest = rocky_core::commitment("rocky.sdk.invitation-code.v6", body);
+        let mut check = [0; CHECK_LEN];
+        check.copy_from_slice(&digest[..CHECK_LEN]);
+        check
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.body();
+        bytes.extend_from_slice(&Self::check(&bytes));
+        bytes
+    }
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Failure> {
+        let (body, check) = bytes
+            .split_last_chunk::<CHECK_LEN>()
+            .ok_or("invitation code too short")?;
+        if *check != Self::check(body) {
+            return Err("invitation code checksum".into());
+        }
+        let mut reader = Reader(body);
+        if reader.array::<1>()? != [INVITE_VERSION] {
+            return Err("unsupported invitation version".into());
+        }
+        let secret = reader.array()?;
+        let publisher = PublicKey::from_bytes(&reader.array()?)?;
+        let scope = rocky_core::Scope {
+            mesh: MeshId(reader.array()?),
+            app: AppId(reader.array()?),
+            domain: DomainId(reader.array()?),
+        };
+        let issuer = PublicKey::from_bytes(&reader.array()?)?;
+        let expires = u64::from_be_bytes(reader.array()?);
+        let person = match reader.array::<1>()? {
+            [0] => None,
+            [1] => Some(PublicKey::from_bytes(&reader.array()?)?),
+            _ => return Err("invitation holder".into()),
+        };
+        let mut routes = Vec::new();
+        while !reader.0.is_empty() {
+            let [len] = reader.array::<1>()?;
+            let route = reader.take(usize::from(len))?;
+            routes.push(Route::try_from(String::from_utf8(route.to_vec())?)?);
+        }
+        if !Self::fits(&routes) {
+            return Err("invalid invitation routes".into());
+        }
+        Ok(Self {
+            secret,
+            database: DatabaseContext { publisher, scope },
+            issuer,
+            person,
+            expires,
+            routes,
+        })
+    }
+}
+struct Reader<'a>(&'a [u8]);
+impl<'a> Reader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], Failure> {
+        let (taken, rest) = self
+            .0
+            .split_at_checked(len)
+            .ok_or("invitation code truncated")?;
+        self.0 = rest;
+        Ok(taken)
+    }
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], Failure> {
+        Ok(self.take(N)?.try_into()?)
+    }
 }
 
-/// The text a joiner redeems with `Configuration::join`; it prints and parses as one URL-safe
-/// string.
+/// The text a joiner redeems with `Configuration::join`: one URL-safe string of about 250
+/// characters that names the issuing device's routes when it issued the code.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitationCode(Box<Code>);
 impl InvitationCode {
-    fn token(&self) -> Option<&[u8; 32]> {
-        match &self.0.holder {
-            Holder::Token(token) => Some(token),
-            Holder::Person(_) => None,
-        }
-    }
     pub(crate) fn person(&self) -> Option<PublicKey> {
-        match self.0.holder {
-            Holder::Person(person) => Some(person),
-            Holder::Token(_) => None,
-        }
-    }
-    pub(crate) fn access(&self) -> &Access {
-        &self.0.access
-    }
-    pub(crate) fn application(&self) -> &str {
-        &self.0.application
+        self.0.person
     }
     pub(crate) fn intent(&self) -> Commitment {
-        rocky_core::commitment("rocky.sdk.invitation-join.v2", &self.0.id.0)
+        rocky_core::commitment("rocky.sdk.invitation-join.v2", &self.id().0)
+    }
+    fn id(&self) -> InvitationId {
+        InvitationId::of(&self.0.secret)
+    }
+    #[cfg(test)]
+    pub(crate) fn secret(&self) -> &[u8; 32] {
+        &self.0.secret
     }
 }
 impl std::fmt::Display for InvitationCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let bytes = serde_json::to_vec(&self.0).map_err(|_| std::fmt::Error)?;
-        write!(f, "{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&bytes))
+        write!(
+            f,
+            "{INVITE_PREFIX}{}",
+            BASE64URL_NOPAD.encode(&self.0.to_bytes())
+        )
     }
 }
 impl std::fmt::Debug for InvitationCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("InvitationCode");
-        debug
-            .field("id", &self.0.id)
-            .field("expires", &self.0.expires);
-        match &self.0.holder {
-            Holder::Person(person) => debug.field("person", person),
-            Holder::Token(_) => debug.field("token", &"<redacted>"),
-        };
-        debug.finish()
+        f.debug_struct("InvitationCode")
+            .field("id", &self.id())
+            .field("expires", &self.0.expires)
+            .field("person", &self.0.person)
+            .finish_non_exhaustive()
     }
 }
 impl std::str::FromStr for InvitationCode {
     type Err = JoinError;
     fn from_str(text: &str) -> Result<Self, JoinError> {
         let parsed = || -> Result<Code, Failure> {
-            let bytes = BASE64URL_NOPAD.decode(
-                text.trim()
-                    .strip_prefix(INVITE_PREFIX)
-                    .ok_or("invalid invitation code")?
-                    .as_bytes(),
-            )?;
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if value["v"].as_u64() != Some(u64::from(INVITE_VERSION)) {
-                return Err("unsupported invitation version".into());
-            }
-            let code: Code = serde_json::from_value(value)?;
-            if code.database.publisher != code.publisher || code.routes.is_empty() {
-                return Err("invalid invitation code".into());
-            }
-            Contact::checked(code.routes.clone())?;
-            Ok(code)
+            let encoded = text
+                .trim()
+                .strip_prefix(INVITE_PREFIX)
+                .ok_or("invalid invitation code")?;
+            Code::from_bytes(&BASE64URL_NOPAD.decode(encoded.as_bytes())?)
         };
         parsed()
             .map(|code| Self(Box::new(code)))
@@ -402,7 +473,9 @@ impl std::str::FromStr for InvitationCode {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
-    holder: Holder,
+    #[serde(with = "crate::registry::hex32")]
+    secret: [u8; 32],
+    person: Option<PublicKey>,
     access: Access,
     partitions: Vec<StoredPartition>,
     label: Option<String>,
@@ -417,7 +490,8 @@ pub(crate) struct Book {
     open: BTreeMap<InvitationId, Pending>,
 }
 struct Opening {
-    holder: Holder,
+    secret: [u8; 32],
+    person: Option<PublicKey>,
     access: Access,
     partitions: Vec<StoredPartition>,
     label: Option<String>,
@@ -468,12 +542,13 @@ impl Book {
         if unredeemed >= MAX_OPEN {
             return Err(InviteError::TooManyOpen { limit: MAX_OPEN });
         }
-        let id = InvitationId::fresh();
+        let id = InvitationId::of(&opening.secret);
         let expires = time.saturating_add(validity);
         self.open.insert(
             id,
             Pending {
-                holder: opening.holder,
+                secret: opening.secret,
+                person: opening.person,
                 access: opening.access,
                 partitions: opening.partitions,
                 label: opening.label,
@@ -494,16 +569,17 @@ impl Book {
         if pending.expires < time {
             return Err(JoinError::Expired);
         }
-        match &pending.holder {
-            Holder::Person(person) if *person != device.identity => {
-                return Err(JoinError::OtherIdentity);
-            }
-            Holder::Person(_) => {}
-            Holder::Token(token) => {
-                if !wire.proves_token(token).map_err(|_| JoinError::Invalid)? {
-                    return Err(JoinError::Invalid);
-                }
-            }
+        if !wire
+            .proves_token(&pending.secret)
+            .map_err(|_| JoinError::Invalid)?
+        {
+            return Err(JoinError::Invalid);
+        }
+        if pending
+            .person
+            .is_some_and(|person| person != device.identity)
+        {
+            return Err(JoinError::OtherIdentity);
         }
         let held = (device.identity, device.node);
         if pending.redeemed.is_some_and(|redeemed| redeemed != held) {
@@ -640,7 +716,7 @@ impl Settings {
         let domain = self.domain()?;
         let targets: Vec<_> = invite.partitions.iter().map(Partition::target).collect();
         domain.compile(&invite.access, &domain.partition_targets(&targets)?)?;
-        let holder = match invite.person {
+        let person = match invite.person {
             Some(person) => {
                 let identity = person.key();
                 admissible(self, registry, &identity, &invite.access).map_err(|error| {
@@ -653,21 +729,23 @@ impl Settings {
                 if registry.full_for(&identity) {
                     return Err(Box::new(RegistryFull));
                 }
-                Holder::Person(identity)
+                Some(identity)
             }
             None => {
                 if registry.identities() >= crate::registry::MAX_IDENTITIES {
                     return Err(Box::new(RegistryFull));
                 }
-                Holder::Token(rocky_platform::entropy::random())
+                None
             }
         };
-        if routes.is_empty() {
+        if !Code::fits(&routes) {
             return Err(Box::new(InviteError::NetworkRequired));
         }
+        let secret = rocky_platform::entropy::random();
         let (id, expires) = book.open(
             Opening {
-                holder: holder.clone(),
+                secret,
+                person,
                 access: invite.access.clone(),
                 partitions: invite.partitions.iter().map(StoredPartition::of).collect(),
                 label: invite.label.clone(),
@@ -676,16 +754,12 @@ impl Settings {
             time,
         )?;
         let code = InvitationCode(Box::new(Code {
-            v: INVITE_VERSION,
-            id,
-            publisher: self.publisher,
+            secret,
             database: self.database_context()?,
             issuer: Self::node_key(vault)?.public_key(),
-            routes,
-            holder,
-            access: invite.access.clone(),
-            application: self.schema.application.clone(),
+            person,
             expires,
+            routes,
         }));
         Ok(Issued { code, id, expires })
     }
@@ -789,7 +863,12 @@ impl Settings {
             &addresses,
             invite.database.scope,
             &PeerRequest::Identity(Box::new(IdentityEnrollment::Invited(
-                InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, code.token(), &node)?,
+                InvitedEnrollmentRequest::sign(
+                    request.clone(),
+                    code.id().0,
+                    Some(&invite.secret),
+                    &node,
+                )?,
             ))),
         )
         .await
@@ -802,11 +881,14 @@ impl Settings {
         if enrollment.issuer() != invite.issuer {
             return Err("the answer comes from another admin than the invitation names".into());
         }
+        if let Some(refusal) = enrollment.refused_by(schema) {
+            return Err(refusal);
+        }
         let settings = Self::install_enrollment(
             schema,
             (intent.installation.clone(), &vault),
             EnrollingIssuer {
-                publisher: invite.publisher,
+                publisher: invite.database.publisher,
                 database: invite.database,
                 routes: invite.routes.clone(),
             },
@@ -825,6 +907,7 @@ mod tests {
 
     const OPEN_FOR: u64 = 600;
     const NOW: u64 = 1_000_000;
+    const SECRET: [u8; 32] = [6; 32];
 
     fn key(byte: u8) -> PublicKey {
         PrivateKey::from_bytes(&[byte; 32]).public_key()
@@ -845,16 +928,17 @@ mod tests {
             },
         }
     }
-    fn opening(holder: Holder) -> Opening {
+    fn opening(secret: [u8; 32], person: Option<PublicKey>) -> Opening {
         Opening {
-            holder,
+            secret,
+            person,
             access: Access::Full,
             partitions: Vec::new(),
             label: None,
         }
     }
-    fn opened(book: &mut Book, holder: Holder) -> InvitationId {
-        book.open(opening(holder), OPEN_FOR, NOW)
+    fn opened(book: &mut Book, secret: [u8; 32], person: Option<PublicKey>) -> InvitationId {
+        book.open(opening(secret, person), OPEN_FOR, NOW)
             .expect("open invitation")
             .0
     }
@@ -862,13 +946,13 @@ mod tests {
         id: InvitationId,
         identity: u8,
         node: u8,
-        token: Option<&[u8; 32]>,
+        secret: Option<&[u8; 32]>,
     ) -> InvitedEnrollmentRequest {
         let person = PrivateKey::from_bytes(&[identity; 32]);
         let node = PrivateKey::from_bytes(&[node; 32]);
         let (request, _) =
             IdentityRequest::sign(&person, &node, key(4), NOW, database()).expect("request");
-        InvitedEnrollmentRequest::sign(request, id.0, token, &node).expect("bound request")
+        InvitedEnrollmentRequest::sign(request, id.0, secret, &node).expect("bound request")
     }
     fn redeemed(
         book: &mut Book,
@@ -884,33 +968,37 @@ mod tests {
     }
 
     #[test]
-    fn a_token_invitation_admits_the_first_device_that_proves_the_token_once() {
+    fn an_invitation_admits_the_first_device_that_proves_its_secret_once() {
         let mut book = Book::empty();
-        let token = [6; 32];
-        let id = opened(&mut book, Holder::Token(token));
+        let id = opened(&mut book, SECRET, None);
+        assert_eq!(
+            id,
+            InvitationId::of(&SECRET),
+            "the id commits to the secret"
+        );
         assert_eq!(
             redeemed(&mut book, &wire(id, 1, 10, Some(&[7; 32])), NOW),
             Err(JoinError::Invalid),
-            "a wrong token proves nothing"
+            "a wrong secret proves nothing"
         );
         assert_eq!(
             redeemed(&mut book, &wire(id, 1, 10, None), NOW),
             Err(JoinError::Invalid),
-            "a token invitation needs the token's proof"
+            "the id alone redeems nothing"
         );
         assert_eq!(
-            redeemed(&mut book, &wire(id, 1, 10, Some(&token)), NOW),
+            redeemed(&mut book, &wire(id, 1, 10, Some(&SECRET)), NOW),
             Ok(true)
         );
         assert_eq!(
-            redeemed(&mut book, &wire(id, 1, 10, Some(&token)), NOW + 1),
+            redeemed(&mut book, &wire(id, 1, 10, Some(&SECRET)), NOW + 1),
             Ok(false),
             "the redeeming device retries an answer it lost"
         );
         assert_eq!(
-            redeemed(&mut book, &wire(id, 2, 20, Some(&token)), NOW + 1),
+            redeemed(&mut book, &wire(id, 2, 20, Some(&SECRET)), NOW + 1),
             Err(JoinError::Used),
-            "a token is single use"
+            "a code is single use"
         );
         assert_eq!(book.listed(NOW)[0].redeemed_by, Some(PersonId::new(key(1))));
     }
@@ -918,14 +1006,17 @@ mod tests {
     #[test]
     fn an_identity_invitation_admits_only_that_identity() {
         let mut book = Book::empty();
-        let id = opened(&mut book, Holder::Person(key(1)));
+        let id = opened(&mut book, SECRET, Some(key(1)));
         assert_eq!(
-            redeemed(&mut book, &wire(id, 2, 10, None), NOW),
+            redeemed(&mut book, &wire(id, 2, 10, Some(&SECRET)), NOW),
             Err(JoinError::OtherIdentity)
         );
-        assert_eq!(redeemed(&mut book, &wire(id, 1, 10, None), NOW), Ok(true));
         assert_eq!(
-            redeemed(&mut book, &wire(id, 1, 11, None), NOW),
+            redeemed(&mut book, &wire(id, 1, 10, Some(&SECRET)), NOW),
+            Ok(true)
+        );
+        assert_eq!(
+            redeemed(&mut book, &wire(id, 1, 11, Some(&SECRET)), NOW),
             Err(JoinError::Used),
             "a second device of the same identity links instead"
         );
@@ -938,7 +1029,7 @@ mod tests {
             .open(
                 Opening {
                     label: Some("Alice".into()),
-                    ..opening(Holder::Person(key(1)))
+                    ..opening(SECRET, Some(key(1)))
                 },
                 OPEN_FOR,
                 NOW,
@@ -946,11 +1037,11 @@ mod tests {
             .expect("open invitation")
             .0;
         let first = book
-            .redeem(&wire(id, 1, 10, None), device(1, 10), NOW)
+            .redeem(&wire(id, 1, 10, Some(&SECRET)), device(1, 10), NOW)
             .expect("redeemed");
         assert_eq!(first.label.as_deref(), Some("Alice"));
         let retried = book
-            .redeem(&wire(id, 1, 10, None), device(1, 10), NOW)
+            .redeem(&wire(id, 1, 10, Some(&SECRET)), device(1, 10), NOW)
             .expect("redeemed");
         assert!(!retried.first);
         assert_eq!(
@@ -964,7 +1055,7 @@ mod tests {
         assert!(book.release(id, key(10)));
         assert!(book.listed(NOW)[0].redeemed_by.is_none());
         let again = book
-            .redeem(&wire(id, 1, 11, None), device(1, 11), NOW)
+            .redeem(&wire(id, 1, 11, Some(&SECRET)), device(1, 11), NOW)
             .expect("redeemed");
         assert!(again.first);
     }
@@ -972,16 +1063,17 @@ mod tests {
     #[test]
     fn an_invitation_ends_at_its_expiry_even_for_the_device_that_redeemed_it() {
         let mut book = Book::empty();
-        let id = opened(&mut book, Holder::Person(key(1)));
-        assert!(redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR).is_ok());
+        let id = opened(&mut book, SECRET, Some(key(1)));
+        let request = wire(id, 1, 10, Some(&SECRET));
+        assert!(redeemed(&mut book, &request, NOW + OPEN_FOR).is_ok());
         assert_eq!(
-            redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR + 1),
+            redeemed(&mut book, &request, NOW + OPEN_FOR + 1),
             Err(JoinError::Expired)
         );
         assert!(book.listed(NOW + OPEN_FOR + 1).is_empty());
         book.forget_expired(NOW + OPEN_FOR + 1);
         assert_eq!(
-            redeemed(&mut book, &wire(id, 1, 10, None), NOW + OPEN_FOR + 1),
+            redeemed(&mut book, &request, NOW + OPEN_FOR + 1),
             Err(JoinError::Cancelled),
             "an expired invitation is forgotten once the book is next written"
         );
@@ -990,12 +1082,12 @@ mod tests {
     #[test]
     fn only_an_unused_invitation_is_cancelled() {
         let mut book = Book::empty();
-        let unused = opened(&mut book, Holder::Person(key(1)));
-        let used = opened(&mut book, Holder::Person(key(2)));
-        assert!(redeemed(&mut book, &wire(used, 2, 20, None), NOW).is_ok());
+        let unused = opened(&mut book, [1; 32], Some(key(1)));
+        let used = opened(&mut book, [2; 32], Some(key(2)));
+        assert!(redeemed(&mut book, &wire(used, 2, 20, Some(&[2; 32])), NOW).is_ok());
         assert_eq!(book.cancel(unused, NOW), Ok(()));
         assert_eq!(
-            redeemed(&mut book, &wire(unused, 1, 10, None), NOW),
+            redeemed(&mut book, &wire(unused, 1, 10, Some(&[1; 32])), NOW),
             Err(JoinError::Cancelled)
         );
         assert_eq!(book.cancel(used, NOW), Err(InviteError::Redeemed));
@@ -1005,17 +1097,17 @@ mod tests {
     #[test]
     fn the_book_holds_a_bounded_number_of_open_invitations() {
         let mut book = Book::empty();
-        for _ in 0..MAX_OPEN {
-            opened(&mut book, Holder::Person(key(1)));
+        for secret in 0..MAX_OPEN {
+            opened(&mut book, [secret as u8; 32], Some(key(1)));
         }
         assert_eq!(
-            book.open(opening(Holder::Person(key(1))), OPEN_FOR, NOW)
+            book.open(opening([255; 32], Some(key(1))), OPEN_FOR, NOW)
                 .err(),
             Some(InviteError::TooManyOpen { limit: MAX_OPEN })
         );
         assert!(
             book.open(
-                opening(Holder::Person(key(1))),
+                opening([255; 32], Some(key(1))),
                 OPEN_FOR,
                 NOW + OPEN_FOR + 1
             )
@@ -1027,7 +1119,7 @@ mod tests {
     #[test]
     fn the_book_reads_back_only_its_own_version() -> Result<(), Failure> {
         let mut book = Book::empty();
-        opened(&mut book, Holder::Token([1; 32]));
+        opened(&mut book, SECRET, None);
         assert!(Book::parse(&book.to_bytes()?)? == book);
         let mut other: serde_json::Value = serde_json::from_slice(&book.to_bytes()?)?;
         other["version"] = serde_json::json!(BOOK_VERSION - 1);
@@ -1035,51 +1127,70 @@ mod tests {
         Ok(())
     }
 
-    fn code(holder: Holder) -> Code {
-        Code {
-            v: INVITE_VERSION,
-            id: InvitationId([7; 32]),
-            publisher: key(3),
+    fn code(person: Option<PublicKey>) -> InvitationCode {
+        InvitationCode(Box::new(Code {
+            secret: SECRET,
             database: database(),
             issuer: key(4),
-            routes: vec![Route::try_from(String::from("memory:issuer")).expect("a route")],
-            holder,
-            access: Access::Full,
-            application: "shopping".into(),
+            person,
             expires: NOW,
-        }
+            routes: vec![
+                Route::try_from(String::from("tcp://192.168.178.20:4433")).expect("a route"),
+            ],
+        }))
     }
 
     #[test]
-    fn a_code_round_trips_and_redacts_its_token() -> Result<(), Failure> {
-        let token = InvitationCode(Box::new(code(Holder::Token([9; 32]))));
-        let parsed: InvitationCode = token.to_string().parse()?;
-        assert!(parsed == token);
-        assert!(!format!("{token:?}").contains(&HEXLOWER.encode(&[9; 32])));
-        let person = InvitationCode(Box::new(code(Holder::Person(key(1)))));
+    fn a_code_round_trips_in_under_300_characters_and_redacts_its_secret() -> Result<(), Failure> {
+        let token = code(None);
+        let text = token.to_string();
+        assert!(text.len() <= 300, "{} characters: {text}", text.len());
+        assert!(text.starts_with(INVITE_PREFIX));
+        assert!(
+            text.trim_start_matches(INVITE_PREFIX)
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
+        );
+        assert!(text.parse::<InvitationCode>()? == token);
+        assert!(!format!("{token:?}").contains(&HEXLOWER.encode(&SECRET)));
+        let person = code(Some(key(1)));
         assert_eq!(
             person.to_string().parse::<InvitationCode>()?.person(),
             Some(key(1))
         );
-        let unroutable = InvitationCode(Box::new(Code {
-            routes: Vec::new(),
-            ..code(Holder::Person(key(1)))
-        }));
-        assert_eq!(
-            unroutable.to_string().parse::<InvitationCode>().err(),
-            Some(JoinError::Invalid)
-        );
-        let mut older = serde_json::to_value(code(Holder::Person(key(1))))?;
-        older["v"] = serde_json::json!(INVITE_VERSION - 1);
-        let older = format!(
-            "{INVITE_PREFIX}{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&older)?)
-        );
-        assert_eq!(
-            older.parse::<InvitationCode>().err(),
-            Some(JoinError::Invalid)
-        );
         Ok(())
+    }
+
+    #[test]
+    fn a_tampered_truncated_or_other_version_code_is_invalid() {
+        let text = code(None).to_string();
+        let mut tampered = text.clone().into_bytes();
+        let last = tampered.len() - 10;
+        tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).expect("ascii");
+        let truncated = &text[..text.len() - 4];
+        let mut older = code(None).0.body();
+        older[0] = INVITE_VERSION - 1;
+        older.extend_from_slice(&Code::check(&older));
+        let older = format!("{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&older));
+        let routeless = InvitationCode(Box::new(Code {
+            routes: Vec::new(),
+            ..*code(None).0
+        }))
+        .to_string();
+        for invalid in [
+            tampered.as_str(),
+            truncated,
+            &older,
+            &routeless,
+            "rocky://invite/",
+        ] {
+            assert_eq!(
+                invalid.parse::<InvitationCode>().err(),
+                Some(JoinError::Invalid),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

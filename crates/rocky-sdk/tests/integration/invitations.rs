@@ -79,7 +79,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     assert!(invitation.code.to_string().starts_with("rocky://invite/"));
     assert!(
         !format!("{:?}", invitation.code).contains(&invitation.code.to_string()[15..]),
-        "a token code redacts itself in debug output"
+        "a code redacts itself in debug output"
     );
     let opened = join(&root.path().join("member"), &hub, None, &invitation.code).await?;
     let minted = opened
@@ -137,7 +137,7 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_identity_code_carries_no_secret_and_admits_only_that_identity() -> Result<(), Failure> {
+async fn an_identity_code_admits_only_that_identity() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let owner = issuer(&root.path().join("issuer"), &hub).await?;
@@ -147,11 +147,6 @@ async fn an_identity_code_carries_no_secret_and_admits_only_that_identity() -> R
         .database
         .invite(Invite::new(writer()).for_identity(PersonId::new(identity)))
         .await?;
-    assert_eq!(
-        format!("{:?}", invitation.code).matches("redacted").count(),
-        0,
-        "an identity code holds nothing to redact"
-    );
     assert_eq!(
         refusal(
             join(
@@ -603,6 +598,52 @@ async fn a_code_no_attached_transport_routes_is_refused_as_no_route() -> Result<
         !refused.retryable(),
         "a missing transport is a configuration error"
     );
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_code_for_another_application_is_refused_once_the_issuer_answers_and_resumes_with_its_own()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = issuer(&root.path().join("issuer"), &hub).await?;
+    let invitation = owner.database.invite(Invite::new(writer())).await?;
+    let notes = rocky_sdk::Schema::builder("notes", 1)
+        .table(
+            rocky_sdk::Table::replayed("notes")
+                .column(rocky_sdk::Column::new("body", rocky_sdk::Affinity::Text)),
+        )
+        .build()?;
+    let refused = Configuration::new(root.path().join("member"), &notes)?
+        .network(Network::Owned(hub.connector("member")))
+        .join(&invitation.code)
+        .await
+        .err()
+        .ok_or("a notes app joined a shopping database")?;
+    assert_eq!(
+        refused.kind(),
+        &ErrorKind::Join(JoinError::OtherApplication)
+    );
+    assert!(!refused.retryable());
+    assert!(
+        !root.path().join("member").join("rocky.sqlite").exists(),
+        "a refused join installs no database"
+    );
+    let reopened = Configuration::new(root.path().join("member"), &notes)?
+        .open()
+        .await
+        .err()
+        .ok_or("a refused join opened")?;
+    assert_eq!(reopened.kind(), &ErrorKind::JoinUnfinished);
+    let resumed = joining(&root.path().join("member"), &hub, None)?
+        .join(&invitation.code)
+        .await?;
+    assert!(
+        resumed.identity.is_some(),
+        "the issuer recognizes the refused device and the join keeps its minted key"
+    );
+    resumed.database.close().await?;
     owner.close().await;
     Ok(())
 }

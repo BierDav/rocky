@@ -123,7 +123,7 @@ impl Counters {
     }
 }
 pub(crate) fn log_lifecycle(node: u64, event: &str) {
-    eprintln!("rocky-voter {node}: {event}");
+    tracing::info!(node, event, "rocky-voter lifecycle");
 }
 
 pub struct VoterService {

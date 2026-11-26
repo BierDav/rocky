@@ -45,14 +45,16 @@ allow_attributes_without_reason = "deny"
 dbg_macro = "deny"
 todo = "deny"
 
-# Development artifacts keep only line-table debug info and no incremental
-# state. Full debug info was ~89% of a typical optimized rlib's bytes, and the
-# per-workspace incremental cache reached tens of gigabytes, which multiplied
-# across worktrees. Restore either for a debugging session with
-# CARGO_PROFILE_DEV_DEBUG=2 or CARGO_INCREMENTAL=1.
+# Development artifacts keep only line-table debug info: full debug info was
+# ~89% of a typical optimized rlib's bytes. Restore it for a debugging session
+# with CARGO_PROFILE_DEV_DEBUG=2. The workspace crates build incrementally:
+# after a small edit, rebuilding rocky-sdk's tests took 12 s instead of 45 s,
+# for about 4 GB more per build directory. sccache still serves the
+# dependencies, which never build incrementally; it refuses CARGO_INCREMENTAL,
+# so set CARGO_PROFILE_DEV_INCREMENTAL=false to turn it off.
 [profile.dev]
 debug = "line-tables-only"
-incremental = false
+incremental = true
 
 # Crypto and SQLite dominate test time; optimize dependencies. Generic code
 # such as encoding is compiled in the crate that uses it, so the small crates

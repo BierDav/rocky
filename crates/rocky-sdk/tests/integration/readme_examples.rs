@@ -62,10 +62,9 @@ fn notes(version: u32) -> Result<Schema, rocky_sdk::Error> {
 const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NULL";
 
 async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction.execute(FILL_SLUGS, params![]).await?;
-    transaction.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| tx.execute(FILL_SLUGS, params![]).await)
+        .await
 }
 
 mod one_device {
@@ -147,21 +146,22 @@ async fn the_readme_ledger_refuses_deleting_an_account_its_entries_reference() -
         .create()
         .await?
         .database;
-    let mut transaction = database.transaction().await?;
-    let account = transaction.next_id("accounts", Vec::new()).await?;
-    transaction
-        .execute(
-            "INSERT INTO accounts(id, name) VALUES(?, 'Cash')",
-            params![account],
-        )
+    let account = database
+        .write(async |tx| {
+            let account = tx.next_id("accounts", Vec::new()).await?;
+            tx.execute(
+                "INSERT INTO accounts(id, name) VALUES(?, 'Cash')",
+                params![account],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO entries(account, cents, booked) VALUES(?, 250, 1)",
+                params![account],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(account)
+        })
         .await?;
-    transaction
-        .execute(
-            "INSERT INTO entries(account, cents, booked) VALUES(?, 250, 1)",
-            params![account],
-        )
-        .await?;
-    transaction.commit().await?;
     let currency: String = database
         .query("SELECT currency FROM accounts", params![])
         .await?
@@ -171,9 +171,11 @@ async fn the_readme_ledger_refuses_deleting_an_account_its_entries_reference() -
         .ok_or("no account")?
         .get("currency")?;
     assert_eq!(currency, "EUR");
-    let mut transaction = database.transaction().await?;
-    let refused = transaction
-        .execute("DELETE FROM accounts WHERE id = ?", params![account])
+    let refused = database
+        .write(async |tx| {
+            tx.execute("DELETE FROM accounts WHERE id = ?", params![account])
+                .await
+        })
         .await
         .err()
         .ok_or("an account its entries reference was deleted")?;
@@ -181,18 +183,17 @@ async fn the_readme_ledger_refuses_deleting_an_account_its_entries_reference() -
         matches!(refused.kind(), ErrorKind::Sql { .. }),
         "{refused:?}"
     );
-    transaction.rollback().await?;
     database.close().await?;
     Ok(())
 }
 
 async fn note(database: &Database, title: &str) -> Result<(), rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute("INSERT INTO notes(title) VALUES(?)", params![title])
-        .await?;
-    transaction.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| {
+            tx.execute("INSERT INTO notes(title) VALUES(?)", params![title])
+                .await
+        })
+        .await
 }
 async fn slugs(database: &Database) -> Result<Vec<Option<String>>, Failure> {
     Ok(database

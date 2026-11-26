@@ -11,9 +11,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .database;
 
-    let mut transaction = database.transaction().await?;
     let stamped = "INSERT INTO notes(body) VALUES(datetime('now'))";
-    let Err(error) = transaction.execute(stamped, params![]).await else {
+    let written = database.write(async |tx| tx.execute(stamped, params![]).await);
+    let Err(error) = written.await else {
         return Err("a clock value in a replayed write was accepted".into());
     };
     match error.kind() {
@@ -27,7 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ if error.retryable() => println!("retry later: {error}"),
         _ => return Err(error.into()),
     }
-    transaction.rollback().await?;
     database.close().await?;
     Ok(std::fs::remove_dir_all(directory)?)
 }

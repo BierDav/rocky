@@ -708,17 +708,9 @@ impl Connection {
             .await
             .map(drop)
     }
-    pub(crate) async fn committed(&self) -> Result<Option<crate::TransactionToken>, crate::Error> {
-        match self.call(connection::Call::Committed).await? {
-            connection::Reply::Token(token) => Ok(token),
-            _ => Err(crate::Error::internal(
-                "the connection replied without a token",
-            )),
-        }
-    }
     pub(crate) async fn begin_identified(&self) -> Result<crate::TransactionToken, crate::Error> {
         match self.call(connection::Call::Begin).await? {
-            connection::Reply::Token(Some(token)) => Ok(token),
+            connection::Reply::Token(token) => Ok(token),
             _ => Err(crate::Error::internal(
                 "the connection replied without a token",
             )),
@@ -1361,6 +1353,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         None => false,
     };
+    node.observe_status_before_writes().await;
     if hello.send(Ok(scope)).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
         let created_root_undelivered = fresh && matches!(setup.install, Install::Create { .. });
@@ -1544,16 +1537,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 let _ = reply.send(crate::reactor::current());
             }
             Command::Observe(tables, reply) => {
-                crate::reactor::spawn_in(&mut tasks, "observe", async move {
-                    let named: Vec<&str> = tables.iter().map(String::as_str).collect();
-                    let tables = (!named.is_empty()).then_some(named);
-                    let observed = node
-                        .replica
-                        .observe_tables(tables.as_deref())
-                        .await
-                        .map_err(Failure::from);
-                    let _ = reply.send(observed);
-                });
+                let named: Vec<&str> = tables.iter().map(String::as_str).collect();
+                let tables = (!named.is_empty()).then_some(named);
+                let observed = node
+                    .replica
+                    .observe_tables(tables.as_deref())
+                    .map_err(Failure::from);
+                let _ = reply.send(observed);
             }
             Command::Flush(reply) => {
                 crate::reactor::spawn_in(&mut tasks, "flush", async move {
@@ -2126,14 +2116,17 @@ mod tests {
         let directory = rocky_platform::fs::Scratch::new().await;
         let configuration = Configuration::new(directory.path(), &schema)?;
         let database = configuration.create().await?.database;
-        let mut tx = database.transaction().await?;
-        let first_id = tx.next_id("items", Vec::new()).await?;
-        tx.execute(
-            "INSERT INTO items(id,title) VALUES(?,'first')",
-            vec![first_id.sql()],
-        )
-        .await?;
-        tx.commit().await?;
+        let first_id = database
+            .write(async |tx| {
+                let first_id = tx.next_id("items", Vec::new()).await?;
+                tx.execute(
+                    "INSERT INTO items(id,title) VALUES(?,'first')",
+                    vec![first_id.sql()],
+                )
+                .await?;
+                Ok::<_, crate::Error>(first_id)
+            })
+            .await?;
         database.close().await?;
 
         let database = configuration.open().await?;
@@ -2144,16 +2137,19 @@ mod tests {
             .await?;
         let stored: rocky_sdk::RowIdentity = rows[0].get_at(0)?;
         assert_eq!(stored, first_id);
-        let mut tx = database.transaction().await?;
-        let second_id = tx.next_id("items", Vec::new()).await?;
+        let second_id = database
+            .write(async |tx| {
+                let second_id = tx.next_id("items", Vec::new()).await?;
+                tx.execute(
+                    "INSERT INTO items(id,title) VALUES(?,'second')",
+                    vec![second_id.sql()],
+                )
+                .await?;
+                Ok::<_, crate::Error>(second_id)
+            })
+            .await?;
         assert_eq!(second_id.writer(), first_id.writer());
         assert_eq!(second_id.sequence(), first_id.sequence() + 1);
-        tx.execute(
-            "INSERT INTO items(id,title) VALUES(?,'second')",
-            vec![second_id.sql()],
-        )
-        .await?;
-        tx.commit().await?;
         let rows = database
             .query("SELECT id FROM items ORDER BY id", Vec::new())
             .await?
@@ -2209,13 +2205,15 @@ mod tests {
             .create()
             .await?
             .database;
-        let mut tx = database.transaction().await?;
-        tx.execute(
-            "INSERT INTO items(key, title) VALUES (?, ?)",
-            vec![SqlValue::Text("a".into()), SqlValue::Text("first".into())],
-        )
-        .await?;
-        tx.commit().await?;
+        database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO items(key, title) VALUES (?, ?)",
+                    vec![SqlValue::Text("a".into()), SqlValue::Text("first".into())],
+                )
+                .await
+            })
+            .await?;
 
         let rows = database
             .query(
@@ -2260,13 +2258,15 @@ mod tests {
         .await?;
         conn.close().await;
 
-        let mut tx = database.transaction().await?;
-        tx.execute(
-            "INSERT INTO items(key, title) VALUES (?, ?)",
-            vec![SqlValue::Text("b".into()), SqlValue::Text("second".into())],
-        )
-        .await?;
-        tx.commit().await?;
+        database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO items(key, title) VALUES (?, ?)",
+                    vec![SqlValue::Text("b".into()), SqlValue::Text("second".into())],
+                )
+                .await
+            })
+            .await?;
 
         let fresh = database
             .connect(ConnectionOptions {

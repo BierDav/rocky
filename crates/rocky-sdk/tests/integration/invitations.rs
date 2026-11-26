@@ -427,17 +427,19 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
 }
 
 async fn writes_an_item(device: &Device, title: &str) -> Result<(), Failure> {
-    let mut tx = device.database.transaction().await?;
-    tx.execute(
-        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
-        vec![
-            rocky_sdk::SqlValue::Text(title.to_owned()),
-            rocky_sdk::SqlValue::Text(title.to_owned()),
-        ],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+                vec![
+                    rocky_sdk::SqlValue::Text(title.to_owned()),
+                    rocky_sdk::SqlValue::Text(title.to_owned()),
+                ],
+            )
+            .await
+        })
+        .await?)
 }
 
 #[tokio::test(flavor = "multi_thread")]

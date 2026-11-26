@@ -46,14 +46,16 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     let before = snap::ok(snap::device(&writer.database)).await;
     let own = before["node"].as_str().ok_or("node missing")?.to_owned();
     writer.add(1, "first").await;
-    let mut tx = writer.database.transaction().await?;
-    let id = tx.next_id("notes", Vec::new()).await?.to_string();
+    let id = writer
+        .database
+        .write(async |tx| tx.next_id("notes", Vec::new()).await)
+        .await?
+        .to_string();
     assert_eq!(
         (id.len(), &id[..64]),
         (80, own.as_str()),
         "a row identity is the writer's key followed by its sequence"
     );
-    tx.rollback().await?;
     writer.close().await;
     let writer = Device::new(open().open().await?)?;
     assert_eq!(snap::ok(snap::device(&writer.database)).await["node"], own);

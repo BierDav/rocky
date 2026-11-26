@@ -301,16 +301,19 @@ pub(super) async fn author(
     step: usize,
     change: &Change,
 ) -> Result<(Authored, Result<(), Failure>), Failure> {
-    let mut transaction = database.transaction().await?;
-    let token = transaction.token();
-    let run = match statements(&mut transaction, change).await {
-        Ok(run) => run,
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            return Err(error);
-        }
+    let mut ran = None;
+    let committed = database
+        .write(async |transaction| {
+            let token = transaction.token();
+            ran = Some((token, statements(transaction, change).await?));
+            Ok::<_, Failure>(())
+        })
+        .await;
+    let Some((token, run)) = ran else {
+        return Err(committed
+            .err()
+            .unwrap_or_else(|| "a write ran no statements".into()));
     };
-    let committed = transaction.commit().await;
     let (lists, scopes) = touched(change);
     let authored = Authored {
         token,
@@ -320,7 +323,7 @@ pub(super) async fn author(
         lists,
         scopes,
     };
-    Ok((authored, committed.map(drop).map_err(Failure::from)))
+    Ok((authored, committed))
 }
 
 pub(super) async fn list_rows(database: &Database, list: &str) -> Result<ListRows, Failure> {

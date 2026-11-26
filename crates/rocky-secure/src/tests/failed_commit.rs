@@ -33,7 +33,7 @@ async fn a_failed_sql_commit_changes_nothing_and_the_same_handle_retries_once() 
     let revision = replica.stored_and_memory_revision().await;
     let context = replica.schema_context().await;
     let observer = replica.observe_revision();
-    let mut tables = replica.observe_tables(Some(&["items"])).await.unwrap();
+    let mut tables = replica.observe_tables(Some(&["items"])).unwrap();
     replica.fail_next_sql_commit().await;
     let sql = session(&replica).await;
     let ids = begin_two(&sql).await;

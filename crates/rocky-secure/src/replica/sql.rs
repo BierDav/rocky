@@ -39,9 +39,11 @@ struct Held<A: RowApplication> {
     inner: Guard<OwnedMutexGuard<Inner<A>>>,
     keeps_pending_pass: bool,
     expiry: Expiry,
+    writing: Arc<AtomicBool>,
 }
 impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
+        self.writing.store(false, Ordering::Release);
         let inner = &mut *self.inner;
         inner.invalidate_context();
         if self.keeps_pending_pass {
@@ -73,6 +75,37 @@ struct Lease<A: RowApplication> {
 
 type Reserved = BTreeMap<ResourceScope, (WriterId, u64)>;
 
+#[derive(Clone)]
+struct Template {
+    scopes: BTreeSet<ResourceScope>,
+    authority: u64,
+    status: SessionStatus,
+    reads: Arc<queries::ReadAccess>,
+    plan: Arc<Plan>,
+    writable: BTreeSet<usize>,
+}
+impl Template {
+    fn current(&self, scopes: &BTreeSet<ResourceScope>) -> bool {
+        self.scopes == *scopes && self.reads.current(self.authority, self.status.expires)
+    }
+}
+#[derive(Clone, Default)]
+pub(crate) struct Opened(Arc<std::sync::Mutex<Option<Template>>>);
+impl Opened {
+    fn reuse(&self, scopes: &BTreeSet<ResourceScope>) -> Option<Template> {
+        let opened = self.0.lock().ok()?;
+        opened
+            .as_ref()
+            .filter(|template| template.current(scopes))
+            .cloned()
+    }
+    fn keep(&self, template: Template) {
+        if let Ok(mut opened) = self.0.lock() {
+            *opened = Some(template);
+        }
+    }
+}
+
 pub struct SecureSql<A: RowApplication> {
     pub(super) session: SecureSession<A>,
     pub(super) reads: Arc<queries::ReadAccess>,
@@ -86,6 +119,40 @@ pub struct SecureSql<A: RowApplication> {
     migration: bool,
 }
 impl<A: RowApplication> SecureSql<A> {
+    fn opened(
+        session: SecureSession<A>,
+        reads: Arc<queries::ReadAccess>,
+        (plan, writable): (Arc<Plan>, BTreeSet<usize>),
+        options: SqlOptions,
+    ) -> Self {
+        Self {
+            reads,
+            session,
+            plan: plan.clone(),
+            writable: writable.clone(),
+            options,
+            lease: Arc::new(tokio::sync::Mutex::new(Lease {
+                plan,
+                writable,
+                held: None,
+                savepoints: Vec::new(),
+                implicit: false,
+                aborted: None,
+                turn: 0,
+                observed: sqlite::Observed::default(),
+                identities: BTreeMap::new(),
+                intents: Vec::new(),
+            })),
+            cancelled: Arc::default(),
+            cursors: Arc::default(),
+            parents: BTreeMap::new(),
+            migration: false,
+        }
+    }
+    pub fn current(&self) -> bool {
+        self.reads
+            .current(self.session.authority, self.session.status.expires)
+    }
     pub fn reset_for_reuse(&self) -> bool {
         let Ok(mut lease) = self.lease.try_lock() else {
             return false;
@@ -200,30 +267,46 @@ impl<A: RowApplication> SecureSession<A> {
             })
             .map(|(index, _)| index)
             .collect();
-        let plan = Arc::new(plan);
-        Ok(SecureSql {
-            reads: inner.register_reader(&self.status, self.authority).await?,
-            session: self.clone(),
-            plan: plan.clone(),
-            writable: writable.clone(),
+        let reads = inner.register_reader(&self.status, self.authority).await?;
+        Ok(SecureSql::opened(
+            self.clone(),
+            reads,
+            (Arc::new(plan), writable),
             options,
-            lease: Arc::new(tokio::sync::Mutex::new(Lease {
-                plan,
-                writable,
-                held: None,
-                savepoints: Vec::new(),
-                implicit: false,
-                aborted: None,
-                turn: 0,
-                observed: sqlite::Observed::default(),
-                identities: BTreeMap::new(),
-                intents: Vec::new(),
-            })),
-            cancelled: Arc::default(),
-            cursors: Arc::default(),
-            parents: BTreeMap::new(),
-            migration: false,
-        })
+        ))
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub async fn sql_session(
+        &self,
+        scopes: BTreeSet<ResourceScope>,
+        options: SqlOptions,
+    ) -> Result<SecureSql<A>, Error> {
+        options.validate()?;
+        if let Some(template) = self.opened_sql.reuse(&scopes) {
+            let session = SecureSession {
+                replica: self.clone(),
+                authority: template.authority,
+                status: template.status,
+            };
+            return Ok(SecureSql::opened(
+                session,
+                template.reads,
+                (template.plan, template.writable),
+                options,
+            ));
+        }
+        let sql = self.session(scopes.clone()).await?.sql(options).await?;
+        self.opened_sql.keep(Template {
+            scopes,
+            authority: sql.session.authority,
+            status: sql.session.status.clone(),
+            reads: sql.reads.clone(),
+            plan: sql.plan.clone(),
+            writable: sql.writable.clone(),
+        });
+        Ok(sql)
     }
 }
 
@@ -668,13 +751,14 @@ impl<A: RowApplication> SecureSql<A> {
         self.finish(lease, target, Some(rows)).await
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
-        let inner = self
-            .session
-            .replica
-            .inner
-            .clone()
-            .lock_owned(Class::Interactive)
-            .await;
+        let timeout = self.options.transaction_timeout;
+        let inner = tokio::select! {
+            biased;
+            inner = self.session.replica.inner.clone().lock_owned(Class::Interactive) => inner,
+            () = expiry::elapsed(&self.session.replica.lease_clock, timeout) => {
+                return Err(Error::Sql(SqlError::WriterBusy(timeout)));
+            }
+        };
         inner.invalidate_frontiers();
         admit(&inner, &self.session)?;
         let domains: BTreeSet<_> = self
@@ -723,10 +807,15 @@ impl<A: RowApplication> SecureSql<A> {
             &self.session.replica.lease_clock,
             self.options.transaction_timeout,
         );
+        self.session
+            .replica
+            .sql_writing
+            .store(true, Ordering::Release);
         let held = Held {
             inner,
             keeps_pending_pass: false,
             expiry,
+            writing: self.session.replica.sql_writing.clone(),
         };
         let conn = held.inner.conn.connection();
         conn.run_now(sql).map_err(engine)?;

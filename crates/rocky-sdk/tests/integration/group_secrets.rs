@@ -598,14 +598,17 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
-    let mut tx = issuer.database.transaction().await.unwrap();
-    tx.execute(
-        "INSERT INTO attachments(list,key) VALUES('A','photo')",
-        Vec::new(),
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    issuer
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO attachments(list,key) VALUES('A','photo')",
+                Vec::new(),
+            )
+            .await
+        })
+        .await
+        .unwrap();
     let rows = snap::ok(snap::read(
         &issuer.database,
         "SELECT key FROM attachments WHERE list='A'",
@@ -667,24 +670,18 @@ async fn a_granted_phone_holds_every_table_of_its_list_and_nothing_else() {
 }
 
 async fn write(peer: &Peer, table: &str, key: &str) {
-    let mut tx = peer.database.transaction().await.unwrap();
     let updates_the_one_row_per_list = table == "lists" && key != "before";
-    if updates_the_one_row_per_list {
-        tx.execute(
-            &format!("UPDATE lists SET title='{key}' WHERE name='A'"),
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        return;
-    }
     let sql = match table {
+        "lists" if updates_the_one_row_per_list => {
+            format!("UPDATE lists SET title='{key}' WHERE name='A'")
+        }
         "lists" => format!("INSERT INTO lists(name,title) VALUES('A','{key}')"),
         _ => format!("INSERT INTO {table}(list,key) VALUES('A','{key}')"),
     };
-    tx.execute(&sql, Vec::new()).await.unwrap();
-    tx.commit().await.unwrap();
+    peer.database
+        .write(async |tx| tx.execute(&sql, Vec::new()).await)
+        .await
+        .unwrap();
 }
 async fn rows(peer: &Peer) -> Vec<Vec<String>> {
     let mut all = Vec::new();
@@ -855,14 +852,17 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     introduce(&issuer, &writer).await;
     snap::ok(writer.database.sync_now()).await;
     snap::ok(writer.database.sync_now()).await;
-    let mut tx = writer.database.transaction().await.unwrap();
-    tx.execute(
-        "INSERT INTO items(list,key) VALUES('A','writer')",
-        Vec::new(),
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    writer
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO items(list,key) VALUES('A','writer')",
+                Vec::new(),
+            )
+            .await
+        })
+        .await
+        .unwrap();
     snap::ok(writer.database.sync_now()).await;
     assert_eq!(
         rows(&issuer).await,

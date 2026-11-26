@@ -15,14 +15,17 @@ fn positioned_items() -> Schema {
 }
 
 async fn insert(device: &Device, key: &str, title: &str) {
-    let mut tx = device.database.transaction().await.expect("begin");
-    tx.execute(
-        "INSERT INTO items(key,completed,title) VALUES(?,0,?)",
-        vec![text(key), text(title)],
-    )
-    .await
-    .expect("insert");
-    tx.commit().await.expect("commit");
+    device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO items(key,completed,title) VALUES(?,0,?)",
+                vec![text(key), text(title)],
+            )
+            .await
+        })
+        .await
+        .expect("insert");
 }
 
 const STATE: &str = "SELECT key, completed, position, title FROM items ORDER BY key";

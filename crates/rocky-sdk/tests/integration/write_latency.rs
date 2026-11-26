@@ -44,23 +44,25 @@ fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration 
 }
 
 async fn write(database: &Database, sql: &str) -> Result<(), Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(sql, Vec::new()).await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(database
+        .write(async |tx| tx.execute(sql, Vec::new()).await)
+        .await?)
 }
 
 async fn seed(database: &Database, keys: &[&str]) -> Result<(), Failure> {
     for table in TABLES {
-        let mut tx = database.transaction().await?;
-        for key in keys {
-            tx.execute(
-                &format!("INSERT INTO {table}(key,amount) VALUES(?,0)"),
-                vec![SqlValue::Text((*key).into())],
-            )
+        database
+            .write(async |tx| {
+                for key in keys {
+                    tx.execute(
+                        &format!("INSERT INTO {table}(key,amount) VALUES(?,0)"),
+                        vec![SqlValue::Text((*key).into())],
+                    )
+                    .await?;
+                }
+                Ok::<_, Failure>(())
+            })
             .await?;
-        }
-        tx.commit().await?;
     }
     Ok(())
 }

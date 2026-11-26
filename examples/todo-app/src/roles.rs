@@ -81,16 +81,18 @@ impl Todos {
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
         let node = self.node().await?;
         let name = crate::title(name)?;
-        let mut transaction = self.database.transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO devices(node,role,name) VALUES(?,?,?) \
-                 ON CONFLICT(node) DO UPDATE SET role=excluded.role,name=excluded.name",
-                params![node, role.as_str(), name],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(())
+        Ok(self
+            .database
+            .write(async |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO devices(node,role,name) VALUES(?,?,?) \
+                         ON CONFLICT(node) DO UPDATE SET role=excluded.role,name=excluded.name",
+                        params![node, role.as_str(), name],
+                    )
+                    .await
+            })
+            .await?)
     }
     pub async fn remove_device(&self, node: &str) -> Result<(), Failure> {
         if node == self.node().await? {
@@ -99,11 +101,13 @@ impl Todos {
         let node_key = node.parse()?;
         let person = self.person_of(node_key).await?;
         self.database.remove(person).await?;
-        let mut transaction = self.database.transaction().await?;
-        transaction
-            .execute("DELETE FROM devices WHERE node=?", params![node])
+        self.database
+            .write(async |transaction| {
+                transaction
+                    .execute("DELETE FROM devices WHERE node=?", params![node])
+                    .await
+            })
             .await?;
-        transaction.commit().await?;
         let _ = self
             .database
             .remove_peer(rocky_sdk::DeviceId::new(node_key))

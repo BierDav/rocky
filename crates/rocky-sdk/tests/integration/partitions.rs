@@ -30,41 +30,48 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     }
     let mut ids = Vec::new();
     for (name, amount) in [("A", 10i64), ("B", 20i64)] {
-        let mut tx = db.transaction().await.unwrap();
-        let id = tx.next_id("items", values(name)).await.unwrap();
+        let id = db
+            .write(async |tx| {
+                let id = tx.next_id("items", values(name)).await?;
+                tx.execute(
+                    "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
+                    vec![
+                        rocky_sdk::SqlValue::Text(name.to_owned()),
+                        rocky_sdk::SqlValue::Text("key".to_owned()),
+                        rocky_sdk::SqlValue::Integer(amount),
+                        id.sql(),
+                    ],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await
+            .unwrap();
         ids.push(id);
-        tx.execute(
-            "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
-            vec![
-                rocky_sdk::SqlValue::Text(name.to_owned()),
-                rocky_sdk::SqlValue::Text("key".to_owned()),
-                rocky_sdk::SqlValue::Integer(amount),
-                id.sql(),
-            ],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
     }
     assert_ne!(ids[0], ids[1], "one creation log per author and table");
-    let mut tx = db.transaction().await.unwrap();
-    let mut next_id = async |list: &str| {
-        tx.query(
-            "SELECT rocky_next_id('items', ?)",
-            vec![rocky_sdk::SqlValue::Text(list.into())],
-        )
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap()[0]
-            .get_at::<rocky_sdk::SqlValue>(0)
-            .unwrap()
-    };
-    let a_id = next_id("A").await;
-    let b_id = next_id("B").await;
-    assert_ne!(a_id, b_id);
-    tx.rollback().await.unwrap();
+    let allocated = db
+        .write(async |tx| {
+            let mut next_id = async |list: &str| {
+                tx.query(
+                    "SELECT rocky_next_id('items', ?)",
+                    vec![rocky_sdk::SqlValue::Text(list.into())],
+                )
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()[0]
+                    .get_at::<rocky_sdk::SqlValue>(0)
+                    .unwrap()
+            };
+            let a_id = next_id("A").await;
+            let b_id = next_id("B").await;
+            assert_ne!(a_id, b_id);
+            Err::<(), Box<dyn std::error::Error>>("roll the allocations back".into())
+        })
+        .await;
+    assert!(allocated.is_err());
 
     let data = snap::ok(snap::read(
         &db,
@@ -130,14 +137,18 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .unwrap();
     db.close().await.unwrap();
     let db = open(&path, &hub).open().await.unwrap();
-    let mut tx = db.transaction().await.unwrap();
-    let id = tx.next_id("items", values("A")).await.unwrap();
-    let first = ids[0];
-    assert_eq!(
-        (id.writer(), id.sequence()),
-        (first.writer(), first.sequence() + 2)
-    );
-    tx.rollback().await.unwrap();
+    let allocated = db
+        .write(async |tx| {
+            let id = tx.next_id("items", values("A")).await.unwrap();
+            let first = ids[0];
+            assert_eq!(
+                (id.writer(), id.sequence()),
+                (first.writer(), first.sequence() + 2)
+            );
+            Err::<(), Box<dyn std::error::Error>>("roll the allocation back".into())
+        })
+        .await;
+    assert!(allocated.is_err());
     snap::ok(db.create_partition(&rocky_sdk::Partition::new("items", (values("C")).clone()))).await;
     snap::ok(db.remove(rocky_sdk::PersonId::new(snap::public_key(
         &(reader_identity.to_string()),
@@ -145,15 +156,16 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .await;
     let revoked = snap::ok(snap::device(&db)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
-    let mut tx = db.transaction().await.unwrap();
-    let id = tx.next_id("items", values("A")).await.unwrap();
-    tx.execute(
-        "INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)",
-        vec![id.sql()],
-    )
+    db.write(async |tx| {
+        let id = tx.next_id("items", values("A")).await?;
+        tx.execute(
+            "INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)",
+            vec![id.sql()],
+        )
+        .await
+    })
     .await
     .unwrap();
-    tx.commit().await.unwrap();
     db.close().await.unwrap();
     open(&path, &hub)
         .open()
@@ -186,8 +198,18 @@ async fn own_id_partitions_continue_the_table_log() {
             db = options().open().await.unwrap();
         }
         let prepared = snap::ok(db.next_partition("lists")).await;
-        let mut tx = db.transaction().await.unwrap();
-        let id = tx.next_id("lists", Vec::new()).await.unwrap();
+        let id = db
+            .write(async |tx| {
+                let id = tx.next_id("lists", Vec::new()).await?;
+                tx.execute(
+                    "INSERT INTO lists(id,title) VALUES(?,?)",
+                    vec![id.sql(), rocky_sdk::SqlValue::Text("list".to_owned())],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await
+            .unwrap();
         assert_eq!(id.to_string(), prepared["id"].as_str().unwrap());
         if let Some(previous) = previous {
             assert_eq!(
@@ -196,13 +218,6 @@ async fn own_id_partitions_continue_the_table_log() {
             );
         }
         previous = Some(id);
-        tx.execute(
-            "INSERT INTO lists(id,title) VALUES(?,?)",
-            vec![id.sql(), rocky_sdk::SqlValue::Text("list".to_owned())],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
     }
     db.close().await.unwrap();
 }

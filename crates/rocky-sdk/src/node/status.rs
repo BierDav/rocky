@@ -169,6 +169,30 @@ impl Node {
                 .clone(),
         })
     }
+    pub(crate) async fn observe_status_before_writes(&self) {
+        if let Err(error) = self.status_beside_writes().await {
+            tracing::debug!(%error, "no status to answer beside the first write");
+        }
+    }
+    pub(super) async fn status_beside_writes(&self) -> Result<DatabaseStatus, Failure> {
+        let last = || {
+            self.last_status
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        if self.replica.sql_write_open()
+            && let Some(observed_before_the_write) = last()
+        {
+            return Ok(observed_before_the_write);
+        }
+        let status = self.observed_status().await?;
+        *self
+            .last_status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(status.clone());
+        Ok(status)
+    }
     pub(super) async fn observed_status(&self) -> Result<DatabaseStatus, Failure> {
         self.refresh_admin_watch().await?;
         let settings = self.settings.lock().await.clone();

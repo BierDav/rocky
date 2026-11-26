@@ -21,11 +21,12 @@ async fn bodies(db: &Database, pattern: &str) -> Result<Vec<String>, Failure> {
 }
 
 async fn note(db: &Database, body: &str) -> Result<(), Failure> {
-    let mut tx = db.transaction().await?;
-    let id = tx.next_id("notes", vec![]).await?;
-    tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
-        .await?;
-    tx.commit().await?;
+    db.write(async |tx| {
+        let id = tx.next_id("notes", vec![]).await?;
+        tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
+            .await
+    })
+    .await?;
     Ok(())
 }
 

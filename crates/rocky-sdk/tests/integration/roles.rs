@@ -103,38 +103,42 @@ async fn rows(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
         .collect()
 }
 async fn insert(device: &Device, table: &str, values: [&str; 2]) -> Result<(), Failure> {
-    let mut tx = device.database.transaction().await?;
     let columns = match table {
         "tickets" => "code,holder",
         "check_ins" => "code,gate",
         _ => "ward,note",
     };
-    tx.execute(
-        &format!("INSERT INTO {table}({columns}) VALUES(?,?)"),
-        vec![
-            SqlValue::Text(values[0].into()),
-            SqlValue::Text(values[1].into()),
-        ],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                &format!("INSERT INTO {table}({columns}) VALUES(?,?)"),
+                vec![
+                    SqlValue::Text(values[0].into()),
+                    SqlValue::Text(values[1].into()),
+                ],
+            )
+            .await
+        })
+        .await?)
 }
 async fn ward_name(device: &Device, name: &str) -> Result<(), Failure> {
-    let mut tx = device.database.transaction().await?;
-    tx.execute(
-        "INSERT INTO wards(name) VALUES(?)",
-        vec![SqlValue::Text(name.into())],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO wards(name) VALUES(?)",
+                vec![SqlValue::Text(name.into())],
+            )
+            .await
+        })
+        .await?)
 }
 async fn write(device: &Device, sql: &str) -> Result<(), Failure> {
-    let mut tx = device.database.transaction().await?;
-    tx.execute(sql, Vec::new()).await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(device
+        .database
+        .write(async |tx| tx.execute(sql, Vec::new()).await)
+        .await?)
 }
 fn holds_reader_key(directory: &Path, table: &str) -> Result<bool, Failure> {
     let identity = common::authority_json(directory, "identity")?;
@@ -1034,23 +1038,27 @@ async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Resu
     let write = |sql: &'static str, params: Vec<SqlValue>| {
         let database = dispatcher.database.clone();
         async move {
-            let mut tx = database.transaction().await?;
-            tx.execute(sql, params).await?;
-            tx.commit().await.map(drop)
+            database
+                .write(async |tx| tx.execute(sql, params).await)
+                .await
         }
     };
-    let mut tx = dispatcher.database.transaction().await?;
-    let id = tx.next_id("alerts", Vec::new()).await?;
-    tx.execute(
-        "INSERT INTO alerts(id,title,state) VALUES(?,?,?)",
-        vec![
-            id.sql(),
-            SqlValue::Text("Fire".into()),
-            SqlValue::Text("open".into()),
-        ],
-    )
-    .await?;
-    tx.commit().await?;
+    let id = dispatcher
+        .database
+        .write(async |tx| {
+            let id = tx.next_id("alerts", Vec::new()).await?;
+            tx.execute(
+                "INSERT INTO alerts(id,title,state) VALUES(?,?,?)",
+                vec![
+                    id.sql(),
+                    SqlValue::Text("Fire".into()),
+                    SqlValue::Text("open".into()),
+                ],
+            )
+            .await?;
+            Ok::<_, Failure>(id)
+        })
+        .await?;
     write(
         "UPDATE alerts SET state = ? WHERE id = ?",
         vec![SqlValue::Text("closed".into()), id.sql()],

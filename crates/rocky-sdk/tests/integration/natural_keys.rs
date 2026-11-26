@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure, introduce};
 use rocky_sdk::{
-    Affinity, Commit, Database, DropReason, ErrorKind, ForeignKey, Network, RowIdentity, SqlValue,
-    Table, TransactionOutcome, TransactionToken, Unsupported, params, transport::memory::Hub,
+    Affinity, Database, DropReason, ErrorKind, ForeignKey, Network, RowIdentity, SqlValue, Table,
+    TransactionOutcome, TransactionToken, Unsupported, params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -40,10 +40,13 @@ async fn attempt(
     database: &Database,
     sql: &str,
     values: Vec<SqlValue>,
-) -> Result<Commit, rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction.execute(sql, values).await?;
-    transaction.commit().await
+) -> Result<TransactionToken, rocky_sdk::Error> {
+    database
+        .write(async |transaction| {
+            transaction.execute(sql, values).await?;
+            Ok(transaction.token())
+        })
+        .await
 }
 
 async fn write(
@@ -51,10 +54,7 @@ async fn write(
     sql: &str,
     values: Vec<SqlValue>,
 ) -> Result<TransactionToken, Failure> {
-    match attempt(database, sql, values).await? {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err(format!("{sql} ran no write").into()),
-    }
+    Ok(attempt(database, sql, values).await?)
 }
 
 async fn refused(database: &Database, sql: &str) -> Result<rocky_sdk::Error, Failure> {
@@ -119,14 +119,12 @@ async fn a_plain_insert_into_a_declared_key_table_needs_no_id() -> Result<(), Fa
         ["code", "holder"],
         "a table with a declared key has no id column"
     );
-    let mut transaction = database.transaction().await?;
-    let refusal = transaction
-        .next_id("tickets", Vec::new())
+    let refusal = database
+        .write(async |transaction| transaction.next_id("tickets", Vec::new()).await)
         .await
         .err()
         .ok_or("a declared-key table allocated a generated id")?;
     assert!(refusal.to_string().contains("no generated id"), "{refusal}");
-    transaction.rollback().await?;
     database.close().await?;
     Ok(())
 }
@@ -138,24 +136,27 @@ async fn an_insert_without_id_into_a_keyless_table_gets_a_generated_id() -> Resu
         .create()
         .await?
         .database;
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute("INSERT INTO tickets(code) VALUES('A1')", params![])
+    let reserved = database
+        .write(async |transaction| {
+            transaction
+                .execute("INSERT INTO tickets(code) VALUES('A1')", params![])
+                .await?;
+            transaction
+                .execute(
+                    "INSERT INTO check_ins(gate, ticket) VALUES('north', ?), ('south', ?)",
+                    params!["A1", "A1"],
+                )
+                .await?;
+            let reserved = transaction.next_id("check_ins", Vec::new()).await?;
+            transaction
+                .execute(
+                    "INSERT INTO check_ins(id, gate, ticket) VALUES(?, 'east', 'A1')",
+                    params![reserved],
+                )
+                .await?;
+            Ok::<_, Failure>(reserved)
+        })
         .await?;
-    transaction
-        .execute(
-            "INSERT INTO check_ins(gate, ticket) VALUES('north', ?), ('south', ?)",
-            params!["A1", "A1"],
-        )
-        .await?;
-    let reserved = transaction.next_id("check_ins", Vec::new()).await?;
-    transaction
-        .execute(
-            "INSERT INTO check_ins(id, gate, ticket) VALUES(?, 'east', 'A1')",
-            params![reserved],
-        )
-        .await?;
-    transaction.commit().await?;
     let rows = database
         .query("SELECT id, gate FROM check_ins ORDER BY id", params![])
         .await?

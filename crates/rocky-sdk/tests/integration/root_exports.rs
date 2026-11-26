@@ -3,14 +3,14 @@
     reason = "importing each name proves the README's types are exported from the crate root"
 )]
 use rocky_sdk::{
-    Access, Affinity, AlertKind, BlockerKind, ChangeCause, ClearsBy, Column, Commit, Configuration,
+    Access, Affinity, AlertKind, BlockerKind, ChangeCause, ClearsBy, Column, Configuration,
     Created, Database, DatabaseStatus, DeclaredSchema, DeleteAction, DenyReason, Device, DeviceId,
     DropReason, DroppedTransaction, Error, ErrorKind, ForeignKey, IdentityKey, IdentityProvider,
     Index, Invitation, Invite, JoinError, Limit, MigrationStep, Network, Opened, Partition,
     PendingLink, PersonId, RefusedChange, Removal, Right, Role, RoleInUse, RolloutImpact, RootKey,
-    RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport, Table,
-    TableChange, TableEvents, Timestamp, Transaction, TransactionOutcome, TransactionToken,
-    Unsupported,
+    RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport,
+    TRANSACTION_TIMEOUT, Table, TableChange, TableEvents, Timestamp, Transaction,
+    TransactionOutcome, TransactionToken, Unsupported,
 };
 
 const VARIANTS: &[&str] = &[
@@ -24,6 +24,7 @@ const VARIANTS: &[&str] = &[
     "Authority",
     "Blob",
     "Blocked",
+    "Busy",
     "Cascade",
     "DatabaseExists",
     "Denied",
@@ -77,9 +78,11 @@ const ELSEWHERE: &[&str] = &[
     "CounterError",
     "Counters",
     "Display",
+    "Err",
     "Exhausted",
     "FromStr",
     "LocalCluster",
+    "Ok",
     "Options",
     "Refusal",
     "OutcomeUnknown",

@@ -604,10 +604,10 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
             let Err(error) = execute("SELECT count(*) FROM items").await else {
                 return Err("a statement after the lease clock passed the timeout ran".into());
             };
-            assert_eq!(error.kind(), &crate::ErrorKind::Busy, "{error}");
+            assert_eq!(error.kind(), &crate::ErrorKind::TimedOut, "{error}");
             assert!(
-                error.to_string().contains("Timeout"),
-                "the lease ends on its own: {error}"
+                error.to_string().contains("TRANSACTION_TIMEOUT"),
+                "the lease ends on its own and the error names the timeout: {error}"
             );
             assert!(
                 in_transaction().await?,
@@ -616,6 +616,97 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
             execute("ROLLBACK TRANSACTION").await?;
             assert!(!in_transaction().await?);
             assert_eq!(count().await?, SqlValue::Integer(0));
+            node.detach().await;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn a_second_write_gets_busy_once_the_transaction_timeout_passes() -> Result<(), Failure> {
+    use crate::connection::{Call, ConnectionOptions, Registry, Reply, serve};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+            let settings = Settings::create_owned(
+                &Schema::parse(SCHEMA)?,
+                &store,
+                crate::enrollment::DEFAULT_TTL,
+            )?;
+            let vault = settings.vault(&store);
+            let transport = Arc::new(Hub::default())
+                .connector("a")
+                .start(true, Settings::route_secret(&vault)?)
+                .await?;
+            let clock = rocky_secure::ManualLeaseClock::default();
+            let node = node_on(root.path(), settings, vault, transport, &clock).await?;
+            let held_for = crate::TRANSACTION_TIMEOUT * 12;
+            let connections = Registry::default();
+            let mut writers = Vec::new();
+            for transaction_timeout in [Some(held_for), None] {
+                let options = ConnectionOptions {
+                    read_only: false,
+                    transaction_timeout,
+                };
+                let id = connections.connect(node.clone(), options).await?;
+                writers.push(connections.get(id)?);
+            }
+            let [holder, waiter] = <[_; 2]>::try_from(writers).map_err(|_| "two writers")?;
+            let execute = |writer: &Arc<_>, sql: &str| {
+                serve(
+                    Arc::clone(writer),
+                    Call::Execute {
+                        statement: 1,
+                        sql: sql.into(),
+                        params: Vec::new(),
+                    },
+                )
+            };
+            execute(&holder, "BEGIN IMMEDIATE TRANSACTION").await?;
+            execute(&holder, "INSERT INTO items(key,title) VALUES('k','held')").await?;
+            let waiting = tokio::task::spawn_local({
+                let waiter = waiter.clone();
+                async move {
+                    execute(&waiter, "BEGIN IMMEDIATE TRANSACTION").await?;
+                    execute(&waiter, "INSERT INTO items(key,title) VALUES('w','waited')").await
+                }
+            });
+            let mut advanced = Duration::ZERO;
+            while !waiting.is_finished() && advanced < held_for - crate::TRANSACTION_TIMEOUT {
+                clock.advance(crate::TRANSACTION_TIMEOUT);
+                advanced += crate::TRANSACTION_TIMEOUT;
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            let Err(error) = waiting.await? else {
+                return Err("a second write ran beside the open one".into());
+            };
+            assert_eq!(error.kind(), &crate::ErrorKind::Busy, "{error}");
+            assert!(
+                error.to_string().contains("TRANSACTION_TIMEOUT"),
+                "the busy error names the timeout it waited for: {error}"
+            );
+            assert!(
+                matches!(
+                    serve(waiter.clone(), Call::InTransaction).await?,
+                    Reply::Flag(false)
+                ),
+                "a write that never got the database holds no transaction"
+            );
+            execute(&holder, "COMMIT TRANSACTION").await?;
+            execute(&waiter, "BEGIN IMMEDIATE TRANSACTION").await?;
+            execute(
+                &waiter,
+                "INSERT INTO items(key,title) VALUES('w','retried')",
+            )
+            .await?;
+            execute(&waiter, "COMMIT TRANSACTION").await?;
+            let Reply::Page(page) = execute(&holder, "SELECT count(*) FROM items").await? else {
+                return Err("a count answers with a page".into());
+            };
+            assert_eq!(page.rows[0][0], SqlValue::Integer(2));
             node.detach().await;
             Ok(())
         })

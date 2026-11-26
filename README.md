@@ -74,10 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .database;
 
-    let mut transaction = database.transaction().await?;
     let insert = "INSERT INTO notes(body) VALUES(?)";
-    transaction.execute(insert, params!["Hello, Rocky"]).await?;
-    transaction.commit().await?;
+    database
+        .write(async |tx| tx.execute(insert, params!["Hello, Rocky"]).await)
+        .await?;
 
     let rows = database.query("SELECT body FROM notes", params![]).await?;
     let note: String = rows
@@ -95,6 +95,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `Configuration::open` opens the same directory again. `Database` is one handle:
 clones share it, every call is a future the caller may drop, and `close` ends
 it for every clone.
+
+`Database::write(async |tx| ..)` runs its body as one transaction. It commits
+when the body returns `Ok` and rolls back when the body returns `Err`, as a
+refused statement does when `?` passes it on, or when the future is dropped.
+The body's error is any type that converts from `rocky_sdk::Error`; a body that
+ends in its last statement's result needs no annotation, and one that ends in
+`Ok(value)` names it, as in `Ok::<_, rocky_sdk::Error>(id)`. One write runs at a
+time: a write waits up to `TRANSACTION_TIMEOUT` (5 s) for another and then
+fails with `ErrorKind::Busy`, and a write that holds the database longer than
+that from its first statement is rolled back and fails with
+`ErrorKind::TimedOut`, so keep slow work such as network calls outside the
+body. Reads never wait for a write: `query` and `observe` beside an open write
+see the last commit, and `status` returns the status last observed before it.
 
 `open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
 and `create` or `join` on one that does with `DatabaseExists`, so a host that
@@ -143,12 +156,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join(&invitation.code)
         .await?;
 
-    let mut transaction = alice.database.transaction().await?;
     let insert = "INSERT INTO notes(body) VALUES(?)";
-    transaction
-        .execute(insert, params!["Hello from Alice"])
+    alice
+        .database
+        .write(async |tx| tx.execute(insert, params!["Hello from Alice"]).await)
         .await?;
-    transaction.commit().await?;
 
     let report = bob.database.sync_now().await?;
     println!("Bob's sync: {report}");
@@ -365,9 +377,11 @@ to reference the row from child rows. A table partitioned by its own id names
 the id `next_id` allocated in every insert. Ids need no coordination; gap-free
 numbers come from `rocky-coordinator`. A `RowIdentity` prints as hex and parses
 back with `str::parse`, and a `Timestamp` column value prints as RFC 3339 in
-UTC. `commit` returns `Commit::Recorded(token)`, or `Commit::NoWrites` when no
-write statement ran and nothing syncs; a write that matched no row still records
-an intent. `flush` makes every returned commit durable.
+UTC. `Transaction::token()` names the transaction for `transaction_outcome`
+and drop reports, already inside the body, so an outbox row can store it. A
+transaction that ran no write statement records and syncs nothing, so its token
+never gets an outcome; a write that matched no row still records an intent.
+`flush` makes every write that returned durable.
 
 `Table::local(name)` declares a table whose rows stay on the device: they
 never sync, are kept across reopening, and are deleted with the rest when the
@@ -390,9 +404,10 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
 - `IS ?` and `IS NOT` comparisons are accepted;
 - a statement whose intent is over 128 KiB fails at `execute` with
   `ErrorKind::TooLarge` and `Limit::Intent`, and a transaction whose
-  statements fit alone but not together fails the same way at `commit`. A
-  parameter takes its own size plus a few bytes, so a blob of about 120 KiB
-  is the largest one statement carries, and an `INSERT … SELECT` records the
+  statements fit alone but not together fails the same way when `write`
+  commits it. A parameter takes its own size plus a few bytes, so a blob of
+  about 120 KiB is the largest one statement carries, and an `INSERT … SELECT`
+  records the
   rows it read.
 
 ### Indexes, defaults and references
@@ -506,9 +521,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .database;
 
-    let mut transaction = database.transaction().await?;
     let stamped = "INSERT INTO notes(body) VALUES(datetime('now'))";
-    let Err(error) = transaction.execute(stamped, params![]).await else {
+    let written = database.write(async |tx| tx.execute(stamped, params![]).await);
+    let Err(error) = written.await else {
         return Err("a clock value in a replayed write was accepted".into());
     };
     match error.kind() {
@@ -522,7 +537,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ if error.retryable() => println!("retry later: {error}"),
         _ => return Err(error.into()),
     }
-    transaction.rollback().await?;
     database.close().await?;
     Ok(std::fs::remove_dir_all(directory)?)
 }
@@ -549,6 +563,10 @@ Other kinds an application meets:
   database, already holds one, or holds a join to repeat.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
   named blockers clear. It always names at least one.
+- `Busy`: another write held the database for all of `TRANSACTION_TIMEOUT`,
+  or too many calls are pending; retry.
+- `TimedOut`: the write body held the database past `TRANSACTION_TIMEOUT` and
+  was rolled back; move slow work out of the body.
 - `TooLarge { limit, size, max }`: a write exceeds a size limit.
 - `SchemaMismatch { installed, declared }`: the database runs a schema version
   this application cannot use. When `installed` is newer, it removed something
@@ -602,10 +620,9 @@ fn notes(version: u32) -> Result<Schema, rocky_sdk::Error> {
 const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NULL";
 
 async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction.execute(FILL_SLUGS, params![]).await?;
-    transaction.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| tx.execute(FILL_SLUGS, params![]).await)
+        .await
 }
 ```
 
@@ -838,14 +855,15 @@ async fn main() -> Result<(), Failure> {
 
 async fn record_sale(database: &Database, sale: &str) -> Result<(), Failure> {
     let created = Timestamp::try_from(SystemTime::now())?;
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute(
-            "INSERT INTO sales(sale, created) VALUES(?, ?)",
-            params![sale, created],
-        )
+    database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO sales(sale, created) VALUES(?, ?)",
+                params![sale, created],
+            )
+            .await
+        })
         .await?;
-    transaction.commit().await?;
     database.flush().await?;
     Ok(())
 }
@@ -869,14 +887,15 @@ async fn invoice(
     let Claimed::First(number) = counters.claim(invoices, &claim).await? else {
         return Err("another attempt holds this sale's number".into());
     };
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute(
-            "UPDATE sales SET invoice = ? WHERE sale = ?",
-            params![number, sale],
-        )
+    database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE sales SET invoice = ? WHERE sale = ?",
+                params![number, sale],
+            )
+            .await
+        })
         .await?;
-    transaction.commit().await?;
     Ok(number)
 }
 ```

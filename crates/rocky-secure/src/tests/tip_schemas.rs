@@ -279,7 +279,7 @@ async fn an_additive_switch_preserves_rows_observers_cursors_and_existing_sessio
         .install_tip_schema(target, lineage.definition(3), b"new-schema".to_vec())
         .await
         .unwrap();
-    let mut observer = replica.observe_tables(None).await.unwrap();
+    let mut observer = replica.observe_tables(None).unwrap();
     let mut config = lineage.config(3, &key);
     config.credentials = lineage.certified(3, &identity, &key);
     config.manifest = lineage.config(2, &key).manifest;
@@ -375,7 +375,7 @@ async fn additive_switch_changes(rows: usize) -> (i64, usize) {
         .install_tip_schema(target, lineage.definition(3), b"new-schema".to_vec())
         .await
         .unwrap();
-    let mut observer = replica.observe_tables(None).await.unwrap();
+    let mut observer = replica.observe_tables(None).unwrap();
     let mut config = lineage.config(3, &key);
     config.credentials = lineage.certified(3, &identity, &key);
     config.manifest = lineage.config(2, &key).manifest;

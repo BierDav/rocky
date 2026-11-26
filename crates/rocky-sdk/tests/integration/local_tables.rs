@@ -16,10 +16,9 @@ fn schema() -> Result<Schema, Failure> {
         .build()?)
 }
 async fn write(database: &Database, sql: &str) -> Result<(), Failure> {
-    let mut transaction = database.transaction().await?;
-    transaction.execute(sql, params![]).await?;
-    transaction.commit().await?;
-    Ok(())
+    Ok(database
+        .write(async |tx| tx.execute(sql, params![]).await)
+        .await?)
 }
 async fn count(database: &Database, table: &str) -> Result<usize, Failure> {
     let rows = database

@@ -64,6 +64,7 @@ pub enum SqlError {
     Aborted(AbortReason),
     Capture(String),
     AuthorityChanged,
+    WriterBusy(Duration),
 }
 impl std::fmt::Display for SqlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -78,6 +79,11 @@ impl std::fmt::Display for SqlError {
             Self::Aborted(reason) => write!(f, "transaction was rolled back: {reason:?}"),
             Self::Capture(reason) => write!(f, "transaction cannot be published: {reason}"),
             Self::AuthorityChanged => write!(f, "the session's credentials changed or expired"),
+            Self::WriterBusy(waited) => write!(
+                f,
+                "another write held the database for the whole transaction timeout of {} s",
+                waited.as_secs_f64()
+            ),
         }
     }
 }

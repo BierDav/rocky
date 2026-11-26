@@ -125,23 +125,28 @@ impl Clinic {
             .database
             .create_partition(&chart(patient))
             .await?;
-        let mut tx = self.admin.database.transaction().await?;
-        for (table, column, value) in [("notes", "body", note), ("prescriptions", "drug", drug)] {
-            let id = tx
-                .next_id(table, vec![SqlValue::Text(patient.into())])
-                .await?;
-            tx.execute(
-                &format!("INSERT INTO {table}(patient,id,{column}) VALUES(?,?,?)"),
-                vec![
-                    SqlValue::Text(patient.into()),
-                    id.sql(),
-                    SqlValue::Text(value.into()),
-                ],
-            )
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
+        self.admin
+            .database
+            .write(async |tx| {
+                for (table, column, value) in
+                    [("notes", "body", note), ("prescriptions", "drug", drug)]
+                {
+                    let id = tx
+                        .next_id(table, vec![SqlValue::Text(patient.into())])
+                        .await?;
+                    tx.execute(
+                        &format!("INSERT INTO {table}(patient,id,{column}) VALUES(?,?,?)"),
+                        vec![
+                            SqlValue::Text(patient.into()),
+                            id.sql(),
+                            SqlValue::Text(value.into()),
+                        ],
+                    )
+                    .await?;
+                }
+                Ok::<_, Failure>(())
+            })
+            .await
     }
     async fn close(self, devices: impl IntoIterator<Item = Device>) {
         for device in devices {
@@ -293,12 +298,16 @@ async fn a_partition_revoked_while_the_device_is_offline_is_purged_when_it_learn
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_whose_role_narrows_reopens() -> Result<(), Failure> {
     let clinic = Clinic::new().await?;
-    let mut tx = clinic.admin.database.transaction().await?;
-    tx.execute("INSERT INTO wards(name) VALUES('north ward')", Vec::new())
+    clinic
+        .admin
+        .database
+        .write(async |tx| {
+            tx.execute("INSERT INTO wards(name) VALUES('north ward')", Vec::new())
+                .await?;
+            tx.execute("INSERT INTO rotas(shift) VALUES('night rota')", Vec::new())
+                .await
+        })
         .await?;
-    tx.execute("INSERT INTO rotas(shift) VALUES('night rota')", Vec::new())
-        .await?;
-    tx.commit().await?;
     let doctor = clinic.invited("doctor", Access::Role(DOCTOR)).await?;
     assert_eq!(
         texts(&doctor, "SELECT shift FROM rotas").await?,
@@ -378,10 +387,14 @@ async fn revoking_a_partition_deletes_its_rows_from_the_device() -> Result<(), F
 #[tokio::test(flavor = "multi_thread")]
 async fn a_removed_device_keeps_no_replicated_rows_on_disk() -> Result<(), Failure> {
     let clinic = Clinic::new().await?;
-    let mut tx = clinic.admin.database.transaction().await?;
-    tx.execute("INSERT INTO wards(name) VALUES('north ward')", Vec::new())
+    clinic
+        .admin
+        .database
+        .write(async |tx| {
+            tx.execute("INSERT INTO wards(name) VALUES('north ward')", Vec::new())
+                .await
+        })
         .await?;
-    tx.commit().await?;
     let member = clinic.invited("member", Access::Full).await?;
     assert_eq!(
         texts(&member, "SELECT name FROM wards").await?,
@@ -389,10 +402,13 @@ async fn a_removed_device_keeps_no_replicated_rows_on_disk() -> Result<(), Failu
     );
     let person = member.database.me().await?.person;
     member.database.detach().await?;
-    let mut tx = member.database.transaction().await?;
-    tx.execute("INSERT INTO wards(name) VALUES('unsent ward')", Vec::new())
+    member
+        .database
+        .write(async |tx| {
+            tx.execute("INSERT INTO wards(name) VALUES('unsent ward')", Vec::new())
+                .await
+        })
         .await?;
-    tx.commit().await?;
     clinic.admin.database.remove(person).await?;
     member
         .database

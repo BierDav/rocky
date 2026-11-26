@@ -24,13 +24,15 @@ fn open(root: &Path, schema: &Schema, hub: &Arc<Hub>, name: &str) -> rocky_sdk::
     )
 }
 async fn note(database: &Database, title: &str, tag: Option<&str>) -> Result<(), Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "INSERT INTO notes(title,tag) VALUES(?,?)",
-        params![title, tag],
-    )
-    .await?;
-    tx.commit().await?;
+    database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO notes(title,tag) VALUES(?,?)",
+                params![title, tag],
+            )
+            .await
+        })
+        .await?;
     Ok(())
 }
 async fn write(
@@ -38,10 +40,9 @@ async fn write(
     sql: &str,
     params: Vec<SqlValue>,
 ) -> Result<(), rocky_sdk::Error> {
-    let mut tx = database.transaction().await?;
-    tx.execute(sql, params).await?;
-    tx.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| tx.execute(sql, params).await)
+        .await
 }
 async fn titles(
     database: &Database,
@@ -222,12 +223,14 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
         .create()
         .await?
         .database;
-    let mut tx = database.transaction().await?;
-    let refused = tx
-        .execute(
-            "INSERT INTO notes(title) VALUES(?)",
-            params!["x".repeat(200 * 1024)],
-        )
+    let refused = database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO notes(title) VALUES(?)",
+                params!["x".repeat(200 * 1024)],
+            )
+            .await
+        })
         .await
         .err()
         .ok_or("an oversized intent was recorded")?;
@@ -242,7 +245,6 @@ async fn a_write_over_a_size_limit_names_the_limit_and_both_sizes() -> Result<()
     assert_eq!(max, 128 * 1024);
     assert!(size > 200 * 1024, "{refused}");
     assert!(!refused.retryable());
-    tx.rollback().await?;
     note(&database, "after", None).await?;
     assert_eq!(all(&database).await?, ["after:-"]);
     database.close().await?;
@@ -372,26 +374,39 @@ fn set_null_on_a_key_column_is_refused_at_build() {
 }
 
 #[tokio::test]
-async fn only_a_transaction_without_a_write_statement_commits_no_writes() -> Result<(), Failure> {
+async fn only_a_transaction_without_a_write_statement_records_nothing() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let database =
         crate::common::configuration(&root.path().join("a"), &schema()?, None, None, None)
             .create()
             .await?
             .database;
-    let tx = database.transaction().await?;
-    assert_eq!(tx.commit().await?, rocky_sdk::Commit::NoWrites);
-    let mut tx = database.transaction().await?;
-    tx.execute("SELECT count(*) FROM notes", Vec::new()).await?;
-    assert_eq!(tx.commit().await?, rocky_sdk::Commit::NoWrites);
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "UPDATE notes SET tag = 'none' WHERE title = 'absent'",
-        Vec::new(),
-    )
-    .await?;
+    let empty = database
+        .write(async |tx| Ok::<_, Failure>(tx.token()))
+        .await?;
+    let read = database
+        .write(async |tx| {
+            tx.execute("SELECT count(*) FROM notes", Vec::new()).await?;
+            Ok::<_, Failure>(tx.token())
+        })
+        .await?;
+    let blind = database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE notes SET tag = 'none' WHERE title = 'absent'",
+                Vec::new(),
+            )
+            .await?;
+            Ok::<_, Failure>(tx.token())
+        })
+        .await?;
+    assert_eq!(database.transaction_outcome(empty).await?, None);
+    assert_eq!(database.transaction_outcome(read).await?, None);
     assert!(
-        matches!(tx.commit().await?, rocky_sdk::Commit::Recorded(_)),
+        matches!(
+            database.transaction_outcome(blind).await?,
+            Some(rocky_sdk::TransactionOutcome::Applied { .. })
+        ),
         "a write that matches no row still records an intent, which every device replays"
     );
     database.close().await?;

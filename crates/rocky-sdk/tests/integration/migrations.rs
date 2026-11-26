@@ -293,14 +293,18 @@ fn positioned_lists() -> Schema {
 
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
     snap::ok(device.database.next_partition("lists")).await;
-    let mut tx = device.database.transaction().await?;
-    let id = tx.next_id("lists", Vec::new()).await?;
-    tx.execute(
-        &format!("INSERT INTO lists(id,title) VALUES(?,'{title}')"),
-        vec![id.sql()],
-    )
-    .await?;
-    tx.commit().await?;
+    let id = device
+        .database
+        .write(async |tx| {
+            let id = tx.next_id("lists", Vec::new()).await?;
+            tx.execute(
+                &format!("INSERT INTO lists(id,title) VALUES(?,'{title}')"),
+                vec![id.sql()],
+            )
+            .await?;
+            Ok::<_, Failure>(id)
+        })
+        .await?;
     Ok(id.to_string())
 }
 
@@ -727,13 +731,15 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["application"], "behind");
-    let mut tx = b.database.transaction().await?;
-    tx.execute(
-        &format!("UPDATE lists SET title='Monthly' WHERE id=X'{id}'"),
-        Vec::new(),
-    )
-    .await?;
-    tx.commit().await?;
+    b.database
+        .write(async |tx| {
+            tx.execute(
+                &format!("UPDATE lists SET title='Monthly' WHERE id=X'{id}'"),
+                Vec::new(),
+            )
+            .await
+        })
+        .await?;
     sync(&b).await;
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists").await,
@@ -1250,15 +1256,17 @@ impl LateWriter {
 
         let bob = reopen(&dirs("bob"), &common::schema(), network("bob")).await?;
         let events = bob.database.observe(&[]).await?;
-        let mut tx = bob.database.transaction().await?;
-        tx.execute(
-            "INSERT INTO items(key,completed,title) VALUES('tea',0,'Tea')",
-            Vec::new(),
-        )
-        .await?;
-        let rocky_sdk::Commit::Recorded(tea) = tx.commit().await? else {
-            return Err("a write has a token".into());
-        };
+        let tea = bob
+            .database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO items(key,completed,title) VALUES('tea',0,'Tea')",
+                    Vec::new(),
+                )
+                .await?;
+                Ok::<_, Failure>(tx.token())
+            })
+            .await?;
         introduce(&owner, &bob).await;
         for _ in 0..3 {
             sync(&bob).await;
@@ -1347,12 +1355,16 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
         installed: 3,
         declared: 1,
     };
-    let mut tx = late.bob.database.transaction().await?;
-    let refused = tx
-        .execute(
-            "INSERT INTO items(key,completed,title) VALUES('milk',0,'Milk')",
-            Vec::new(),
-        )
+    let refused = late
+        .bob
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO items(key,completed,title) VALUES('milk',0,'Milk')",
+                Vec::new(),
+            )
+            .await
+        })
         .await
         .err()
         .ok_or("a write into the removed field succeeded")?;
@@ -1362,7 +1374,6 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
         "SQL naming the removed field says the application must upgrade: {refused}"
     );
     assert!(!refused.retryable());
-    drop(tx);
     late.bob.close().await;
 
     let refused = open(&late.path("bob"), &common::schema(), late.network("bob"))

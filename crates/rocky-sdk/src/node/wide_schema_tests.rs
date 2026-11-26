@@ -161,16 +161,19 @@ async fn exercise(count: usize) -> Result<(), Failure> {
     }
     let table = format!("table_{:03}", count - 1);
     let writer = &members[0].0;
-    let mut tx = writer.database.transaction().await?;
-    let id = tx
-        .next_id(&table, vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+    writer
+        .database
+        .write(async |tx| {
+            let id = tx
+                .next_id(&table, vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+                .await?;
+            tx.execute(
+                &format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')"),
+                vec![id.sql()],
+            )
+            .await
+        })
         .await?;
-    tx.execute(
-        &format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')"),
-        vec![id.sql()],
-    )
-    .await?;
-    tx.commit().await?;
     let writer_sync = writer.sync().await.map_err(|e| e.to_string())?;
     owner
         .add_peer(&writer.contact().await)
@@ -214,13 +217,15 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         );
     }
     assert_eq!(title.as_deref(), Some("written"));
-    let mut tx = members[1].0.database.transaction().await?;
-    assert!(
-        tx.execute(&format!("UPDATE {table} SET title='forged'"), Vec::new())
-            .await
-            .is_err()
-    );
-    tx.rollback().await?;
+    let forged = members[1]
+        .0
+        .database
+        .write(async |tx| {
+            tx.execute(&format!("UPDATE {table} SET title='forged'"), Vec::new())
+                .await
+        })
+        .await;
+    assert!(forged.is_err());
     snap::ok(owner.database.remove(members[0].1)).await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
@@ -262,16 +267,19 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
         vec![rocky_sdk::SqlValue::Text("A".to_owned())],
     )))
     .await;
-    let mut tx = device.database.transaction().await?;
-    let id = tx
-        .next_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+    device
+        .database
+        .write(async |tx| {
+            let id = tx
+                .next_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+                .await?;
+            tx.execute(
+                "INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')",
+                vec![id.sql()],
+            )
+            .await
+        })
         .await?;
-    tx.execute(
-        "INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')",
-        vec![id.sql()],
-    )
-    .await?;
-    tx.commit().await?;
     let rows = device
         .database
         .query("SELECT title FROM table_159", Vec::new())

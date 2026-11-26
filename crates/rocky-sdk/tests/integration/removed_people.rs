@@ -3,15 +3,17 @@ use rocky_sdk::{Network, PersonId, SqlValue, transport::memory::Hub};
 use std::sync::Arc;
 
 async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
-    let mut transaction = device.database.transaction().await?;
-    transaction
-        .execute(
-            "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
-            vec![SqlValue::Text(title.into()), SqlValue::Text(title.into())],
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(())
+    device
+        .database
+        .write(async |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+                    vec![SqlValue::Text(title.into()), SqlValue::Text(title.into())],
+                )
+                .await
+        })
+        .await
 }
 
 async fn read(device: &Device) -> Result<Vec<rocky_sdk::Row>, rocky_sdk::Error> {

@@ -11,10 +11,12 @@ pub(crate) struct Touched {
     causes: BTreeSet<Cause>,
     outcomes: crate::observe::Outcomes,
 }
+pub(crate) type Observable = Arc<std::sync::Mutex<Option<Arc<TableEvents>>>>;
 pub(crate) struct Queries {
     pub(super) cursors: Arc<CursorHost>,
     pub(super) authority: Arc<AtomicU64>,
     pub(super) events: Option<Arc<TableEvents>>,
+    pub(super) observable: Observable,
     pub(super) touched: std::sync::Mutex<Touched>,
     readers: std::sync::Mutex<Vec<std::sync::Weak<ReadAccess>>>,
 }
@@ -24,6 +26,7 @@ impl Default for Queries {
             cursors: CursorHost::new(),
             authority: Arc::new(AtomicU64::new(1)),
             events: None,
+            observable: Observable::default(),
             touched: Default::default(),
             readers: Default::default(),
         }
@@ -44,8 +47,13 @@ struct ReadState {
     unavailable: BTreeMap<String, Error>,
 }
 impl ReadAccess {
+    pub(super) fn current(&self, authority: u64, expires: u64) -> bool {
+        self.current.load(Ordering::SeqCst) == authority
+            && self.authority == authority
+            && now().is_ok_and(|time| time < expires)
+    }
     fn snapshot(&self) -> Result<ReadState, Error> {
-        if self.current.load(Ordering::SeqCst) != self.authority || now()? >= self.status.expires {
+        if !self.current(self.authority, self.status.expires) {
             return Err(Error::Sql(SqlError::AuthorityChanged));
         }
         let state = self.state.read().map_err(|_| Error::Closed)?;
@@ -185,10 +193,14 @@ impl<A: RowApplication> Inner<A> {
                 .tables
                 .iter()
                 .map(|table| table.sql_name.clone());
-            self.workspace.queries.events = Some(match &self.workspace.queries.events {
+            let events = match &self.workspace.queries.events {
                 Some(events) if events.scope() == typed.domain => events.follow(tables),
                 _ => TableEvents::new(typed.domain, tables),
-            });
+            };
+            if let Ok(mut observable) = self.workspace.queries.observable.lock() {
+                *observable = Some(events.clone());
+            }
+            self.workspace.queries.events = Some(events);
         }
     }
     pub(super) fn bump_authority(&mut self) {
@@ -345,13 +357,12 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    pub async fn observe_tables(&self, tables: Option<&[&str]>) -> Result<TableObserver, Error> {
-        let inner = self.inner.lock(crate::replica::Class::Background).await;
-        let events = inner
-            .workspace
-            .queries
-            .events
-            .as_ref()
+    pub fn observe_tables(&self, tables: Option<&[&str]>) -> Result<TableObserver, Error> {
+        let events = self
+            .observable
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .clone()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
         let labels: Option<Vec<(String, String)>> = tables.map(|tables| {
             tables
@@ -361,7 +372,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         });
         let mut observer = TableObserver::new();
         events.register(&observer, labels.as_deref())?;
-        observer.registered_at(events.scope(), inner.revision);
+        observer.registered_at(events.scope(), *self.revisions.borrow());
         Ok(observer)
     }
 }

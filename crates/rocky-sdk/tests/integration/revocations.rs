@@ -86,17 +86,20 @@ const INSERT_ITEM: &str = "INSERT INTO items(key,title,completed) VALUES(?,?,0)"
 const INSERT_NOTE: &str = "INSERT INTO notes(key,text) VALUES(?,?)";
 async fn create_row(device: &Device, handle: u8, sql: &str, text: &str) {
     let handle = [handle; 32];
-    let mut tx = device.database.transaction().await.expect("begin");
-    tx.execute(
-        sql,
-        vec![
-            SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
-            SqlValue::Text(text.into()),
-        ],
-    )
-    .await
-    .expect("insert");
-    tx.commit().await.expect("commit");
+    device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                sql,
+                vec![
+                    SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
+                    SqlValue::Text(text.into()),
+                ],
+            )
+            .await
+        })
+        .await
+        .expect("insert");
 }
 async fn texts(device: &Device, sql: &str) -> Vec<String> {
     device

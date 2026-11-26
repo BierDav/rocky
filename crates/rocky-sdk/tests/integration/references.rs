@@ -1,8 +1,8 @@
 use crate::common::{self, Device, Failure, introduce};
 use rocky_sdk::{
-    Affinity, Column, Commit, Database, DropReason, ErrorKind, ForeignKey, Index, Network,
-    Partition, RowIdentity, Schema, SchemaError, SqlValue, Table, TransactionOutcome,
-    TransactionToken, params, transport::memory::Hub,
+    Affinity, Column, Database, DropReason, ErrorKind, ForeignKey, Index, Network, Partition,
+    RowIdentity, Schema, SchemaError, SqlValue, Table, TransactionOutcome, TransactionToken,
+    params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -60,20 +60,20 @@ async fn attempt(
     database: &Database,
     sql: &str,
     values: Vec<SqlValue>,
-) -> Result<Commit, rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction.execute(sql, values).await?;
-    transaction.commit().await
+) -> Result<TransactionToken, rocky_sdk::Error> {
+    database
+        .write(async |tx| {
+            tx.execute(sql, values).await?;
+            Ok(tx.token())
+        })
+        .await
 }
 async fn write(
     database: &Database,
     sql: &str,
     values: Vec<SqlValue>,
 ) -> Result<TransactionToken, Failure> {
-    match attempt(database, sql, values).await? {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err(format!("{sql} ran no write").into()),
-    }
+    Ok(attempt(database, sql, values).await?)
 }
 async fn count(database: &Database, table: &str) -> Result<i64, Failure> {
     let rows = database
@@ -84,16 +84,17 @@ async fn count(database: &Database, table: &str) -> Result<i64, Failure> {
     Ok(rows.first().ok_or("no count")?.get_at(0)?)
 }
 async fn add_account(database: &Database) -> Result<RowIdentity, Failure> {
-    let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("accounts", Vec::new()).await?;
-    transaction
-        .execute(
-            "INSERT INTO accounts(id, name) VALUES(?, 'Ada')",
-            params![id],
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(id)
+    Ok(database
+        .write(async |tx| {
+            let id = tx.next_id("accounts", Vec::new()).await?;
+            tx.execute(
+                "INSERT INTO accounts(id, name) VALUES(?, 'Ada')",
+                params![id],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(id)
+        })
+        .await?)
 }
 
 async fn pair(root: &Path) -> Result<(Device, Device), Failure> {
@@ -252,38 +253,37 @@ async fn restrict_drops_the_later_of_an_offline_delete_and_insert_in_a_partition
     let (a, b) = pair(root.path()).await?;
     let north = Partition::new("site", vec![SqlValue::Text("north".into())]);
     a.database.create_partition(&north).await?;
-    let mut transaction = a.database.transaction().await?;
-    let shelf = transaction.next_id("shelves", params!["north"]).await?;
-    transaction
-        .execute(
-            "INSERT INTO shelves(site, id, label) VALUES('north', ?, 'Poetry')",
-            params![shelf],
-        )
+    let shelf = a
+        .database
+        .write(async |tx| {
+            let shelf = tx.next_id("shelves", params!["north"]).await?;
+            tx.execute(
+                "INSERT INTO shelves(site, id, label) VALUES('north', ?, 'Poetry')",
+                params![shelf],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(shelf)
+        })
         .await?;
-    transaction.commit().await?;
     sync(&a, &b).await?;
-    let deleted = match attempt(
+    let deleted = attempt(
         &a.database,
         "DELETE FROM shelves WHERE site = 'north' AND id = ?",
         params![shelf],
     )
-    .await?
-    {
-        Commit::Recorded(token) => token,
-        Commit::NoWrites => return Err("the shelf delete ran no write".into()),
-    };
-    let mut transaction = b.database.transaction().await?;
-    let book = transaction.next_id("books", params!["north"]).await?;
-    transaction
-        .execute(
-            "INSERT INTO books(site, id, shelf, title) VALUES('north', ?, ?, 'Odes')",
-            params![book, shelf],
-        )
+    .await?;
+    let inserted = b
+        .database
+        .write(async |tx| {
+            let book = tx.next_id("books", params!["north"]).await?;
+            tx.execute(
+                "INSERT INTO books(site, id, shelf, title) VALUES('north', ?, ?, 'Odes')",
+                params![book, shelf],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
         .await?;
-    let inserted = match transaction.commit().await? {
-        Commit::Recorded(token) => token,
-        Commit::NoWrites => return Err("the book insert ran no write".into()),
-    };
     sync(&a, &b).await?;
     let kept = one_of_two_drops_on_every_device(&a, &b, deleted, inserted).await?;
     let expected = if kept == deleted { (0, 0) } else { (1, 1) };

@@ -28,12 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join(&invitation.code)
         .await?;
 
-    let mut transaction = alice.database.transaction().await?;
     let insert = "INSERT INTO notes(body) VALUES(?)";
-    transaction
-        .execute(insert, params!["Hello from Alice"])
+    alice
+        .database
+        .write(async |tx| tx.execute(insert, params!["Hello from Alice"]).await)
         .await?;
-    transaction.commit().await?;
 
     let report = bob.database.sync_now().await?;
     println!("Bob's sync: {report}");

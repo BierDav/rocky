@@ -58,10 +58,14 @@ fn open(directory: &Path, network: Option<Network>) -> Result<Configuration, Fai
 }
 async fn create(configuration: Configuration) -> Result<Database, Failure> {
     let database = configuration.create().await?.database;
-    let mut tx = database.transaction().await?;
-    let id = tx.next_id("items", Vec::new()).await?;
-    assert_eq!(id.sequence(), 1);
-    tx.rollback().await?;
+    let rolled_back = database
+        .write(async |tx| {
+            let id = tx.next_id("items", Vec::new()).await?;
+            assert_eq!(id.sequence(), 1);
+            Err::<(), Failure>("roll the allocation back".into())
+        })
+        .await;
+    assert!(rolled_back.is_err());
     Ok(database)
 }
 fn text(value: &str) -> SqlValue {

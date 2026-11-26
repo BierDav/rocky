@@ -1,7 +1,7 @@
 use crate::common;
 
 use common::{World, sync, titles};
-use rocky_sdk::{Commit, DropReason, TableEvents, TransactionOutcome, TransactionToken, params};
+use rocky_sdk::{DropReason, TableEvents, TransactionOutcome, TransactionToken, params};
 use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
@@ -67,13 +67,6 @@ fn dropped(outcome: &Option<TransactionOutcome>) -> Option<(DropReason, bool)> {
     }
 }
 
-fn token(commit: Commit) -> Result<TransactionToken, Failure> {
-    match commit {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err("a replayed write publishes a transaction".into()),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<(), Failure> {
     let mut world = World::new().await?;
@@ -95,20 +88,20 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
 
     let (on_laptop, on_phone, on_tablet) = tokio::join!(
         async {
-            let moved = token(laptop.move_to(list, ids[2], 1).await?)?;
-            let raised = token(laptop.raise_priority(list, ids[0]).await?)?;
-            let added = token(laptop.add(list, "Pharmacy").await?.token)?;
+            let moved = laptop.move_to(list, ids[2], 1).await?;
+            let raised = laptop.raise_priority(list, ids[0]).await?;
+            let added = laptop.add(list, "Pharmacy").await?.token;
             Ok::<_, Failure>([moved, raised, added])
         },
         async {
-            let moved = token(phone.move_to(list, ids[3], 1).await?)?;
-            let raised = token(phone.raise_priority(list, ids[0]).await?)?;
-            let added = token(phone.add(list, "Pharmacy").await?.token)?;
+            let moved = phone.move_to(list, ids[3], 1).await?;
+            let raised = phone.raise_priority(list, ids[0]).await?;
+            let added = phone.add(list, "Pharmacy").await?.token;
             Ok::<_, Failure>([moved, raised, added])
         },
         async {
-            let raised = token(tablet.raise_priority(list, ids[0]).await?)?;
-            let renamed = token(tablet.rename(list, ids[1], "Bank and cash").await?)?;
+            let raised = tablet.raise_priority(list, ids[0]).await?;
+            let renamed = tablet.rename(list, ids[1], "Bank and cash").await?;
             Ok::<_, Failure>([raised, renamed])
         },
     );
@@ -182,18 +175,16 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
 
     phone.database().set_sync(rocky_sdk::SyncMode::Off).await?;
     let late = [
-        token(phone.add(list, "Milk").await?.token)?,
-        token(phone.raise_priority(list, post).await?)?,
-        token(phone.add(list, "Bread").await?.token)?,
+        phone.add(list, "Milk").await?.token,
+        phone.raise_priority(list, post).await?,
+        phone.add(list, "Bread").await?.token,
     ];
     let mut tokens = Vec::new();
     let enough_for_a_routine_seal = rocky_secure_routine();
     for index in 0..enough_for_a_routine_seal {
-        tokens.push(token(
-            laptop.add(list, &format!("Item {index}")).await?.token,
-        )?);
+        tokens.push(laptop.add(list, &format!("Item {index}")).await?.token);
     }
-    tokens.push(token(laptop.add(list, "Bread").await?.token)?);
+    tokens.push(laptop.add(list, "Bread").await?.token);
     let sealed = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let offline_phone = laptop.database().sync_now().await.err();
@@ -272,14 +263,12 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
         for (name, device) in [("phone", &phone), ("tablet", &tablet)] {
             for index in 0..WRITES_APART_PER_ROUND {
                 tokens.push(if index % 4 == 0 {
-                    token(device.raise_priority(list, shared).await?)?
+                    device.raise_priority(list, shared).await?
                 } else {
-                    token(
-                        device
-                            .add(list, &format!("{name} {round}.{index}"))
-                            .await?
-                            .token,
-                    )?
+                    device
+                        .add(list, &format!("{name} {round}.{index}"))
+                        .await?
+                        .token
                 });
             }
         }
@@ -350,18 +339,22 @@ async fn qualification_child() -> Result<(), Failure> {
         }
         _ => {
             for pair in 0.. {
-                let mut transaction = todos.database().transaction().await?;
-                for side in ["a", "b"] {
-                    let id = transaction.next_id(TODOS, params![list]).await?;
-                    let position = position::between(None, None, id)?;
-                    transaction
-                        .execute(
-                            "INSERT INTO todos(id,list,title,completed,position,priority) VALUES(?,?,?,0,?,0)",
-                            params![id, list, format!("{side} {pair}"), position],
-                        )
-                        .await?;
-                }
-                transaction.commit().await?;
+                todos
+                    .database()
+                    .write(async |transaction| {
+                        for side in ["a", "b"] {
+                            let id = transaction.next_id(TODOS, params![list]).await?;
+                            let position = position::between(None, None, id)?;
+                            transaction
+                                .execute(
+                                    "INSERT INTO todos(id,list,title,completed,position,priority) VALUES(?,?,?,0,?,0)",
+                                    params![id, list, format!("{side} {pair}"), position],
+                                )
+                                .await?;
+                        }
+                        Ok::<_, Failure>(())
+                    })
+                    .await?;
                 writeln!(out, "{REPORT}{pair}")?;
                 out.flush()?;
             }

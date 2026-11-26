@@ -41,23 +41,24 @@ async fn write(
     sql: &str,
     params: Vec<SqlValue>,
 ) -> Result<TransactionToken, Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(sql, params).await?;
-    match tx.commit().await? {
-        rocky_sdk::Commit::Recorded(token) => Ok(token),
-        rocky_sdk::Commit::NoWrites => Err("a replayed write publishes".into()),
-    }
+    Ok(database
+        .write(async |tx| {
+            tx.execute(sql, params).await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await?)
 }
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<(), Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "INSERT INTO balances(key,amount,fee,bonus) VALUES(?,?,0,0)",
-        params![key, amount],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO balances(key,amount,fee,bonus) VALUES(?,?,0,0)",
+                params![key, amount],
+            )
+            .await
+        })
+        .await?)
 }
 
 async fn balances(database: &Database) -> Result<Vec<(String, i64, i64, i64)>, Failure> {
@@ -235,13 +236,15 @@ async fn uuids_timestamps_json_and_extreme_integers_round_trip() -> Result<(), F
     let uuid: [u8; 16] = *b"\x67\xe5\x50\x44\x10\xb1\x42\x6f\x92\x47\xbb\x68\x0e\x5f\xe0\xc8";
     let at = Timestamp::from_unix_micros(-1_234_567);
     let doc = json!({"b": [1, 2.5, null], "a": {"z": "x", "y": true}});
-    let mut tx = a.database.transaction().await?;
-    tx.execute(
-        "INSERT INTO records(key,uuid,at,doc) VALUES(?,?,?,?)",
-        params!["r", uuid, at, doc.clone()],
-    )
-    .await?;
-    tx.commit().await?;
+    a.database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO records(key,uuid,at,doc) VALUES(?,?,?,?)",
+                params!["r", uuid, at, doc.clone()],
+            )
+            .await
+        })
+        .await?;
     create(&a.database, "min", i64::MIN).await?;
     create(&a.database, "max", i64::MAX).await?;
 

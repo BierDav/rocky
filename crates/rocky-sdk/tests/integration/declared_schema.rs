@@ -22,12 +22,12 @@ fn open(directory: &Path, hub: &Arc<Hub>, name: &str, version: u32) -> Configura
     )
 }
 async fn write(database: &Database) -> Result<(), rocky_sdk::Error> {
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute("INSERT INTO notes(body) VALUES('late')", params![])
-        .await?;
-    transaction.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| {
+            tx.execute("INSERT INTO notes(body) VALUES('late')", params![])
+                .await
+        })
+        .await
 }
 async fn bodies(database: &Database) -> Result<usize, rocky_sdk::Error> {
     Ok(database

@@ -35,29 +35,29 @@ fn open(directory: &Path, hub: &Arc<Hub>, name: &str) -> rocky_sdk::Configuratio
 }
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<TransactionToken, Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "INSERT INTO counters(key,amount) VALUES(?,?)",
-        vec![SqlValue::Text(key.into()), SqlValue::Integer(amount)],
-    )
-    .await?;
-    match tx.commit().await? {
-        rocky_sdk::Commit::Recorded(token) => Ok(token),
-        rocky_sdk::Commit::NoWrites => Err("a replayed insert publishes".into()),
-    }
+    Ok(database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO counters(key,amount) VALUES(?,?)",
+                vec![SqlValue::Text(key.into()), SqlValue::Integer(amount)],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await?)
 }
 
 async fn raise(database: &Database, key: &str) -> Result<TransactionToken, Failure> {
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "UPDATE counters SET amount=amount+? WHERE key=?",
-        vec![SqlValue::Integer(1), SqlValue::Text(key.into())],
-    )
-    .await?;
-    match tx.commit().await? {
-        rocky_sdk::Commit::Recorded(token) => Ok(token),
-        rocky_sdk::Commit::NoWrites => Err("a replayed update publishes".into()),
-    }
+    Ok(database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE counters SET amount=amount+? WHERE key=?",
+                vec![SqlValue::Integer(1), SqlValue::Text(key.into())],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await?)
 }
 
 async fn counters(database: &Database) -> Result<Vec<(String, i64)>, Failure> {

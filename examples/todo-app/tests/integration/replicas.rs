@@ -1,7 +1,7 @@
 use crate::common;
 
 use common::{World, titles};
-use rocky_sdk::{Commit, DropReason, TransactionToken};
+use rocky_sdk::DropReason;
 use todo_app::{Failure, Role};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -129,10 +129,7 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
         "each move rewrote only its own todo, so both placements hold"
     );
 
-    let tokens = [
-        published(laptop_pharmacy.token)?,
-        published(phone_pharmacy.token)?,
-    ];
+    let tokens = [laptop_pharmacy.token, phone_pharmacy.token];
     let mut outcomes = Vec::new();
     for device in [&laptop, &phone] {
         let mut here = Vec::new();
@@ -158,11 +155,4 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
         "deleting a list cascades to its todos on every device"
     );
     world.close().await
-}
-
-fn published(commit: Commit) -> Result<TransactionToken, Failure> {
-    match commit {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err("published".into()),
-    }
 }

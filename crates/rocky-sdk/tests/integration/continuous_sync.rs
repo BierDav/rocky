@@ -11,19 +11,20 @@ const READER: &str = "reader";
 const ROUNDS: usize = 40;
 
 async fn replace_row(database: &Database, key: &str, title: &str) -> Result<(), Error> {
-    let mut tx = database.transaction().await?;
-    tx.execute(
-        "DELETE FROM items WHERE key=?",
-        vec![SqlValue::Text(key.into())],
-    )
-    .await?;
-    tx.execute(
-        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
-        vec![SqlValue::Text(key.into()), SqlValue::Text(title.into())],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    database
+        .write(async |tx| {
+            tx.execute(
+                "DELETE FROM items WHERE key=?",
+                vec![SqlValue::Text(key.into())],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+                vec![SqlValue::Text(key.into()), SqlValue::Text(title.into())],
+            )
+            .await
+        })
+        .await
 }
 
 async fn rows(database: &Database) -> Result<Vec<(String, String)>, Error> {

@@ -66,14 +66,15 @@ async fn main() -> Result<(), Failure> {
 
 async fn record_sale(database: &Database, sale: &str) -> Result<(), Failure> {
     let created = Timestamp::try_from(SystemTime::now())?;
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute(
-            "INSERT INTO sales(sale, created) VALUES(?, ?)",
-            params![sale, created],
-        )
+    database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO sales(sale, created) VALUES(?, ?)",
+                params![sale, created],
+            )
+            .await
+        })
         .await?;
-    transaction.commit().await?;
     database.flush().await?;
     Ok(())
 }
@@ -97,13 +98,14 @@ async fn invoice(
     let Claimed::First(number) = counters.claim(invoices, &claim).await? else {
         return Err("another attempt holds this sale's number".into());
     };
-    let mut transaction = database.transaction().await?;
-    transaction
-        .execute(
-            "UPDATE sales SET invoice = ? WHERE sale = ?",
-            params![number, sale],
-        )
+    database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE sales SET invoice = ? WHERE sale = ?",
+                params![number, sale],
+            )
+            .await
+        })
         .await?;
-    transaction.commit().await?;
     Ok(number)
 }

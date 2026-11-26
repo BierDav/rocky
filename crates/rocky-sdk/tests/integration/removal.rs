@@ -75,9 +75,11 @@ async fn create(device: &Device, handle: u8, collection: &str, values: Value) ->
     reply["id"].as_str().unwrap_or_default().to_owned()
 }
 async fn write(device: &Device, _collection: &str, _handle: u8, sql: &str) {
-    let mut tx = device.database.transaction().await.expect("begin");
-    tx.execute(sql, Vec::new()).await.expect("execute");
-    tx.commit().await.expect("commit");
+    device
+        .database
+        .write(async |tx| tx.execute(sql, Vec::new()).await)
+        .await
+        .expect("write");
 }
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     let file = rusqlite::Connection::open_with_flags(
@@ -320,18 +322,20 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     )
     .await;
     b.sync().await.expect("sync");
-    let mut tx = b.database.transaction().await?;
-    tx.execute(
-        "UPDATE items SET title='green apples' WHERE title='apples'",
-        Vec::new(),
-    )
-    .await?;
-    tx.execute(
-        "INSERT INTO shelves(key,label) VALUES('cellar','cellar')",
-        Vec::new(),
-    )
-    .await?;
-    tx.commit().await?;
+    b.database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE items SET title='green apples' WHERE title='apples'",
+                Vec::new(),
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO shelves(key,label) VALUES('cellar','cellar')",
+                Vec::new(),
+            )
+            .await
+        })
+        .await?;
     assert_eq!(b.titles().await, ["bread", "green apples"]);
 
     a.close().await;
@@ -596,19 +600,21 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
         )
         .await;
 
-        let mut tx = b.database.transaction().await?;
-        tx.execute(
-            "INSERT INTO items(list,key,title,completed,note) VALUES(?,?,?,?,?)",
-            vec![
-                text(list),
-                text("key"),
-                text(list),
-                rocky_sdk::SqlValue::Integer(0),
-                text("old"),
-            ],
-        )
-        .await?;
-        tx.commit().await?;
+        b.database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO items(list,key,title,completed,note) VALUES(?,?,?,?,?)",
+                    vec![
+                        text(list),
+                        text("key"),
+                        text(list),
+                        rocky_sdk::SqlValue::Integer(0),
+                        text("old"),
+                    ],
+                )
+                .await
+            })
+            .await?;
     }
     b.close().await;
     let without_note = build(shopping(2).table(partitioned_items()));

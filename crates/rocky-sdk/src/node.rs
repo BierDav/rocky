@@ -302,6 +302,7 @@ pub(crate) struct Node {
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::SyncReport>>,
+    last_status: std::sync::Mutex<Option<crate::DatabaseStatus>>,
     last_syncs: std::sync::Mutex<BTreeMap<PublicKey, crate::PeerReconciliation>>,
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
@@ -337,6 +338,7 @@ impl Node {
                 .map(|key| PrivateKey::from_bytes(&key).public_key())
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
+            last_status: Default::default(),
             last_syncs: Default::default(),
             mesh: Default::default(),
             link_requests: Default::default(),
@@ -444,29 +446,33 @@ impl Node {
     pub(crate) async fn removed_what_the_application_declares(
         &self,
     ) -> Result<Option<crate::Error>, Failure> {
-        if self.replica.followed_bookmark().await.is_none() {
+        let settings = self.settings.published();
+        let Some((installed, declared)) = settings.upgrade_required(&self.declared)? else {
             return Ok(None);
-        }
-        let settings = self.settings.lock().await.clone();
-        Ok(settings
-            .upgrade_required(&self.declared)?
-            .map(|(installed, declared)| crate::Error::schema_mismatch(installed, declared)))
+        };
+        Ok(self
+            .replica
+            .followed_bookmark()
+            .await
+            .is_some()
+            .then(|| crate::Error::schema_mismatch(installed, declared)))
     }
     pub(crate) async fn refuse_sql_while_declared_ahead(&self) -> Result<(), Failure> {
-        if self.declared_installed.load(Ordering::Acquire)
-            || self.replica.followed_bookmark().await.is_none()
-        {
+        if self.declared_installed.load(Ordering::Acquire) {
             return Ok(());
         }
-        let settings = self.settings.lock().await.clone();
-        if settings.application(&self.declared)? == crate::DeclaredSchema::Ahead {
-            return Err(Box::new(crate::Error::schema_mismatch(
-                settings.generation,
-                self.declared.version,
-            )));
+        let settings = self.settings.published();
+        if settings.application(&self.declared)? != crate::DeclaredSchema::Ahead {
+            self.declared_installed.store(true, Ordering::Release);
+            return Ok(());
         }
-        self.declared_installed.store(true, Ordering::Release);
-        Ok(())
+        if self.replica.followed_bookmark().await.is_none() {
+            return Ok(());
+        }
+        Err(Box::new(crate::Error::schema_mismatch(
+            settings.generation,
+            self.declared.version,
+        )))
     }
     pub(crate) async fn staged_switch_mismatch(&self, error: Failure) -> Failure {
         let staged = matches!(
@@ -550,11 +556,10 @@ impl Node {
         options: SqlOptions,
     ) -> Result<SecureSql<TypedRows>, Failure> {
         self.admit_sql().await?;
-        let session = self
+        Ok(self
             .replica
-            .session(self.app_scopes().into_iter().collect())
-            .await?;
-        Ok(session.sql(options).await?)
+            .sql_session(self.app_scopes().into_iter().collect(), options)
+            .await?)
     }
 
     fn install(

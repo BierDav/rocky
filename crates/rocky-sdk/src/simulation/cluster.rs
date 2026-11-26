@@ -156,17 +156,19 @@ impl Member {
         _handle: u64,
         _kind: u8,
     ) -> Result<(), Failure> {
-        let mut tx = self.database()?.transaction().await?;
-        for values in rows {
-            let places = vec!["?"; values.len()].join(", ");
-            tx.execute(
-                &format!("INSERT INTO {table}({columns}) VALUES({places})"),
-                values.clone(),
-            )
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
+        self.database()?
+            .write(async |tx| {
+                for values in rows {
+                    let places = vec!["?"; values.len()].join(", ");
+                    tx.execute(
+                        &format!("INSERT INTO {table}({columns}) VALUES({places})"),
+                        values.clone(),
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await
     }
     pub(super) async fn keys(&self) -> Result<Vec<String>, Failure> {
         let rows = self

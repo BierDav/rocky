@@ -332,72 +332,72 @@ pub async fn mutate(
             return Ok(json!({"replayed":true,"handle":key}));
         }
     }
-    let mut tx = database.transaction().await?;
-    let id = match action {
-        Action::Create { table, values } => {
-            if !valid(&table) || values.iter().any(|(name, _)| !valid(name)) {
-                return Err("invalid fixture identifier".into());
-            }
-            let mut columns = vec!["key".to_owned()];
-            let mut bound = vec![sdk::SqlValue::Text(key.clone())];
-            for (name, value) in values {
-                columns.push(format!("\"{name}\""));
-                bound.push(value);
-            }
-            let sql = format!(
-                "INSERT INTO \"{table}\"({}) VALUES({})",
-                columns.join(","),
-                vec!["?"; columns.len()].join(",")
-            );
-            tx.execute(&sql, bound).await?;
-            key.clone()
-        }
-        Action::Set {
-            table,
-            field,
-            value,
-        } => {
-            if !valid(&table) || !valid(&field) {
-                return Err("invalid fixture identifier".into());
-            }
-            let id = entity.ok_or("missing fixture entity")?;
-            let exists = tx
-                .query(
-                    &format!("SELECT 1 FROM \"{table}\" WHERE key=?"),
-                    vec![sdk::SqlValue::Text(id.clone())],
-                )
-                .await?
-                .next()
-                .await?
-                .is_some();
-            if !exists {
-                return Err(fixture_rejection("fixture entity not found"));
-            }
-            tx.execute(
-                &format!("UPDATE \"{table}\" SET \"{field}\"=? WHERE key=?"),
-                vec![value, sdk::SqlValue::Text(id.clone())],
-            )
-            .await?;
-            id
-        }
-        Action::Delete { table } => {
-            if !valid(&table) {
-                return Err("invalid fixture identifier".into());
-            }
-            let id = entity.ok_or("missing fixture entity")?;
-            tx.execute(
-                &format!("DELETE FROM \"{table}\" WHERE key=?"),
-                vec![sdk::SqlValue::Text(id.clone())],
-            )
-            .await?;
-            id
-        }
-    };
-    let committed = tx.commit().await?;
-    let frames = match committed {
-        sdk::Commit::Recorded(_) => Some(1usize),
-        sdk::Commit::NoWrites => None,
-    };
+    let id = database
+        .write(async |tx| {
+            let id = match action {
+                Action::Create { table, values } => {
+                    if !valid(&table) || values.iter().any(|(name, _)| !valid(name)) {
+                        return Err("invalid fixture identifier".into());
+                    }
+                    let mut columns = vec!["key".to_owned()];
+                    let mut bound = vec![sdk::SqlValue::Text(key.clone())];
+                    for (name, value) in values {
+                        columns.push(format!("\"{name}\""));
+                        bound.push(value);
+                    }
+                    let sql = format!(
+                        "INSERT INTO \"{table}\"({}) VALUES({})",
+                        columns.join(","),
+                        vec!["?"; columns.len()].join(",")
+                    );
+                    tx.execute(&sql, bound).await?;
+                    key.clone()
+                }
+                Action::Set {
+                    table,
+                    field,
+                    value,
+                } => {
+                    if !valid(&table) || !valid(&field) {
+                        return Err("invalid fixture identifier".into());
+                    }
+                    let id = entity.ok_or("missing fixture entity")?;
+                    let exists = tx
+                        .query(
+                            &format!("SELECT 1 FROM \"{table}\" WHERE key=?"),
+                            vec![sdk::SqlValue::Text(id.clone())],
+                        )
+                        .await?
+                        .next()
+                        .await?
+                        .is_some();
+                    if !exists {
+                        return Err(fixture_rejection("fixture entity not found"));
+                    }
+                    tx.execute(
+                        &format!("UPDATE \"{table}\" SET \"{field}\"=? WHERE key=?"),
+                        vec![value, sdk::SqlValue::Text(id.clone())],
+                    )
+                    .await?;
+                    id
+                }
+                Action::Delete { table } => {
+                    if !valid(&table) {
+                        return Err("invalid fixture identifier".into());
+                    }
+                    let id = entity.ok_or("missing fixture entity")?;
+                    tx.execute(
+                        &format!("DELETE FROM \"{table}\" WHERE key=?"),
+                        vec![sdk::SqlValue::Text(id.clone())],
+                    )
+                    .await?;
+                    id
+                }
+            };
+            Ok::<_, Failure>(id)
+        })
+        .await?;
+    let frames = Some(1usize);
     Ok(json!({"id":id,"handle":key,"frames":frames}))
 }
 

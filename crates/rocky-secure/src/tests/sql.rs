@@ -1844,15 +1844,10 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
             &both,
         )
         .await;
-    let mut items = alice.observe_tables(Some(&["items"])).await.unwrap();
-    let mut salaries = alice.observe_tables(Some(&["salaries"])).await.unwrap();
-    let mut received = bob.observe_tables(Some(&["items"])).await.unwrap();
-    assert!(
-        alice
-            .observe_tables(Some(&["secure_row_records"]))
-            .await
-            .is_err()
-    );
+    let mut items = alice.observe_tables(Some(&["items"])).unwrap();
+    let mut salaries = alice.observe_tables(Some(&["salaries"])).unwrap();
+    let mut received = bob.observe_tables(Some(&["items"])).unwrap();
+    assert!(alice.observe_tables(Some(&["secure_row_records"])).is_err());
     let session = sql(&alice, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])

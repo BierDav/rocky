@@ -120,19 +120,23 @@ impl Peer {
         crate::support::peerless_ok(self.database.sync_now().await)
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        let mut tx = self.database.transaction().await?;
-        let id = tx
-            .next_id(table, list.map(values).unwrap_or_default())
+        let id = self
+            .database
+            .write(async |tx| {
+                let id = tx
+                    .next_id(table, list.map(values).unwrap_or_default())
+                    .await?;
+                tx.execute(sql, vec![id.sql()]).await?;
+                Ok::<_, Failure>(id)
+            })
             .await?;
-        tx.execute(sql, vec![id.sql()]).await?;
-        tx.commit().await?;
         Ok(id.to_string())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        let mut tx = self.database.transaction().await?;
-        tx.execute(sql, Vec::new()).await?;
-        tx.commit().await?;
-        Ok(())
+        Ok(self
+            .database
+            .write(async |tx| tx.execute(sql, Vec::new()).await)
+            .await?)
     }
     async fn column(&self, sql: &str) -> Result<Vec<Value>, Failure> {
         let page = snap::read(&self.database, sql, Vec::new()).await?;
@@ -213,11 +217,9 @@ async fn checkpoint_writer(
     );
     writer
         .database
-        .transaction()
+        .write(async |_| Ok::<_, rocky_sdk::Error>(()))
         .await
-        .map_err(|error| format!("before preparing a new partition: {error}"))?
-        .rollback()
-        .await?;
+        .map_err(|error| format!("before preparing a new partition: {error}"))?;
     Ok((issuer, writer))
 }
 
@@ -460,13 +462,16 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         [json!(category)]
     );
 
-    let mut tx = writer.database.transaction().await?;
-    tx.execute(
-        &format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'"),
-        Vec::new(),
-    )
-    .await?;
-    tx.commit().await?;
+    writer
+        .database
+        .write(async |tx| {
+            tx.execute(
+                &format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'"),
+                Vec::new(),
+            )
+            .await
+        })
+        .await?;
     writer.sync_now().await?;
     for peer in [&writer, &issuer] {
         assert_eq!(
@@ -668,10 +673,13 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             )
             .await?;
     }
-    let mut tx = issuer.database.transaction().await?;
-    tx.execute("DELETE FROM items WHERE title='Eggs'", Vec::new())
+    issuer
+        .database
+        .write(async |tx| {
+            tx.execute("DELETE FROM items WHERE title='Eggs'", Vec::new())
+                .await
+        })
         .await?;
-    tx.commit().await?;
     writer.sync_now().await?;
     let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(
@@ -1293,19 +1301,23 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
     let list_bytes = data_encoding::HEXLOWER_PERMISSIVE.decode(list.as_bytes())?;
     for chunk_start in (0..total).step_by(200) {
         let chunk_end = (chunk_start + 200).min(total);
-        let mut transaction = issuer.database.transaction().await?;
-        for index in chunk_start..chunk_end {
-            let id = transaction
-                .next_id("items", rocky_sdk::params![list_bytes.clone()])
-                .await?;
-            transaction
-                .execute(
-                    "INSERT INTO items(id,list,title) VALUES(?,?,?)",
-                    rocky_sdk::params![id, list_bytes.clone(), format!("Item {index:04}")],
-                )
-                .await?;
-        }
-        transaction.commit().await?;
+        issuer
+            .database
+            .write(async |transaction| {
+                for index in chunk_start..chunk_end {
+                    let id = transaction
+                        .next_id("items", rocky_sdk::params![list_bytes.clone()])
+                        .await?;
+                    transaction
+                        .execute(
+                            "INSERT INTO items(id,list,title) VALUES(?,?,?)",
+                            rocky_sdk::params![id, list_bytes.clone(), format!("Item {index:04}")],
+                        )
+                        .await?;
+                }
+                Ok::<_, Failure>(())
+            })
+            .await?;
     }
     member.sync_now().await?;
     for peer in [member, issuer] {

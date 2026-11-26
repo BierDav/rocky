@@ -8,14 +8,16 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 }
 
 async fn try_add(device: &Device, key: &str) -> Result<(), rocky_sdk::Error> {
-    let mut tx = device.database.transaction().await?;
-    tx.execute(
-        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
-        vec![SqlValue::Text(key.into()), SqlValue::Text(key.into())],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+                vec![SqlValue::Text(key.into()), SqlValue::Text(key.into())],
+            )
+            .await
+        })
+        .await
 }
 
 async fn keys(device: &Device) -> Vec<String> {

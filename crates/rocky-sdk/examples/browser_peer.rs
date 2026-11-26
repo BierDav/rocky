@@ -82,10 +82,11 @@ mod native {
             .create()
             .await?
             .database;
-        let mut tx = db.transaction().await?;
-        tx.execute("INSERT INTO notes(body) VALUES(?)", params!["from native"])
-            .await?;
-        tx.commit().await?;
+        db.write(async |tx| {
+            tx.execute("INSERT INTO notes(body) VALUES(?)", params!["from native"])
+                .await
+        })
+        .await?;
         let invitation = db.invite(rocky_sdk::Invite::new(Access::Full)).await?;
         Ok((db, invitation))
     }

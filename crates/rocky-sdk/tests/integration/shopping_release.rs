@@ -93,12 +93,16 @@ impl Peer {
         Ok(())
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        let mut tx = self.database.transaction().await?;
-        let id = tx
-            .next_id(table, list.map(values).unwrap_or_default())
+        let id = self
+            .database
+            .write(async |tx| {
+                let id = tx
+                    .next_id(table, list.map(values).unwrap_or_default())
+                    .await?;
+                tx.execute(sql, vec![id.sql()]).await?;
+                Ok::<_, Failure>(id)
+            })
             .await?;
-        tx.execute(sql, vec![id.sql()]).await?;
-        tx.commit().await?;
         Ok(id.to_string())
     }
     async fn create_list(&self, title: &str) -> Result<String, Failure> {
@@ -127,26 +131,30 @@ impl Peer {
         .await
     }
     async fn move_item(&self, from: &str, id: &str, to: &str) -> Result<String, Failure> {
-        let mut tx = self.database.transaction().await?;
-        let moved = tx.next_id("items", values(to)).await?;
-        tx.execute(
-            &format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'"),
-            vec![moved.sql()],
-        )
-        .await?;
-        tx.execute(
-            &format!("DELETE FROM items WHERE list=X'{from}' AND id=X'{id}'"),
-            Vec::new(),
-        )
-        .await?;
-        tx.commit().await?;
+        let moved = self
+            .database
+            .write(async |tx| {
+                let moved = tx.next_id("items", values(to)).await?;
+                tx.execute(
+                    &format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'"),
+                    vec![moved.sql()],
+                )
+                .await?;
+                tx.execute(
+                    &format!("DELETE FROM items WHERE list=X'{from}' AND id=X'{id}'"),
+                    Vec::new(),
+                )
+                .await?;
+                Ok::<_, Failure>(moved)
+            })
+            .await?;
         Ok(moved.to_string())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        let mut tx = self.database.transaction().await?;
-        tx.execute(sql, Vec::new()).await?;
-        tx.commit().await?;
-        Ok(())
+        Ok(self
+            .database
+            .write(async |tx| tx.execute(sql, Vec::new()).await)
+            .await?)
     }
     async fn rows(&self, sql: &str) -> Result<Vec<Vec<Value>>, Failure> {
         let page = snap::read(&self.database, sql, Vec::new()).await?;

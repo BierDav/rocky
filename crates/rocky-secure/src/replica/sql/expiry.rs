@@ -107,6 +107,11 @@ impl Expiry {
         }
     }
 }
+pub(super) async fn elapsed(clock: &LeaseClock, timeout: Duration) {
+    if !Expiry::start(clock, timeout).1.deadline.reached().await {
+        std::future::pending::<()>().await;
+    }
+}
 impl Lapse {
     pub(super) async fn passed(self) -> bool {
         let Self {

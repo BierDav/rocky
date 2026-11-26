@@ -56,19 +56,20 @@ async fn open_rolled_out(
     }
 }
 async fn check_in(database: &Database, code: &str) -> Result<(), Failure> {
-    let mut tx = database.transaction().await?;
-    let id = tx.next_id("check_ins", Vec::new()).await?;
-    tx.execute(
-        "INSERT INTO check_ins(code,gate,id) VALUES(?,?,?)",
-        vec![
-            SqlValue::Text(code.into()),
-            SqlValue::Text("north".into()),
-            id.sql(),
-        ],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(database
+        .write(async |tx| {
+            let id = tx.next_id("check_ins", Vec::new()).await?;
+            tx.execute(
+                "INSERT INTO check_ins(code,gate,id) VALUES(?,?,?)",
+                vec![
+                    SqlValue::Text(code.into()),
+                    SqlValue::Text("north".into()),
+                    id.sql(),
+                ],
+            )
+            .await
+        })
+        .await?)
 }
 fn settings(directory: &Path) -> Result<Settings, Failure> {
     Settings::load(&directory.join("rocky.sqlite"))
@@ -222,13 +223,15 @@ async fn a_crash_between_narrowing_access_and_its_revocation_still_revokes_once(
         check_in(&member, "T1").await.is_ok(),
         "the scanner role still appends check-ins"
     );
-    let mut tx = member.transaction().await?;
+    let deleted = member
+        .write(async |tx| tx.execute("DELETE FROM check_ins", Vec::new()).await)
+        .await;
     assert!(
-        tx.execute("DELETE FROM check_ins", Vec::new())
-            .await
-            .is_err()
-            || tx.commit().await.is_err(),
-        "the narrowed person deletes nothing"
+        matches!(
+            deleted.as_ref().map_err(crate::Error::kind),
+            Err(crate::ErrorKind::Denied { .. })
+        ),
+        "the narrowed person deletes nothing, refused at the statement: {deleted:?}"
     );
     member.close().await?;
     admin.close().await?;

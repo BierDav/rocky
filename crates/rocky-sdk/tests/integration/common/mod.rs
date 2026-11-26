@@ -213,17 +213,19 @@ impl Device {
             .expect("next")
             .is_some();
         if !exists {
-            let mut tx = self.database.transaction().await.expect("begin");
-            tx.execute(
-                "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
-                vec![
-                    rocky_sdk::SqlValue::Text(key.clone()),
-                    rocky_sdk::SqlValue::Text(title.into()),
-                ],
-            )
-            .await
-            .expect("insert");
-            tx.commit().await.expect("commit");
+            self.database
+                .write(async |tx| {
+                    tx.execute(
+                        "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
+                        vec![
+                            rocky_sdk::SqlValue::Text(key.clone()),
+                            rocky_sdk::SqlValue::Text(title.into()),
+                        ],
+                    )
+                    .await
+                })
+                .await
+                .expect("insert");
         }
         key
     }
@@ -241,14 +243,16 @@ impl Device {
             Value::String(value) => SqlValue::Text(value),
             _ => panic!("unsupported fixture value"),
         };
-        let mut tx = self.database.transaction().await.expect("begin");
-        tx.execute(
-            &format!("UPDATE items SET \"{field}\"=? WHERE key=?"),
-            vec![value, SqlValue::Text(id.into())],
-        )
-        .await
-        .expect("update");
-        tx.commit().await.expect("commit");
+        self.database
+            .write(async |tx| {
+                tx.execute(
+                    &format!("UPDATE items SET \"{field}\"=? WHERE key=?"),
+                    vec![value, SqlValue::Text(id.into())],
+                )
+                .await
+            })
+            .await
+            .expect("update");
     }
     pub async fn items(&self) -> Vec<String> {
         let rows = self

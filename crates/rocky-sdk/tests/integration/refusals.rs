@@ -98,20 +98,23 @@ impl Venue {
         Ok(device)
     }
     async fn chart(&self, name: &str, note: &str) -> Result<(), Failure> {
-        let mut tx = self.admin.database.transaction().await?;
-        let id = tx
-            .next_id("charts", vec![SqlValue::Text(name.into())])
+        self.admin
+            .database
+            .write(async |tx| {
+                let id = tx
+                    .next_id("charts", vec![SqlValue::Text(name.into())])
+                    .await?;
+                tx.execute(
+                    "INSERT INTO charts(ward,id,note) VALUES(?,?,?)",
+                    vec![
+                        SqlValue::Text(name.into()),
+                        id.sql(),
+                        SqlValue::Text(note.into()),
+                    ],
+                )
+                .await
+            })
             .await?;
-        tx.execute(
-            "INSERT INTO charts(ward,id,note) VALUES(?,?,?)",
-            vec![
-                SqlValue::Text(name.into()),
-                id.sql(),
-                SqlValue::Text(note.into()),
-            ],
-        )
-        .await?;
-        tx.commit().await?;
         Ok(())
     }
     async fn close(self, devices: impl IntoIterator<Item = Device>) {
@@ -122,30 +125,33 @@ impl Venue {
     }
 }
 async fn write(device: &Device, sql: &str, params: Vec<SqlValue>) -> Result<(), rocky_sdk::Error> {
-    let mut tx = device.database.transaction().await?;
-    tx.execute(sql, params).await?;
-    tx.commit().await?;
-    Ok(())
+    device
+        .database
+        .write(async |tx| tx.execute(sql, params).await)
+        .await
 }
 async fn insert(device: &Device, table: &str, value: &str) -> Result<(), rocky_sdk::Error> {
     let column = if table == "check_ins" { "gate" } else { "code" };
-    let mut tx = device.database.transaction().await?;
-    tx.execute(
-        &format!("INSERT INTO {table}({column}) VALUES(?)"),
-        vec![SqlValue::Text(value.into())],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    device
+        .database
+        .write(async |tx| {
+            tx.execute(
+                &format!("INSERT INTO {table}({column}) VALUES(?)"),
+                vec![SqlValue::Text(value.into())],
+            )
+            .await
+        })
+        .await
 }
 async fn allocate(
     device: &Device,
     table: &str,
     partition: Vec<SqlValue>,
 ) -> Result<(), rocky_sdk::Error> {
-    let mut tx = device.database.transaction().await?;
-    tx.next_id(table, partition).await?;
-    tx.rollback().await
+    device
+        .database
+        .write(async |tx| tx.next_id(table, partition).await.map(drop))
+        .await
 }
 async fn read(device: &Device, sql: &str) -> Result<(), rocky_sdk::Error> {
     device
@@ -354,17 +360,19 @@ async fn a_write_into_a_partition_not_held_is_a_final_partition_refusal() -> Res
             "ward {never_or_no_longer_held}"
         );
     }
-    let mut tx = clinician.database.transaction().await?;
-    let id = tx
-        .next_id("charts", vec![SqlValue::Text("A".into())])
-        .await?;
-    let inserted = tx
-        .execute(
-            "INSERT INTO charts(ward,id,note) VALUES('B',?,'moved')",
-            vec![id.sql()],
-        )
+    let inserted = clinician
+        .database
+        .write(async |tx| {
+            let id = tx
+                .next_id("charts", vec![SqlValue::Text("A".into())])
+                .await?;
+            tx.execute(
+                "INSERT INTO charts(ward,id,note) VALUES('B',?,'moved')",
+                vec![id.sql()],
+            )
+            .await
+        })
         .await;
-    tx.rollback().await?;
     assert_eq!(refused(inserted)?, partition_not_granted(Right::Append));
     let updated = write(
         &clinician,
@@ -476,16 +484,19 @@ async fn a_statement_over_the_intent_limit_fails_at_execute_and_a_blob_counts_it
         .await?
         .database;
     let insert = "INSERT INTO files(id, data) VALUES(?, ?)";
-    let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("files", vec![]).await?;
-    transaction
-        .execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 100 * 1024])])
+    database
+        .write(async |tx| {
+            let id = tx.next_id("files", vec![]).await?;
+            tx.execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 100 * 1024])])
+                .await
+        })
         .await?;
-    transaction.commit().await?;
-    let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("files", vec![]).await?;
-    let refused = transaction
-        .execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 200 * 1024])])
+    let refused = database
+        .write(async |tx| {
+            let id = tx.next_id("files", vec![]).await?;
+            tx.execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 200 * 1024])])
+                .await
+        })
         .await
         .err()
         .ok_or("a 200 KiB blob fit in one intent")?;
@@ -500,7 +511,6 @@ async fn a_statement_over_the_intent_limit_fails_at_execute_and_a_blob_counts_it
         ),
         "{refused:?}"
     );
-    transaction.rollback().await?;
     database.close().await?;
     Ok(())
 }

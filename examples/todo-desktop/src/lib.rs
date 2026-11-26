@@ -1,7 +1,7 @@
 mod status;
 
 use dioxus::prelude::*;
-use rocky_sdk::{Commit, Configuration, Network, TransactionToken, transport::memory::Hub};
+use rocky_sdk::{Configuration, Network, TransactionToken, transport::memory::Hub};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -387,11 +387,11 @@ async fn load(todos: &Todos, chosen: Option<rocky_sdk::RowIdentity>) -> Result<V
     })
 }
 
-fn submit(
+fn submit<Written: Into<Option<TransactionToken>>>(
     mut busy: Signal<bool>,
     mut error: Signal<Option<String>>,
     mut own: Signal<BTreeSet<TransactionToken>>,
-    write: impl Future<Output = Result<Commit, Failure>> + 'static,
+    write: impl Future<Output = Result<Written, Failure>> + 'static,
 ) {
     if busy() {
         return;
@@ -399,8 +399,8 @@ fn submit(
     busy.set(true);
     spawn(async move {
         match write.await {
-            Ok(commit) => {
-                if let Commit::Recorded(token) = commit {
+            Ok(written) => {
+                if let Some(token) = written.into() {
                     own.write().insert(token);
                 }
                 error.set(None);
@@ -568,7 +568,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                                 submit(busy, error, own, async move {
                                     todos.share(list, &[node]).await?;
                                     revision += 1;
-                                    Ok(Commit::NoWrites)
+                                    Ok(None::<TransactionToken>)
                                 });
                             },
                             "Share with partial device"

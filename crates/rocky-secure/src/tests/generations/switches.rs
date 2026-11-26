@@ -367,7 +367,7 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
     .unwrap();
     let newer = authored(&bob, &bob_key).await;
     assert!(!newer.is_empty());
-    let mut observer = alice.observe_tables(None).await.unwrap();
+    let mut observer = alice.observe_tables(None).unwrap();
     let before = session(&alice).await;
     assert!(
         alice

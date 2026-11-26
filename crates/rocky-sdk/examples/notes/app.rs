@@ -15,16 +15,18 @@ pub fn schema() -> Result<Schema, Error> {
 }
 
 pub async fn add(database: &Database, body: &str) -> Result<RowIdentity, Error> {
-    let mut transaction = database.transaction().await?;
-    let id = transaction.next_id("notes", vec![]).await?;
-    transaction
-        .execute(
-            "INSERT INTO notes(id,body,done) VALUES(?,?,?)",
-            params![id, body, false],
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(id)
+    database
+        .write(async |transaction| {
+            let id = transaction.next_id("notes", vec![]).await?;
+            transaction
+                .execute(
+                    "INSERT INTO notes(id,body,done) VALUES(?,?,?)",
+                    params![id, body, false],
+                )
+                .await?;
+            Ok(id)
+        })
+        .await
 }
 
 pub struct Note {

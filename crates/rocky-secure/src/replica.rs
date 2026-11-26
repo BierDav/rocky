@@ -712,6 +712,9 @@ pub struct EncryptedReplica<A> {
     revisions: watch::Receiver<u64>,
     node: PublicKey,
     lease_clock: sql::LeaseClock,
+    opened_sql: sql::Opened,
+    observable: queries::Observable,
+    sql_writing: Arc<AtomicBool>,
 }
 impl<A> Clone for EncryptedReplica<A> {
     fn clone(&self) -> Self {
@@ -721,12 +724,18 @@ impl<A> Clone for EncryptedReplica<A> {
             revisions: self.revisions.clone(),
             node: self.node,
             lease_clock: self.lease_clock.clone(),
+            opened_sql: self.opened_sql.clone(),
+            observable: self.observable.clone(),
+            sql_writing: self.sql_writing.clone(),
         }
     }
 }
 impl<A> EncryptedReplica<A> {
     pub fn node_key(&self) -> PublicKey {
         self.node
+    }
+    pub fn sql_write_open(&self) -> bool {
+        self.sql_writing.load(Ordering::Acquire)
     }
     #[cfg(any(test, feature = "qualification"))]
     pub fn lock_measurements(&self) -> LockMeasurements {
@@ -1385,6 +1394,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verify_open().await?;
         let opening_revocations = inner.opening_revocations.take();
         let node = inner.config.node.public_key();
+        let observable = inner.workspace.queries.observable.clone();
         let replica = Self {
             inner: Arc::new(ReplicaLock::new(
                 inner,
@@ -1395,6 +1405,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             revisions,
             node,
             lease_clock,
+            opened_sql: sql::Opened::default(),
+            observable,
+            sql_writing: Arc::default(),
         };
         if let Some(revocations) = opening_revocations {
             replica.learn_revocations(&revocations).await?;

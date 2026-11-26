@@ -1,8 +1,7 @@
 use crate::common::{self, Device, Failure, build, introduce, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, Commit, Configuration, DropReason, ErrorKind, Index, MigrationStep, Network,
-    Role, RoleName, Schema, Table, TransactionOutcome, TransactionToken, params,
-    transport::memory::Hub,
+    Affinity, Column, Configuration, DropReason, ErrorKind, Index, MigrationStep, Network, Role,
+    RoleName, Schema, Table, TransactionOutcome, TransactionToken, params, transport::memory::Hub,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -140,20 +139,16 @@ async fn sync(device: &Device) {
     crate::support::peerless_ok(device.sync_now().await).expect("sync");
 }
 async fn write(device: &Device, sql: &str) -> Result<TransactionToken, Failure> {
-    let mut transaction = device.database.transaction().await?;
-    transaction.execute(sql, params![]).await?;
-    match transaction.commit().await? {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err("the write changed nothing".into()),
-    }
+    Ok(device
+        .database
+        .write(async |transaction| {
+            transaction.execute(sql, params![]).await?;
+            Ok::<_, rocky_sdk::Error>(transaction.token())
+        })
+        .await?)
 }
 async fn update(device: &Device, sql: &str) -> Result<TransactionToken, Failure> {
-    let mut transaction = device.database.transaction().await?;
-    transaction.execute(sql, params![]).await?;
-    match transaction.commit().await? {
-        Commit::Recorded(token) => Ok(token),
-        Commit::NoWrites => Err("the write changed nothing".into()),
-    }
+    write(device, sql).await
 }
 async fn texts(device: &Device, sql: &str, columns: &[&str]) -> Result<Vec<Vec<String>>, Failure> {
     let rows = device
@@ -298,12 +293,17 @@ async fn a_late_write_to_a_renamed_table_lands_in_its_new_name() -> Result<(), F
             "a renamed table keeps its rows, its key column and the late writes to both"
         );
     }
-    let mut transaction = household.owner().database.transaction().await?;
-    let refused = transaction
-        .execute(
-            "UPDATE entries SET code = 'k9' WHERE code = 'k1'",
-            params![],
-        )
+    let refused = household
+        .owner()
+        .database
+        .write(async |transaction| {
+            transaction
+                .execute(
+                    "UPDATE entries SET code = 'k9' WHERE code = 'k1'",
+                    params![],
+                )
+                .await
+        })
         .await
         .err()
         .ok_or("a renamed key column was updated")?;
@@ -317,7 +317,6 @@ async fn a_late_write_to_a_renamed_table_lands_in_its_new_name() -> Result<(), F
         ),
         "a renamed key column is still the row's key, so updating it is refused: {refused:?}"
     );
-    drop(transaction);
     household.close().await;
     Ok(())
 }

@@ -34,8 +34,12 @@ pub enum ErrorKind {
     AuthorityChanged,
     /// A concurrent change conflicted; retry.
     Conflict,
-    /// Too many calls are pending or storage is busy; retry.
+    /// Too many calls are pending, or another write held the database for all of
+    /// `TRANSACTION_TIMEOUT`; retry.
     Busy,
+    /// A write held the database past `TRANSACTION_TIMEOUT` and was rolled back; keep slow work
+    /// outside `Database::write`.
+    TimedOut,
     /// A write exceeded a size limit.
     TooLarge {
         /// Which limit.
@@ -228,6 +232,7 @@ impl ErrorKind {
             Self::AuthorityChanged => "authority_changed",
             Self::Conflict => "conflict",
             Self::Busy => "busy",
+            Self::TimedOut => "timed_out",
             Self::TooLarge { .. } => "too_large",
             Self::Quota => "quota",
             Self::Sql { .. } => "sql",

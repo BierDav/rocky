@@ -968,7 +968,7 @@ async fn changing_one_table_keeps_the_other_base_observer_and_session_untouched(
     update(&replica, "a", "after").await;
     seal(&lineage, &replica).await;
     let session = session(&replica).await;
-    let mut observer = replica.observe_tables(Some(&["tags"])).await.unwrap();
+    let mut observer = replica.observe_tables(Some(&["tags"])).unwrap();
     replica.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(
         replica.checkpoint(tags).await.unwrap().to_bytes().unwrap(),

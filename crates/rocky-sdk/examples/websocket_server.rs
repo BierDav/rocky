@@ -45,14 +45,14 @@ mod native {
             .create()
             .await?
             .database;
-        let mut transaction = admin.transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO notes(body) VALUES(?)",
-                params!["served beside the web app"],
-            )
+        let insert = "INSERT INTO notes(body) VALUES(?)";
+        admin
+            .write(async |transaction| {
+                transaction
+                    .execute(insert, params!["served beside the web app"])
+                    .await
+            })
             .await?;
-        transaction.commit().await?;
         let invitation = admin.invite(Invite::new(Access::Full)).await?;
 
         let laptop = Configuration::new(directory.path().join("laptop"), &schema)?

@@ -30,9 +30,9 @@ impl ConnectionOptions {
             acknowledge: rocky_secure::CommitClass::Buffered,
             ..Default::default()
         };
-        if let Some(timeout) = self.transaction_timeout {
-            options.transaction_timeout = timeout;
-        }
+        options.transaction_timeout = self
+            .transaction_timeout
+            .unwrap_or(crate::TRANSACTION_TIMEOUT);
         options
     }
 }
@@ -180,9 +180,21 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
             )
         }
         SqlError::Unavailable { table, reason } => unavailable(table, reason),
-        SqlError::Aborted(AbortReason::Timeout | AbortReason::Preempted) => {
-            crate::Error::new(Kind::Busy, detail)
-        }
+        SqlError::Aborted(AbortReason::Timeout) => crate::Error::new(
+            Kind::TimedOut,
+            format!(
+                "the write held the database past its transaction timeout (TRANSACTION_TIMEOUT, {} s) and was rolled back; keep slow work outside Database::write",
+                crate::TRANSACTION_TIMEOUT.as_secs()
+            ),
+        ),
+        SqlError::Aborted(AbortReason::Preempted) => crate::Error::new(Kind::Busy, detail),
+        SqlError::WriterBusy(waited) => crate::Error::new(
+            Kind::Busy,
+            format!(
+                "another write held the database for the whole transaction timeout (TRANSACTION_TIMEOUT, {} s); retry when it finishes",
+                waited.as_secs()
+            ),
+        ),
         SqlError::Aborted(_) => sql(code::ABORT, None),
         SqlError::Capture(_) => sql(code::ERROR, None),
         SqlError::AuthorityChanged => crate::Error::authority_changed(),
@@ -449,7 +461,6 @@ pub(crate) struct State {
     open: bool,
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
-    committed: Option<crate::TransactionToken>,
     handle: Option<rocky_core::Commitment>,
     writes: BTreeSet<String>,
 }
@@ -464,7 +475,6 @@ impl State {
             open: false,
             reading: None,
             results: BTreeMap::new(),
-            committed: None,
             handle: None,
             writes: BTreeSet::new(),
         };
@@ -486,10 +496,10 @@ impl State {
                 .is_some_and(|reading| reading.snapshot.is_some())
     }
     async fn sql(&mut self) -> Result<&SecureSql<TypedRows>, Failure> {
-        let current = match &self.opened {
-            Some(opened) => self.authority_pinned() || opened.status().await.is_ok(),
-            None => false,
-        };
+        let current = self
+            .opened
+            .as_ref()
+            .is_some_and(|opened| self.authority_pinned() || opened.current());
         if !current {
             self.opened = Some(self.node.sql_session(self.options.sql()).await?);
         }
@@ -562,9 +572,6 @@ impl State {
     }
     pub(crate) fn finish(&mut self, statement: u64) {
         self.results.remove(&statement);
-    }
-    pub(crate) fn committed(&self) -> Option<crate::TransactionToken> {
-        self.committed
     }
     pub(crate) async fn begin_identified(&mut self) -> Result<crate::TransactionToken, Failure> {
         if self.read_only {
@@ -659,18 +666,6 @@ impl State {
             (Control::Commit, Some(handle)) => self.sql().await?.commit(handle).await,
             _ => self.sql().await?.run(sql, params).await,
         };
-        if matches!(control, Control::Commit) {
-            self.committed = None;
-            if let Ok(rows) = &ran
-                && let Some(commit) = rows
-                    .committed
-                    .as_ref()
-                    .filter(|commit| !commit.frames.is_empty())
-            {
-                let transaction = self.node.replica.transaction_of(commit.handle);
-                self.committed = Some(crate::TransactionToken::new(transaction));
-            }
-        }
         let session_may_have_ended =
             ending || ran.is_err() || matches!(control, Control::Release(_));
         if session_may_have_ended {
@@ -812,7 +807,6 @@ impl State {
         {
             return false;
         }
-        self.committed = None;
         self.handle = None;
         self.writes.clear();
         self.read_only = self.options.read_only;
@@ -992,14 +986,13 @@ pub(crate) enum Call {
     },
     #[cfg(test)]
     InTransaction,
-    Committed,
     Begin,
 }
 pub(crate) enum Reply {
     Page(Page),
     #[cfg(test)]
     Flag(bool),
-    Token(Option<crate::TransactionToken>),
+    Token(crate::TransactionToken),
     Done,
 }
 pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply, crate::Error> {
@@ -1020,11 +1013,7 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
         }
         #[cfg(test)]
         Call::InTransaction => Ok(Reply::Flag(state.active())),
-        Call::Committed => Ok(Reply::Token(state.committed())),
-        Call::Begin => state
-            .begin_identified()
-            .await
-            .map(|token| Reply::Token(Some(token))),
+        Call::Begin => state.begin_identified().await.map(Reply::Token),
     };
     reply.map_err(crate::Error::failed)
 }

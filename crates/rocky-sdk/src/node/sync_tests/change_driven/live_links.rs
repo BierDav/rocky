@@ -181,7 +181,7 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
                 .parse()?;
             let traffic_before = traffic_snapshot(&service_a, &service_b);
             let bytes_before = *hub.written().borrow();
-            let mut changes = b.replica.observe_tables(Some(&["items"])).await?;
+            let mut changes = b.replica.observe_tables(Some(&["items"]))?;
             let (committed, observed) = tokio::join!(
                 async {
                     add(&a, 1).await?;
@@ -2086,7 +2086,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
         let activity = snap::Snapshot::snapshot(b.activity.after(0))["token"].as_str().ok_or("activity")?.parse()?;
         for version in 1..=3 {
             let traffic_before = traffic_snapshot(&service_a, &service_b);
-            let mut changes = b.replica.observe_tables(Some(&["contacts", "receipts", "versions"])).await?;
+            let mut changes = b.replica.observe_tables(Some(&["contacts", "receipts", "versions"]))?;
             let bytes_before = *hub.written().borrow();
             let messages_before = [hub.link_messages("a"), hub.link_messages("b")];
             let sql = a.sql_session(SqlOptions::default()).await?;

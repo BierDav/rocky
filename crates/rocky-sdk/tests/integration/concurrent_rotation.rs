@@ -101,16 +101,20 @@ async fn create_partition(device: &Device) -> Value {
     json!({ "epoch": status["current"] })
 }
 async fn write_group(device: &Device, prefix: &str) {
-    let mut tx = device.database.transaction().await.expect("begin");
-    for table in ["parts", "labels", "attachments"] {
-        tx.execute(
-            &format!("INSERT INTO {table}(list,key) VALUES ('L', '{prefix}')"),
-            Vec::new(),
-        )
+    device
+        .database
+        .write(async |tx| {
+            for table in ["parts", "labels", "attachments"] {
+                tx.execute(
+                    &format!("INSERT INTO {table}(list,key) VALUES ('L', '{prefix}')"),
+                    Vec::new(),
+                )
+                .await?;
+            }
+            Ok::<_, rocky_sdk::Error>(())
+        })
         .await
         .expect("insert");
-    }
-    tx.commit().await.expect("commit");
 }
 async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
     for issuer in issuers {
@@ -356,14 +360,17 @@ async fn an_offline_write_on_the_losing_seal_line_reaches_every_device() -> Resu
 async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_superseding_rows()
 -> Result<(), Failure> {
     async fn write(device: &Device, key: &str) {
-        let mut tx = device.database.transaction().await.expect("begin");
-        tx.execute(
-            "INSERT INTO parts(list,key) VALUES ('L', ?)",
-            vec![rocky_sdk::SqlValue::Text(key.to_owned())],
-        )
-        .await
-        .expect("insert");
-        tx.commit().await.expect("commit");
+        device
+            .database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO parts(list,key) VALUES ('L', ?)",
+                    vec![rocky_sdk::SqlValue::Text(key.to_owned())],
+                )
+                .await
+            })
+            .await
+            .expect("insert");
     }
     let root = crate::support::small_directory()?;
     let root = root.path();

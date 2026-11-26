@@ -52,7 +52,7 @@ impl Node {
                 let _ = reply.send(self.partition_status(&a).await);
             }
             Request::Status(reply) => {
-                let _ = reply.send(self.observed_status().await);
+                let _ = reply.send(self.status_beside_writes().await);
             }
             Request::StatusAfter(after, mut reply) => {
                 let result = tokio::select! { result = self.readiness_after(&after) => result, () = reply.closed() => return, };

@@ -469,8 +469,28 @@ impl Database {
         };
         Ok(Rows::from_page(source, 1, page))
     }
-    /// Starts a write transaction, which rolls back unless committed.
-    pub async fn transaction(&self) -> Result<Transaction, crate::Error> {
+    /// Runs `body` as one write transaction: it commits when `body` returns `Ok` and rolls back
+    /// when it returns `Err` or the future is dropped.
+    pub async fn write<T, E>(
+        &self,
+        body: impl AsyncFnOnce(&mut Transaction) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<Error>,
+    {
+        let mut transaction = self.begin().await?;
+        match body(&mut transaction).await {
+            Ok(value) => {
+                transaction.commit().await?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+    async fn begin(&self) -> Result<Transaction, Error> {
         let connection = self
             .connect(ConnectionOptions {
                 read_only: false,
@@ -483,24 +503,19 @@ impl Database {
     }
 }
 
-/// What a commit recorded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Commit {
-    /// No write statement ran, so no intent was recorded and nothing syncs; a write that matched
-    /// no row still records one.
-    NoWrites,
-    /// The transaction was recorded and syncs under this token.
-    Recorded(TransactionToken),
-}
+/// How long a write waits for another write to finish before it fails with `Busy`, and how long it
+/// may hold the database from its first statement before it is rolled back with `TimedOut`.
+pub const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// A write transaction whose statements are recorded as SQL intents and replayed on every device.
-#[must_use = "a transaction must be committed or it rolls back"]
+/// The write transaction `Database::write` runs its body in; its statements are recorded as SQL
+/// intents and replayed on every device.
 pub struct Transaction {
     connection: Connection,
     token: TransactionToken,
 }
 impl Transaction {
-    /// The token the transaction commits under.
+    /// The token the transaction commits under, for `transaction_outcome`; a transaction that ran
+    /// no write statement records nothing, so its token never gets an outcome.
     pub fn token(&self) -> TransactionToken {
         self.token
     }
@@ -509,8 +524,8 @@ impl Transaction {
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
     }
-    /// Runs a statement that returns no rows; a constraint violation on replay drops the whole
-    /// transaction on every device.
+    /// Runs a statement that returns no rows; a statement the device's access does not allow is
+    /// refused with `Denied` before it runs, even when it would match no row.
     pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), Error> {
         let rows = self.query(sql, params).await?;
         if rows.done {
@@ -522,7 +537,7 @@ impl Transaction {
         }
     }
     /// Runs a statement inside the transaction and returns its rows; `BEGIN`, `COMMIT` and
-    /// `ROLLBACK` are refused.
+    /// `ROLLBACK` are refused, as `Database::write` ends the transaction.
     pub async fn query(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'_>, Error> {
         if !matches!(
             rocky_storage::sql::classify(sql),
@@ -530,7 +545,7 @@ impl Transaction {
         ) {
             return Err(crate::connection::failure(
                 crate::connection::code::MISUSE,
-                "transaction control is managed by Transaction; use commit or rollback",
+                "transaction control is managed by Database::write; return Ok to commit or Err to roll back",
             ));
         }
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
@@ -555,30 +570,20 @@ impl Transaction {
             .ok_or_else(|| Error::internal("row id allocation returned no row"))?;
         Ok(row.get_at(0)?)
     }
-    /// Commits locally and returns at once; the commit syncs later, and `Database::flush` makes it
-    /// durable.
-    pub async fn commit(self) -> Result<Commit, Error> {
-        let result = async {
-            self.connection
-                .execute(self.connection.statement(), "COMMIT".into(), Vec::new())
-                .await?;
-            self.connection.committed().await
-        }
-        .await;
-        self.connection.close().await;
-        Ok(match result? {
-            Some(token) => Commit::Recorded(token),
-            None => Commit::NoWrites,
-        })
-    }
-    /// Discards the transaction.
-    pub async fn rollback(self) -> Result<(), Error> {
+    async fn commit(self) -> Result<(), Error> {
         let result = self
+            .connection
+            .execute(self.connection.statement(), "COMMIT".into(), Vec::new())
+            .await;
+        self.connection.close().await;
+        result.map(drop)
+    }
+    async fn rollback(self) {
+        let _ = self
             .connection
             .execute(self.connection.statement(), "ROLLBACK".into(), Vec::new())
             .await;
         self.connection.close().await;
-        result.map(drop)
     }
 }
 

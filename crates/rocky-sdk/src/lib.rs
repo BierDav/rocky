@@ -109,8 +109,8 @@ pub use schema::{
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Cause, ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
 pub use sql::{
-    Commit, DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction,
-    TransactionToken,
+    DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, TRANSACTION_TIMEOUT, Timestamp,
+    Transaction, TransactionToken,
 };
 pub(crate) use status::*;
 pub use status::{

@@ -11,10 +11,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .database;
 
-    let mut transaction = database.transaction().await?;
     let insert = "INSERT INTO notes(body) VALUES(?)";
-    transaction.execute(insert, params!["Hello, Rocky"]).await?;
-    transaction.commit().await?;
+    database
+        .write(async |tx| tx.execute(insert, params!["Hello, Rocky"]).await)
+        .await?;
 
     let rows = database.query("SELECT body FROM notes", params![]).await?;
     let note: String = rows

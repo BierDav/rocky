@@ -2118,7 +2118,7 @@ mod tests {
         let database = configuration.create().await?.database;
         let first_id = database
             .write(async |tx| {
-                let first_id = tx.next_id("items", Vec::new()).await?;
+                let first_id = tx.next_id("items").await?;
                 tx.execute(
                     "INSERT INTO items(id,title) VALUES(?,'first')",
                     vec![first_id.sql()],
@@ -2139,7 +2139,7 @@ mod tests {
         assert_eq!(stored, first_id);
         let second_id = database
             .write(async |tx| {
-                let second_id = tx.next_id("items", Vec::new()).await?;
+                let second_id = tx.next_id("items").await?;
                 tx.execute(
                     "INSERT INTO items(id,title) VALUES(?,'second')",
                     vec![second_id.sql()],

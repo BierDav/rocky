@@ -124,7 +124,7 @@ impl Peer {
             .database
             .write(async |tx| {
                 let id = tx
-                    .next_id(table, list.map(values).unwrap_or_default())
+                    .next_id_in(table, list.map(values).unwrap_or_default())
                     .await?;
                 tx.execute(sql, vec![id.sql()]).await?;
                 Ok::<_, Failure>(id)
@@ -1306,7 +1306,7 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
             .write(async |transaction| {
                 for index in chunk_start..chunk_end {
                     let id = transaction
-                        .next_id("items", rocky_sdk::params![list_bytes.clone()])
+                        .next_id_in("items", rocky_sdk::params![list_bytes.clone()])
                         .await?;
                     transaction
                         .execute(

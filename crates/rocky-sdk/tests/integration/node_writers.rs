@@ -48,7 +48,7 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
     writer.add(1, "first").await;
     let id = writer
         .database
-        .write(async |tx| tx.next_id("notes", Vec::new()).await)
+        .write(async |tx| tx.next_id("notes").await)
         .await?
         .to_string();
     assert_eq!(

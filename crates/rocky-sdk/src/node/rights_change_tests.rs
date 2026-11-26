@@ -58,7 +58,7 @@ async fn open_rolled_out(
 async fn check_in(database: &Database, code: &str) -> Result<(), Failure> {
     Ok(database
         .write(async |tx| {
-            let id = tx.next_id("check_ins", Vec::new()).await?;
+            let id = tx.next_id("check_ins").await?;
             tx.execute(
                 "INSERT INTO check_ins(code,gate,id) VALUES(?,?,?)",
                 vec![

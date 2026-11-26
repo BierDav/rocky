@@ -550,10 +550,13 @@ impl Transaction {
         }
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
     }
-    /// Allocates a generated id in `table` before inserting, for example to reference the row from
-    /// child rows; `partition` names the partition's values, empty for an unpartitioned table. A
-    /// table keyed by declared columns has no generated id and is refused.
-    pub async fn next_id(
+    /// Allocates a generated id in the unpartitioned `table` before inserting, for example to
+    /// reference the row from child rows; a table keyed by declared columns is refused.
+    pub async fn next_id(&mut self, table: &str) -> Result<RowIdentity, Error> {
+        self.next_id_in(table, Vec::new()).await
+    }
+    /// Allocates a generated id in the partition of `table` named by its partition column values.
+    pub async fn next_id_in(
         &mut self,
         table: &str,
         partition: Vec<SqlValue>,

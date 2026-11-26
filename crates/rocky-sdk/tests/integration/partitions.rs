@@ -32,7 +32,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     for (name, amount) in [("A", 10i64), ("B", 20i64)] {
         let id = db
             .write(async |tx| {
-                let id = tx.next_id("items", values(name)).await?;
+                let id = tx.next_id_in("items", values(name)).await?;
                 tx.execute(
                     "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
                     vec![
@@ -139,7 +139,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let db = open(&path, &hub).open().await.unwrap();
     let allocated = db
         .write(async |tx| {
-            let id = tx.next_id("items", values("A")).await.unwrap();
+            let id = tx.next_id_in("items", values("A")).await.unwrap();
             let first = ids[0];
             assert_eq!(
                 (id.writer(), id.sequence()),
@@ -157,7 +157,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let revoked = snap::ok(snap::device(&db)).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     db.write(async |tx| {
-        let id = tx.next_id("items", values("A")).await?;
+        let id = tx.next_id_in("items", values("A")).await?;
         tx.execute(
             "INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)",
             vec![id.sql()],
@@ -200,7 +200,7 @@ async fn own_id_partitions_continue_the_table_log() {
         let prepared = snap::ok(db.next_partition("lists")).await;
         let id = db
             .write(async |tx| {
-                let id = tx.next_id("lists", Vec::new()).await?;
+                let id = tx.next_id("lists").await?;
                 tx.execute(
                     "INSERT INTO lists(id,title) VALUES(?,?)",
                     vec![id.sql(), rocky_sdk::SqlValue::Text("list".to_owned())],

@@ -1046,7 +1046,7 @@ async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Resu
     let id = dispatcher
         .database
         .write(async |tx| {
-            let id = tx.next_id("alerts", Vec::new()).await?;
+            let id = tx.next_id("alerts").await?;
             tx.execute(
                 "INSERT INTO alerts(id,title,state) VALUES(?,?,?)",
                 vec![

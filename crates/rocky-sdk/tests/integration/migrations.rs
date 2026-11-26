@@ -296,7 +296,7 @@ async fn list(device: &Device, title: &str) -> Result<String, Failure> {
     let id = device
         .database
         .write(async |tx| {
-            let id = tx.next_id("lists", Vec::new()).await?;
+            let id = tx.next_id("lists").await?;
             tx.execute(
                 &format!("INSERT INTO lists(id,title) VALUES(?,'{title}')"),
                 vec![id.sql()],

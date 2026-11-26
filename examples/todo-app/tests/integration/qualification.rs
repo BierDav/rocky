@@ -343,7 +343,7 @@ async fn qualification_child() -> Result<(), Failure> {
                     .database()
                     .write(async |transaction| {
                         for side in ["a", "b"] {
-                            let id = transaction.next_id(TODOS, params![list]).await?;
+                            let id = transaction.next_id_in(TODOS, params![list]).await?;
                             let position = position::between(None, None, id)?;
                             transaction
                                 .execute(

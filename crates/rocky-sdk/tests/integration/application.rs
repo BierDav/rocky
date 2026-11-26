@@ -24,7 +24,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
     let id = db
         .write(async |tx| {
             assert!(tx.execute("COMMIT", params![]).await.is_err());
-            let id = tx.next_id("notes", vec![]).await?;
+            let id = tx.next_id("notes").await?;
             let body = "quoted ' text".to_owned();
             tx.execute(
                 "INSERT INTO notes(id,body,optional) VALUES(?,?,?)",
@@ -69,7 +69,7 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
         .database;
     let (inserted, discarding) = tokio::sync::oneshot::channel();
     let dropped = db.write(async |tx| {
-        let id = tx.next_id("notes", vec![]).await?;
+        let id = tx.next_id("notes").await?;
         tx.execute(
             "INSERT INTO notes(id,body) VALUES(?,?)",
             params![id, "discarded"],
@@ -87,7 +87,7 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
     let task = rocky_platform::task::spawn(async move {
         task_db
             .write(async |tx| {
-                let id = tx.next_id("notes", vec![]).await?;
+                let id = tx.next_id("notes").await?;
                 tx.execute(
                     "INSERT INTO notes(id,body) VALUES(?,?)",
                     params![id, "cancelled"],
@@ -102,7 +102,7 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
     task.abort();
     assert!(task.await.expect_err("cancelled").is_cancelled());
     db.write(async |tx| {
-        let id = tx.next_id("notes", vec![]).await?;
+        let id = tx.next_id("notes").await?;
         tx.execute(
             "INSERT INTO notes(id,body) VALUES(?,?)",
             params![id, "kept"],
@@ -138,7 +138,7 @@ async fn paged_reads_hold_a_snapshot_and_decode_aliases() -> Result<(), Failure>
     for batch in batches_under_intent_statement_quota {
         db.write(async |tx| {
             for n in batch {
-                let id = tx.next_id("cache", params![]).await?;
+                let id = tx.next_id("cache").await?;
                 tx.execute("INSERT INTO cache(id,n) VALUES(?,?)", params![id, n])
                     .await?;
             }
@@ -216,7 +216,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
     member.sync_now().await?;
     issuer
         .write(async |tx| {
-            let id = tx.next_id("notes", vec![]).await?;
+            let id = tx.next_id("notes").await?;
             tx.execute(
                 "INSERT INTO notes(id,body) VALUES(?,?)",
                 params![id, "from issuer"],
@@ -266,7 +266,7 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
     let transactions_for_routine_seal = 128;
     for index in 0..transactions_for_routine_seal {
         db.write(async |tx| {
-            let id = tx.next_id("notes", vec![]).await?;
+            let id = tx.next_id("notes").await?;
             tx.execute(
                 "INSERT INTO notes(id,body) VALUES(?,?)",
                 params![id, format!("note {index}")],
@@ -317,13 +317,13 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     let token = db
         .write(async |tx| {
             let token = tx.token();
-            let id = tx.next_id("orders", vec![]).await?;
+            let id = tx.next_id("orders").await?;
             tx.execute(
                 "INSERT INTO orders(id,item) VALUES(?,?)",
                 params![id, "book"],
             )
             .await?;
-            let outbox = tx.next_id("outbox", vec![]).await?;
+            let outbox = tx.next_id("outbox").await?;
             tx.execute(
                 "INSERT INTO outbox(id,order_id,txn) VALUES(?,?,?)",
                 params![outbox, id, token],
@@ -337,7 +337,7 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     let rolled_back = db
         .write(async |tx| {
             abandoned = Some(tx.token());
-            let id = tx.next_id("orders", vec![]).await?;
+            let id = tx.next_id("orders").await?;
             tx.execute(
                 "INSERT INTO orders(id,item) VALUES(?,?)",
                 params![id, "pen"],
@@ -382,7 +382,7 @@ async fn flush_persists_every_commit_returned_before_it() -> Result<(), Failure>
     for body in ["first", "second"] {
         let token = db
             .write(async |tx| {
-                let id = tx.next_id("notes", vec![]).await?;
+                let id = tx.next_id("notes").await?;
                 tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
                     .await?;
                 Ok::<_, Failure>(tx.token())
@@ -414,7 +414,7 @@ async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Fai
     let database = configuration.create().await?.database;
     let id = database
         .write(async |tx| {
-            let id = tx.next_id("notes", params![]).await?;
+            let id = tx.next_id("notes").await?;
             tx.execute(
                 "INSERT INTO notes(id,body) VALUES(?,?)",
                 params![id, "Hello Rocky"],

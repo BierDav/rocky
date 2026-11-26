@@ -86,7 +86,7 @@ async fn count(database: &Database, table: &str) -> Result<i64, Failure> {
 async fn add_account(database: &Database) -> Result<RowIdentity, Failure> {
     Ok(database
         .write(async |tx| {
-            let id = tx.next_id("accounts", Vec::new()).await?;
+            let id = tx.next_id("accounts").await?;
             tx.execute(
                 "INSERT INTO accounts(id, name) VALUES(?, 'Ada')",
                 params![id],
@@ -256,7 +256,7 @@ async fn restrict_drops_the_later_of_an_offline_delete_and_insert_in_a_partition
     let shelf = a
         .database
         .write(async |tx| {
-            let shelf = tx.next_id("shelves", params!["north"]).await?;
+            let shelf = tx.next_id_in("shelves", params!["north"]).await?;
             tx.execute(
                 "INSERT INTO shelves(site, id, label) VALUES('north', ?, 'Poetry')",
                 params![shelf],
@@ -275,7 +275,7 @@ async fn restrict_drops_the_later_of_an_offline_delete_and_insert_in_a_partition
     let inserted = b
         .database
         .write(async |tx| {
-            let book = tx.next_id("books", params!["north"]).await?;
+            let book = tx.next_id_in("books", params!["north"]).await?;
             tx.execute(
                 "INSERT INTO books(site, id, shelf, title) VALUES('north', ?, ?, 'Odes')",
                 params![book, shelf],

@@ -151,7 +151,7 @@ impl Todos {
         self.database.next_partition(LISTS).await?;
         self.database
             .write(async |transaction| {
-                let id = transaction.next_id(LISTS, params![]).await?;
+                let id = transaction.next_id(LISTS).await?;
                 transaction
                     .execute("INSERT INTO lists(id,title) VALUES(?,?)", params![id, name])
                     .await?;
@@ -200,7 +200,7 @@ impl Todos {
         let name = title(name)?;
         self.database
             .write(async |transaction| {
-                let id = transaction.next_id(TODOS, params![list]).await?;
+                let id = transaction.next_id_in(TODOS, params![list]).await?;
                 let last = positions(transaction, list, None).await?.pop();
                 let position = position::between(last.as_deref(), None, id)?;
                 transaction

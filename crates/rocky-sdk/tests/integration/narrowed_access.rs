@@ -132,7 +132,7 @@ impl Clinic {
                     [("notes", "body", note), ("prescriptions", "drug", drug)]
                 {
                     let id = tx
-                        .next_id(table, vec![SqlValue::Text(patient.into())])
+                        .next_id_in(table, vec![SqlValue::Text(patient.into())])
                         .await?;
                     tx.execute(
                         &format!("INSERT INTO {table}(patient,id,{column}) VALUES(?,?,?)"),

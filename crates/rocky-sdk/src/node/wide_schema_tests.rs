@@ -165,7 +165,7 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         .database
         .write(async |tx| {
             let id = tx
-                .next_id(&table, vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+                .next_id_in(&table, vec![rocky_sdk::SqlValue::Text("A".to_owned())])
                 .await?;
             tx.execute(
                 &format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')"),
@@ -271,7 +271,7 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
         .database
         .write(async |tx| {
             let id = tx
-                .next_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+                .next_id_in("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())])
                 .await?;
             tx.execute(
                 "INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')",

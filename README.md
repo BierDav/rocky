@@ -483,8 +483,9 @@ the key and its transaction is dropped; `INSERT … ON CONFLICT DO UPDATE` repla
 onto the same row, and a deleted key may be created again. A table that declares
 no key gets a generated `id` holding a `RowIdentity`, which Rocky fills when an
 `INSERT … VALUES` omits it and `RETURNING id` reads back;
-`Transaction::next_id(table, partition_values)` allocates one ahead, for example
-to reference the row from child rows. A table partitioned by its own id names
+`Transaction::next_id(table)` allocates one ahead, for example to reference the
+row from child rows, and `next_id_in(table, partition_values)` does so in a
+partition. A table partitioned by its own id names
 the id `next_id` allocated in every insert. Ids need no coordination; gap-free
 numbers come from `rocky-coordinator`. A `RowIdentity` prints as hex and parses
 back with `str::parse`, and a `Timestamp` column value prints as RFC 3339 in

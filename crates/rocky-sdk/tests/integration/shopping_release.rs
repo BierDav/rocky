@@ -97,7 +97,7 @@ impl Peer {
             .database
             .write(async |tx| {
                 let id = tx
-                    .next_id(table, list.map(values).unwrap_or_default())
+                    .next_id_in(table, list.map(values).unwrap_or_default())
                     .await?;
                 tx.execute(sql, vec![id.sql()]).await?;
                 Ok::<_, Failure>(id)
@@ -134,7 +134,7 @@ impl Peer {
         let moved = self
             .database
             .write(async |tx| {
-                let moved = tx.next_id("items", values(to)).await?;
+                let moved = tx.next_id_in("items", values(to)).await?;
                 tx.execute(
                     &format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'"),
                     vec![moved.sql()],

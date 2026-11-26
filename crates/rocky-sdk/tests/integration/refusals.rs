@@ -102,7 +102,7 @@ impl Venue {
             .database
             .write(async |tx| {
                 let id = tx
-                    .next_id("charts", vec![SqlValue::Text(name.into())])
+                    .next_id_in("charts", vec![SqlValue::Text(name.into())])
                     .await?;
                 tx.execute(
                     "INSERT INTO charts(ward,id,note) VALUES(?,?,?)",
@@ -161,7 +161,7 @@ async fn allocate(
 ) -> Result<(), rocky_sdk::Error> {
     device
         .database
-        .write(async |tx| tx.next_id(table, partition).await.map(drop))
+        .write(async |tx| tx.next_id_in(table, partition).await.map(drop))
         .await
 }
 async fn read(device: &Device, sql: &str) -> Result<(), rocky_sdk::Error> {
@@ -375,7 +375,7 @@ async fn a_write_into_a_partition_not_held_is_a_final_partition_refusal() -> Res
         .database
         .write(async |tx| {
             let id = tx
-                .next_id("charts", vec![SqlValue::Text("A".into())])
+                .next_id_in("charts", vec![SqlValue::Text("A".into())])
                 .await?;
             let executed = tx
                 .execute(
@@ -500,14 +500,14 @@ async fn a_statement_over_the_intent_limit_fails_at_execute_and_a_blob_counts_it
     let insert = "INSERT INTO files(id, data) VALUES(?, ?)";
     database
         .write(async |tx| {
-            let id = tx.next_id("files", vec![]).await?;
+            let id = tx.next_id("files").await?;
             tx.execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 100 * 1024])])
                 .await
         })
         .await?;
     let refused = database
         .write(async |tx| {
-            let id = tx.next_id("files", vec![]).await?;
+            let id = tx.next_id("files").await?;
             tx.execute(insert, vec![id.sql(), SqlValue::Blob(vec![7; 200 * 1024])])
                 .await
         })

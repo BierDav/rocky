@@ -120,7 +120,7 @@ async fn a_plain_insert_into_a_declared_key_table_needs_no_id() -> Result<(), Fa
         "a table with a declared key has no id column"
     );
     let refusal = database
-        .write(async |transaction| transaction.next_id("tickets", Vec::new()).await)
+        .write(async |transaction| transaction.next_id("tickets").await)
         .await
         .err()
         .ok_or("a declared-key table allocated a generated id")?;
@@ -147,7 +147,7 @@ async fn an_insert_without_id_into_a_keyless_table_gets_a_generated_id() -> Resu
                     params!["A1", "A1"],
                 )
                 .await?;
-            let reserved = transaction.next_id("check_ins", Vec::new()).await?;
+            let reserved = transaction.next_id("check_ins").await?;
             transaction
                 .execute(
                     "INSERT INTO check_ins(id, gate, ticket) VALUES(?, 'east', 'A1')",

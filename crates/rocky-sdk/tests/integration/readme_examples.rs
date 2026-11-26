@@ -234,7 +234,7 @@ async fn the_readme_ledger_refuses_deleting_an_account_its_entries_reference() -
         .database;
     let account = database
         .write(async |tx| {
-            let account = tx.next_id("accounts", Vec::new()).await?;
+            let account = tx.next_id("accounts").await?;
             tx.execute(
                 "INSERT INTO accounts(id, name) VALUES(?, 'Cash')",
                 params![account],

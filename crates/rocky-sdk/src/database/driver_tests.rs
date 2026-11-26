@@ -60,7 +60,7 @@ async fn create(configuration: Configuration) -> Result<Database, Failure> {
     let database = configuration.create().await?.database;
     let rolled_back = database
         .write(async |tx| {
-            let id = tx.next_id("items", Vec::new()).await?;
+            let id = tx.next_id("items").await?;
             assert_eq!(id.sequence(), 1);
             Err::<(), Failure>("roll the allocation back".into())
         })

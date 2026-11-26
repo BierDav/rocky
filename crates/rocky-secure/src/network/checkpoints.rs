@@ -211,10 +211,10 @@ impl NativeSession {
             )
             .await?;
         let needs: Vec<_> = replica
-            .in_dependency_chains(needs, |need| need.scope)
+            .dependency_graph(needs, |need| need.scope)
             .await?
             .into_iter()
-            .flatten()
+            .flat_map(|node| node.items)
             .collect();
         let mut first_failure = None;
         for need in needs {

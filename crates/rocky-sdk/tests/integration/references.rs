@@ -331,3 +331,210 @@ fn a_text_column_referencing_a_generated_id_is_refused_at_build() -> Result<(), 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_five_table_fk_chain_syncs_without_channel_deadlock() -> Result<(), Failure> {
+    let schema = common::build(
+        Schema::builder("fk_chain_5", 1)
+            .table(Table::replayed("t1").column(common::required("label", Affinity::Text)))
+            .table(
+                Table::replayed("t2")
+                    .column(
+                        Column::new("parent", Affinity::Blob)
+                            .required()
+                            .references("t1"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("t3")
+                    .column(
+                        Column::new("parent", Affinity::Blob)
+                            .required()
+                            .references("t2"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("t4")
+                    .column(
+                        Column::new("parent", Affinity::Blob)
+                            .required()
+                            .references("t3"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("t5")
+                    .column(
+                        Column::new("parent", Affinity::Blob)
+                            .required()
+                            .references("t4"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            ),
+    );
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::new(
+        common::configuration(
+            &root.path().join("a"),
+            &schema,
+            None,
+            None,
+            Some(Network::Owned(hub.connector("a"))),
+        )
+        .create()
+        .await?,
+    )?;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
+    let b = Device::new(
+        common::configuration(
+            &root.path().join("b"),
+            &schema,
+            None,
+            None,
+            Some(Network::Owned(hub.connector("b"))),
+        )
+        .join(&invitation)
+        .await?,
+    )?;
+    b.sync().await.map_err(|error| error.to_string())?;
+    introduce(&a, &b).await;
+
+    a.database
+        .write(async |tx| {
+            let id1 = tx.next_id("t1").await?;
+            tx.execute("INSERT INTO t1(id, label) VALUES(?, 'n1')", params![id1])
+                .await?;
+            let id2 = tx.next_id("t2").await?;
+            tx.execute(
+                "INSERT INTO t2(id, parent, label) VALUES(?, ?, 'n2')",
+                params![id2, id1],
+            )
+            .await?;
+            let id3 = tx.next_id("t3").await?;
+            tx.execute(
+                "INSERT INTO t3(id, parent, label) VALUES(?, ?, 'n3')",
+                params![id3, id2],
+            )
+            .await?;
+            let id4 = tx.next_id("t4").await?;
+            tx.execute(
+                "INSERT INTO t4(id, parent, label) VALUES(?, ?, 'n4')",
+                params![id4, id3],
+            )
+            .await?;
+            let id5 = tx.next_id("t5").await?;
+            tx.execute(
+                "INSERT INTO t5(id, parent, label) VALUES(?, ?, 'n5')",
+                params![id5, id4],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(())
+        })
+        .await?;
+
+    sync(&a, &b).await?;
+    for table in ["t1", "t2", "t3", "t4", "t5"] {
+        assert_eq!(count(&b.database, table).await?, 1, "{table}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_one_parent_four_children_star_syncs_without_channel_deadlock() -> Result<(), Failure> {
+    let schema = common::build(
+        Schema::builder("fk_star_5", 1)
+            .table(Table::replayed("hub").column(common::required("label", Affinity::Text)))
+            .table(
+                Table::replayed("c1")
+                    .column(
+                        Column::new("hub", Affinity::Blob)
+                            .required()
+                            .references("hub"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("c2")
+                    .column(
+                        Column::new("hub", Affinity::Blob)
+                            .required()
+                            .references("hub"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("c3")
+                    .column(
+                        Column::new("hub", Affinity::Blob)
+                            .required()
+                            .references("hub"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            )
+            .table(
+                Table::replayed("c4")
+                    .column(
+                        Column::new("hub", Affinity::Blob)
+                            .required()
+                            .references("hub"),
+                    )
+                    .column(common::required("label", Affinity::Text)),
+            ),
+    );
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::new(
+        common::configuration(
+            &root.path().join("a"),
+            &schema,
+            None,
+            None,
+            Some(Network::Owned(hub.connector("a"))),
+        )
+        .create()
+        .await?,
+    )?;
+    let invitation = a.invite_as(rocky_sdk::Access::Full).await;
+    let b = Device::new(
+        common::configuration(
+            &root.path().join("b"),
+            &schema,
+            None,
+            None,
+            Some(Network::Owned(hub.connector("b"))),
+        )
+        .join(&invitation)
+        .await?,
+    )?;
+    b.sync().await.map_err(|error| error.to_string())?;
+    introduce(&a, &b).await;
+
+    a.database
+        .write(async |tx| {
+            let parent = tx.next_id("hub").await?;
+            tx.execute(
+                "INSERT INTO hub(id, label) VALUES(?, 'root')",
+                params![parent],
+            )
+            .await?;
+            for table in ["c1", "c2", "c3", "c4"] {
+                let child = tx.next_id(table).await?;
+                tx.execute(
+                    &format!("INSERT INTO {table}(id, hub, label) VALUES(?, ?, '{table}')"),
+                    params![child, parent],
+                )
+                .await?;
+            }
+            Ok::<_, rocky_sdk::Error>(())
+        })
+        .await?;
+
+    sync(&a, &b).await?;
+    for table in ["hub", "c1", "c2", "c3", "c4"] {
+        assert_eq!(count(&b.database, table).await?, 1, "{table}");
+    }
+    Ok(())
+}

@@ -7,6 +7,7 @@ mod base;
 mod bystanders;
 mod constraints;
 mod import_order;
+pub use import_order::DependencyNode;
 pub(crate) mod outcomes;
 mod rebuild;
 mod references;

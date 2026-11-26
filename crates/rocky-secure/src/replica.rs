@@ -75,6 +75,7 @@ mod recovery;
 mod removal;
 pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
+pub use replay::DependencyNode;
 use replay::Rebuilding;
 pub use replay::SchemaDrop;
 pub use replay::outcomes::OutcomeDivergence;

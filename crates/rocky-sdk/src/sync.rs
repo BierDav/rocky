@@ -265,12 +265,10 @@ pub(crate) async fn bootstrap(
     replica
         .set_importing(pending.iter().copied().collect())
         .await;
-    use futures_util::{StreamExt, stream};
+    use futures_util::{StreamExt, stream::FuturesUnordered};
     let settling = tokio::sync::Mutex::new((pending, expected));
     let (progress, totals) = (&settling, &totals);
-    let chains = replica
-        .in_dependency_chains(planned, |plan| plan.scope)
-        .await?;
+    let nodes = replica.dependency_graph(planned, |plan| plan.scope).await?;
     let import = |plan: Planned, mut first: Option<NativeSession>| async move {
         let (scope, checkpoint) = (plan.scope, plan.checkpoint);
         let mut moved = Transfer::default();
@@ -338,29 +336,42 @@ pub(crate) async fn bootstrap(
         };
         (scope, moved, imported, settled)
     };
-    let mut imports = stream::iter(chains.into_iter().map(|chain| {
-        let mut first = first.take();
-        async move {
-            let mut done = Vec::with_capacity(chain.len());
-            for plan in chain {
-                let outcome = import(plan, first.take()).await;
-                let unsettled = outcome.2.is_err() || outcome.3.is_err();
-                done.push(outcome);
-                if unsettled {
-                    break;
-                }
+    let mut schedule = DependencySchedule::new(nodes);
+    let mut imports = FuturesUnordered::new();
+    let run_node = |index: usize, plans: Vec<Planned>, mut reused: Option<NativeSession>| async move {
+        let mut done = Vec::with_capacity(plans.len());
+        let mut ok = true;
+        for plan in plans {
+            let outcome = import(plan, reused.take()).await;
+            let unsettled = outcome.2.is_err() || outcome.3.is_err();
+            done.push(outcome);
+            if unsettled {
+                ok = false;
+                break;
             }
-            done
         }
-    }))
-    .buffer_unordered(PARALLEL);
-    while let Some(done) = imports.next().await {
+        (index, ok, done)
+    };
+    while imports.len() < PARALLEL {
+        let Some((index, plans)) = schedule.next_ready() else {
+            break;
+        };
+        imports.push(run_node(index, plans, first.take()));
+    }
+    while let Some((index, ok, done)) = imports.next().await {
         for (scope, moved, imported, settled) in done {
             transfer.extend(moved);
             settled?;
             if let Err(error) = imported {
                 transfer.request_failed(scope, &error);
             }
+        }
+        schedule.complete(index, ok);
+        while imports.len() < PARALLEL {
+            let Some((index, plans)) = schedule.next_ready() else {
+                break;
+            };
+            imports.push(run_node(index, plans, first.take()));
         }
     }
     drop(imports);
@@ -417,7 +428,7 @@ async fn rows(
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
 ) -> Result<(), Failure> {
-    use futures_util::{StreamExt, stream};
+    use futures_util::{StreamExt, stream::FuturesUnordered};
     let mut planning = match first.take() {
         Some(session) => session,
         None => session(replica, upstream).await?,
@@ -436,8 +447,14 @@ async fn rows(
         return Err(Box::new(Unfinished));
     }
     if !replica.tip_statements(None, 1).await?.is_empty() {
-        for scope in scopes {
-            if planning.sync_held_changes(replica, *scope, QUOTA).await? {
+        let ordered: Vec<_> = replica
+            .dependency_graph(scopes.to_vec(), |scope| *scope)
+            .await?
+            .into_iter()
+            .flat_map(|node| node.items)
+            .collect();
+        for scope in ordered {
+            if planning.sync_held_changes(replica, scope, QUOTA).await? {
                 planning.close().await?;
                 return Err(Box::new(Unfinished));
             }
@@ -466,40 +483,76 @@ async fn rows(
         planning.close().await?;
         None
     };
-    let chains = replica
-        .in_dependency_chains(exchange.changed, |scope| *scope)
+    let nodes = replica
+        .dependency_graph(exchange.changed, |scope| *scope)
         .await?;
-    let mut pending = stream::iter(chains.into_iter().map(|chain| {
+    let mut schedule = DependencySchedule::new(nodes);
+    let mut pending = FuturesUnordered::new();
+    let run_node = |index: usize, node_scopes: Vec<ResourceScope>| {
         let progress = &progress;
         async move {
-            let mut done = Vec::with_capacity(chain.len());
-            for scope in chain {
+            let mut done = Vec::with_capacity(node_scopes.len());
+            let mut kept = None;
+            let mut ok = true;
+            for scope in node_scopes {
                 let mut moved = Transfer::default();
-                let result =
-                    rows_scope(replica, upstream, &[scope], progress, &mut moved, None).await;
-                let learned = matches!(&result, Err(error) if error.is::<Learned>());
-                done.push((scope, moved, result));
-                if learned {
-                    break;
+                match rows_scope(
+                    replica,
+                    upstream,
+                    &[scope],
+                    progress,
+                    &mut moved,
+                    kept.take(),
+                )
+                .await
+                {
+                    Ok(session) => {
+                        kept = Some(session);
+                        done.push((scope, moved, Ok(())));
+                    }
+                    Err(error) => {
+                        ok = false;
+                        done.push((scope, moved, Err(error)));
+                        break;
+                    }
                 }
             }
-            done
+            if let Some(session) = kept
+                && let Err(error) = session.close().await
+            {
+                ok = false;
+                if let Some((_, _, result)) = done.last_mut()
+                    && result.is_ok()
+                {
+                    *result = Err(error.into());
+                }
+            }
+            (index, ok, done)
         }
-    }))
-    .buffer_unordered(PARALLEL);
-    while let Some(done) = pending.next().await {
+    };
+    while pending.len() < PARALLEL {
+        let Some((index, node_scopes)) = schedule.next_ready() else {
+            break;
+        };
+        pending.push(run_node(index, node_scopes));
+    }
+    while let Some((index, ok, done)) = pending.next().await {
         for (scope, moved, result) in done {
             transfer.extend(moved);
-            match result {
-                Ok(session) => session.close().await?,
-                Err(error) => {
-                    if error.is::<Learned>() {
-                        return Err(error);
-                    }
-                    transfer.request_failed(scope, &error);
-                    progress(false);
+            if let Err(error) = result {
+                if error.is::<Learned>() {
+                    return Err(error);
                 }
+                transfer.request_failed(scope, &error);
+                progress(false);
             }
+        }
+        schedule.complete(index, ok);
+        while pending.len() < PARALLEL {
+            let Some((index, node_scopes)) = schedule.next_ready() else {
+                break;
+            };
+            pending.push(run_node(index, node_scopes));
         }
     }
     if upstream.refresh_control {
@@ -654,4 +707,141 @@ async fn rows_scope(
         session.close().await?;
     }
     Err("sync exceeded its session budget; it continues on the next sync".into())
+}
+
+struct DependencySchedule<T> {
+    items: Vec<Option<Vec<T>>>,
+    dependents: Vec<Vec<usize>>,
+    waiting: Vec<usize>,
+    blocked: Vec<bool>,
+    ready: std::collections::VecDeque<usize>,
+}
+
+impl<T> DependencySchedule<T> {
+    fn new(nodes: Vec<rocky_secure::DependencyNode<T>>) -> Self {
+        let count = nodes.len();
+        let mut items = Vec::with_capacity(count);
+        let mut dependents = vec![Vec::new(); count];
+        let mut waiting = Vec::with_capacity(count);
+        let mut ready = std::collections::VecDeque::new();
+        for (index, node) in nodes.into_iter().enumerate() {
+            items.push(Some(node.items));
+            waiting.push(node.parents.len());
+            if node.parents.is_empty() {
+                ready.push_back(index);
+            }
+            for parent in node.parents {
+                dependents[parent].push(index);
+            }
+        }
+        Self {
+            items,
+            dependents,
+            waiting,
+            blocked: vec![false; count],
+            ready,
+        }
+    }
+
+    fn next_ready(&mut self) -> Option<(usize, Vec<T>)> {
+        while let Some(index) = self.ready.pop_front() {
+            if self.blocked[index] {
+                continue;
+            }
+            if let Some(items) = self.items[index].take() {
+                return Some((index, items));
+            }
+        }
+        None
+    }
+
+    fn complete(&mut self, index: usize, ok: bool) {
+        if ok {
+            for &child in &self.dependents[index] {
+                self.waiting[child] = self.waiting[child].saturating_sub(1);
+                if self.waiting[child] == 0 && !self.blocked[child] {
+                    self.ready.push_back(child);
+                }
+            }
+        } else {
+            let mut stack = vec![index];
+            while let Some(node) = stack.pop() {
+                for &child in &self.dependents[node] {
+                    if !self.blocked[child] {
+                        self.blocked[child] = true;
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DependencySchedule;
+    use rocky_secure::DependencyNode;
+
+    #[test]
+    fn star_releases_all_children_after_parent_succeeds() {
+        let mut schedule = DependencySchedule::new(vec![
+            DependencyNode {
+                items: vec!["hub"],
+                parents: vec![],
+            },
+            DependencyNode {
+                items: vec!["c1"],
+                parents: vec![0],
+            },
+            DependencyNode {
+                items: vec!["c2"],
+                parents: vec![0],
+            },
+            DependencyNode {
+                items: vec!["c3"],
+                parents: vec![0],
+            },
+            DependencyNode {
+                items: vec!["c4"],
+                parents: vec![0],
+            },
+        ]);
+        let (hub, items) = schedule.next_ready().unwrap();
+        assert_eq!((hub, items), (0, vec!["hub"]));
+        assert!(schedule.next_ready().is_none());
+        schedule.complete(hub, true);
+        let mut children = Vec::new();
+        while let Some((_, items)) = schedule.next_ready() {
+            children.extend(items);
+        }
+        assert_eq!(children, vec!["c1", "c2", "c3", "c4"]);
+    }
+
+    #[test]
+    fn failed_parent_blocks_descendants_without_blocking_unrelated_nodes() {
+        let mut schedule = DependencySchedule::new(vec![
+            DependencyNode {
+                items: vec!["parent"],
+                parents: vec![],
+            },
+            DependencyNode {
+                items: vec!["other"],
+                parents: vec![],
+            },
+            DependencyNode {
+                items: vec!["child"],
+                parents: vec![0],
+            },
+            DependencyNode {
+                items: vec!["grandchild"],
+                parents: vec![0, 2],
+            },
+        ]);
+        let (parent, _) = schedule.next_ready().unwrap();
+        let (other, _) = schedule.next_ready().unwrap();
+        assert!(schedule.next_ready().is_none());
+        schedule.complete(parent, false);
+        schedule.complete(other, true);
+        assert!(schedule.next_ready().is_none());
+    }
 }

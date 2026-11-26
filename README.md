@@ -633,40 +633,81 @@ Rocky's encryption and authorization apply on top of every transport.
 `rocky-coordinator` adds gap-free counters and admit-once claims to a
 `Database`. `Counters::connect(database, &bundle, transport)` reaches the
 coordinator a `TrustBundle` names. Voters accept only iroh connections, so pass
-a `rocky-iroh` transport, such as
-`rocky_iroh::Options::isolated("127.0.0.1:0").client().await?.transport()`.
+a `rocky-iroh` transport. The application owns that transport: closing it ends
+its open streams, refuses every later dial and stops an endpoint that
+`Options::client()` bound, so a claim after it is an error, never a number.
 The owner registers the database once with
 `counters.register(&root, &tenant, lifetime)`, where `tenant` is the
 coordinator account (`Tenant::generate()`, kept through `Tenant::secret`), and
 renews it with `renew(&tenant, &receipt, lifetime)` before it expires.
 
+```rust crates/rocky-coordinator/examples/counters.rs
+
+    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
+        .client()
+        .await?
+        .transport();
+    let counters = Counters::connect(created.database.clone(), &bundle, transport.clone())?;
+    counters
+        .register(&created.root, &Tenant::generate(), CONTROL_LIFETIME_SECONDS)
+        .await?;
+    let admissions = Name::new("admissions")?;
+    let east = counters
+        .claim(&admissions, &Claim::new("ticket-1", "east-scan-1"))
+        .await?;
+    admitted_once(&counters, &admissions, east).await?;
+
+    transport.close().await;
+    let offline = counters
+        .claim(&admissions, &Claim::new("ticket-2", "east-scan-2"))
+        .await;
+    if offline.is_ok() {
+        return Err("a closed transport still took a number".into());
+    }
+```
+
+A counter is the unit of uniqueness: a key is admitted once per counter, so
+every door, till or device that must agree claims against the same name, such
+as one `admissions` counter for all doors. A counter per door would admit a
+ticket once at each door.
+
 `counters.claim(&name, &claim)` takes a counter's next number for any person
-with write access, and the application writes that number in its own
-transaction. `Claim::new(key)` makes one attempt on an application key such as
-an order id or a ticket; store the claim and send the same value to retry. The
-answer is `Claimed::First(n)` for the attempt that holds the key, on every
-retry, and `Claimed::Taken(n)` for any other attempt while the key is in force,
-so admitting a ticket once is
-`matches!(counters.claim(&door, &Claim::new(ticket)).await?, Claimed::First(_))`.
-`Claim::unkeyed()` takes a number no business key names.
+whose access holds insert, update or delete rights; a reader is refused with
+`Refusal::ReadOnly` and a removed person with `Refusal::Revoked`. The
+application writes the number, an `i64` from 1 up, in its own transaction.
+`Claim::new(key, attempt)` names the business key, such as a ticket or an
+order id, and the application's own id for this try, such as the scan row's
+id. The answer is `Claimed::First(n)` for the attempt that holds the key, on
+every retry, and `Claimed::Taken(n)` for any other attempt while the key is in
+force. A retry rebuilds the same `Claim` from the application's rows, so
+nothing about a claim needs storing before it is sent. `Claim::new(id, id)`
+takes a number no other key shares, such as an invoice number.
 
 A key stays in force for seven days (`CLAIM_WINDOW`), or until
 `Claim::expires(at)`, at most 366 days ahead. A counter holds 16,384 keys in
 force (`MAX_CLAIMS`); a new key beyond them is refused with
 `CoordinationError::Full` and takes no number, and only expired keys are ever
-forgotten. A database holds 64 counters, and the tenant's storage limit may
-refuse a claim earlier with `Backpressure`.
+forgotten. A counter's last number is `i64::MAX`; after it, a claim is refused
+with `Exhausted`. A database holds 64 counters, and the tenant's storage limit
+may refuse a claim earlier with `Backpressure`.
 
+Each call waits up to 12 seconds (`CALL_DEADLINE`);
+`counters.deadline(std::time::Duration)` sets another bound.
 `CounterError::retryable` says whether sending the same call again may succeed.
 `Unavailable` means no voter accepted the request. `OutcomeUnknown` means the
 request may have reached the coordinator without an answer: send the same
-`Claim` again to learn its number, never a new one.
+`Claim` again, which answers the same `Claimed` the first one took, never a
+new one.
 
 `scripts/coordinator-local DIR` builds `rocky-voter`, starts three voters on
 loopback and prints the trust bundle that `cargo run -p rocky-coordinator
---example counters -- BUNDLE EMPTY_DIR` claims from. Tests in this workspace
-start voters in-process with `rocky_voter::LocalCluster::start(dir, 3)` and
-reach them through `cluster.bundle()`.
+--example counters -- BUNDLE EMPTY_DIR` claims from. For tests and local
+development, `rocky_voter::LocalCluster::start(dir, 3)` runs three to seven
+voters in-process on loopback, keeping their state under `dir`;
+`cluster.bundle()` is the trust bundle to connect with and
+`cluster.shutdown()` stops them. The voters log through `tracing`. Depend on
+`rocky-voter` with `default-features = false` to leave out the relay server
+its `server` feature builds into the `rocky-voter` executable.
 
 ## Browser (wasm)
 

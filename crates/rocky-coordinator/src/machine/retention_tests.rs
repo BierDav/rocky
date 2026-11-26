@@ -83,7 +83,7 @@ impl Mesh {
     ) -> Result<Outcome, CoordinationError> {
         metadata.apply_at(proposed, &self.request(key, operation, signed))
     }
-    fn reading(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> u64 {
+    fn reading(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> i64 {
         let read = Operation::Counter {
             scope,
             counter: Name::new("invoices").unwrap(),
@@ -94,11 +94,11 @@ impl Mesh {
         }
     }
     fn claim(&self, scope: Scope, issued: u64) -> Operation {
-        Operation::Claim {
+        Operation::claim(
             scope,
-            counter: Name::new("invoices").unwrap(),
-            claim: Claim::unkeyed_until(issued + CLAIM_WINDOW),
-        }
+            Name::new("invoices").unwrap(),
+            Claim::unique_until(issued + CLAIM_WINDOW),
+        )
     }
     fn open(&self, limits: Limits) -> Metadata {
         let mut metadata = Metadata::with_limits(self.genesis.clone(), limits).unwrap();

@@ -262,7 +262,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
 const RETRIES_PAST_THE_LAGGING_LOG: usize = 80;
 
 fn claim(n: u8) -> Claim {
-    Claim::new([n])
+    Claim::new([n], [n])
 }
 async fn claim_definitely(
     client: &NetworkCoordinator,
@@ -320,14 +320,14 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     let mut taken = Vec::new();
     for task in tasks {
         let values: Vec<_> = task.await.unwrap();
-        let ordered: Vec<u64> = values.iter().map(|(_, v)| *v.as_ref().unwrap()).collect();
+        let ordered: Vec<i64> = values.iter().map(|(_, v)| *v.as_ref().unwrap()).collect();
         assert!(
             ordered.windows(2).all(|pair| pair[0] < pair[1]),
             "each node's own answers strictly increase: {ordered:?}"
         );
         taken.extend(values.into_iter().map(|(claim, v)| (claim, v.unwrap())));
     }
-    let distinct: BTreeSet<u64> = taken.iter().map(|(_, value)| *value).collect();
+    let distinct: BTreeSet<i64> = taken.iter().map(|(_, value)| *value).collect();
     assert_eq!(
         distinct,
         (1..=24).collect(),

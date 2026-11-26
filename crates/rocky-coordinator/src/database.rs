@@ -9,9 +9,9 @@ use crate::{
 };
 use rocky_core::Commitment;
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher};
-use rocky_platform::time::Duration;
 use rocky_sdk::{Database, DeviceCredential, transport::Transport};
 use std::sync::Arc;
+use std::time::Duration;
 
 const GRANT_LIFETIME_SECONDS: u64 = 3600;
 
@@ -66,15 +66,16 @@ impl From<rocky_sdk::Error> for CounterError {
     }
 }
 
-/// Gap-free named counters for one database, claimed through a coordinator.
+/// Gap-free named counters for one database, claimed through a coordinator; each counter is
+/// one unit of uniqueness, so every door or till that must agree claims against the same name.
 pub struct Counters {
     database: Database,
     client: NetworkCoordinator,
     deadline: Duration,
 }
 impl Counters {
-    /// Reaches the coordinator a trust bundle names over `transport`, whose kind the bundle must
-    /// list; `rocky-voter` serves `iroh` only, so pass a `rocky-iroh` transport.
+    /// Reaches the coordinator a trust bundle names over `transport`, which the application keeps
+    /// and closes; `rocky-voter` serves iroh only, so pass a `rocky-iroh` transport.
     pub fn connect(
         database: Database,
         bundle: &TrustBundle,
@@ -87,8 +88,8 @@ impl Counters {
             deadline: CALL_DEADLINE,
         })
     }
-    /// Bounds how long each call waits, 12 seconds by default.
-    pub fn with_deadline(self, deadline: Duration) -> Self {
+    /// Bounds how long each call waits, 12 seconds (`CALL_DEADLINE`) by default.
+    pub fn deadline(self, deadline: Duration) -> Self {
         Self { deadline, ..self }
     }
     /// Registers the database with the coordinator under `tenant`, signed by the database's root
@@ -138,22 +139,19 @@ impl Counters {
         let operation = Operation::Control(Box::new(certificate.clone()));
         self.publish(tenant, certificate, operation).await
     }
-    /// Takes the counter's next number for the claim's key, for any person with write access;
-    /// only `Claimed::First` admits, and after `OutcomeUnknown` send the same `claim` again.
+    /// Takes the counter's next number for the claim's key, for any person with insert, update or
+    /// delete rights; only `Claimed::First` admits, and after `OutcomeUnknown` the same `Claim`
+    /// sent again answers the same `Claimed`.
     pub async fn claim(&self, counter: &Name, claim: &Claim) -> Result<Claimed, CounterError> {
         let device = self.database.device_credential().await?;
-        let operation = Operation::Claim {
-            scope: device.scope,
-            counter: counter.clone(),
-            claim: *claim,
-        };
+        let operation = Operation::claim(device.scope, counter.clone(), *claim);
         match self.submit(device, operation).await? {
             Outcome::Claimed(claimed) => Ok(claimed),
             _ => Err(CoordinationError::Corrupt.into()),
         }
     }
     /// The counter's last number, or 0 before any.
-    pub async fn read(&self, counter: &Name) -> Result<u64, CounterError> {
+    pub async fn read(&self, counter: &Name) -> Result<i64, CounterError> {
         let device = self.database.device_credential().await?;
         let operation = Operation::Counter {
             scope: device.scope,

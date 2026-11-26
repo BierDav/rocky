@@ -49,26 +49,25 @@ impl From<Name> for Vec<u8> {
     }
 }
 
-/// One attempt to take a counter's number for a key such as an order id or a ticket; store it and
-/// send the same value to retry. A retry answers `First` with the attempt's number, while another
-/// attempt on a key still in force answers `Taken`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One attempt to take a counter's number for a key such as a ticket or an order id. Build it
+/// again from the application's own rows to retry: the same key and attempt answer `First` with
+/// the attempt's number, while another attempt on a key still in force answers `Taken`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Claim {
-    key: Commitment,
-    attempt: Commitment,
-    expires: u64,
+    pub(crate) key: Commitment,
+    pub(crate) attempt: Commitment,
+    pub(crate) expires: u64,
 }
 impl Claim {
-    /// A new attempt on an application key, in force for `CLAIM_WINDOW` from now.
-    pub fn new(key: impl AsRef<[u8]>) -> Self {
-        Self::attempt(rocky_core::commitment(
-            "rocky.counter-claim-key.v2",
-            key.as_ref(),
-        ))
-    }
-    /// A new attempt on a random key no other attempt shares, for a number without a business key.
-    pub fn unkeyed() -> Self {
-        Self::attempt(rocky_platform::entropy::random())
+    /// An attempt on `key` named by the application's own id for this try, such as a scan row or
+    /// an order id, in force for `CLAIM_WINDOW` from now; `Claim::new(id, id)` takes a number no
+    /// other key shares.
+    pub fn new(key: impl AsRef<[u8]>, attempt: impl AsRef<[u8]>) -> Self {
+        Self {
+            key: rocky_core::commitment("rocky.counter-claim-key.v2", key.as_ref()),
+            attempt: rocky_core::commitment("rocky.counter-claim-attempt.v1", attempt.as_ref()),
+            expires: unix_seconds(SystemTime::now()).saturating_add(CLAIM_WINDOW),
+        }
     }
     /// Keeps the key in force until `at` instead, at most `MAX_CLAIM_LIFETIME` ahead.
     pub fn expires(self, at: SystemTime) -> Self {
@@ -77,20 +76,14 @@ impl Claim {
             ..self
         }
     }
-    fn attempt(key: Commitment) -> Self {
-        Self {
-            key,
-            attempt: rocky_platform::entropy::random(),
-            expires: unix_seconds(SystemTime::now()).saturating_add(CLAIM_WINDOW),
-        }
-    }
 }
 #[cfg(test)]
 impl Claim {
-    pub(crate) fn unkeyed_until(expires: u64) -> Self {
+    pub(crate) fn unique_until(expires: u64) -> Self {
+        let id: Commitment = rocky_platform::entropy::random();
         Self {
             expires,
-            ..Self::unkeyed()
+            ..Self::new(id, id)
         }
     }
     pub(crate) fn keyed_for_test((key, attempt): (Commitment, u8), expires: u64) -> Self {
@@ -117,13 +110,13 @@ fn unix_seconds(at: SystemTime) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Claimed {
     /// This attempt holds the key's number, whether it took it now or on an earlier try.
-    First(u64),
+    First(i64),
     /// Another attempt already holds this key, with this number.
-    Taken(u64),
+    Taken(i64),
 }
 impl Claimed {
-    /// The key's number, whichever attempt took it.
-    pub fn number(self) -> u64 {
+    /// The key's number, from 1 up to `i64::MAX`, whichever attempt took it.
+    pub fn number(self) -> i64 {
         match self {
             Self::First(number) | Self::Taken(number) => number,
         }

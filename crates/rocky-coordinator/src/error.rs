@@ -34,6 +34,8 @@ pub enum CoordinationError {
     /// The counter holds `MAX_CLAIMS` claims still in force, so a new key takes no number until
     /// one expires.
     Full,
+    /// The counter took `i64::MAX`, its last number, so it takes no more.
+    Exhausted,
     /// The trust bundle has a format this version does not read.
     UnsupportedFormat,
 }
@@ -53,6 +55,7 @@ impl CoordinationError {
             Self::Expired => "expired",
             Self::Backpressure => "backpressure",
             Self::Full => "full",
+            Self::Exhausted => "exhausted",
             Self::UnsupportedFormat => "unsupported_format",
         }
     }

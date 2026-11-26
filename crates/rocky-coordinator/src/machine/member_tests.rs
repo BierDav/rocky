@@ -83,18 +83,14 @@ impl Fixture {
         claim: Claim,
         time: u64,
     ) -> Result<crate::counters::Claimed, CoordinationError> {
-        let operation = Operation::Claim {
-            scope: self.scope,
-            counter: name(counter),
-            claim,
-        };
+        let operation = Operation::claim(self.scope, name(counter), claim);
         let request = self.presenting(person, operation, time);
         match self.state.apply_at(time, &request)? {
             Outcome::Claimed(claimed) => Ok(claimed),
             other => panic!("claim: {other:?}"),
         }
     }
-    fn read_by(&self, person: &Person, counter: &str, time: u64) -> Result<u64, CoordinationError> {
+    fn read_by(&self, person: &Person, counter: &str, time: u64) -> Result<i64, CoordinationError> {
         let operation = Operation::Counter {
             scope: self.scope,
             counter: name(counter),
@@ -104,13 +100,9 @@ impl Fixture {
             other => panic!("reading: {other:?}"),
         }
     }
-    fn admin_claim(&mut self, counter: &str, claim: Claim, time: u64) -> u64 {
+    fn admin_claim(&mut self, counter: &str, claim: Claim, time: u64) -> i64 {
         let request = self.certified(
-            Operation::Claim {
-                scope: self.scope,
-                counter: name(counter),
-                claim,
-            },
+            Operation::claim(self.scope, name(counter), claim),
             &self.nodes[0],
             time,
         );
@@ -242,11 +234,7 @@ fn readers_strangers_and_foreign_chains_never_claim() {
     let unchained = Request::sign_at(
         f.state.genesis.id().unwrap(),
         [1; 32],
-        Operation::Claim {
-            scope: f.scope,
-            counter: name("invoices"),
-            claim: claim(5, T),
-        },
+        Operation::claim(f.scope, name("invoices"), claim(5, T)),
         &writer.node,
         T,
     )

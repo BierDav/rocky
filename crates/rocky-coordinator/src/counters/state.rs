@@ -1,6 +1,6 @@
 use super::{Claim, Claimed, MAX_CLAIM_LIFETIME, MAX_CLAIMS, MAX_COUNTERS, Name};
 use crate::CoordinationError;
-use rocky_core::{Commitment, MAX_COUNTER};
+use rocky_core::Commitment;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ const ACCOUNTED_CLAIM_BYTES: usize = 96;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Held {
     attempt: Commitment,
-    value: u64,
+    value: i64,
     expires: u64,
 }
 impl Held {
@@ -21,7 +21,7 @@ impl Held {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Counter {
     name: Name,
-    value: u64,
+    value: i64,
     claims: BTreeMap<Commitment, Held>,
 }
 impl Counter {
@@ -80,8 +80,7 @@ impl Counter {
         let value = self
             .value
             .checked_add(1)
-            .filter(|value| *value <= MAX_COUNTER)
-            .ok_or(CoordinationError::Configuration)?;
+            .ok_or(CoordinationError::Exhausted)?;
         self.value = value;
         self.claims.insert(
             claim.key,
@@ -126,10 +125,38 @@ impl Counters {
         }
         result
     }
-    pub fn read(&self, name: &Name) -> u64 {
+    pub fn read(&self, name: &Name) -> i64 {
         self.counters
             .iter()
             .find(|c| c.name == *name)
             .map_or(0, |counter| counter.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_counter_takes_i64_max_last_and_then_refuses_as_exhausted() {
+        let time = 1_000;
+        let expires = time + 60;
+        let mut counter = Counter::new(Name::new("tickets").unwrap());
+        counter.value = i64::MAX - 1;
+        assert_eq!(
+            counter.take(Claim::fixed(1, 1, expires), time, usize::MAX),
+            Ok(Claimed::First(i64::MAX))
+        );
+        assert_eq!(
+            counter.take(Claim::fixed(2, 2, expires), time, usize::MAX),
+            Err(CoordinationError::Exhausted),
+            "a counter at i64::MAX takes no number and says why"
+        );
+        assert_eq!(
+            counter.take(Claim::fixed(1, 1, expires), time, usize::MAX),
+            Ok(Claimed::First(i64::MAX)),
+            "the claim that took the last number still learns it"
+        );
+        assert!(!CoordinationError::Exhausted.retryable());
     }
 }

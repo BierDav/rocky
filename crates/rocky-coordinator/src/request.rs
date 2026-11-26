@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 #[cfg(feature = "voter")]
 pub const MAX_ADMINS: usize = 32;
-pub const REQUEST_LABEL: &str = "rocky.ext.coordinator-request.v11";
+pub const REQUEST_LABEL: &str = "rocky.ext.coordinator-request.v12";
 
 /// What a coordinator request asks for.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,8 +39,13 @@ pub enum Operation {
         scope: Scope,
         /// The counter.
         counter: crate::counters::Name,
-        /// The claim, whose key and attempt decide between a first and a taken number.
-        claim: crate::counters::Claim,
+        /// The commitment to the application's key.
+        key: Commitment,
+        /// The commitment to the application's attempt id, which decides between a first and a
+        /// taken number.
+        attempt: Commitment,
+        /// Unix seconds when the key stops being in force.
+        expires: u64,
     },
     /// Reads a counter's last number.
     Counter {
@@ -56,6 +61,22 @@ pub enum Operation {
         /// The revocations to merge.
         revocations: Box<RevocationSet>,
     },
+}
+impl Operation {
+    /// Takes `counter`'s next number for `claim`.
+    pub fn claim(
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> Self {
+        Self::Claim {
+            scope,
+            counter,
+            key: claim.key,
+            attempt: claim.attempt,
+            expires: claim.expires,
+        }
+    }
 }
 /// A public registration: the root key's grant, the tenant's admission and the first certificate.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,7 +315,7 @@ pub enum Outcome {
     /// What a claim found.
     Claimed(crate::counters::Claimed),
     /// A counter's last number, or 0 before any.
-    Counter(u64),
+    Counter(i64),
     /// The digest of the merged revocations.
     Revoked(Commitment),
     /// The reference of the accepted control certificate.

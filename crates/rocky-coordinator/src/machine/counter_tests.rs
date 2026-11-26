@@ -29,11 +29,7 @@ impl Fixture {
         claim: Claim,
         time: u64,
     ) -> Result<Claimed, CoordinationError> {
-        let operation = Operation::Claim {
-            scope: self.scope,
-            counter: name(counter),
-            claim,
-        };
+        let operation = Operation::claim(self.scope, name(counter), claim);
         match self.operate(key, operation, time)? {
             Outcome::Claimed(claimed) => Ok(claimed),
             other => panic!("claim: {other:?}"),
@@ -49,7 +45,7 @@ impl Fixture {
         let key = self.nodes[node].clone();
         self.claim_as(&key, counter, claim, time)
     }
-    fn reading(&self, counter: &str, time: u64) -> u64 {
+    fn reading(&self, counter: &str, time: u64) -> i64 {
         let request = self.certified(
             Operation::Counter {
                 scope: self.scope,
@@ -86,7 +82,7 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     for n in 0..20u8 {
         assert_eq!(
             fixture.claim(0, "invoices", claim(n, T), T + 2),
-            Ok(First(u64::from(n) + 1)),
+            Ok(First(i64::from(n) + 1)),
             "every earlier claim still answers its own value"
         );
     }
@@ -184,11 +180,7 @@ fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
     let uncertified = Request::sign_at(
         fixture.state.genesis.id().unwrap(),
         [1; 32],
-        Operation::Claim {
-            scope: fixture.scope,
-            counter: name("invoices"),
-            claim: claim(1, T),
-        },
+        Operation::claim(fixture.scope, name("invoices"), claim(1, T)),
         &fixture.nodes[0],
         T,
     )
@@ -204,11 +196,7 @@ fn only_admin_nodes_claim_and_only_while_the_domain_is_open() {
     assert_eq!(
         fixture.operate(
             &key,
-            Operation::Claim {
-                scope: unknown,
-                counter: name("invoices"),
-                claim: claim(1, T),
-            },
+            Operation::claim(unknown, name("invoices"), claim(1, T)),
             T,
         ),
         Err(CoordinationError::UnknownDomain)
@@ -283,7 +271,7 @@ fn a_full_counter_refuses_new_keys_and_never_admits_a_ticket_in_force_twice() {
         let claim = crate::counters::Claim::keyed_for_test(ticket(n, 1), expires);
         assert_eq!(
             counters.claim(&door, claim, T, usize::MAX),
-            Ok(First(n as u64 + 1))
+            Ok(First(n as i64 + 1))
         );
     }
     let newcomer = crate::counters::Claim::keyed_for_test(ticket(MAX_CLAIMS, 1), T + CLAIM_WINDOW);
@@ -296,13 +284,13 @@ fn a_full_counter_refuses_new_keys_and_never_admits_a_ticket_in_force_twice() {
         let rescan = crate::counters::Claim::keyed_for_test(ticket(n, 2), T + CLAIM_WINDOW);
         assert_eq!(
             counters.claim(&door, rescan, T, usize::MAX),
-            Ok(Taken(n as u64 + 1)),
+            Ok(Taken(n as i64 + 1)),
             "every ticket in force stays admitted once, however many came after it"
         );
     }
     assert_eq!(
         counters.claim(&door, newcomer, early, usize::MAX),
-        Ok(First(MAX_CLAIMS as u64 + 1)),
+        Ok(First(MAX_CLAIMS as i64 + 1)),
         "an expired claim makes room, and numbers stay gap-free"
     );
     assert_eq!(
@@ -409,11 +397,7 @@ fn admin_siblings_claim_until_their_identity_unlinks_them() {
         Request::certified(
             f.state.genesis.id().unwrap(),
             [n; 32],
-            Operation::Claim {
-                scope: f.scope,
-                counter: name("siblings"),
-                claim: claim(n, T),
-            },
+            Operation::claim(f.scope, name("siblings"), claim(n, T)),
             (&nodes[index], chains[index].certificate().cloned()),
             T,
         )
@@ -425,7 +409,7 @@ fn admin_siblings_claim_until_their_identity_unlinks_them() {
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(
             f.state.apply_at(T, request),
-            Ok(Outcome::Claimed(First(index as u64 + 1)))
+            Ok(Outcome::Claimed(First(index as i64 + 1)))
         );
     }
     let unlink = SignedRevocation::sign(
@@ -465,11 +449,7 @@ fn admin_siblings_claim_until_their_identity_unlinks_them() {
         let request = Request::certified(
             f.state.genesis.id().unwrap(),
             [20 + index as u8; 32],
-            Operation::Claim {
-                scope: f.scope,
-                counter: name("after unlink"),
-                claim: claim(20 + index as u8, T),
-            },
+            Operation::claim(f.scope, name("after unlink"), claim(20 + index as u8, T)),
             (&nodes[index], chains[index].certificate().cloned()),
             T,
         )

@@ -272,9 +272,9 @@ pub fn invoices() -> rocky_coordinator::counters::Name {
     rocky_coordinator::counters::Name::new("invoices").unwrap()
 }
 pub fn fresh_claim(n: u8) -> rocky_coordinator::Claim {
-    rocky_coordinator::Claim::new([n])
+    rocky_coordinator::Claim::new([n], [n])
 }
-pub async fn reading(client: &NetworkCoordinator, scope: Scope) -> Result<u64, CoordinationError> {
+pub async fn reading(client: &NetworkCoordinator, scope: Scope) -> Result<i64, CoordinationError> {
     client.counter(scope, invoices()).await
 }
 

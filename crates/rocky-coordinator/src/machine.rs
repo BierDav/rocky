@@ -854,8 +854,19 @@ impl Metadata {
             Operation::Claim {
                 scope,
                 counter,
-                claim,
-            } => self.claim(*scope, counter, *claim, request),
+                key,
+                attempt,
+                expires,
+            } => self.claim(
+                *scope,
+                counter,
+                crate::counters::Claim {
+                    key: *key,
+                    attempt: *attempt,
+                    expires: *expires,
+                },
+                request,
+            ),
             Operation::Counter { scope, counter } => self.counter(*scope, counter, request),
             Operation::Revoke { scope, revocations } => self.revoke(*scope, revocations),
             Operation::Close { scope } => {

@@ -209,13 +209,13 @@ impl Service {
             time,
         )
     }
-    fn claim(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope) -> u64 {
+    fn claim(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope) -> i64 {
         match self.apply(metadata, key, claim(scope), T) {
             Ok(Outcome::Claimed(Claimed::First(value))) => value,
             other => panic!("claim: {other:?}"),
         }
     }
-    fn reading(&self, metadata: &Metadata, key: &PrivateKey, scope: Scope) -> u64 {
+    fn reading(&self, metadata: &Metadata, key: &PrivateKey, scope: Scope) -> i64 {
         match self.read(metadata, key, read(scope)) {
             Ok(Outcome::Counter(value)) => value,
             other => panic!("reading: {other:?}"),
@@ -229,11 +229,11 @@ fn read(scope: Scope) -> Operation {
     }
 }
 fn claim(scope: Scope) -> Operation {
-    Operation::Claim {
+    Operation::claim(
         scope,
-        counter: Name::new("invoices").unwrap(),
-        claim: Claim::unkeyed_until(T + CLAIM_WINDOW),
-    }
+        Name::new("invoices").unwrap(),
+        Claim::unique_until(T + CLAIM_WINDOW),
+    )
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

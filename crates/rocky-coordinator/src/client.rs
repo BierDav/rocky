@@ -365,14 +365,7 @@ impl NetworkCoordinator {
         claim: crate::counters::Claim,
     ) -> Result<crate::counters::Claimed, CoordinationError> {
         match self
-            .call(
-                nonce(),
-                Operation::Claim {
-                    scope,
-                    counter,
-                    claim,
-                },
-            )
+            .call(nonce(), Operation::claim(scope, counter, claim))
             .await?
         {
             Outcome::Claimed(claimed) => Ok(claimed),
@@ -384,7 +377,7 @@ impl NetworkCoordinator {
         &self,
         scope: Scope,
         counter: crate::counters::Name,
-    ) -> Result<u64, CoordinationError> {
+    ) -> Result<i64, CoordinationError> {
         match self
             .call(nonce(), Operation::Counter { scope, counter })
             .await?

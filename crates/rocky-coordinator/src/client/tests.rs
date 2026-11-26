@@ -13,6 +13,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(crate) const SCHEME: &str = "memory";
 
+fn unique() -> Claim {
+    let id: Commitment = rocky_platform::entropy::random();
+    Claim::new(id, id)
+}
+
 pub(crate) struct Memory {
     genesis: Commitment,
     key: PrivateKey,
@@ -273,7 +278,7 @@ async fn an_admin_node_claims_and_a_retry_returns_the_same_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("company-1/invoices").unwrap();
-    let first = Claim::unkeyed();
+    let first = unique();
     assert_eq!(
         client.claim(service.scope, invoices.clone(), first).await,
         Ok(First(1))
@@ -282,7 +287,7 @@ async fn an_admin_node_claims_and_a_retry_returns_the_same_value() {
         client.claim(service.scope, invoices.clone(), first).await,
         Ok(First(1))
     );
-    let second = Claim::unkeyed();
+    let second = unique();
     assert_eq!(
         client.claim(service.scope, invoices.clone(), second).await,
         Ok(First(2))
@@ -304,7 +309,10 @@ async fn two_doors_racing_one_ticket_admit_it_exactly_once() {
     let service = Service::start().await;
     let doors = [service.client(&service.node), service.client(&service.node)];
     let door = Name::new("door").unwrap();
-    let scans = [Claim::new(b"ticket-42"), Claim::new(b"ticket-42")];
+    let scans = [
+        Claim::new(b"ticket-42", b"east-scan-1"),
+        Claim::new(b"ticket-42", b"west-scan-1"),
+    ];
     let (east, west) = tokio::join!(
         doors[0].claim(service.scope, door.clone(), scans[0]),
         doors[1].claim(service.scope, door.clone(), scans[1]),
@@ -317,7 +325,11 @@ async fn two_doors_racing_one_ticket_admit_it_exactly_once() {
         [First(1), Taken(1)],
         "exactly one door admits the ticket, and both see its one number"
     );
-    for ((door_client, scan), answer) in doors.iter().zip(scans).zip(answers) {
+    let rescans = [
+        Claim::new(b"ticket-42", b"east-scan-1"),
+        Claim::new(b"ticket-42", b"west-scan-1"),
+    ];
+    for ((door_client, scan), answer) in doors.iter().zip(rescans).zip(answers) {
         assert_eq!(
             door_client.claim(service.scope, door.clone(), scan).await,
             Ok(answer),
@@ -336,7 +348,7 @@ async fn a_lost_reply_is_outcome_unknown_and_the_same_claim_learns_its_number() 
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    let order = Claim::new(b"order-17");
+    let order = Claim::new(b"order-17", b"checkout-3");
     service.voter.loses_replies.store(true, Ordering::Relaxed);
     assert_eq!(
         client.claim(service.scope, invoices.clone(), order).await,
@@ -355,14 +367,17 @@ async fn a_lost_reply_is_outcome_unknown_and_the_same_claim_learns_its_number() 
         Ok(1),
         "the unanswered claim took its number"
     );
+    let rebuilt_from_the_order_row = Claim::new(b"order-17", b"checkout-3");
     assert_eq!(
-        client.claim(service.scope, invoices.clone(), order).await,
+        client
+            .claim(service.scope, invoices.clone(), rebuilt_from_the_order_row)
+            .await,
         Ok(First(1)),
-        "the same claim sent again learns the number it took"
+        "the claim rebuilt from the same key and attempt learns the number it took"
     );
     assert_eq!(
         client
-            .claim(service.scope, invoices.clone(), Claim::unkeyed())
+            .claim(service.scope, invoices.clone(), unique())
             .await,
         Ok(First(2)),
         "no number was lost or taken twice"
@@ -374,7 +389,7 @@ async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    let stale = Claim::new(b"order-5").expires(
+    let stale = Claim::new(b"order-5", b"order-5").expires(
         rocky_platform::time::SystemTime::now() - rocky_platform::time::Duration::from_secs(60),
     );
     assert_eq!(
@@ -391,7 +406,7 @@ async fn only_admin_nodes_claim() {
     let stranger = service.client(&PrivateKey::new());
     assert_eq!(
         stranger
-            .claim(service.scope, invoices.clone(), Claim::unkeyed())
+            .claim(service.scope, invoices.clone(), unique())
             .await,
         Err(CoordinationError::Denied(Refusal::NotMember))
     );
@@ -403,7 +418,7 @@ async fn only_admin_nodes_claim() {
     .unwrap();
     assert_eq!(
         uncertified
-            .claim(service.scope, invoices.clone(), Claim::unkeyed())
+            .claim(service.scope, invoices.clone(), unique())
             .await,
         Err(CoordinationError::Denied(Refusal::NotMember)),
         "an admin node's key without its certificate is no identity"
@@ -471,9 +486,7 @@ async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
     assert_eq!(
-        client
-            .claim(service.scope, invoices, Claim::unkeyed())
-            .await,
+        client.claim(service.scope, invoices, unique()).await,
         Err(CoordinationError::OutcomeUnknown),
         "every answer is refused after the request was sent, so its outcome is unknown"
     );
@@ -495,7 +508,7 @@ async fn an_observer_sees_every_voter_answer_and_refusal() {
     let invoices = Name::new("invoices").unwrap();
     assert_eq!(
         client
-            .claim(service.scope, invoices.clone(), Claim::unkeyed())
+            .claim(service.scope, invoices.clone(), unique())
             .await,
         Ok(First(1))
     );
@@ -504,9 +517,7 @@ async fn an_observer_sees_every_voter_answer_and_refusal() {
         .clock_ahead_seconds
         .store(3600, Ordering::Relaxed);
     assert!(matches!(
-        client
-            .claim(service.scope, invoices, Claim::unkeyed())
-            .await,
+        client.claim(service.scope, invoices, unique()).await,
         Err(CoordinationError::ClockSkew { .. })
     ));
     let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -611,14 +622,14 @@ async fn connecting_never_closes_the_callers_transport() {
         let client = service.client_on(&service.node, transport.clone());
         assert_eq!(
             client
-                .claim(service.scope, invoices.clone(), Claim::unkeyed())
+                .claim(service.scope, invoices.clone(), unique())
                 .await,
             Ok(First(1))
         );
         let stranger = service.client_on(&PrivateKey::new(), transport.clone());
         assert_eq!(
             stranger
-                .claim(service.scope, invoices.clone(), Claim::unkeyed())
+                .claim(service.scope, invoices.clone(), unique())
                 .await,
             Err(CoordinationError::Denied(Refusal::NotMember)),
             "the voter refuses the request"
@@ -626,7 +637,7 @@ async fn connecting_never_closes_the_callers_transport() {
         transport.refuse_connections(true);
         assert_eq!(
             client
-                .claim(service.scope, invoices.clone(), Claim::unkeyed())
+                .claim(service.scope, invoices.clone(), unique())
                 .await,
             Err(CoordinationError::Unavailable),
             "every connection fails"
@@ -640,9 +651,7 @@ async fn connecting_never_closes_the_callers_transport() {
     ));
     let reopened = service.client_on(&service.node, transport.clone());
     assert_eq!(
-        reopened
-            .claim(service.scope, invoices, Claim::unkeyed())
-            .await,
+        reopened.claim(service.scope, invoices, unique()).await,
         Ok(First(2)),
         "the caller's transport still carries a new client"
     );

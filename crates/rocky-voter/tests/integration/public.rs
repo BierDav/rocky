@@ -44,7 +44,7 @@ async fn commit(
     client: &NetworkCoordinator,
     scope: Scope,
     claim: Claim,
-) -> Result<u64, CoordinationError> {
+) -> Result<i64, CoordinationError> {
     client
         .claim(scope, invoices(), claim)
         .await

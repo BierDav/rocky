@@ -184,11 +184,7 @@ async fn claims_recover_from_logs_and_snapshot_and_retry_identically() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         store.apply([entry]).await.unwrap().remove(0)
     }
-    let claim = Operation::Claim {
-        scope,
-        counter: invoices(),
-        claim: rocky_coordinator::Claim::new([7]),
-    };
+    let claim = Operation::claim(scope, invoices(), rocky_coordinator::Claim::new([7], [7]));
     let claimed = write(&mut store, request(claim.clone()), 1, time)
         .await
         .unwrap();

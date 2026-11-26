@@ -171,10 +171,10 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_in_process_voters_and
     let other = office.person("other", Access::Full).await;
     let theirs = office.counters(&other).await;
     let orders = [
-        (&mine, Claim::new(b"order-a1")),
-        (&theirs, Claim::new(b"order-b1")),
-        (&mine, Claim::new(b"order-a2")),
-        (&theirs, Claim::new(b"order-b2")),
+        (&mine, Claim::new(b"order-a1", b"order-a1")),
+        (&theirs, Claim::new(b"order-b1", b"order-b1")),
+        (&mine, Claim::new(b"order-a2", b"order-a2")),
+        (&theirs, Claim::new(b"order-b2", b"order-b2")),
     ];
     let mut numbers = Vec::new();
     for (counters, claim) in &orders {
@@ -194,7 +194,7 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_in_process_voters_and
     }
     assert_eq!(
         theirs
-            .claim(&invoices(), &Claim::new(b"order-a1"))
+            .claim(&invoices(), &Claim::new(b"order-a1", b"their-checkout"))
             .await
             .unwrap(),
         Taken(1),
@@ -217,7 +217,7 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_in_process_voters_and
     assert_eq!(renewed.revision, receipt.revision + 1);
     assert_eq!(
         theirs
-            .claim(&invoices(), &Claim::new(b"order-b3"))
+            .claim(&invoices(), &Claim::new(b"order-b3", b"order-b3"))
             .await
             .unwrap(),
         First(5),
@@ -243,10 +243,14 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
         office.counters(&writer).await,
         office.counters(&reader).await,
     );
-    let first = Claim::new(b"order-1");
+    let first = Claim::new(b"order-1", b"order-1");
     assert_eq!(writing.claim(&invoices(), &first).await.unwrap(), First(1));
     assert_eq!(
-        refused(reading.claim(&invoices(), &Claim::new(b"order-2")).await),
+        refused(
+            reading
+                .claim(&invoices(), &Claim::new(b"order-2", b"order-2"))
+                .await
+        ),
         Refusal::ReadOnly
     );
     assert_eq!(
@@ -263,7 +267,11 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
         .unwrap();
     publisher.share_revocations().await.unwrap();
     assert_eq!(
-        refused(writing.claim(&invoices(), &Claim::new(b"order-3")).await),
+        refused(
+            writing
+                .claim(&invoices(), &Claim::new(b"order-3", b"order-3"))
+                .await
+        ),
         Refusal::Revoked
     );
     assert_eq!(
@@ -273,7 +281,7 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
     );
     assert_eq!(
         publisher
-            .claim(&invoices(), &Claim::new(b"order-4"))
+            .claim(&invoices(), &Claim::new(b"order-4", b"order-4"))
             .await
             .unwrap(),
         First(2)
@@ -283,12 +291,8 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_claim_sent_to_stopped_voters_is_retryable_and_its_retry_takes_one_number() {
     let mut office = Office::as_processes().await;
-    let counters = office
-        .registered()
-        .await
-        .0
-        .with_deadline(Duration::from_secs(2));
-    let claim = Claim::new(b"order-1");
+    let counters = office.registered().await.0.deadline(Duration::from_secs(2));
+    let claim = Claim::new(b"order-1", b"order-1");
     for id in 1..=3 {
         office.processes().stop(id);
     }
@@ -313,7 +317,7 @@ async fn a_claim_sent_to_stopped_voters_is_retryable_and_its_retry_takes_one_num
     );
 
     office.restart_every_voter().await;
-    let counters = counters.with_deadline(rocky_coordinator::CALL_DEADLINE);
+    let counters = counters.deadline(rocky_coordinator::CALL_DEADLINE);
     assert_eq!(
         counters.read(&invoices()).await.unwrap(),
         0,
@@ -334,10 +338,13 @@ async fn two_doors_scanning_one_ticket_at_once_admit_it_exactly_once() {
     let east = office.person("east-door", Access::Full).await;
     let west = office.person("west-door", Access::Full).await;
     let (east, west) = (office.counters(&east).await, office.counters(&west).await);
-    let door = Name::new("main-door").unwrap();
-    let scans = [Claim::new(b"ticket-7"), Claim::new(b"ticket-7")];
-    let (at_east, at_west) =
-        tokio::join!(east.claim(&door, &scans[0]), west.claim(&door, &scans[1]));
+    let admissions = Name::new("admissions").unwrap();
+    let scan = |door: &str| Claim::new(b"ticket-7", format!("{door}-scan-1"));
+    let (east_scan, west_scan) = (scan("east"), scan("west"));
+    let (at_east, at_west) = tokio::join!(
+        east.claim(&admissions, &east_scan),
+        west.claim(&admissions, &west_scan)
+    );
     let answers = [at_east.unwrap(), at_west.unwrap()];
     assert_eq!(
         answers
@@ -348,8 +355,52 @@ async fn two_doors_scanning_one_ticket_at_once_admit_it_exactly_once() {
         "exactly one door admits the ticket: {answers:?}"
     );
     assert!(answers.iter().all(|answer| answer.number() == 1));
-    assert_eq!(east.claim(&door, &scans[0]).await.unwrap(), answers[0]);
-    assert_eq!(west.claim(&door, &scans[1]).await.unwrap(), answers[1]);
+    assert_eq!(
+        east.claim(&admissions, &scan("east")).await.unwrap(),
+        answers[0],
+        "a scan rebuilt from its row repeats its door's answer"
+    );
+    assert_eq!(
+        west.claim(&admissions, &scan("west")).await.unwrap(),
+        answers[1]
+    );
+    if let Voters::InProcess(cluster) = office.voters {
+        cluster.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_till_whose_transport_closed_gets_an_error_and_takes_no_number() {
+    let office = Office::in_process().await;
+    office.registered().await;
+    let transport = rocky_iroh::Options::isolated("127.0.0.1:0")
+        .client()
+        .await
+        .unwrap()
+        .transport();
+    let till =
+        Counters::connect(office.publisher.clone(), &office.bundle, transport.clone()).unwrap();
+    let order = |id: &str| Claim::new(id, id);
+    assert_eq!(
+        till.claim(&invoices(), &order("order-1")).await.unwrap(),
+        First(1)
+    );
+
+    transport.close().await;
+    let offline = till.claim(&invoices(), &order("order-2")).await;
+    assert!(
+        matches!(
+            offline,
+            Err(CounterError::Coordination(CoordinationError::Unavailable))
+        ),
+        "a claim through a closed transport reaches no voter: {offline:?}"
+    );
+    let online = office.counters(&office.publisher).await;
+    assert_eq!(
+        online.read(&invoices()).await.unwrap(),
+        1,
+        "the offline claim took no number"
+    );
     if let Voters::InProcess(cluster) = office.voters {
         cluster.shutdown().await;
     }

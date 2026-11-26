@@ -1581,6 +1581,43 @@ async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> R
     Ok(())
 }
 
+fn root_for_table_order(app_name: &str, first: &str, second: &str) -> rocky_sdk::RootKey {
+    use rocky_sdk::IdentityProvider;
+    for seed in 1u8..=u8::MAX {
+        let root = rocky_credentials::key_bytes::root_key([seed; 32]);
+        let publisher = *root.public_key().expect("root public key").as_bytes();
+        let app = rocky_core::ApplicationManifest::app_id(publisher, app_name);
+        let first_id = rocky_core::definition_item_id(publisher, app, "entity", first);
+        let second_id = rocky_core::definition_item_id(publisher, app, "entity", second);
+        if first_id < second_id {
+            return root;
+        }
+    }
+    panic!("no root key seed ordered {first} before {second}");
+}
+
+async fn create_with_root(
+    configuration: rocky_sdk::Configuration,
+    root: rocky_sdk::RootKey,
+    owner: rocky_sdk::IdentityKey,
+) -> Result<rocky_sdk::Created, rocky_sdk::Error> {
+    let database = configuration
+        .create_with_root(
+            Arc::new(rocky_credentials::key_bytes::root_key(
+                rocky_credentials::key_bytes::root_secret(&root),
+            )),
+            Arc::new(rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(&owner),
+            )),
+        )
+        .await?;
+    Ok(rocky_sdk::Created {
+        database,
+        root,
+        owner,
+    })
+}
+
 fn ledger_v1() -> Schema {
     build(
         Schema::builder("finance", 1)
@@ -1611,16 +1648,23 @@ fn ledger_v2() -> Schema {
                             .references("accounts"),
                     )
                     .column(required("amount", Affinity::Integer))
-                    .column(required("description", Affinity::Text))
-                    .column(Column::new("category_name", Affinity::Text)),
+                    .column(
+                        Column::new("note", Affinity::Text)
+                            .required()
+                            .renamed_from("description"),
+                    )
+                    .column(
+                        Column::new("category", Affinity::Text)
+                            .required()
+                            .default("uncategorized"),
+                    ),
             )
             .migration(
                 2,
-                [
-                    "UPDATE transactions SET category_name = 'uncategorized' WHERE category_name IS NULL"
-                        .into(),
-                    MigrationStep::insert("categories", "SELECT 'uncategorized' AS name"),
-                ],
+                [MigrationStep::insert(
+                    "categories",
+                    "SELECT 'uncategorized' AS name",
+                )],
             ),
     )
 }
@@ -1629,212 +1673,419 @@ fn ledger_v2() -> Schema {
 async fn offline_v1_peer_syncs_v2_with_restricted_foreign_key() -> Result<(), Failure> {
     let v1 = ledger_v1();
     let v2 = ledger_v2();
-    for round in 0..8 {
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let alice = Device::new(
+        create_with_root(
+            open(&dirs("alice"), &v1, network("alice")),
+            root_for_table_order("finance", "transactions", "accounts"),
+            common::external_key(&dirs("alice")),
+        )
+        .await?,
+    )?;
+    let bob = Device::new(
+        open(&dirs("bob"), &v1, network("bob"))
+            .join(&alice.invite().await)
+            .await?,
+    )?;
+    let carol = Device::new(
+        open(&dirs("carol"), &v1, network("carol"))
+            .join(&alice.invite().await)
+            .await?,
+    )?;
+    introduce(&alice, &bob).await;
+    introduce(&alice, &carol).await;
+    introduce(&bob, &carol).await;
+
+    let checking = alice
+        .database
+        .write(async |tx| {
+            let id = tx.next_id("accounts").await?;
+            tx.execute(
+                "INSERT INTO accounts(id, name) VALUES(?, 'Checking')",
+                rocky_sdk::params![id],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO transactions(account, amount, description) VALUES(?, 100, 'Coffee')",
+                rocky_sdk::params![id],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(id)
+        })
+        .await?;
+    bob.sync().await.unwrap();
+    carol.sync().await.unwrap();
+    alice.database.seal().await?;
+    bob.sync().await.unwrap();
+    carol.sync().await.unwrap();
+
+    hub.set_down("carol", "alice", true);
+    hub.set_down("carol", "bob", true);
+    carol
+        .database
+        .write(async |tx| {
+            let id = tx.next_id("accounts").await?;
+            tx.execute(
+                "INSERT INTO accounts(id, name) VALUES(?, 'Savings')",
+                rocky_sdk::params![id],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO transactions(account, amount, description) VALUES(?, 250, 'Offline')",
+                rocky_sdk::params![id],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(id)
+        })
+        .await?;
+
+    alice.close().await;
+    let alice = reopen(&dirs("alice"), &v2, network("alice")).await?;
+    bob.close().await;
+    let bob = reopen(&dirs("bob"), &v2, network("bob")).await?;
+    bob.sync().await.unwrap();
+    bob.database
+        .write(async |tx| {
+            let travel = tx.next_id("accounts").await?;
+            tx.execute(
+                "INSERT INTO accounts(id, name) VALUES(?, 'Travel')",
+                rocky_sdk::params![travel],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO transactions(account, amount, note, category) VALUES(?, 500, 'Flight', 'travel')",
+                rocky_sdk::params![travel],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO transactions(account, amount, note, category) VALUES(?, 300, 'Lunch', 'food')",
+                rocky_sdk::params![checking],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(())
+        })
+        .await?;
+    alice.sync().await.unwrap();
+    alice.database.seal().await?;
+    alice.database.compact(0).await?;
+    let prune_all: rocky_sdk::inspection::RetentionPolicy = serde_json::from_value(json!({
+        "required": [], "behind": [], "copies": 1, "window": 0
+    }))?;
+    for table in ["accounts", "transactions"] {
+        alice
+            .database
+            .set_retention(table, prune_all.clone())
+            .await?;
+        let status = snap::ok(alice.database.maintain_retention(table)).await;
+        assert!(
+            !status["pruned_prefix"]
+                .as_array()
+                .expect("pruned_prefix")
+                .is_empty(),
+            "alice did not prune {table} prefix before carol reconnected: {status}"
+        );
+    }
+
+    hub.set_down("carol", "alice", false);
+    carol.database.sync_now().await.map_err(|error| {
+        format!(
+            "carol v1 discovery sync failed: kind={:?} {error}",
+            error.kind()
+        )
+    })?;
+    carol.close().await;
+
+    let carol = reopen(&dirs("carol"), &v2, network("carol")).await?;
+    for pass in 1..=2 {
+        carol.database.sync_now().await.map_err(|error| {
+            format!(
+                "carol v2 sync pass {pass} failed: kind={:?} {error}",
+                error.kind()
+            )
+        })?;
+    }
+    hub.set_down("carol", "bob", false);
+    alice.sync().await.unwrap();
+    bob.sync().await.unwrap();
+    carol.sync().await.unwrap();
+
+    let expected_accounts = vec![
+        "Checking".to_owned(),
+        "Savings".to_owned(),
+        "Travel".to_owned(),
+    ];
+    let expected_transactions = vec![
+        (
+            "Checking".to_owned(),
+            100i64,
+            "Coffee".to_owned(),
+            "uncategorized".to_owned(),
+        ),
+        (
+            "Checking".to_owned(),
+            300i64,
+            "Lunch".to_owned(),
+            "food".to_owned(),
+        ),
+        (
+            "Savings".to_owned(),
+            250i64,
+            "Offline".to_owned(),
+            "uncategorized".to_owned(),
+        ),
+        (
+            "Travel".to_owned(),
+            500i64,
+            "Flight".to_owned(),
+            "travel".to_owned(),
+        ),
+    ];
+    for (name, peer) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+        let status = peer.database.status().await?;
+        assert_eq!(status.schema_version(), 2, "{name} stayed on wrong schema");
+        assert!(
+            status.blockers().is_empty(),
+            "{name} has blockers: {:?}",
+            status.blockers()
+        );
+        let accounts: Vec<String> = peer
+            .database
+            .query(
+                "SELECT name FROM accounts ORDER BY name",
+                rocky_sdk::params![],
+            )
+            .await?
+            .collect()
+            .await?
+            .iter()
+            .map(|row| Ok::<_, rocky_sdk::Error>(row.get("name")?))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(accounts, expected_accounts, "{name} accounts mismatch");
+        let categories: Vec<String> = peer
+            .database
+            .query(
+                "SELECT name FROM categories ORDER BY name",
+                rocky_sdk::params![],
+            )
+            .await?
+            .collect()
+            .await?
+            .iter()
+            .map(|row| Ok::<_, rocky_sdk::Error>(row.get("name")?))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            categories,
+            vec!["uncategorized".to_owned()],
+            "{name} categories mismatch"
+        );
+        let txns: Vec<(String, i64, String, String)> = peer
+            .database
+            .query(
+                "SELECT a.name AS acct, t.amount, t.note, t.category FROM transactions t JOIN accounts a ON a.id = t.account ORDER BY a.name, t.amount",
+                rocky_sdk::params![],
+            )
+            .await?
+            .collect()
+            .await?
+            .iter()
+            .map(|row| {
+                Ok::<_, rocky_sdk::Error>((
+                    row.get("acct")?,
+                    row.get("amount")?,
+                    row.get("note")?,
+                    row.get("category")?,
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+        assert_eq!(txns, expected_transactions, "{name} transactions mismatch");
+    }
+    carol.close().await;
+    bob.close().await;
+    alice.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rewinding_multi_table_restricted_foreign_key_write_succeeds() -> Result<(), Failure> {
+    let schema = ledger_v1();
+    for (label, first, second) in [
+        ("child_before_parent", "transactions", "accounts"),
+        ("parent_before_child", "accounts", "transactions"),
+    ] {
         let root = crate::support::small_directory()?;
         let hub = Arc::new(Hub::default());
         let network = |name: &str| Some(Network::Owned(hub.connector(name)));
         let dirs = |name: &str| root.path().join(name);
         let alice = Device::new(
-            common::create_as(
-                open(&dirs("alice"), &v1, network("alice")),
+            create_with_root(
+                open(&dirs("alice"), &schema, network("alice")),
+                root_for_table_order("finance", first, second),
                 common::external_key(&dirs("alice")),
             )
             .await?,
         )?;
         let bob = Device::new(
-            open(&dirs("bob"), &v1, network("bob"))
+            open(&dirs("bob"), &schema, network("bob"))
                 .join(&alice.invite().await)
                 .await?,
         )?;
         let carol = Device::new(
-            open(&dirs("carol"), &v1, network("carol"))
+            open(&dirs("carol"), &schema, network("carol"))
                 .join(&alice.invite().await)
                 .await?,
         )?;
         introduce(&alice, &bob).await;
         introduce(&alice, &carol).await;
         introduce(&bob, &carol).await;
-        let acct = alice
-            .database
+
+        let parent = "accounts";
+        let child = "transactions";
+        let fk_col = "account";
+        let insert_parent = format!("INSERT INTO {parent}(id, name) VALUES(?, ?)");
+        let insert_child =
+            format!("INSERT INTO {child}({fk_col}, amount, description) VALUES(?, ?, 'Item')");
+
+        hub.set_down("carol", "bob", true);
+        hub.set_down("alice", "bob", true);
+        bob.database
             .write(async |tx| {
-                let id = tx.next_id("accounts").await?;
-                tx.execute(
-                    "INSERT INTO accounts(id, name) VALUES(?, 'Checking')",
-                    rocky_sdk::params![id],
-                )
-                .await?;
-                tx.execute(
-                    "INSERT INTO transactions(account, amount, description) VALUES(?, 100, 'Coffee')",
-                    rocky_sdk::params![id],
-                )
-                .await?;
+                let id = tx.next_id(parent).await?;
+                tx.execute(&insert_parent, rocky_sdk::params![id, "BobEarly"])
+                    .await?;
+                tx.execute(&insert_child, rocky_sdk::params![id, 10])
+                    .await?;
                 Ok::<_, rocky_sdk::Error>(id)
             })
             .await?;
+        alice
+            .database
+            .write(async |tx| {
+                let id = tx.next_id(parent).await?;
+                tx.execute(&insert_parent, rocky_sdk::params![id, "AliceBump"])
+                    .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await?;
+        alice
+            .database
+            .write(async |tx| {
+                let id = tx.next_id(parent).await?;
+                tx.execute(&insert_parent, rocky_sdk::params![id, "AliceLater"])
+                    .await?;
+                tx.execute(&insert_child, rocky_sdk::params![id, 20])
+                    .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await?;
+        carol.database.sync_now().await?;
+        hub.set_down("carol", "bob", false);
+        hub.set_down("alice", "bob", false);
+        carol.database.sync_now().await.map_err(|error| {
+            format!(
+                "{label} frame rewind sync failed: kind={:?} {error}",
+                error.kind()
+            )
+        })?;
+        alice.sync().await.unwrap();
+        bob.sync().await.unwrap();
+        alice.database.seal().await?;
         bob.sync().await.unwrap();
         carol.sync().await.unwrap();
-        carol.database.set_sync(rocky_sdk::SyncMode::Off).await?;
+
+        hub.set_down("carol", "alice", true);
+        hub.set_down("carol", "bob", true);
         carol
             .database
             .write(async |tx| {
-                let id = tx.next_id("accounts").await?;
-                tx.execute(
-                    "INSERT INTO accounts(id, name) VALUES(?, 'Savings')",
-                    rocky_sdk::params![id],
-                )
-                .await?;
-                tx.execute(
-                    "INSERT INTO transactions(account, amount, description) VALUES(?, 250, 'Offline')",
-                    rocky_sdk::params![id],
-                )
-                .await?;
+                let id = tx.next_id(parent).await?;
+                tx.execute(&insert_parent, rocky_sdk::params![id, "CarolOffline"])
+                    .await?;
+                tx.execute(&insert_child, rocky_sdk::params![id, 30])
+                    .await?;
                 Ok::<_, rocky_sdk::Error>(id)
             })
             .await?;
-        alice.close().await;
-
-        let alice = reopen(&dirs("alice"), &v2, network("alice")).await?;
-        bob.close().await;
-        let bob = reopen(&dirs("bob"), &v2, network("bob")).await?;
-        bob.sync().await.unwrap();
         bob.database
             .write(async |tx| {
-                tx.execute(
-                    "INSERT INTO transactions(account, amount, description, category_name) VALUES(?, 300, 'Lunch', 'food')",
-                    rocky_sdk::params![acct],
-                )
-                .await
+                let id = tx.next_id(parent).await?;
+                tx.execute(&insert_parent, rocky_sdk::params![id, "AliceSealed"])
+                    .await?;
+                tx.execute(&insert_child, rocky_sdk::params![id, 40])
+                    .await?;
+                Ok::<_, rocky_sdk::Error>(id)
             })
             .await?;
         alice.sync().await.unwrap();
-
-        carol.close().await;
-        let carol = reopen(&dirs("carol"), &v2, network("carol")).await?;
-        carol.database.set_sync(rocky_sdk::SyncMode::Manual).await?;
-        carol.database.sync_now().await.map_err(|error| {
-            format!(
-                "round {round} first sync failed: kind={:?} {error}",
-                error.kind()
-            )
-        })?;
-        carol.database.sync_now().await.map_err(|error| {
-            format!(
-                "round {round} second sync failed: kind={:?} {error}",
-                error.kind()
-            )
-        })?;
-        assert_eq!(carol.database.status().await?.schema_version(), 2);
-        let count: i64 = carol
-            .database
-            .query(
-                "SELECT COUNT(*) AS n FROM transactions",
-                rocky_sdk::params![],
-            )
-            .await?
-            .collect()
-            .await?[0]
-            .get("n")?;
-        assert_eq!(count, 3, "round {round} lost transactions");
-        carol.close().await;
-        bob.close().await;
-        alice.close().await;
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rewinding_multi_table_restricted_foreign_key_write_succeeds() -> Result<(), Failure> {
-    let child_first = build(
-        Schema::builder("child_first_ledger", 1)
-            .table(Table::replayed("ledgers").column(required("name", Affinity::Text)))
-            .table(
-                Table::replayed("entries")
-                    .column(required("ledger", Affinity::Blob).references("ledgers"))
-                    .column(required("amount", Affinity::Integer)),
-            ),
-    );
-    for (label, schema, parent, child, fk_col) in [
-        (
-            "parent_first",
-            ledger_v1(),
-            "accounts",
-            "transactions",
-            "account",
-        ),
-        ("child_first", child_first, "ledgers", "entries", "ledger"),
-    ] {
-        for round in 0..4 {
-            let root = crate::support::small_directory()?;
-            let hub = Arc::new(Hub::default());
-            let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-            let dirs = |name: &str| root.path().join(name);
-            let alice = Device::new(
-                common::create_as(
-                    open(&dirs("alice"), &schema, network("alice")),
-                    common::external_key(&dirs("alice")),
-                )
-                .await?,
-            )?;
-            let bob = Device::new(
-                open(&dirs("bob"), &schema, network("bob"))
-                    .join(&alice.invite().await)
-                    .await?,
-            )?;
-            let carol = Device::new(
-                open(&dirs("carol"), &schema, network("carol"))
-                    .join(&alice.invite().await)
-                    .await?,
-            )?;
-            let insert_parent = format!("INSERT INTO {parent}(id, name) VALUES(?, ?)");
-            let insert_child = if child == "transactions" {
-                format!("INSERT INTO {child}({fk_col}, amount, description) VALUES(?, ?, 'Item')")
-            } else {
-                format!("INSERT INTO {child}({fk_col}, amount) VALUES(?, ?)")
-            };
-            bob.database
-                .write(async |tx| {
-                    let id = tx.next_id(parent).await?;
-                    tx.execute(&insert_parent, rocky_sdk::params![id, "BobFirst"])
-                        .await?;
-                    tx.execute(&insert_child, rocky_sdk::params![id, 10])
-                        .await?;
-                    Ok::<_, rocky_sdk::Error>(id)
-                })
-                .await?;
+        alice.database.seal().await?;
+        alice.database.compact(0).await?;
+        bob.sync().await.unwrap();
+        let prune_all: rocky_sdk::inspection::RetentionPolicy = serde_json::from_value(json!({
+            "required": [], "behind": [], "copies": 1, "window": 0
+        }))?;
+        for table in [parent, child] {
             alice
                 .database
-                .write(async |tx| {
-                    let id = tx.next_id(parent).await?;
-                    tx.execute(&insert_parent, rocky_sdk::params![id, "AliceLater"])
-                        .await?;
-                    tx.execute(&insert_child, rocky_sdk::params![id, 20])
-                        .await?;
-                    Ok::<_, rocky_sdk::Error>(id)
-                })
+                .set_retention(table, prune_all.clone())
                 .await?;
-            carol.database.sync_now().await?;
-            introduce(&bob, &carol).await;
+            let status = snap::ok(alice.database.maintain_retention(table)).await;
+            assert!(
+                !status["pruned_prefix"]
+                    .as_array()
+                    .expect("pruned_prefix")
+                    .is_empty(),
+                "{label} alice did not prune {table} prefix: {status}"
+            );
+        }
+
+        hub.set_down("carol", "alice", false);
+        for pass in 1..=2 {
             carol.database.sync_now().await.map_err(|error| {
                 format!(
-                    "{label} round {round} rewind sync failed: kind={:?} {error}",
+                    "{label} checkpoint rewind pass {pass} failed: kind={:?} {error}",
                     error.kind()
                 )
             })?;
-            let count: i64 = carol
+        }
+        hub.set_down("carol", "bob", false);
+        alice.sync().await.unwrap();
+        bob.sync().await.unwrap();
+        carol.sync().await.unwrap();
+
+        let expected = vec![
+            ("AliceLater".to_owned(), 20i64),
+            ("AliceSealed".to_owned(), 40i64),
+            ("BobEarly".to_owned(), 10i64),
+            ("CarolOffline".to_owned(), 30i64),
+        ];
+        for (name, peer) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+            let status = peer.database.status().await?;
+            assert!(
+                status.blockers().is_empty(),
+                "{label} {name} has blockers: {:?}",
+                status.blockers()
+            );
+            let rows: Vec<(String, i64)> = peer
                 .database
                 .query(
-                    &format!("SELECT COUNT(*) AS n FROM {child}"),
+                    &format!(
+                        "SELECT p.name, c.amount FROM {child} c JOIN {parent} p ON p.id = c.{fk_col} ORDER BY p.name"
+                    ),
                     rocky_sdk::params![],
                 )
                 .await?
                 .collect()
-                .await?[0]
-                .get("n")?;
-            assert_eq!(count, 2, "{label} round {round} missing child rows");
-            carol.close().await;
-            bob.close().await;
-            alice.close().await;
+                .await?
+                .iter()
+                .map(|row| Ok::<_, rocky_sdk::Error>((row.get("name")?, row.get("amount")?)))
+                .collect::<Result<_, _>>()?;
+            assert_eq!(rows, expected, "{label} {name} rows mismatch");
         }
+        carol.close().await;
+        bob.close().await;
+        alice.close().await;
     }
     Ok(())
 }

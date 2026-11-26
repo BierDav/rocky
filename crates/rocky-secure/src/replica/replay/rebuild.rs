@@ -27,13 +27,15 @@ impl Rederived {
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn mark_rederive_for_test(&self, scope: ResourceScope) -> Result<(), Error> {
-        let mut inner = self.inner.lock(Class::Background).await;
+        let inner = self.inner.lock(Class::Background).await;
         let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
         inner
             .conn
             .execute("INSERT INTO secure_replayed_rederive VALUES(?)", [id])
             .await?;
-        inner.rederive_marked = true;
+        inner
+            .rederive_marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }
@@ -86,7 +88,13 @@ impl<A: RowApplication> Inner<A> {
         })
         .collect::<Result<_, _>>()?;
         self.keep_outcomes(id).await?;
-        let mut redo = self.rewind(vec![(id, from)]).await?;
+        let mut redo = self
+            .deferring_foreign_keys(async || {
+                let redo = self.rewind(vec![(id, from)]).await?;
+                self.withhold_and_mark_rederive().await?;
+                Ok(redo)
+            })
+            .await?;
         for redo in &mut redo {
             redo.members.retain(|(hash, _)| !own.contains(hash));
         }
@@ -98,9 +106,19 @@ impl<A: RowApplication> Inner<A> {
         LinkedReplay(redo): LinkedReplay,
         time: u64,
     ) -> Result<(), Error> {
-        self.redo_recorded(redo, time, None, false).await
+        self.deferring_foreign_keys(async || {
+            self.redo_recorded(redo, time, None, false).await?;
+            self.withhold_and_mark_rederive().await
+        })
+        .await
     }
-    async fn mark_rederive(&mut self, id: Option<i64>) -> Result<(), Error> {
+    pub(super) async fn withhold_and_mark_rederive(&self) -> Result<(), Error> {
+        for scope_id in self.withhold_all_orphans().await? {
+            self.mark_rederive(Some(scope_id)).await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn mark_rederive(&self, id: Option<i64>) -> Result<(), Error> {
         if let Some(id) = id {
             self.conn
                 .execute(
@@ -108,11 +126,80 @@ impl<A: RowApplication> Inner<A> {
                     [id],
                 )
                 .await?;
-            self.rederive_marked = true;
+            self.rederive_marked
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
-    async fn delete_referencing_descendants(
+    pub(super) async fn withhold_all_orphans(&self) -> Result<Vec<i64>, Error> {
+        let mut withheld = BTreeSet::new();
+        loop {
+            let violations = rows(
+                &self.conn,
+                "SELECT DISTINCT \"table\", rowid FROM pragma_foreign_key_check",
+            )
+            .await?;
+            if violations.is_empty() {
+                break;
+            }
+            for record in violations {
+                let [SqlValue::Text(table), SqlValue::Integer(rowid)] = record.as_slice() else {
+                    return Err(Error::Corrupt("foreign key check".into()));
+                };
+                if let Some(typed) = self.workspace.typed.as_ref()
+                    && let Some(projected) = typed.by_name(table)
+                {
+                    let scope = if typed.partitioned(projected) {
+                        let schema = typed.rows.schema();
+                        let logical = schema
+                            .table(&projected.table.sql_name)
+                            .ok_or_else(|| Error::Corrupt("replayed scope".into()))?;
+                        let selected = logical
+                            .columns
+                            .iter()
+                            .map(|column| typed::quoted(&column.sql_name))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        match collect_rows(
+                            self.conn
+                                .query(
+                                    &format!(
+                                        "SELECT {selected} FROM {} WHERE rowid=?",
+                                        typed::quoted(&projected.table.sql_name)
+                                    ),
+                                    [*rowid],
+                                )
+                                .await?,
+                        )
+                        .await?
+                        .first()
+                        {
+                            Some(columns) => {
+                                typed.registered_row_scope(projected, columns, &self.partitions)?
+                            }
+                            None => None,
+                        }
+                    } else {
+                        Some(projected.scope)
+                    };
+                    if let Some(scope) = scope
+                        && let Some(id) = self.find_scope_id(scope).await?
+                    {
+                        withheld.insert(id);
+                    }
+                    self.touch(&projected.table.sql_name);
+                }
+                self.conn
+                    .execute(
+                        format!("DELETE FROM {} WHERE rowid=?", typed::quoted(table)),
+                        [*rowid],
+                    )
+                    .await?;
+            }
+        }
+        Ok(withheld.into_iter().collect())
+    }
+    async fn delete_with_referencing_descendants(
         &self,
         parent: &str,
         parent_rows: &[Vec<SqlValue>],
@@ -135,6 +222,7 @@ impl<A: RowApplication> Inner<A> {
             .map(|row| (parent_lower.clone(), row))
             .collect();
         let mut initial = BTreeSet::new();
+        let mut parent_keys = Vec::new();
         if let Some(plan) = plans.get(&parent_lower) {
             for row in parent_rows {
                 if let Some(key) = plan
@@ -143,7 +231,9 @@ impl<A: RowApplication> Inner<A> {
                     .map(|index| row.get(*index).cloned())
                     .collect::<Option<Vec<_>>>()
                 {
-                    initial.insert((parent_lower.clone(), values_blob(&key)));
+                    if initial.insert((parent_lower.clone(), values_blob(&key))) {
+                        parent_keys.push(key);
+                    }
                 }
             }
         }
@@ -216,14 +306,26 @@ impl<A: RowApplication> Inner<A> {
         let ranks = leaf_first_ranks(schema);
         targets.sort_by_key(|(name, _)| ranks.get(name).copied().unwrap_or(usize::MAX));
         let count = targets.len();
-        for (name, key) in targets {
-            if let Some(plan) = plans.get(&name) {
-                self.touch(&plan.name);
-                self.conn
-                    .execute(&plan.delete_by_key(), bindings(key))
-                    .await?;
+        self.deferring_foreign_keys(async || {
+            for (name, key) in targets {
+                if let Some(plan) = plans.get(&name) {
+                    self.touch(&plan.name);
+                    self.conn
+                        .execute(&plan.delete_by_key(), bindings(key))
+                        .await?;
+                }
             }
-        }
+            if let Some(plan) = plans.get(&parent_lower) {
+                for key in parent_keys {
+                    self.touch(&plan.name);
+                    self.conn
+                        .execute(&plan.delete_by_key(), bindings(key))
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
         Ok(count)
     }
     pub(in crate::replica) async fn replace_replayed_with_staged(
@@ -252,139 +354,140 @@ impl<A: RowApplication> Inner<A> {
         };
         self.touch(&table.name);
         let ordinals = self.stored_field_ordinals().await?;
-        let touched_children = self
-            .deferring_foreign_keys(async || {
-                let mut kept_keys = BTreeSet::new();
-                let mut collided = Vec::new();
-                let mut after = None;
-                loop {
-                    let rows = self
-                        .stored_page("secure_replayed_staged", id, after, &ordinals)
-                        .await?;
-                    let Some((last, _)) = rows.last() else {
-                        break;
-                    };
-                    after = Some(*last);
-                    let images = self.current_images(scope, source, &rows)?;
-                    for (_, image) in images {
-                        let key = table
-                            .key
-                            .iter()
-                            .map(|index| image.get(*index).cloned())
-                            .collect::<Option<Vec<_>>>()
-                            .ok_or_else(corrupt)?;
-                        kept_keys.insert(values_blob(&key));
-                        match self.restore_in_place(&table, &key, &image).await {
-                            Ok(_) => {}
-                            Err(error) if error.is_constraint() => collided.push((key, image)),
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                }
-                let existing = collect_rows(
-                    self.conn
-                        .query(
-                            &format!("{} WHERE {condition}", table.scan),
-                            bindings(values),
-                        )
-                        .await?,
-                )
+        let mut kept_keys = BTreeSet::new();
+        let mut collided = Vec::new();
+        let mut after = None;
+        loop {
+            let rows = self
+                .stored_page("secure_replayed_staged", id, after, &ordinals)
                 .await?;
-                let mut obsolete = Vec::new();
-                for row in existing {
-                    let key = table
-                        .key
-                        .iter()
-                        .map(|index| row.get(*index).cloned())
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(corrupt)?;
-                    if !kept_keys.contains(&values_blob(&key)) {
-                        obsolete.push((key, row));
+            let Some((last, _)) = rows.last() else {
+                break;
+            };
+            after = Some(*last);
+            let images = self.current_images(scope, source, &rows)?;
+            for (_, image) in images {
+                let key = table
+                    .key
+                    .iter()
+                    .map(|index| image.get(*index).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(corrupt)?;
+                kept_keys.insert(values_blob(&key));
+                match self.restore_in_place(&table, &key, &image).await {
+                    Ok(_) => {}
+                    Err(error) if error.is_constraint() => collided.push((key, image)),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        let existing = collect_rows(
+            self.conn
+                .query(
+                    &format!("{} WHERE {condition}", table.scan),
+                    bindings(values),
+                )
+                .await?,
+        )
+        .await?;
+        let mut obsolete = Vec::new();
+        for row in existing {
+            let key = table
+                .key
+                .iter()
+                .map(|index| row.get(*index).cloned())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(corrupt)?;
+            if !kept_keys.contains(&values_blob(&key)) {
+                obsolete.push((key, row));
+            }
+        }
+        let mut touched_children = false;
+        for (key, image) in &obsolete {
+            let before = self.conn.connection().total_changes()?;
+            match self
+                .conn
+                .execute(&table.delete_by_key(), bindings(key.clone()))
+                .await
+            {
+                Ok(_) => {
+                    if self.conn.connection().total_changes()? - before > 1 {
+                        touched_children = true;
                     }
                 }
-                let mut touched_children = false;
-                for (key, image) in &obsolete {
-                    let before = self.conn.connection().total_changes()?;
-                    match self
-                        .conn
-                        .execute(&table.delete_by_key(), bindings(key.clone()))
-                        .await
-                    {
-                        Ok(_) => {
-                            if self.conn.connection().total_changes()? - before > 1 {
-                                touched_children = true;
-                            }
-                        }
-                        Err(error) if error.is_constraint() => {
-                            self.delete_referencing_descendants(
-                                &table_name,
-                                std::slice::from_ref(image),
-                            )
-                            .await?;
-                            self.conn
-                                .execute(&table.delete_by_key(), bindings(key.clone()))
-                                .await?;
-                            touched_children = true;
-                        }
-                        Err(error) => return Err(error.into()),
+                Err(error) if error.is_constraint() => {
+                    self.delete_with_referencing_descendants(
+                        &table_name,
+                        std::slice::from_ref(image),
+                    )
+                    .await?;
+                    touched_children = true;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut pending = collided;
+        loop {
+            let mut next = Vec::new();
+            let mut progressed = false;
+            for (key, image) in pending {
+                match self.restore_in_place(&table, &key, &image).await {
+                    Ok(_) => progressed = true,
+                    Err(error) if error.is_constraint() => next.push((key, image)),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            pending = next;
+            if !progressed || pending.is_empty() {
+                break;
+            }
+        }
+        let still_collided = pending;
+        for (key, _) in &still_collided {
+            let before = self.conn.connection().total_changes()?;
+            match self
+                .conn
+                .execute(&table.delete_by_key(), bindings(key.clone()))
+                .await
+            {
+                Ok(_) => {
+                    if self.conn.connection().total_changes()? - before > 1 {
+                        touched_children = true;
                     }
                 }
-                let mut pending = collided;
-                loop {
-                    let mut next = Vec::new();
-                    let mut progressed = false;
-                    for (key, image) in pending {
-                        match self.restore_in_place(&table, &key, &image).await {
-                            Ok(_) => progressed = true,
-                            Err(error) if error.is_constraint() => next.push((key, image)),
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                    pending = next;
-                    if !progressed || pending.is_empty() {
-                        break;
-                    }
-                }
-                let still_collided = pending;
-                for (key, _) in &still_collided {
-                    let before = self.conn.connection().total_changes()?;
-                    match self
-                        .conn
-                        .execute(&table.delete_by_key(), bindings(key.clone()))
-                        .await
-                    {
-                        Ok(_) => {
-                            if self.conn.connection().total_changes()? - before > 1 {
-                                touched_children = true;
-                            }
-                        }
-                        Err(error) if error.is_constraint() => {
-                            let current = collect_rows(
-                                self.conn
-                                    .query(&table.select, bindings(key.clone()))
-                                    .await?,
-                            )
-                            .await?;
-                            self.delete_referencing_descendants(&table_name, &current)
-                                .await?;
-                            self.conn
-                                .execute(&table.delete_by_key(), bindings(key.clone()))
-                                .await?;
-                            touched_children = true;
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                for (_, image) in &still_collided {
-                    self.conn
-                        .execute(&table.insert_image(), bindings(table.stored(image)))
+                Err(error) if error.is_constraint() => {
+                    let current = collect_rows(
+                        self.conn
+                            .query(&table.select, bindings(key.clone()))
+                            .await?,
+                    )
+                    .await?;
+                    self.delete_with_referencing_descendants(&table_name, &current)
                         .await?;
+                    touched_children = true;
                 }
-                Ok(touched_children)
-            })
-            .await?;
-        if touched_children {
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let withheld = match still_collided.is_empty() {
+            true => Vec::new(),
+            false => {
+                self.deferring_foreign_keys(async || {
+                    for (_, image) in &still_collided {
+                        self.conn
+                            .execute(&table.insert_image(), bindings(table.stored(image)))
+                            .await?;
+                    }
+                    self.withhold_all_orphans().await
+                })
+                .await?
+            }
+        };
+        if touched_children || !withheld.is_empty() {
             self.mark_rederive(Some(id)).await?;
+            for scope_id in withheld {
+                self.mark_rederive(Some(scope_id)).await?;
+            }
         }
         Ok(())
     }
@@ -439,20 +542,11 @@ impl<A: RowApplication> Inner<A> {
                 };
                 let existing = collect_rows(
                     self.conn
-                        .query(
-                            &format!("{scan} WHERE {condition}"),
-                            bindings(values.clone()),
-                        )
+                        .query(&format!("{scan} WHERE {condition}"), bindings(values))
                         .await?,
                 )
                 .await?;
-                self.delete_referencing_descendants(&table, &existing)
-                    .await?;
-                self.conn
-                    .execute(
-                        format!("DELETE FROM {quoted} WHERE {condition}"),
-                        bindings(values),
-                    )
+                self.delete_with_referencing_descendants(&table, &existing)
                     .await?;
                 self.mark_rederive(id).await?;
             }
@@ -535,49 +629,51 @@ impl<A: RowApplication> Inner<A> {
         let values = super::super::partition::partition_values(schema, logical, tuple)?;
         Ok(Some((logical.sql_name.clone(), condition, values)))
     }
-    pub(in crate::replica) async fn rederive_replayed(
+    pub(in crate::replica) fn rederive_replayed(
         &self,
         importing: Option<ResourceScope>,
         time: u64,
-    ) -> Result<Rederived, Error> {
-        let corrupt = || Error::Corrupt("rederived scope".into());
-        let marked = rows(
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Rederived, Error>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let corrupt = || Error::Corrupt("rederived scope".into());
+            let marked = rows(
             &self.conn,
             "SELECT r.scope,s.scope FROM secure_replayed_rederive r LEFT JOIN secure_scope_state s ON s.id=r.scope",
         )
         .await?;
-        if marked.is_empty() {
-            return Ok(Rederived::Unmarked);
-        }
-        let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(Rederived::Waiting("the replayed tables are not installed"));
-        };
-        let domain = typed.domain;
-        let waiting: BTreeSet<ResourceScope> = self
-            .seal_rebootstraps(domain)
-            .await?
-            .into_iter()
-            .map(|need| need.scope)
-            .collect();
-        let mut cleared = Vec::new();
-        for record in &marked {
-            let (id, blob) = match record.as_slice() {
-                [SqlValue::Integer(id), SqlValue::Blob(blob)] => (*id, blob),
-                [SqlValue::Integer(id), SqlValue::Null] => {
-                    cleared.push(*id);
+            if marked.is_empty() {
+                return Ok(Rederived::Unmarked);
+            }
+            let Some(typed) = self.workspace.typed.as_ref() else {
+                return Ok(Rederived::Waiting("the replayed tables are not installed"));
+            };
+            let domain = typed.domain;
+            let waiting: BTreeSet<ResourceScope> = self
+                .seal_rebootstraps(domain)
+                .await?
+                .into_iter()
+                .map(|need| need.scope)
+                .collect();
+            let mut cleared = Vec::new();
+            for record in &marked {
+                let (id, blob) = match record.as_slice() {
+                    [SqlValue::Integer(id), SqlValue::Blob(blob)] => (*id, blob),
+                    [SqlValue::Integer(id), SqlValue::Null] => {
+                        cleared.push(*id);
+                        continue;
+                    }
+                    _ => return Err(corrupt()),
+                };
+                let scope: ResourceScope = decode(blob)?;
+                if scope.domain != domain {
                     continue;
                 }
-                _ => return Err(corrupt()),
-            };
-            let scope: ResourceScope = decode(blob)?;
-            if scope.domain != domain {
-                continue;
-            }
-            cleared.push(id);
-            if waiting.contains(&scope) {
-                return Ok(Rederived::Waiting("a scope needs a seal rebootstrap"));
-            }
-            if !collect_rows(
+                cleared.push(id);
+                if waiting.contains(&scope) {
+                    return Ok(Rederived::Waiting("a scope needs a seal rebootstrap"));
+                }
+                if !collect_rows(
                 self.conn
                     .query(
                         "SELECT 1 FROM secure_operations WHERE scope=? AND status='pending' LIMIT 1",
@@ -590,69 +686,70 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Ok(Rederived::Waiting("a scope holds pending frames"));
             }
-        }
-        if self
-            .direct
-            .iter()
-            .any(|scope| scope.domain == domain && Some(*scope) != importing)
-        {
-            return Ok(Rederived::Waiting("a direct import fills a scope"));
-        }
-        let inputs = self.rederive_inputs().await?;
-        if let Some([SqlValue::Blob(stuck), SqlValue::Text(violation)]) = rows(
-            &self.conn,
-            "SELECT inputs,violation FROM secure_replayed_stuck",
-        )
-        .await?
-        .first()
-        .map(Vec::as_slice)
-            && *stuck == inputs
-        {
-            return Ok(Rederived::Stuck(violation.clone()));
-        }
-        self.conn.execute("SAVEPOINT rederive", ()).await?;
-        let rebuilt = async {
-            for id in &cleared {
-                self.conn
-                    .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [*id])
-                    .await?;
             }
-            Ok(self
-                .replay_from_frames(time)
-                .await?
-                .err()
-                .map(|BrokenReference(violation)| violation))
-        }
-        .await;
-        let undo = async || -> Result<(), Error> {
-            self.conn.execute("ROLLBACK TO rederive", ()).await?;
-            self.conn.execute("RELEASE rederive", ()).await?;
-            self.clear_applied_cache();
-            Ok(())
-        };
-        match rebuilt {
-            Ok(None) => {
+            if self
+                .direct
+                .iter()
+                .any(|scope| scope.domain == domain && Some(*scope) != importing)
+            {
+                return Ok(Rederived::Waiting("a direct import fills a scope"));
+            }
+            let inputs = self.rederive_inputs().await?;
+            if let Some([SqlValue::Blob(stuck), SqlValue::Text(violation)]) = rows(
+                &self.conn,
+                "SELECT inputs,violation FROM secure_replayed_stuck",
+            )
+            .await?
+            .first()
+            .map(Vec::as_slice)
+                && *stuck == inputs
+            {
+                return Ok(Rederived::Stuck(violation.clone()));
+            }
+            self.conn.execute("SAVEPOINT rederive", ()).await?;
+            let rebuilt = async {
+                for id in &cleared {
+                    self.conn
+                        .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [*id])
+                        .await?;
+                }
+                Box::pin(self.replay_checked(time, true)).await
+            }
+            .await;
+            let undo = async || -> Result<(), Error> {
+                self.conn.execute("ROLLBACK TO rederive", ()).await?;
                 self.conn.execute("RELEASE rederive", ()).await?;
-                self.conn
-                    .execute("DELETE FROM secure_replayed_stuck", ())
-                    .await?;
-                self.prune_shadowed_outcomes(None).await?;
-                Ok(Rederived::Done)
+                self.clear_applied_cache();
+                Ok(())
+            };
+            match rebuilt {
+                Ok(Ok(withheld)) if withheld.is_empty() => {
+                    self.conn.execute("RELEASE rederive", ()).await?;
+                    self.conn
+                        .execute("DELETE FROM secure_replayed_stuck", ())
+                        .await?;
+                    self.prune_shadowed_outcomes(None).await?;
+                    Ok(Rederived::Done)
+                }
+                Ok(Ok(_)) => {
+                    undo().await?;
+                    Ok(Rederived::Waiting("a referenced parent is not ready"))
+                }
+                Ok(Err(BrokenReference(violation))) => {
+                    undo().await?;
+                    self.record_stuck(inputs, &violation).await?;
+                    Ok(Rederived::Stuck(violation))
+                }
+                Err(Error::Rejected(reason)) if reason == KEY_WAITS => {
+                    undo().await?;
+                    Ok(Rederived::Waiting(KEY_WAITS))
+                }
+                Err(error) => {
+                    undo().await?;
+                    Err(error)
+                }
             }
-            Ok(Some(violation)) => {
-                undo().await?;
-                self.record_stuck(inputs, &violation).await?;
-                Ok(Rederived::Stuck(violation))
-            }
-            Err(Error::Rejected(reason)) if reason == KEY_WAITS => {
-                undo().await?;
-                Ok(Rederived::Waiting(KEY_WAITS))
-            }
-            Err(error) => {
-                undo().await?;
-                Err(error)
-            }
-        }
+        })
     }
     async fn record_stuck(&self, inputs: Vec<u8>, violation: &str) -> Result<(), Error> {
         tracing::warn!(%violation, "replayed rows cannot be derived again");
@@ -680,7 +777,8 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        self.rederive_marked = true;
+        self.rederive_marked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let inputs = self.rederive_inputs().await?;
         self.record_stuck(inputs, &violation).await
     }
@@ -688,7 +786,9 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         domain: rocky_core::Scope,
     ) -> Result<(bool, Option<String>), Error> {
-        if !self.rederive_marked
+        if !self
+            .rederive_marked
+            .load(std::sync::atomic::Ordering::Relaxed)
             || self
                 .workspace
                 .typed
@@ -712,12 +812,15 @@ impl<A: RowApplication> Inner<A> {
             Ok(result)
         })?;
         match result {
-            Rederived::Unmarked => self.rederive_marked = false,
+            Rederived::Unmarked => self
+                .rederive_marked
+                .store(false, std::sync::atomic::Ordering::Relaxed),
             Rederived::Done => {
-                self.rederive_marked =
-                    !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
-                        .await?
-                        .is_empty();
+                let remaining = !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
+                    .await?
+                    .is_empty();
+                self.rederive_marked
+                    .store(remaining, std::sync::atomic::Ordering::Relaxed);
                 self.publish_revision().await?;
             }
             Rederived::Waiting(_) | Rederived::Stuck(_) => {}
@@ -728,7 +831,9 @@ impl<A: RowApplication> Inner<A> {
         &self,
         domain: rocky_core::Scope,
     ) -> Result<Option<String>, Error> {
-        if !self.rederive_marked
+        if !self
+            .rederive_marked
+            .load(std::sync::atomic::Ordering::Relaxed)
             || self
                 .workspace
                 .typed
@@ -816,13 +921,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         };
         if self.broken_reference(Some(&table)).await?.is_some() {
-            self.conn
-                .execute(
-                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
-                    [id],
-                )
-                .await?;
-            self.rederive_marked = true;
+            self.mark_rederive(Some(id)).await?;
         }
         Ok(())
     }
@@ -847,16 +946,70 @@ impl<A: RowApplication> Inner<A> {
         &self,
         time: u64,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_unchecked(time, true).await?;
-        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
+        match Box::pin(self.replay_checked(time, true)).await? {
+            Ok(withheld) => {
+                for id in withheld {
+                    self.mark_rederive(Some(id)).await?;
+                }
+                Ok(Ok(()))
+            }
+            Err(broken) => Ok(Err(broken)),
+        }
     }
 
     pub(in crate::replica) async fn replay_for_audit(
         &self,
         time: u64,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_unchecked(time, false).await?;
-        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
+        Ok(Box::pin(self.replay_checked(time, false))
+            .await?
+            .map(|_| ()))
+    }
+
+    fn replay_checked(
+        &self,
+        time: u64,
+        publish_outcomes: bool,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Result<Vec<i64>, BrokenReference>, Error>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.deferring_foreign_keys_or_rollback(async || {
+                self.conn.execute("SAVEPOINT replay_checked", ()).await?;
+                let result = async {
+                    Box::pin(self.replay_unchecked(time, publish_outcomes)).await?;
+                    if let Some(broken) = self.broken_reference(None).await? {
+                        return Ok(Err(broken));
+                    }
+                    let withheld = self.withhold_all_orphans().await?;
+                    Ok(Ok(withheld))
+                }
+                .await;
+                match result {
+                    Ok(Ok(withheld)) => {
+                        self.conn.execute("RELEASE replay_checked", ()).await?;
+                        Ok(Ok(withheld))
+                    }
+                    Ok(Err(broken)) => {
+                        self.conn.execute("ROLLBACK TO replay_checked", ()).await?;
+                        self.conn.execute("RELEASE replay_checked", ()).await?;
+                        self.clear_applied_cache();
+                        Ok(Err(broken))
+                    }
+                    Err(error) => {
+                        let _ = self.conn.execute("ROLLBACK TO replay_checked", ()).await;
+                        let _ = self.conn.execute("RELEASE replay_checked", ()).await;
+                        self.clear_applied_cache();
+                        Err(error)
+                    }
+                }
+            })
+            .await
+        })
     }
 
     async fn replay_unchecked(&self, time: u64, publish_outcomes: bool) -> Result<(), Error> {
@@ -995,13 +1148,9 @@ impl<A: RowApplication> Inner<A> {
                     .unwrap_or(usize::MAX),
             )
         });
-        self.deferring_foreign_keys(async || {
-            for (scope, source, rows) in &restored {
-                self.restore_images(*scope, *source, rows).await?;
-            }
-            Ok(())
-        })
-        .await?;
+        for (scope, source, rows) in &restored {
+            self.insert_images(*scope, *source, rows).await?;
+        }
         members.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         let mut redo: Vec<Redo> = Vec::new();
         for (order, _, transaction, member) in members {

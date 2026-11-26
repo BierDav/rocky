@@ -163,6 +163,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             })
             .collect();
         inner.conn.execute("SAVEPOINT undoing", ()).await?;
+        inner
+            .conn
+            .execute("PRAGMA defer_foreign_keys=ON", ())
+            .await?;
         let read = async {
             inner.restore(&undo, &mut BTreeMap::new()).await?;
             rows(&inner.conn, read).await
@@ -170,6 +174,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .await;
         inner.conn.execute("ROLLBACK TO undoing", ()).await?;
         inner.conn.execute("RELEASE undoing", ()).await?;
+        inner
+            .conn
+            .execute("PRAGMA defer_foreign_keys=OFF", ())
+            .await?;
         read
     }
 }

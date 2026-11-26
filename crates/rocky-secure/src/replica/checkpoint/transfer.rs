@@ -2048,7 +2048,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         transaction!(inner, |inner| {
             if staging.direct {
                 inner
-                    .restore_images(page.scope, staging.signed.statement.tip, &rows)
+                    .restore_valid_images(page.scope, staging.signed.statement.tip, &rows)
                     .await?;
             }
             let mut sets = staging.sets.clone();
@@ -2315,9 +2315,8 @@ impl<A: RowApplication> Inner<A> {
         };
         let reapply = self.supersede(scope, &statement, &mut report).await?;
         if let Some(linked) = linked {
-            self.replace_replayed_with_staged(scope, statement.tip, id)
-                .await?;
-            self.redo_linked_replay(linked, time).await?;
+            Box::pin(self.replace_replayed_with_staged(scope, statement.tip, id)).await?;
+            Box::pin(self.redo_linked_replay(linked, time)).await?;
             self.mark_rederive_if_orphaned(scope, id).await?;
             self.cover_kept(scope, id, &statement).await?;
             self.store_staged_base(id).await?;
@@ -2500,7 +2499,7 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         self.reseed_ledger(scope, id).await?;
-        self.rederive_replayed(Some(scope), time).await?;
+        Box::pin(self.rederive_replayed(Some(scope), time)).await?;
         self.clear_staging(id).await?;
         self.conn
             .execute(

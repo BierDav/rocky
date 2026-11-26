@@ -921,16 +921,19 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(in crate::replica) async fn restore_images(
+    pub(in crate::replica) async fn restore_valid_images(
         &self,
         scope: ResourceScope,
         source: TipId,
         rows: &[(Commitment, Vec<u8>)],
-    ) -> Result<(), Error> {
-        self.deferring_foreign_keys(async || self.insert_images(scope, source, rows).await)
-            .await
+    ) -> Result<bool, Error> {
+        self.deferring_foreign_keys(async || {
+            self.insert_images(scope, source, rows).await?;
+            Ok(!self.withhold_all_orphans().await?.is_empty())
+        })
+        .await
     }
-    async fn insert_images(
+    pub(in crate::replica) async fn insert_images(
         &self,
         scope: ResourceScope,
         source: TipId,

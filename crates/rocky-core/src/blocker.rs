@@ -58,6 +58,9 @@ pub enum BlockerKind {
     PartitionNotGranted {
         group: String,
     },
+    Rederiving {
+        reason: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -179,6 +182,12 @@ impl fmt::Display for Blocker {
             BlockerKind::PartitionNotGranted { group } => format!(
                 "no partition of group `{group}` is granted to this person; an admin grants one with grant_partition"
             ),
+            BlockerKind::Rederiving {
+                reason: Some(reason),
+            } => format!("replayed rows wait to be derived again ({reason})"),
+            BlockerKind::Rederiving { reason: None } => {
+                "replayed rows wait to be derived again".into()
+            }
         };
         let clears = match &self.clears_by {
             ClearsBy::AnyPeer => "any permitted peer".into(),

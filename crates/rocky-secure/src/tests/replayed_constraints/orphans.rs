@@ -74,18 +74,21 @@ async fn orphaned_memberships(replica: &EncryptedReplica<TypedRows>) -> usize {
     .len()
 }
 
-async fn keep_an_orphaned_membership(replica: &EncryptedReplica<TypedRows>, tenant: i64) {
-    let missing = format!("X'{}'", "00".repeat(40));
-    execute(replica, "PRAGMA foreign_keys=OFF", None).await;
-    execute(
-        replica,
-        &format!(
-            "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES({tenant},{missing},{missing},'member',1,1,{missing})"
-        ),
-        None,
-    )
-    .await;
-    execute(replica, "PRAGMA foreign_keys=ON", None).await;
+async fn foreign_key_violations(replica: &EncryptedReplica<TypedRows>) -> usize {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    crate::storage::rows(&inner.conn, "SELECT * FROM pragma_foreign_key_check")
+        .await
+        .unwrap()
+        .len()
+}
+
+async fn has_rederiving_blocker(replica: &EncryptedReplica<TypedRows>) -> bool {
+    replica
+        .blockers()
+        .await
+        .unwrap()
+        .iter()
+        .any(|blocker| matches!(blocker.kind, crate::BlockerKind::Rederiving { .. }))
 }
 
 async fn memberships(replica: &EncryptedReplica<TypedRows>) -> usize {
@@ -146,7 +149,7 @@ async fn a_replay_orphaning_a_row_of_a_held_and_settled_parent_partition_is_refu
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_replay_orphaning_a_row_of_a_parent_partition_not_held_here_keeps_it() {
+async fn a_replay_orphaning_a_row_of_a_parent_partition_not_held_here_withholds_it_and_blocks() {
     let c = graph();
     let root = rocky_platform::fs::Scratch::new().await;
     let device = a_sealed_membership_whose_team_base_is_lost(&c, &root.path().join("d.db")).await;
@@ -165,15 +168,59 @@ async fn a_replay_orphaning_a_row_of_a_parent_partition_not_held_here_keeps_it()
         .rebuild_projection(c.scope("memberships"))
         .await
         .unwrap();
-    assert_eq!(orphaned_memberships(&device.replica).await, 1);
+    assert_eq!(orphaned_memberships(&device.replica).await, 0);
+    assert_eq!(foreign_key_violations(&device.replica).await, 0);
+    assert!(has_rederiving_blocker(&device.replica).await);
+}
+
+async fn withhold_child_in_tenant(c: &Constrained, root: &Path, target: &Device, tenant: i64) {
+    let other = c.for_tenant(tenant);
+    let mut writer = other.open(&root.join(format!("tenant-{tenant}.db"))).await;
+    let team = writer
+        .commit(
+            &other,
+            &[&format!(
+                "INSERT INTO teams(tenant,name,id) VALUES({tenant},'other',#id)"
+            )],
+        )
+        .await
+        .unwrap()[0];
+    let _held = writer.fresh().await;
+    let own_frames_not_back_since_a_reset = format!(
+        "INSERT INTO secure_restoration_guards VALUES(?,7,X'{}')",
+        "11".repeat(32)
+    );
+    execute(
+        &target.replica,
+        &own_frames_not_back_since_a_reset,
+        Some(other.scope("teams")),
+    )
+    .await;
+    writer
+        .commit(
+            &other,
+            &[
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES({tenant},{team},#next(people),'member',1,1,#id)"
+                ),
+                &format!(
+                    "INSERT INTO people(tenant,nickname,id) VALUES({tenant},'beta',#id)"
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let withheld = writer.fresh().await;
+    target.receive(&withheld).await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
-    let c = graph();
+async fn a_withheld_child_in_another_partition_drops_no_replayed_transaction() {
+    let c = graph().with_extra_tenant(2);
     let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
-    keep_an_orphaned_membership(&devices[1].replica, 2).await;
+    withhold_child_in_tenant(&c, root.path(), &devices[1], 2).await;
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
     devices[0]
         .commit(
             &c,
@@ -190,7 +237,7 @@ async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
     assert_eq!(
         statuses.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
         vec![ReceiveStatus::Applied; frames.len()],
-        "a transaction in tenant 1 applies beside an orphan of tenant 2"
+        "a transaction in tenant 1 applies beside a withheld child of tenant 2"
     );
     assert_eq!(
         devices[1]
@@ -199,13 +246,14 @@ async fn an_orphan_kept_in_another_partition_drops_no_replayed_transaction() {
             .await
             .unwrap(),
         Some(TransactionOutcome::Applied { sealed: false }),
-        "a membership whose team lives in a partition not held here is no violation of this transaction"
     );
-    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 0);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restored_keeps_it() {
+async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restored_withholds_it_and_blocks()
+ {
     let c = graph();
     let root = rocky_platform::fs::Scratch::new().await;
     let device = a_sealed_membership_whose_team_base_is_lost(&c, &root.path().join("d.db")).await;
@@ -234,28 +282,48 @@ async fn a_replay_orphaning_a_row_of_a_held_parent_partition_still_being_restore
         .rebuild_projection(c.scope("memberships"))
         .await
         .unwrap();
-    assert_eq!(orphaned_memberships(&device.replica).await, 1);
-    device.replica.audit(c.scope("memberships")).await.unwrap();
+    assert_eq!(orphaned_memberships(&device.replica).await, 0);
+    assert_eq!(foreign_key_violations(&device.replica).await, 0);
+    assert!(has_rederiving_blocker(&device.replica).await);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_valid_transaction_into_the_partition_of_a_tolerated_orphan_applies_as_on_its_peers() {
+async fn a_valid_transaction_into_the_partition_of_a_withheld_child_applies_as_on_its_peers() {
     let c = graph();
     let root = rocky_platform::fs::Scratch::new().await;
-    let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
-    keep_an_orphaned_membership(&devices[1].replica, 1).await;
-    let ids = devices[0]
+    let (mut devices, ids, _) = devices(
+        &c,
+        root.path(),
+        3,
+        &["INSERT INTO teams(tenant,name,id) VALUES(1,'ten2',#id)"],
+    )
+    .await;
+    let team2 = ids[0];
+    let own_frames_not_back_since_a_reset = format!(
+        "INSERT INTO secure_restoration_guards VALUES(?,7,X'{}')",
+        "11".repeat(32)
+    );
+    execute(
+        &devices[1].replica,
+        &own_frames_not_back_since_a_reset,
+        Some(c.scope("teams")),
+    )
+    .await;
+    let _withheld = a_membership_of_a_team_this_device_never_received(&c, &mut devices).await;
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
+    devices[2]
         .commit(
             &c,
             &[
-                "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,#next(teams),#next(people),'member',1,1,#id)",
-                "INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)",
-                "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team2},#next(people),'member',1,1,#id)"
+                ),
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'gamma',#id)",
             ],
         )
         .await
         .unwrap();
-    let frames = devices[0].fresh().await;
+    let frames = devices[2].fresh().await;
     let statuses = devices[1].replica.receive_all(frames.clone()).await;
     assert_eq!(
         statuses.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
@@ -264,7 +332,7 @@ async fn a_valid_transaction_into_the_partition_of_a_tolerated_orphan_applies_as
     let transaction = c.transaction(&frames);
     let applied = Some(TransactionOutcome::Applied { sealed: false });
     assert_eq!(
-        devices[0]
+        devices[2]
             .replica
             .transaction_outcome(transaction)
             .await
@@ -278,29 +346,16 @@ async fn a_valid_transaction_into_the_partition_of_a_tolerated_orphan_applies_as
             .await
             .unwrap(),
         applied,
-        "an orphan that was already in tenant 1 is no violation of this transaction"
+        "a valid transaction applies beside a withheld child in the same partition"
     );
-    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
-    assert_eq!(memberships(&devices[1].replica).await, 2);
-    let team = ids[1];
-    devices[1]
-        .commit(
-            &c,
-            &[
-                &format!(
-                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team},#next(people),'owner',1,1,#id)"
-                ),
-                "INSERT INTO people(tenant,nickname,id) VALUES(1,'beta',#id)",
-            ],
-        )
-        .await
-        .expect("a local commit beside the orphan is no violation either");
-    assert_eq!(memberships(&devices[1].replica).await, 3);
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 0);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
+    assert_eq!(memberships(&devices[1].replica).await, 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_transaction_orphaning_a_row_beside_a_tolerated_orphan_still_drops() {
-    let c = graph();
+async fn a_transaction_orphaning_a_row_beside_a_withheld_child_in_another_partition_still_drops() {
+    let c = graph().with_extra_tenant(2);
     let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, ids, _) = devices(
         &c,
@@ -313,7 +368,7 @@ async fn a_transaction_orphaning_a_row_beside_a_tolerated_orphan_still_drops() {
     )
     .await;
     let (team, person) = (ids[0], ids[1]);
-    keep_an_orphaned_membership(&devices[1].replica, 1).await;
+    withhold_child_in_tenant(&c, root.path(), &devices[1], 2).await;
     devices[1]
         .commit(
             &c,
@@ -355,8 +410,9 @@ async fn a_transaction_orphaning_a_row_beside_a_tolerated_orphan_still_drops() {
         }),
         "a membership of a team deleted before it is a violation the transaction introduces"
     );
-    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
-    assert_eq!(memberships(&devices[1].replica).await, 1);
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 0);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
+    assert_eq!(memberships(&devices[1].replica).await, 0);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -447,32 +503,6 @@ async fn outcome(device: &Device, transaction: Commitment) -> Option<Transaction
         .unwrap()
 }
 
-async fn membership_rows(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
-    let inner = replica.inner.lock(crate::replica::Class::Background).await;
-    crate::storage::rows(&inner.conn, "SELECT * FROM memberships ORDER BY id")
-        .await
-        .unwrap()
-}
-
-async fn rebuilt_rows_match(c: &Constrained, device: &Device, transaction: Commitment) {
-    let replayed = membership_rows(&device.replica).await;
-    device
-        .replica
-        .rebuild_projection(c.scope("memberships"))
-        .await
-        .unwrap();
-    assert_eq!(
-        membership_rows(&device.replica).await,
-        replayed,
-        "a full rebuild keeps what replay kept"
-    );
-    assert_eq!(
-        outcome(device, transaction).await,
-        Some(TransactionOutcome::Applied { sealed: false })
-    );
-    device.replica.audit(c.scope("memberships")).await.unwrap();
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_new_reference_into_a_parent_scope_not_held_here_applies_as_a_rebuild_keeps_it() {
     let c = graph();
@@ -494,14 +524,34 @@ async fn a_new_reference_into_a_parent_scope_not_held_here_applies_as_a_rebuild_
     assert_eq!(
         outcome(&devices[1], transaction).await,
         applied,
-        "a membership of a team in a scope not held here is tolerated as a rebuild tolerates it"
+        "a membership of a team in a scope not held here is not dropped as a constraint violation"
     );
-    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
-    rebuilt_rows_match(&c, &devices[1], transaction).await;
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 0);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
+    assert!(has_rederiving_blocker(&devices[1].replica).await);
+    device_rebuild_keeps_zero_orphans(&c, &devices[1], transaction).await;
+}
+
+async fn device_rebuild_keeps_zero_orphans(
+    c: &Constrained,
+    device: &Device,
+    transaction: Commitment,
+) {
+    device
+        .replica
+        .rebuild_projection(c.scope("memberships"))
+        .await
+        .unwrap();
+    assert_eq!(orphaned_memberships(&device.replica).await, 0);
+    assert_eq!(foreign_key_violations(&device.replica).await, 0);
+    assert_eq!(
+        outcome(device, transaction).await,
+        Some(TransactionOutcome::Applied { sealed: false })
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_new_reference_into_a_parent_scope_still_being_restored_applies_as_a_rebuild_keeps_it() {
+async fn a_new_reference_into_a_parent_scope_still_being_restored_withholds_until_parent_arrives() {
     let c = graph();
     let root = rocky_platform::fs::Scratch::new().await;
     let (mut devices, _, _) = devices(&c, root.path(), 2, &[]).await;
@@ -515,14 +565,49 @@ async fn a_new_reference_into_a_parent_scope_still_being_restored_applies_as_a_r
         Some(c.scope("teams")),
     )
     .await;
-    let transaction = a_membership_of_a_team_this_device_never_received(&c, &mut devices).await;
+    let team = devices[0]
+        .commit(
+            &c,
+            &["INSERT INTO teams(tenant,name,id) VALUES(1,'ten',#id)"],
+        )
+        .await
+        .unwrap()[0];
+    let team_frames = devices[0].fresh().await;
+    devices[0]
+        .commit(
+            &c,
+            &[
+                &format!(
+                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{team},#next(people),'member',1,1,#id)"
+                ),
+                "INSERT INTO people(tenant,nickname,id) VALUES(1,'alpha',#id)",
+            ],
+        )
+        .await
+        .unwrap();
+    let joined = devices[0].fresh().await;
+    devices[1].receive(&joined).await;
+    let transaction = c.transaction(&joined);
     assert_eq!(
         outcome(&devices[1], transaction).await,
         Some(TransactionOutcome::Applied { sealed: false }),
         "a held team scope with a restoration guard is not settled"
     );
-    assert_eq!(orphaned_memberships(&devices[1].replica).await, 1);
-    rebuilt_rows_match(&c, &devices[1], transaction).await;
+    assert_eq!(orphaned_memberships(&devices[1].replica).await, 0);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
+    assert!(has_rederiving_blocker(&devices[1].replica).await);
+    device_rebuild_keeps_zero_orphans(&c, &devices[1], transaction).await;
+    execute(
+        &devices[1].replica,
+        "DELETE FROM secure_restoration_guards",
+        None,
+    )
+    .await;
+    devices[1].receive(&team_frames).await;
+    devices[1].replica.rederive().await.unwrap();
+    assert!(!has_rederiving_blocker(&devices[1].replica).await);
+    assert_eq!(memberships(&devices[1].replica).await, 1);
+    assert_eq!(foreign_key_violations(&devices[1].replica).await, 0);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

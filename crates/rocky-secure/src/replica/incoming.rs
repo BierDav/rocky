@@ -549,180 +549,183 @@ impl<A: RowApplication> Inner<A> {
         pass.advanced = true;
         Ok(true)
     }
-    pub(super) async fn apply_frame(
-        &self,
-        frame: &EncryptedFrame,
+    pub(super) fn apply_frame<'a>(
+        &'a self,
+        frame: &'a EncryptedFrame,
         time: u64,
-    ) -> Result<Outcome, Error> {
-        let operation = frame.operation_ref()?;
-        match self.stored_status(operation.hash).await?.as_deref() {
-            Some("applied" | "abandoned" | "held") => return Ok(Outcome::Applied),
-            Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
-            _ => {}
-        }
-        #[cfg(test)]
-        if self.poisoned.contains(&operation.hash) {
-            return Err(Error::Corrupt("poisoned frame".into()));
-        }
-        let reach = self.frame_reach(frame)?;
-        if !self.frame_schema_ready(frame)? {
-            return Ok(Outcome::Waiting(WaitReason::Schema));
-        }
-        if reach == tips::FrameReach::Unfollowed {
-            self.reject(operation.hash).await?;
-            return Ok(Outcome::Rejected(
-                "frame belongs to a tip this replica does not follow".into(),
-            ));
-        }
-        let extension = &operation.header.extensions;
-        if self.direct.contains(&extension.scope) {
-            return Ok(Outcome::Waiting(WaitReason::DirectImport));
-        }
-        if !self.can_read_key(
-            extension.scope,
-            &self.local_grants(time).unwrap_or_default(),
-        ) {
-            return Ok(Outcome::Waiting(WaitReason::ReadGrant));
-        }
-        let Some(key) = self.opening_key(extension.scope, extension.generation) else {
-            return Ok(Outcome::Waiting(WaitReason::OpeningKey));
-        };
-        if reach == tips::FrameReach::Held
-            && let Err(error) = self.verify_frame_authority(frame, time)
-        {
-            self.reject(operation.hash).await?;
-            {
-                return Ok(Outcome::Rejected(error.to_string()));
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Outcome, Error>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let operation = frame.operation_ref()?;
+            match self.stored_status(operation.hash).await?.as_deref() {
+                Some("applied" | "abandoned" | "held") => return Ok(Outcome::Applied),
+                Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
+                _ => {}
             }
-        }
-        if reach == tips::FrameReach::Held {
+            #[cfg(test)]
+            if self.poisoned.contains(&operation.hash) {
+                return Err(Error::Corrupt("poisoned frame".into()));
+            }
+            let reach = self.frame_reach(frame)?;
+            if !self.frame_schema_ready(frame)? {
+                return Ok(Outcome::Waiting(WaitReason::Schema));
+            }
+            if reach == tips::FrameReach::Unfollowed {
+                self.reject(operation.hash).await?;
+                return Ok(Outcome::Rejected(
+                    "frame belongs to a tip this replica does not follow".into(),
+                ));
+            }
+            let extension = &operation.header.extensions;
+            if self.direct.contains(&extension.scope) {
+                return Ok(Outcome::Waiting(WaitReason::DirectImport));
+            }
+            if !self.can_read_key(
+                extension.scope,
+                &self.local_grants(time).unwrap_or_default(),
+            ) {
+                return Ok(Outcome::Waiting(WaitReason::ReadGrant));
+            }
+            let Some(key) = self.opening_key(extension.scope, extension.generation) else {
+                return Ok(Outcome::Waiting(WaitReason::OpeningKey));
+            };
+            if reach == tips::FrameReach::Held
+                && let Err(error) = self.verify_frame_authority(frame, time)
+            {
+                self.reject(operation.hash).await?;
+                {
+                    return Ok(Outcome::Rejected(error.to_string()));
+                }
+            }
+            if reach == tips::FrameReach::Held {
+                if let Some(stamp) = self.clock_ahead(&operation.header)? {
+                    return Ok(Outcome::Ahead(stamp));
+                }
+                return self.hold_closed_one(frame, time).await;
+            }
+            if self
+                .config
+                .revocations
+                .revoking(frame.chain()?.credentials())
+                .map_err(credential)?
+                .is_some()
+            {
+                self.reject(operation.hash).await?;
+                return Ok(Outcome::Rejected("the frame's author is revoked".into()));
+            }
+            if !self
+                .own_chain_ready(&operation.header, &BTreeSet::new())
+                .await?
+            {
+                return Ok(Outcome::Waiting(WaitReason::OwnChain));
+            }
+            let extension = &operation.header.extensions;
+            let Some(Ok(opened)) = self
+                .opening_key(extension.scope, extension.generation)
+                .map(|key| self.crypto.open(frame, key))
+            else {
+                return Ok(Outcome::Waiting(WaitReason::Undecryptable));
+            };
+            if opened.partition.as_ref() != self.partitions.get(&extension.scope) {
+                self.reject(operation.hash).await?;
+                return Ok(Outcome::Rejected(
+                    "sealed partition tuple differs from its keyed scope".into(),
+                ));
+            }
+            let payload = self.decode_row_payload(frame, &opened.payload);
+            #[cfg(any(test, feature = "qualification"))]
+            if let Ok(payload) = &payload {
+                self.flusher.measurements.work(
+                    crate::replica::lock::WorkUnit::ReceivedInputRow,
+                    payload.writes().len() as u64,
+                );
+            }
+            match self
+                .dependency_wait(frame, &BTreeSet::new(), payload.as_ref().ok())
+                .await
+            {
+                Ok(Readiness::Ready) => {}
+                Ok(Readiness::Dependency(id)) => return Ok(Outcome::Blocked(id)),
+                Ok(Readiness::Other) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
+                Err(error) => {
+                    self.reject(operation.hash).await?;
+                    {
+                        return Ok(Outcome::Rejected(error.to_string()));
+                    }
+                }
+            }
+            let grants = match self.verify_frame(frame, time) {
+                Ok(grants) => grants,
+                Err(error) => {
+                    self.reject(operation.hash).await?;
+                    {
+                        return Ok(Outcome::Rejected(error.to_string()));
+                    }
+                }
+            };
+            if let Ok(payload) = &payload
+                && let Some(membership) = payload.membership()
+            {
+                return Box::pin(self.apply_bundle(operation, membership, time)).await;
+            }
             if let Some(stamp) = self.clock_ahead(&operation.header)? {
                 return Ok(Outcome::Ahead(stamp));
             }
-            return self.hold_closed_one(frame, time).await;
-        }
-        if self
-            .config
-            .revocations
-            .revoking(frame.chain()?.credentials())
-            .map_err(credential)?
-            .is_some()
-        {
-            self.reject(operation.hash).await?;
-            return Ok(Outcome::Rejected("the frame's author is revoked".into()));
-        }
-        if !self
-            .own_chain_ready(&operation.header, &BTreeSet::new())
-            .await?
-        {
-            return Ok(Outcome::Waiting(WaitReason::OwnChain));
-        }
-        let extension = &operation.header.extensions;
-        let Some(Ok(opened)) = self
-            .opening_key(extension.scope, extension.generation)
-            .map(|key| self.crypto.open(frame, key))
-        else {
-            return Ok(Outcome::Waiting(WaitReason::Undecryptable));
-        };
-        if opened.partition.as_ref() != self.partitions.get(&extension.scope) {
-            self.reject(operation.hash).await?;
-            return Ok(Outcome::Rejected(
-                "sealed partition tuple differs from its keyed scope".into(),
-            ));
-        }
-        let payload = self.decode_row_payload(frame, &opened.payload);
-        #[cfg(any(test, feature = "qualification"))]
-        if let Ok(payload) = &payload {
-            self.flusher.measurements.work(
-                crate::replica::lock::WorkUnit::ReceivedInputRow,
-                payload.writes().len() as u64,
-            );
-        }
-        match self
-            .dependency_wait(frame, &BTreeSet::new(), payload.as_ref().ok())
-            .await
-        {
-            Ok(Readiness::Ready) => {}
-            Ok(Readiness::Dependency(id)) => return Ok(Outcome::Blocked(id)),
-            Ok(Readiness::Other) => return Ok(Outcome::Waiting(WaitReason::Dependencies)),
-            Err(error) => {
-                self.reject(operation.hash).await?;
-                {
-                    return Ok(Outcome::Rejected(error.to_string()));
+            self.conn.execute("SAVEPOINT pending", ()).await?;
+            let materialized = match &payload {
+                Ok(payload) if payload.outcome().is_some() => Ok((Vec::new(), Default::default())),
+                Ok(payload) => {
+                    self.materialize(frame, payload.writes(), &grants, Some(payload))
+                        .await
                 }
-            }
-        }
-        let grants = match self.verify_frame(frame, time) {
-            Ok(grants) => grants,
-            Err(error) => {
-                self.reject(operation.hash).await?;
-                {
-                    return Ok(Outcome::Rejected(error.to_string()));
-                }
-            }
-        };
-        if let Ok(payload) = &payload
-            && let Some(membership) = payload.membership()
-        {
-            return Box::pin(self.apply_bundle(operation, membership, time)).await;
-        }
-        if let Some(stamp) = self.clock_ahead(&operation.header)? {
-            return Ok(Outcome::Ahead(stamp));
-        }
-        self.conn.execute("SAVEPOINT pending", ()).await?;
-        let materialized = match &payload {
-            Ok(payload) if payload.outcome().is_some() => Ok((Vec::new(), Default::default())),
-            Ok(payload) => {
-                self.materialize(frame, payload.writes(), &grants, Some(payload))
-                    .await
-            }
-            Err(error) => Err(group::shared(error)),
-        };
-        let result = match materialized {
-            Ok((rows, admission)) => {
-                let applied = async {
-                    if let Some(record) = payload.as_ref().ok().and_then(RowPayload::outcome)
-                        && let Err(divergence) = self.apply_outcome(frame, record, time).await?
-                    {
-                        self.reject(operation.hash).await?;
-                        return Ok(Outcome::Rejected(divergence));
+                Err(error) => Err(group::shared(error)),
+            };
+            let result = match materialized {
+                Ok((rows, admission)) => {
+                    let applied = async {
+                        if let Some(record) = payload.as_ref().ok().and_then(RowPayload::outcome)
+                            && let Err(divergence) = self.apply_outcome(frame, record, time).await?
+                        {
+                            self.reject(operation.hash).await?;
+                            return Ok(Outcome::Rejected(divergence));
+                        }
+                        self.record_key(key).await?;
+                        self.write_materialized(frame, rows, admission, payload.as_ref().ok())
+                            .await?;
+                        self.note_settled(operation.hash);
+                        Ok(Outcome::Applied)
                     }
-                    self.record_key(key).await?;
-                    self.write_materialized(frame, rows, admission, payload.as_ref().ok())
-                        .await?;
-                    self.note_settled(operation.hash);
-                    Ok(Outcome::Applied)
-                }
-                .await;
-                match applied {
-                    Err(Error::Rejected(reason)) if reason == super::replay::KEY_WAITS => {
-                        self.conn.execute("ROLLBACK TO pending", ()).await?;
-                        self.invalidate_context();
-                        Ok(Outcome::Waiting(WaitReason::OpeningKey))
+                    .await;
+                    match applied {
+                        Err(Error::Rejected(reason)) if reason == super::replay::KEY_WAITS => {
+                            self.conn.execute("ROLLBACK TO pending", ()).await?;
+                            self.invalidate_context();
+                            Ok(Outcome::Waiting(WaitReason::OpeningKey))
+                        }
+                        applied => applied,
                     }
-                    applied => applied,
                 }
-            }
-            Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
+                Err(Error::Rejected(reason)) if reason == identity::LEDGER_WAITS => {
+                    self.conn.execute("ROLLBACK TO pending", ()).await?;
+                    self.invalidate_context();
+                    Ok(Outcome::Waiting(WaitReason::Ledger))
+                }
+                Err(error) if identity::receipts::semantic_refusal(&error) => {
+                    self.conn.execute("ROLLBACK TO pending", ()).await?;
+                    self.invalidate_context();
+                    self.reject(operation.hash)
+                        .await
+                        .map(|()| Outcome::Rejected(error.to_string()))
+                }
+                Err(error) => Err(error),
+            };
+            if result.is_err() {
                 self.conn.execute("ROLLBACK TO pending", ()).await?;
                 self.invalidate_context();
-                Ok(Outcome::Waiting(WaitReason::Ledger))
             }
-            Err(error) if identity::receipts::semantic_refusal(&error) => {
-                self.conn.execute("ROLLBACK TO pending", ()).await?;
-                self.invalidate_context();
-                self.reject(operation.hash)
-                    .await
-                    .map(|()| Outcome::Rejected(error.to_string()))
-            }
-            Err(error) => Err(error),
-        };
-        if result.is_err() {
-            self.conn.execute("ROLLBACK TO pending", ()).await?;
-            self.invalidate_context();
-        }
-        self.conn.execute("RELEASE pending", ()).await?;
-        result
+            self.conn.execute("RELEASE pending", ()).await?;
+            result
+        })
     }
     fn hold_ahead(&mut self, id: Hash, ahead: Option<(PublicKey, u64)>) {
         let waiting =

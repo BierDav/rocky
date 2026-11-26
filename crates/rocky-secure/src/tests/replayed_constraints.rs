@@ -141,6 +141,7 @@ struct Constrained {
     manifest: SignedManifest,
     domain: Scope,
     tenant: Option<i64>,
+    extra_tenants: Vec<i64>,
 }
 
 impl Constrained {
@@ -180,6 +181,7 @@ impl Constrained {
             schema,
             publisher,
             tenant,
+            extra_tenants: Vec::new(),
         }
     }
     fn app(&self) -> TypedRows {
@@ -209,13 +211,46 @@ impl Constrained {
     fn tuple(&self, name: &str, tenant: i64) -> PartitionTuple {
         PartitionTuple::new([self.tenant_of(name, tenant)]).unwrap()
     }
+    fn partition_name(tenant: i64) -> rocky_core::PartitionName {
+        [0x5a_u8.wrapping_add((tenant - 1) as u8); 32]
+    }
+    fn partition(&self, name: &str, tenant: i64) -> ResourceScope {
+        let table = self.schema.table_id(self.schema.table(name).unwrap());
+        self.tuple(name, tenant)
+            .scope(self.domain, table, &Self::partition_name(tenant))
+            .unwrap()
+    }
+    fn for_tenant(&self, tenant: i64) -> Self {
+        Self {
+            publisher: self.publisher.clone(),
+            schema: self.schema.clone(),
+            manifest: self.manifest.clone(),
+            domain: self.domain,
+            tenant: Some(tenant),
+            extra_tenants: Vec::new(),
+        }
+    }
+    fn with_extra_tenant(&self, tenant: i64) -> Self {
+        let mut extra_tenants = self.extra_tenants.clone();
+        extra_tenants.push(tenant);
+        Self {
+            publisher: self.publisher.clone(),
+            schema: self.schema.clone(),
+            manifest: self.manifest.clone(),
+            domain: self.domain,
+            tenant: self.tenant,
+            extra_tenants,
+        }
+    }
+    fn all_tenants(&self) -> Vec<i64> {
+        self.tenant
+            .into_iter()
+            .chain(self.extra_tenants.iter().copied())
+            .collect()
+    }
     fn scope(&self, name: &str) -> ResourceScope {
         if let Some(tenant) = self.tenant {
-            let table = self.schema.table_id(self.schema.table(name).unwrap());
-            return self
-                .tuple(name, tenant)
-                .scope(self.domain, table, &crate::tests::PARTITION_NAME)
-                .unwrap();
+            return self.partition(name, tenant);
         }
         ResourceScope {
             domain: self.domain,
@@ -224,6 +259,15 @@ impl Constrained {
         }
     }
     fn key(&self, scope: ResourceScope) -> [u8; 32] {
+        for tenant in self.all_tenants() {
+            if let Some(index) = self
+                .names()
+                .iter()
+                .position(|name| self.partition(name, tenant) == scope)
+            {
+                return [40 + index as u8 + (tenant as u8) * 16; 32];
+            }
+        }
         let index = self
             .names()
             .iter()
@@ -255,17 +299,21 @@ impl Constrained {
             })
             .collect()
     }
-    fn partition_grants(&self, tenant: i64) -> Vec<PartitionGrant> {
+    fn partition_grants(&self, tenants: &[i64]) -> Vec<PartitionGrant> {
         self.names()
             .into_iter()
             .map(|name| {
                 let table = self.schema.table(name).unwrap();
-                let (column, value) = self.tenant_of(name, tenant);
+                let (column, _) = self.tenant_of(name, tenants[0]);
+                let values: BTreeSet<_> = tenants
+                    .iter()
+                    .map(|tenant| self.tenant_of(name, *tenant).1)
+                    .collect();
                 PartitionGrant {
                     domain: self.domain,
                     table: self.schema.table_id(table),
                     selector: PartitionSelector(
-                        [(column, PartitionSelection::Only([value].into()))].into(),
+                        [(column, PartitionSelection::Only(values))].into(),
                     ),
                     rows: RowSelection::All,
                     rights: [
@@ -288,13 +336,15 @@ impl Constrained {
     }
     fn credentials(&self, node: &PrivateKey) -> CredentialChain {
         let user = crate::tests::identity_of(node);
-        if let Some(tenant) = self.tenant {
+        if self.tenant.is_some() {
+            let tenants = self.all_tenants();
+            let partitions = self.partition_grants(&tenants);
             let root = Authority::owner(&self.publisher)
                 .issue_person(
                     user.public_key(),
                     rocky_credentials::Granted {
                         grants: vec![],
-                        partitions: self.partition_grants(tenant),
+                        partitions,
                         ..Default::default()
                     },
                     rocky_credentials::Validity {
@@ -385,14 +435,14 @@ impl Constrained {
             )
             .await
             .unwrap();
-        if let Some(tenant) = self.tenant {
+        for tenant in self.all_tenants() {
             for name in self.names() {
-                let scope = self.scope(name);
+                let scope = self.partition(name, tenant);
                 replica
                     .register_partition(
                         scope,
                         self.tuple(name, tenant),
-                        crate::tests::PARTITION_NAME,
+                        Self::partition_name(tenant),
                     )
                     .await
                     .unwrap();

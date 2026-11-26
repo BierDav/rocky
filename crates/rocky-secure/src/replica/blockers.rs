@@ -30,6 +30,8 @@ const STATE_TABLES: &[&str] = &[
     "secure_seal_drops",
     "secure_partitions",
     "secure_followed_tip",
+    "secure_replayed_rederive",
+    "secure_replayed_stuck",
 ];
 
 #[derive(Default)]
@@ -222,6 +224,55 @@ impl<A: RowApplication> Inner<A> {
                 ),
             );
         }
+        let mut rederiving = BTreeSet::new();
+        for record in rows(
+            &self.conn,
+            "SELECT s.scope FROM secure_replayed_rederive r JOIN secure_scope_state s ON s.id=r.scope",
+        )
+        .await?
+        {
+            let [SqlValue::Blob(bytes)] = record.as_slice() else {
+                return Err(Error::Corrupt("rederived scope".into()));
+            };
+            let scope: ResourceScope = decode(bytes)?;
+            if scope.domain != domain {
+                continue;
+            }
+            rederiving.insert(scope);
+            for linked in self.linked_resource_scopes(scope)? {
+                rederiving.insert(linked);
+            }
+        }
+        if !rederiving.is_empty() {
+            let reason = match rows(
+                &self.conn,
+                "SELECT violation FROM secure_replayed_stuck LIMIT 1",
+            )
+            .await?
+            .first()
+            .map(Vec::as_slice)
+            {
+                Some([SqlValue::Text(violation)]) => Some(violation.clone()),
+                _ => None,
+            };
+            let clears_by = if reason.is_some() {
+                ClearsBy::AnyPeer
+            } else {
+                ClearsBy::LocalWork
+            };
+            for scope in rederiving {
+                readiness.add(
+                    scope,
+                    blocker(
+                        scope_label(&scope),
+                        BlockerKind::Rederiving {
+                            reason: reason.clone(),
+                        },
+                        clears_by.clone(),
+                    ),
+                );
+            }
+        }
         Ok(readiness)
     }
     pub(super) async fn workspace_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
@@ -272,12 +323,15 @@ impl<A: RowApplication> Inner<A> {
         blockers.dedup();
         Ok(blockers)
     }
-    pub(super) async fn readable_blockers(
+    pub(super) fn readable_blockers(
         &self,
         scope: ResourceScope,
-    ) -> Result<Vec<Blocker>, Error> {
-        let readiness = self.readiness(scope.domain).await?;
-        self.readable_in(&readiness, scope).await
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Blocker>, Error>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let readiness = self.readiness(scope.domain).await?;
+            self.readable_in(&readiness, scope).await
+        })
     }
     pub(super) async fn readable_in(
         &self,

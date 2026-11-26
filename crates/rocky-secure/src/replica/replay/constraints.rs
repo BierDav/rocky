@@ -400,9 +400,11 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("SAVEPOINT before_replayed", ()).await?;
         let read = async {
             let mut plans = BTreeMap::new();
-            for undo in undo_in_applied_order.iter().rev() {
-                self.restore(undo, &mut plans).await?;
-            }
+            let combined: Vec<Undo> = undo_in_applied_order
+                .iter()
+                .flat_map(|slice| slice.iter().cloned())
+                .collect();
+            self.restore(&combined, &mut plans).await?;
             read().await
         }
         .await;

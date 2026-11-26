@@ -1108,8 +1108,11 @@ async fn role_reading_child_without_referenced_parent_is_rejected() -> Result<()
     let refused = Schema::builder("ledger", 1)
         .table(Table::replayed("accounts").column(Column::new("name", Affinity::Text).required()))
         .table(
-            Table::replayed("transactions")
-                .column(Column::new("account", Affinity::Blob).required().references("accounts")),
+            Table::replayed("transactions").column(
+                Column::new("account", Affinity::Blob)
+                    .required()
+                    .references("accounts"),
+            ),
         )
         .role(Role::new(reader.clone()).read("transactions"))
         .build()
@@ -1135,8 +1138,11 @@ async fn role_reading_child_without_referenced_parent_is_rejected() -> Result<()
     let accepted = Schema::builder("ledger", 1)
         .table(Table::replayed("accounts").column(Column::new("name", Affinity::Text).required()))
         .table(
-            Table::replayed("transactions")
-                .column(Column::new("account", Affinity::Blob).required().references("accounts")),
+            Table::replayed("transactions").column(
+                Column::new("account", Affinity::Blob)
+                    .required()
+                    .references("accounts"),
+            ),
         )
         .role(Role::new(reader).read("accounts").read("transactions"))
         .build();

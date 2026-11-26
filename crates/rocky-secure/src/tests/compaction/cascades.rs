@@ -855,7 +855,8 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
 async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     let lineage = linked();
     let dir = Scratch::new().await;
-    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "p", "parent").await;
     tag(&replica, "old", "p").await;
@@ -886,18 +887,59 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
             .contains("cannot be derived again: a row of tags references a missing row of items")),
         "{status:?}"
     );
-    assert_eq!(tags(&replica).await, before);
-    let again = attempt().await;
-    assert!(again * 4 < rebuilt, "{again} statements after {rebuilt}");
-    insert(&replica, "q", "new").await;
+    let blocked = session(&replica)
+        .await
+        .run("SELECT key FROM tags ORDER BY key", vec![])
+        .await
+        .unwrap_err();
     assert!(
-        attempt().await * 4 > rebuilt,
-        "a new frame changes the inputs, so the rebuild runs again"
+        matches!(
+            blocked,
+            Error::Blocked(ref blockers)
+                if blockers.iter().any(|blocker| matches!(
+                    &blocker.kind,
+                    crate::BlockerKind::Rederiving { reason: Some(reason) }
+                        if reason == "a row of tags references a missing row of items"
+                ))
+        ),
+        "{blocked:?}"
+    );
+    assert_eq!(
+        stored(
+            &replica,
+            "SELECT t.key,i.key,a.key FROM tags t LEFT JOIN items i ON i.id=t.item LEFT JOIN items a ON a.id=t.also ORDER BY t.key"
+        )
+        .await,
+        before
     );
     assert!(
-        !stored(&replica, "SELECT 1 FROM secure_replayed_stuck")
+        stored(&replica, "SELECT * FROM pragma_foreign_key_check")
             .await
             .is_empty()
+    );
+    let again = attempt().await;
+    assert!(again * 4 < rebuilt, "{again} statements after {rebuilt}");
+    let stuck_before = stored(&replica, "SELECT inputs FROM secure_replayed_stuck").await;
+    assert!(!stuck_before.is_empty());
+    let peer_key = PrivateKey::new();
+    let peer = open(&lineage, &dir, "peer", &peer_key).await;
+    crate::tests::exchange_graphs(&replica, &peer, lineage.domain).await;
+    peer.follow_bookmark(lineage.domain, "main").await.unwrap();
+    insert(&peer, "q", "new").await;
+    let start = crate::sqlite::statements();
+    sync_scope(&lineage, &peer, &replica, &key, items).await;
+    let on_arrival = crate::sqlite::statements() - start;
+    assert!(
+        on_arrival * 4 > rebuilt,
+        "a new frame changes the inputs, so the rebuild runs again ({on_arrival} vs {rebuilt})"
+    );
+    let stuck_after = stored(&replica, "SELECT inputs FROM secure_replayed_stuck").await;
+    assert!(!stuck_after.is_empty());
+    assert_ne!(stuck_after, stuck_before);
+    let cached_again = attempt().await;
+    assert!(
+        cached_again * 4 < rebuilt,
+        "{cached_again} statements after {rebuilt}"
     );
 }
 
@@ -1216,14 +1258,6 @@ async fn marked_for_rederive(replica: &Replica) -> bool {
         .await
         .is_empty()
 }
-async fn forget_tag(replica: &Replica, key: &str) {
-    let inner = replica.inner.lock(crate::replica::Class::Background).await;
-    inner
-        .conn
-        .execute("DELETE FROM tags WHERE key=?", [key.to_string()])
-        .await
-        .unwrap();
-}
 async fn orphan_by_hand(replica: &Replica, item: &str) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
@@ -1262,55 +1296,80 @@ async fn tags_imported_before_items(
     (a, b, keys)
 }
 
+async fn read_blocked_by_rederiving(replica: &Replica, table: &str) {
+    let error = session(replica)
+        .await
+        .run(&format!("SELECT key FROM {table} ORDER BY key"), vec![])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Blocked(ref blockers)
+                if blockers
+                    .iter()
+                    .any(|blocker| matches!(blocker.kind, crate::BlockerKind::Rederiving { .. }))
+        ),
+        "expected Rederiving blocker on {table}, got {error:?}"
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_child_imported_before_its_parent_waits_on_the_parent_alone() {
+async fn a_child_imported_before_its_parent_withholds_orphans_blocks_reads_and_recovers() {
     let lineage = linked();
     let dir = Scratch::new().await;
     let (a, b, keys) = tags_imported_before_items(&lineage, &dir, &["t"]).await;
     let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
-    assert_eq!(orphaned_tags(&b).await, vec![vec![text("t")]]);
+    assert!(orphaned_tags(&b).await.is_empty());
     assert!(
-        !marked_for_rederive(&b).await,
-        "an orphan of a parent the replica holds no state of yet is not a rederive to retry"
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
     );
+    assert!(marked_for_rederive(&b).await);
+    read_blocked_by_rederiving(&b, "tags").await;
     let status = b.compaction_status(lineage.domain).await.unwrap();
-    assert!(
-        status
-            .waiting
-            .as_deref()
-            .is_some_and(|waiting| waiting.contains("has no verified state")),
-        "the parent's own readiness holds compaction: {status:?}"
-    );
+    assert!(status.waiting.is_some(), "{status:?}");
     b.rebuild_projection(tag_scope).await.unwrap();
+    assert!(orphaned_tags(&b).await.is_empty());
     import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
     let status = b.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.waiting, None);
     assert_eq!(tags(&b).await, tagged(&[("t", "p")]));
     assert!(orphaned_tags(&b).await.is_empty());
+    assert!(!marked_for_rederive(&b).await);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_replay_restoring_more_children_of_a_parent_still_missing_keeps_them() {
+async fn a_replay_withholding_children_of_a_missing_parent_restores_all_when_parent_arrives() {
     let lineage = linked();
     let dir = Scratch::new().await;
     let (a, b, keys) = tags_imported_before_items(&lineage, &dir, &["t", "u"]).await;
-    forget_tag(&b, "u").await;
-    assert_eq!(orphaned_tags(&b).await, vec![vec![text("t")]]);
+    assert!(orphaned_tags(&b).await.is_empty());
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
+    );
+    read_blocked_by_rederiving(&b, "tags").await;
     b.rebuild_projection(lineage.scope("tags")).await.unwrap();
-    assert_eq!(
-        orphaned_tags(&b).await,
-        vec![vec![text("t")], vec![text("u")]],
-        "the base brings back a second child of the parent that has not arrived"
+    assert!(orphaned_tags(&b).await.is_empty());
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
     );
     import_checkpoint(&lineage, &a, &b, &keys[1], lineage.scope("items")).await;
     assert_eq!(tags(&b).await, tagged(&[("t", "p"), ("u", "p")]));
+    assert!(orphaned_tags(&b).await.is_empty());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rebuild_that_repairs_one_orphan_and_breaks_another_is_refused() {
     let lineage = linked();
     let dir = Scratch::new().await;
-    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    let key = PrivateKey::new();
+    let replica = open(&lineage, &dir, "a", &key).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "p2", "sealed parent").await;
     tag(&replica, "t2", "p2").await;
@@ -1367,11 +1426,16 @@ async fn a_rival_that_takes_a_parent_off_its_base_waits_for_the_parent_and_recov
         vec![items],
         "the parent's base sits at the losing seal"
     );
-    assert_eq!(
-        orphaned_tags(&b).await,
-        vec![vec![text("t")]],
-        "the child waits for its parent's base instead of refusing the rival"
+    assert!(
+        orphaned_tags(&b).await.is_empty(),
+        "no orphaned child row is committed while the parent awaits reimport"
     );
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
+    );
+    read_blocked_by_rederiving(&b, "tags").await;
     let status = b.compaction_status(lineage.domain).await.unwrap();
     assert!(status.waiting.is_some(), "{status:?}");
 
@@ -1390,7 +1454,7 @@ async fn a_rival_that_takes_a_parent_off_its_base_waits_for_the_parent_and_recov
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_partial_replica_holding_a_child_without_its_parent_keeps_its_rows_and_moves_on() {
+async fn a_partial_replica_holding_a_child_without_its_parent_withholds_orphans_and_blocks_reads() {
     let lineage = linked();
     let dir = Scratch::new().await;
     let keys = [PrivateKey::new(), PrivateKey::new()];
@@ -1404,17 +1468,16 @@ async fn a_partial_replica_holding_a_child_without_its_parent_keeps_its_rows_and
     crate::tests::exchange_graphs(&a, b, lineage.domain).await;
     partial(b, &a, &[tag_scope]).await;
     import_checkpoint(&lineage, &a, b, &keys[1], tag_scope).await;
-    assert_eq!(orphaned_tags(b).await, vec![vec![text("t")]]);
+    assert!(orphaned_tags(b).await.is_empty());
     assert!(
-        !marked_for_rederive(b).await,
-        "a parent the replica never holds is no reason to derive the child again"
+        stored(b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
     );
-    assert_eq!(
-        b.compaction_status(lineage.domain).await.unwrap().waiting,
-        None
-    );
+    assert!(marked_for_rederive(b).await);
+    read_blocked_by_rederiving(b, "tags").await;
     b.rebuild_projection(tag_scope).await.unwrap();
-    assert_eq!(orphaned_tags(b).await, vec![vec![text("t")]]);
+    assert!(orphaned_tags(b).await.is_empty());
 }
 
 fn restricted_lineage(seed: u8) -> Lineage {
@@ -1587,6 +1650,127 @@ async fn rewinding_multi_table_restricted_transaction_succeeds_when_child_sorts_
     assert_eq!(
         rows,
         vec![vec![text("ba1"), text("a1")], vec![text("bb1"), text("b1")],]
+    );
+    b.audit(items).await.unwrap();
+    b.audit(badges).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn importing_parent_checkpoint_before_child_with_restricted_fk_blocks_reads_without_orphans_and_recovers()
+ {
+    let lineage = restricted_lineage(1);
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "p1", "kept").await;
+    insert(&a, "p2", "removed").await;
+    tag(&a, "t1", "p1").await;
+    tag(&a, "t2", "p2").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    assert_eq!(tags(&b).await, tagged(&[("t1", "p1"), ("t2", "p2")]));
+
+    session(&a)
+        .await
+        .run("DELETE FROM tags WHERE key='t2'", vec![])
+        .await
+        .unwrap();
+    delete(&a, "p2").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty(),
+        "importing the parent checkpoint before the child must commit no orphaned child rows"
+    );
+    assert!(marked_for_rederive(&b).await);
+    read_blocked_by_rederiving(&b, "tags").await;
+    read_blocked_by_rederiving(&b, "items").await;
+
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    b.settle().await.unwrap();
+    assert!(!marked_for_rederive(&b).await);
+    assert_eq!(tags(&b).await, tagged(&[("t1", "p1")]));
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
+    );
+    b.audit(items).await.unwrap();
+    b.audit(tag_scope).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn rewinding_multi_table_restricted_transaction_with_interleaved_peer_frame_succeeds() {
+    let mut lineage = restricted_lineage(1);
+    lineage.children_first = true;
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    let c = open(&lineage, &dir, "c", &keys[2]).await;
+    follow_main(&lineage, &a).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    crate::tests::exchange_graphs(&a, &c, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    c.follow_bookmark(lineage.domain, "main").await.unwrap();
+
+    let (items, badges) = (lineage.scope("items"), lineage.scope("badges"));
+    insert(&a, "a0", "earliest").await;
+
+    insert(&b, "b0", "bump").await;
+    let s_b = session(&b).await;
+    s_b.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
+    identity_insert(
+        &s_b,
+        "INSERT INTO items(key,title) VALUES(?,'parent')",
+        vec![text("b1")],
+    )
+    .await
+    .unwrap();
+    let b_id = s_b
+        .run("SELECT id FROM items WHERE key='b1'", vec![])
+        .await
+        .unwrap()
+        .rows
+        .remove(0)
+        .remove(0);
+    identity_insert(
+        &s_b,
+        "INSERT INTO badges(key,label,item,also) VALUES(?,'l',?,?)",
+        vec![text("bb1"), b_id.clone(), b_id],
+    )
+    .await
+    .unwrap();
+    s_b.run("COMMIT", vec![]).await.unwrap();
+
+    insert(&c, "c0", "interleaved").await;
+    sync_scope(&lineage, &c, &b, &keys[1], items).await;
+    sync_scope(&lineage, &a, &b, &keys[1], items).await;
+    sync_scope(&lineage, &a, &b, &keys[1], badges).await;
+
+    let rows = select(
+        &b,
+        "SELECT b.key,i.key FROM badges b JOIN items i ON i.id=b.item ORDER BY b.key",
+    )
+    .await;
+    assert_eq!(rows, vec![vec![text("bb1"), text("b1")]]);
+    assert!(
+        stored(&b, "SELECT * FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
     );
     b.audit(items).await.unwrap();
     b.audit(badges).await.unwrap();

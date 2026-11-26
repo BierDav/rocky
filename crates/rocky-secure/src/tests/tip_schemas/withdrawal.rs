@@ -322,10 +322,22 @@ async fn a_withdrawal_whose_replay_orphans_a_settled_parent_waits_to_rederive_in
             .await
             .unwrap_or_else(|refused| panic!("switched={switched}: {refused}"));
         back_at_the_source(&lineage, &replica, source).await;
-        assert_eq!(
-            tags(&replica).await,
-            vec![vec![text("t"), SqlValue::Null]],
-            "switched={switched}: the source's replay misses the parent whose base is gone"
+        let blocked = session(&replica)
+            .await
+            .run("SELECT key FROM tags ORDER BY key", vec![])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                blocked,
+                Error::Blocked(ref blockers)
+                    if blockers.iter().any(|blocker| matches!(
+                        &blocker.kind,
+                        crate::BlockerKind::Rederiving { reason: Some(reason) }
+                            if reason == "a row of tags references a missing row of items"
+                    ))
+            ),
+            "switched={switched}: {blocked:?}"
         );
         assert!(waits_to_rederive(&replica).await, "switched={switched}");
         let waiting = replica

@@ -269,7 +269,9 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Ok(());
         };
-        let rederive_pending = self.rederive_marked
+        let rederive_pending = self
+            .rederive_marked
+            .load(std::sync::atomic::Ordering::Relaxed)
             && !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
                 .await?
                 .is_empty();
@@ -445,8 +447,12 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(Ok(()));
         }
-        let redo = self.rewind(starts).await?;
-        self.redo(redo, time).await?;
+        self.deferring_foreign_keys(async || {
+            let redo = self.rewind(starts).await?;
+            Box::pin(self.redo(redo, time)).await?;
+            self.withhold_and_mark_rederive().await
+        })
+        .await?;
         Ok(Ok(()))
     }
 }

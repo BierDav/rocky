@@ -2019,7 +2019,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let (_, waiting) = inner.finalize_ready(domain).await?;
-        let rederiving = inner.rederive_marked && inner.retry_rederive(domain).await?.1.is_some();
+        let rederiving = inner
+            .rederive_marked
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && inner.retry_rederive(domain).await?.1.is_some();
         let target = match inner.compaction_target(domain, keep).await? {
             Some(target) => Some(target),
             None => inner.compacted_target(domain).await?,

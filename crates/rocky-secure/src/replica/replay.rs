@@ -651,28 +651,28 @@ impl<A: RowApplication> Inner<A> {
         }
         struct RewindGroup {
             order: Order,
-            transaction: Commitment,
             hashes: Vec<Hash>,
             undo: Vec<Undo>,
         }
-        let mut groups: Vec<RewindGroup> = Vec::new();
-        for ((order, _), (hash, transaction, _, undo)) in rewound.iter().rev() {
-            match groups
-                .last_mut()
-                .filter(|group| group.order == *order && group.transaction == *transaction)
-            {
-                Some(group) => {
+        let mut by_txn: BTreeMap<Commitment, RewindGroup> = BTreeMap::new();
+        for ((order, _), (hash, transaction, _, undo)) in &rewound {
+            by_txn
+                .entry(*transaction)
+                .and_modify(|group| {
+                    if *order > group.order {
+                        group.order = order.clone();
+                    }
                     group.hashes.push(*hash);
                     group.undo.extend(undo.iter().cloned());
-                }
-                None => groups.push(RewindGroup {
+                })
+                .or_insert_with(|| RewindGroup {
                     order: order.clone(),
-                    transaction: *transaction,
                     hashes: vec![*hash],
                     undo: undo.clone(),
-                }),
-            }
+                });
         }
+        let mut groups: Vec<RewindGroup> = by_txn.into_values().collect();
+        groups.sort_by(|a, b| b.order.cmp(&a.order));
         let mut plans = BTreeMap::new();
         for group in groups {
             self.undo(&group.undo, &mut plans).await?;
@@ -913,24 +913,48 @@ impl<A: RowApplication> Inner<A> {
         tables: &[&rocky_core::LogicalTable],
         path: Option<&super::schemas::PathFields>,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.keep_trigger_bodies_on_rename(true).await?;
-        let set_aside = self.set_aside(installed, schema, tables, path).await;
-        self.keep_trigger_bodies_on_rename(false).await?;
-        let copies = set_aside?;
-        for copy in &copies {
-            self.release_index_names(&set_aside_name(&copy.installed.sql_name))
-                .await?;
-        }
-        let indexes: Vec<_> = tables
-            .iter()
-            .flat_map(|table| table.indexes.iter().map(move |index| (*table, index)))
-            .collect();
-        for table in tables {
-            self.conn.execute(table.create_sql.clone(), ()).await?;
-            self.touch(&table.sql_name);
-        }
-        self.deferring_foreign_keys(async || self.refill_rebuilt(tables, &copies, indexes).await)
-            .await
+        self.deferring_foreign_keys_or_rollback(async || {
+            self.conn.execute("SAVEPOINT rebuild_replayed", ()).await?;
+            let result = async {
+                self.keep_trigger_bodies_on_rename(true).await?;
+                let set_aside = self.set_aside(installed, schema, tables, path).await;
+                self.keep_trigger_bodies_on_rename(false).await?;
+                let copies = set_aside?;
+                for copy in &copies {
+                    self.release_index_names(&set_aside_name(&copy.installed.sql_name))
+                        .await?;
+                }
+                let indexes: Vec<_> = tables
+                    .iter()
+                    .flat_map(|table| table.indexes.iter().map(move |index| (*table, index)))
+                    .collect();
+                for table in tables {
+                    self.conn.execute(table.create_sql.clone(), ()).await?;
+                    self.touch(&table.sql_name);
+                }
+                self.refill_rebuilt(tables, &copies, indexes).await
+            }
+            .await;
+            match result {
+                Ok(Ok(())) => {
+                    self.conn.execute("RELEASE rebuild_replayed", ()).await?;
+                    Ok(Ok(()))
+                }
+                Ok(Err(broken)) => {
+                    self.conn
+                        .execute("ROLLBACK TO rebuild_replayed", ())
+                        .await?;
+                    self.conn.execute("RELEASE rebuild_replayed", ()).await?;
+                    Ok(Err(broken))
+                }
+                Err(error) => {
+                    let _ = self.conn.execute("ROLLBACK TO rebuild_replayed", ()).await;
+                    let _ = self.conn.execute("RELEASE rebuild_replayed", ()).await;
+                    Err(error)
+                }
+            }
+        })
+        .await
     }
     async fn refill_rebuilt(
         &self,
@@ -974,23 +998,70 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(()),
         })
     }
+    pub(super) async fn is_deferring_foreign_keys(&self) -> Result<bool, Error> {
+        let deferring = rows(&self.conn, "PRAGMA defer_foreign_keys").await?;
+        Ok(matches!(
+            deferring.first().map(Vec::as_slice),
+            Some([SqlValue::Integer(1)])
+        ))
+    }
+    pub(super) async fn has_foreign_key_violation(&self) -> Result<bool, Error> {
+        Ok(
+            !rows(&self.conn, "SELECT 1 FROM pragma_foreign_key_check LIMIT 1")
+                .await?
+                .is_empty(),
+        )
+    }
+    async fn check_deferred_foreign_keys(&self) -> Result<(), Error> {
+        if let Some([SqlValue::Text(table), _, SqlValue::Text(parent), ..]) =
+            rows(&self.conn, "SELECT * FROM pragma_foreign_key_check LIMIT 1")
+                .await?
+                .first()
+                .map(Vec::as_slice)
+        {
+            return Err(Error::Corrupt(missing_parent(table, parent)));
+        }
+        Ok(())
+    }
     pub(super) async fn deferring_foreign_keys<T>(
         &self,
         work: impl AsyncFnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let deferring = rows(&self.conn, "PRAGMA defer_foreign_keys").await?;
-        if matches!(
-            deferring.first().map(Vec::as_slice),
-            Some([SqlValue::Integer(1)])
-        ) {
+        if self.is_deferring_foreign_keys().await? {
             return work().await;
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
         let result = work().await;
+        let checked = match &result {
+            Ok(_) => self.check_deferred_foreign_keys().await,
+            Err(_) => Ok(()),
+        };
         let enforced = self.conn.execute("PRAGMA defer_foreign_keys=OFF", ()).await;
         let value = result?;
+        checked?;
+        enforced?;
+        Ok(value)
+    }
+    pub(super) async fn deferring_foreign_keys_or_rollback<T, R>(
+        &self,
+        work: impl AsyncFnOnce() -> Result<Result<T, R>, Error>,
+    ) -> Result<Result<T, R>, Error> {
+        if self.is_deferring_foreign_keys().await? {
+            return work().await;
+        }
+        self.conn
+            .execute("PRAGMA defer_foreign_keys=ON", ())
+            .await?;
+        let result = work().await;
+        let checked = match &result {
+            Ok(Ok(_)) => self.check_deferred_foreign_keys().await,
+            Ok(Err(_)) | Err(_) => Ok(()),
+        };
+        let enforced = self.conn.execute("PRAGMA defer_foreign_keys=OFF", ()).await;
+        let value = result?;
+        checked?;
         enforced?;
         Ok(value)
     }
@@ -1296,21 +1367,25 @@ impl<A: RowApplication> Inner<A> {
         if starts.is_empty() {
             return Ok(());
         }
-        let mut redo = self.rewind(starts).await?;
-        for redo in &mut redo {
-            if redo.members.iter().any(|(hash, _)| moved.contains(hash)) {
-                redo.order.0 = era;
-            } else if let Some(target) = redo
-                .members
-                .iter()
-                .filter_map(|(hash, _)| covered.get(hash))
-                .min()
-            {
-                redo.order.0 = *target;
+        self.deferring_foreign_keys(async || {
+            let mut redo = self.rewind(starts).await?;
+            for redo in &mut redo {
+                if redo.members.iter().any(|(hash, _)| moved.contains(hash)) {
+                    redo.order.0 = era;
+                } else if let Some(target) = redo
+                    .members
+                    .iter()
+                    .filter_map(|(hash, _)| covered.get(hash))
+                    .min()
+                {
+                    redo.order.0 = *target;
+                }
             }
-        }
-        redo.sort_by(|a, b| a.order.cmp(&b.order));
-        self.redo(redo, time).await
+            redo.sort_by(|a, b| a.order.cmp(&b.order));
+            Box::pin(self.redo(redo, time)).await?;
+            self.withhold_and_mark_rederive().await
+        })
+        .await
     }
 
     async fn finalized_frontiers(
@@ -1422,128 +1497,219 @@ impl<A: RowApplication> Inner<A> {
         Ok((replayed, dropped))
     }
 
-    async fn replay_transaction(
+    fn any_deferred_fk(&self, intents: &[Replaying<'_>]) -> bool {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return false;
+        };
+        let schema = typed.rows.schema();
+        intents.iter().any(|(frame, ..)| {
+            frame
+                .scope()
+                .ok()
+                .and_then(|scope| typed.rows.table(&scope.table))
+                .and_then(|table| schema.table(&table.sql_name))
+                .is_some_and(|logical| logical.foreign_keys.iter().any(|key| key.deferred))
+        })
+    }
+
+    async fn run_intents_in_savepoint(
         &self,
-        (transaction, members): (Commitment, u16),
         intents: &[Replaying<'_>],
+        deferred_all: bool,
+        check_unsettled: bool,
+    ) -> Result<(Vec<Replayed>, Option<Dropped>, bool), Error> {
+        self.conn.execute("SAVEPOINT intents", ()).await?;
+        let outcome = async {
+            let (mut replayed, dropped) = self.replay_intents(intents, deferred_all).await?;
+            let mut withheld = false;
+            if dropped.is_some() {
+                self.conn.execute("ROLLBACK TO intents", ()).await?;
+                self.clear_applied_cache();
+                replayed.clear();
+            } else if check_unsettled && self.has_foreign_key_violation().await? {
+                self.conn.execute("ROLLBACK TO intents", ()).await?;
+                self.clear_applied_cache();
+                replayed.clear();
+                withheld = true;
+            }
+            Ok::<_, Error>((replayed, dropped, withheld))
+        }
+        .await;
+        match outcome {
+            Ok(result) => {
+                self.conn.execute("RELEASE intents", ()).await?;
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK TO intents", ()).await;
+                let _ = self.conn.execute("RELEASE intents", ()).await;
+                self.clear_applied_cache();
+                Err(error)
+            }
+        }
+    }
+
+    async fn unsettled_fk_drop(&self, intents: &[Replaying<'_>]) -> Result<bool, Error> {
+        let (_, deferred_drop) = self
+            .deferring_foreign_keys(async || {
+                self.conn.execute("SAVEPOINT intents_fk", ()).await?;
+                let res = self.replay_intents(intents, true).await;
+                let rb = self.conn.execute("ROLLBACK TO intents_fk", ()).await;
+                let rel = self.conn.execute("RELEASE intents_fk", ()).await;
+                self.clear_applied_cache();
+                let res = res?;
+                rb?;
+                rel?;
+                Ok(res)
+            })
+            .await?;
+        Ok(deferred_drop.is_none())
+    }
+
+    fn replay_transaction<'a>(
+        &'a self,
+        (transaction, members): (Commitment, u16),
+        intents: &'a [Replaying<'a>],
         era: Option<i64>,
         time: u64,
         publish_outcomes: bool,
-    ) -> Result<(), Error> {
-        if members > 1 {
-            let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
-            let removed = match intents.first() {
-                Some((frame, ..)) => self.names_removed_table(frame)?,
-                None => false,
-            };
-            let remote = match removed {
-                true => Some(DropReason::Schema),
-                false => self.remote_drop(transaction, &held).await?,
-            };
-            if let Some(reason) = remote {
-                for (frame, .., member) in intents {
-                    self.record_replayed(
-                        frame,
-                        (transaction, *member, members),
-                        Some(&reason.into()),
-                        &[],
-                        era,
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-        }
-        self.conn.execute("SAVEPOINT intents", ()).await?;
-        let (mut replayed, dropped) = match intents.len() > 1 {
-            true => {
-                self.deferring_foreign_keys(async || self.replay_intents(intents, true).await)
-                    .await?
-            }
-            false => self.replay_intents(intents, false).await?,
-        };
-        if dropped.is_some() {
-            self.conn.execute("ROLLBACK TO intents", ()).await?;
-            self.clear_applied_cache();
-            replayed.clear();
-        }
-        self.conn.execute("RELEASE intents", ()).await?;
-        for (index, (frame, _, _, member)) in intents.iter().enumerate() {
-            let (undo, births) = replayed.get(index).map_or((&[][..], &[][..]), |replayed| {
-                (replayed.undo.as_slice(), replayed.births.as_slice())
-            });
-            self.record_replayed(
-                frame,
-                (transaction, *member, members),
-                dropped.as_ref(),
-                undo,
-                era,
-            )
-            .await?;
-            let scope = frame.scope()?;
-            self.record_births(frame, births).await?;
-            for birth in births {
-                self.put_identity_mark(scope, birth, identity::Raise::Own)
-                    .await?;
-            }
-            if dropped.is_none()
-                && let Some(table) = self
-                    .workspace
-                    .typed
-                    .as_ref()
-                    .and_then(|typed| typed.rows.table(&frame.scope().ok()?.table))
-            {
-                self.touch(&table.sql_name);
-            }
-        }
-        if members > 1 && publish_outcomes {
-            let mut others = Vec::new();
-            for record in collect_rows(
-                self.conn
-                    .query(
-                        "SELECT hash,member FROM secure_replayed WHERE txn=? ORDER BY member",
-                        [transaction.to_vec()],
-                    )
-                    .await?,
-            )
-            .await?
-            {
-                let [SqlValue::Blob(hash), SqlValue::Integer(member)] = record.as_slice() else {
-                    return Err(Error::Corrupt("replayed member".into()));
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            if members > 1 {
+                let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
+                let removed = match intents.first() {
+                    Some((frame, ..)) => self.names_removed_table(frame)?,
+                    None => false,
                 };
-                let hash = super::checkpoint::hash_of(hash)?;
-                if intents
-                    .iter()
-                    .all(|(frame, ..)| frame.operation_ref().map(|o| o.hash).ok() != Some(hash))
-                    && let Some(frame) = self.frame(hash).await?
-                {
-                    let member = u16::try_from(*member)
-                        .map_err(|_| Error::Corrupt("replayed member".into()))?;
-                    others.push((frame, member));
+                let remote = match removed {
+                    true => Some(DropReason::Schema),
+                    false => self.remote_drop(transaction, &held).await?,
+                };
+                if let Some(reason) = remote {
+                    for (frame, .., member) in intents {
+                        self.record_replayed(
+                            frame,
+                            (transaction, *member, members),
+                            Some(&reason.into()),
+                            &[],
+                            era,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
                 }
             }
-            let mut held: Vec<_> = intents
-                .iter()
-                .map(|(frame, .., member)| (*frame, *member))
-                .chain(others.iter().map(|(frame, member)| (frame, *member)))
-                .collect();
-            held.sort_by_key(|(frame, _)| {
-                frame
-                    .operation_ref()
-                    .map(|operation| stamp(&operation.header))
-                    .ok()
-            });
-            self.publish_outcome(
-                transaction,
-                &held,
-                dropped.as_ref().map(|dropped| dropped.reason),
-                time,
-            )
-            .await?;
-        }
-        #[cfg(any(test, feature = "qualification"))]
-        self.crash_at(|point| point == CrashPoint::Apply)?;
-        Ok(())
+            let deferring = self.is_deferring_foreign_keys().await?;
+            let defer = intents.len() > 1 || deferring;
+            let check_unsettled =
+                !deferring && (intents.len() > 1 || self.any_deferred_fk(intents));
+            let (replayed, mut dropped, mut withheld) = match defer {
+                true => {
+                    self.deferring_foreign_keys(async || {
+                        Box::pin(self.run_intents_in_savepoint(intents, true, check_unsettled))
+                            .await
+                    })
+                    .await?
+                }
+                false => {
+                    Box::pin(self.run_intents_in_savepoint(intents, false, check_unsettled)).await?
+                }
+            };
+            if !defer
+                && let Some(Dropped {
+                    reason: DropReason::Constraint,
+                    violated: Some(ref violated),
+                }) = dropped
+                && violated.contains("FOREIGN KEY")
+                && Box::pin(self.unsettled_fk_drop(intents)).await?
+            {
+                dropped = None;
+                withheld = true;
+            }
+            if withheld {
+                for (frame, ..) in intents {
+                    let id = self.scope_id(frame.scope()?).await?;
+                    self.mark_rederive(Some(id)).await?;
+                }
+            }
+            for (index, (frame, _, _, member)) in intents.iter().enumerate() {
+                let (undo, births) = replayed.get(index).map_or((&[][..], &[][..]), |replayed| {
+                    (replayed.undo.as_slice(), replayed.births.as_slice())
+                });
+                self.record_replayed(
+                    frame,
+                    (transaction, *member, members),
+                    dropped.as_ref(),
+                    undo,
+                    era,
+                )
+                .await?;
+                let scope = frame.scope()?;
+                self.record_births(frame, births).await?;
+                for birth in births {
+                    self.put_identity_mark(scope, birth, identity::Raise::Own)
+                        .await?;
+                }
+                if dropped.is_none()
+                    && let Some(table) = self
+                        .workspace
+                        .typed
+                        .as_ref()
+                        .and_then(|typed| typed.rows.table(&frame.scope().ok()?.table))
+                {
+                    self.touch(&table.sql_name);
+                }
+            }
+            if members > 1 && publish_outcomes {
+                let mut others = Vec::new();
+                for record in collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT hash,member FROM secure_replayed WHERE txn=? ORDER BY member",
+                            [transaction.to_vec()],
+                        )
+                        .await?,
+                )
+                .await?
+                {
+                    let [SqlValue::Blob(hash), SqlValue::Integer(member)] = record.as_slice()
+                    else {
+                        return Err(Error::Corrupt("replayed member".into()));
+                    };
+                    let hash = super::checkpoint::hash_of(hash)?;
+                    if intents
+                        .iter()
+                        .all(|(frame, ..)| frame.operation_ref().map(|o| o.hash).ok() != Some(hash))
+                        && let Some(frame) = self.frame(hash).await?
+                    {
+                        let member = u16::try_from(*member)
+                            .map_err(|_| Error::Corrupt("replayed member".into()))?;
+                        others.push((frame, member));
+                    }
+                }
+                let mut held: Vec<_> = intents
+                    .iter()
+                    .map(|(frame, .., member)| (*frame, *member))
+                    .chain(others.iter().map(|(frame, member)| (frame, *member)))
+                    .collect();
+                held.sort_by_key(|(frame, _)| {
+                    frame
+                        .operation_ref()
+                        .map(|operation| stamp(&operation.header))
+                        .ok()
+                });
+                self.publish_outcome(
+                    transaction,
+                    &held,
+                    dropped.as_ref().map(|dropped| dropped.reason),
+                    time,
+                )
+                .await?;
+            }
+            #[cfg(any(test, feature = "qualification"))]
+            self.crash_at(|point| point == CrashPoint::Apply)?;
+            Ok(())
+        })
     }
 
     pub(super) async fn replay_arrival(
@@ -1568,69 +1734,73 @@ impl<A: RowApplication> Inner<A> {
             .map(|(_, order)| order.clone())
             .min()
             .ok_or_else(|| Error::Corrupt("an arriving transaction has no member".into()))?;
-        let mut redo = self.rewind(starts).await?;
-        let own = redo
-            .iter()
-            .position(|redo| redo.transaction == transaction.0)
-            .map(|index| redo.remove(index));
-        if let Some(own) = &own {
-            position = position.min(own.order.clone());
-        }
-        let after = redo.split_off(redo.partition_point(|redo| redo.order < position));
-        self.redo(redo, time).await?;
-        let redo = after;
-        let Some(own) = own else {
-            self.replay_transaction(transaction, intents, era, time, true)
-                .await?;
-            return self.redo(redo, time).await;
-        };
-        let mut opened = Vec::with_capacity(own.members.len());
-        for (hash, member) in own.members {
-            let frame = self
-                .frame(hash)
-                .await?
-                .ok_or_else(|| Error::Corrupt("rewound frame is missing".into()))?;
-            let extension = &frame.operation_ref()?.header.extensions;
-            if self
-                .opening_key(extension.scope, extension.generation)
-                .is_none()
-            {
-                return Err(Error::Rejected(KEY_WAITS.into()));
+        self.deferring_foreign_keys(async || {
+            let mut redo = self.rewind(starts).await?;
+            let own = redo
+                .iter()
+                .position(|redo| redo.transaction == transaction.0)
+                .map(|index| redo.remove(index));
+            if let Some(own) = &own {
+                position = position.min(own.order.clone());
             }
-            let payload = self.row_payload(&frame)?;
-            let grants = self.verify_frame(&frame, time).ok();
-            opened.push((frame, payload, grants, member));
-        }
-        let mut joined: Vec<Replaying<'_>> = intents.to_vec();
-        let admitted = opened.iter().all(|(.., grants, _)| grants.is_some());
-        for (frame, payload, grants, member) in &opened {
-            let intent = payload
-                .intent()
-                .ok_or_else(|| Error::Corrupt("rewound frame carries no intent".into()))?;
-            joined.push((frame, intent, grants.as_deref().unwrap_or(&[]), *member));
-        }
-        if !admitted {
-            for (frame, .., member) in &joined {
-                self.record_replayed(
-                    frame,
-                    (transaction.0, *member, transaction.1),
-                    Some(&DropReason::Admission.into()),
-                    &[],
-                    era,
-                )
-                .await?;
+            let after = redo.split_off(redo.partition_point(|redo| redo.order < position));
+            Box::pin(self.redo(redo, time)).await?;
+            let redo = after;
+            let Some(own) = own else {
+                Box::pin(self.replay_transaction(transaction, intents, era, time, true)).await?;
+                Box::pin(self.redo(redo, time)).await?;
+                return self.withhold_and_mark_rederive().await;
+            };
+            let mut opened = Vec::with_capacity(own.members.len());
+            for (hash, member) in own.members {
+                let frame = self
+                    .frame(hash)
+                    .await?
+                    .ok_or_else(|| Error::Corrupt("rewound frame is missing".into()))?;
+                let extension = &frame.operation_ref()?.header.extensions;
+                if self
+                    .opening_key(extension.scope, extension.generation)
+                    .is_none()
+                {
+                    return Err(Error::Rejected(KEY_WAITS.into()));
+                }
+                let payload = self.row_payload(&frame)?;
+                let grants = self.verify_frame(&frame, time).ok();
+                opened.push((frame, payload, grants, member));
             }
-            return self.redo(redo, time).await;
-        }
-        joined.sort_by_key(|(frame, ..)| {
-            frame
-                .operation_ref()
-                .map(|operation| stamp(&operation.header))
-                .ok()
-        });
-        self.replay_transaction(transaction, &joined, era, time, true)
-            .await?;
-        self.redo(redo, time).await
+            let mut joined: Vec<Replaying<'_>> = intents.to_vec();
+            let admitted = opened.iter().all(|(.., grants, _)| grants.is_some());
+            for (frame, payload, grants, member) in &opened {
+                let intent = payload
+                    .intent()
+                    .ok_or_else(|| Error::Corrupt("rewound frame carries no intent".into()))?;
+                joined.push((frame, intent, grants.as_deref().unwrap_or(&[]), *member));
+            }
+            if !admitted {
+                for (frame, .., member) in &joined {
+                    self.record_replayed(
+                        frame,
+                        (transaction.0, *member, transaction.1),
+                        Some(&DropReason::Admission.into()),
+                        &[],
+                        era,
+                    )
+                    .await?;
+                }
+                Box::pin(self.redo(redo, time)).await?;
+                return self.withhold_and_mark_rederive().await;
+            }
+            joined.sort_by_key(|(frame, ..)| {
+                frame
+                    .operation_ref()
+                    .map(|operation| stamp(&operation.header))
+                    .ok()
+            });
+            Box::pin(self.replay_transaction(transaction, &joined, era, time, true)).await?;
+            Box::pin(self.redo(redo, time)).await?;
+            self.withhold_and_mark_rederive().await
+        })
+        .await
     }
 
     pub(super) async fn redo_removed_writes(&self, time: u64) -> Result<(), Error> {
@@ -1658,8 +1828,12 @@ impl<A: RowApplication> Inner<A> {
         if starts.is_empty() {
             return Ok(());
         }
-        let redo = self.rewind(starts).await?;
-        self.redo(redo, time).await
+        self.deferring_foreign_keys(async || {
+            let redo = self.rewind(starts).await?;
+            Box::pin(self.redo(redo, time)).await?;
+            self.withhold_and_mark_rederive().await
+        })
+        .await
     }
 
     pub(super) async fn join_open_era(&self, id: i64, open: i64) -> Result<bool, Error> {
@@ -1696,8 +1870,12 @@ impl<A: RowApplication> Inner<A> {
         }
     }
 
-    async fn redo(&self, redo: Vec<Redo>, time: u64) -> Result<(), Error> {
-        self.redo_recorded(redo, time, None, true).await
+    fn redo(
+        &self,
+        redo: Vec<Redo>,
+        time: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>> {
+        Box::pin(async move { self.redo_recorded(redo, time, None, true).await })
     }
     async fn redo_recorded(
         &self,
@@ -1766,7 +1944,7 @@ impl<A: RowApplication> Inner<A> {
                     (*frame, *intent, grants.as_deref().unwrap_or(&[]), *member)
                 })
                 .collect();
-            self.replay_transaction(transaction, &intents, era, time, publish_outcomes)
+            Box::pin(self.replay_transaction(transaction, &intents, era, time, publish_outcomes))
                 .await?;
         }
         Ok(())
@@ -2228,9 +2406,9 @@ mod deferral_tests {
         let replica = revocations::open(&f, &dir, "deferral.db", &PrivateKey::new()).await;
         let inner = replica.inner.lock(Class::Background).await;
         for sql in [
-            "CREATE TEMP TABLE deferral_parent(id INTEGER PRIMARY KEY)",
-            "CREATE TEMP TABLE deferral_child(parent INTEGER REFERENCES deferral_parent(id))",
             "BEGIN IMMEDIATE",
+            "CREATE TABLE deferral_parent(id INTEGER PRIMARY KEY)",
+            "CREATE TABLE deferral_child(parent INTEGER REFERENCES deferral_parent(id))",
         ] {
             inner.conn.execute(sql, ()).await.unwrap();
         }
@@ -2256,6 +2434,36 @@ mod deferral_tests {
         assert!(
             matches!(&failed, Err(Error::Corrupt(reason)) if reason == "the work failed"),
             "{failed:?}"
+        );
+        assert!(!deferring(&inner).await);
+        inner.conn.execute("ROLLBACK", ()).await.unwrap();
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn an_unresolved_orphan_fails_when_leaving_deferral_and_leaves_foreign_keys_enforced() {
+        let f = Fixture::new();
+        let dir = Scratch::new().await;
+        let replica = revocations::open(&f, &dir, "deferral-orphan.db", &PrivateKey::new()).await;
+        let inner = replica.inner.lock(Class::Background).await;
+        for sql in [
+            "BEGIN IMMEDIATE",
+            "CREATE TABLE deferral_parent(id INTEGER PRIMARY KEY)",
+            "CREATE TABLE deferral_child(parent INTEGER REFERENCES deferral_parent(id))",
+        ] {
+            inner.conn.execute(sql, ()).await.unwrap();
+        }
+        let leaked = inner
+            .deferring_foreign_keys(async || {
+                inner
+                    .conn
+                    .execute("INSERT INTO deferral_child VALUES(99)", ())
+                    .await?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(&leaked, Err(Error::Corrupt(reason)) if reason.contains("deferral_child") && reason.contains("deferral_parent")),
+            "{leaked:?}"
         );
         assert!(!deferring(&inner).await);
         inner.conn.execute("ROLLBACK", ()).await.unwrap();

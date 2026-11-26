@@ -76,8 +76,7 @@ impl Domain {
             }
         }
         let tables: BTreeMap<String, ResourceScope> = logical
-            .tables
-            .iter()
+            .typed()
             .map(|table| {
                 (
                     table.identity().to_owned(),
@@ -95,8 +94,7 @@ impl Domain {
             })
             .collect();
         let names = logical
-            .tables
-            .iter()
+            .typed()
             .map(|table| (table.sql_name.clone(), table.identity().to_owned()))
             .collect();
         let app = TypedRows::new(logical, vec![domain])?

@@ -38,6 +38,8 @@ mod iroh;
 #[cfg(not(target_family = "wasm"))]
 mod issuers;
 #[cfg(not(target_family = "wasm"))]
+mod local_tables;
+#[cfg(not(target_family = "wasm"))]
 mod migrations;
 #[cfg(not(target_family = "wasm"))]
 mod narrowed_access;

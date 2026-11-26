@@ -350,6 +350,11 @@ UTC. `commit` returns `Commit::Recorded(token)`, or `Commit::NoWrites` when no
 write statement ran and nothing syncs; a write that matched no row still records
 an intent. `flush` makes every returned commit durable.
 
+`Table::local(name)` declares a table whose rows stay on the device: they
+never sync, are kept across reopening, and are deleted with the rest when the
+device is removed. It holds per-device state, such as a till's parked sales or
+its offline switch.
+
 A write must replay identically everywhere, so Rocky refuses some SQL in a
 transaction with `ErrorKind::Sql { unsupported, .. }`:
 

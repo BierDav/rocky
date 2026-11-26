@@ -337,13 +337,18 @@ impl Role {
     }
 }
 
-/// A table whose writes are replayed on every device; without a declared primary key it is keyed by
+/// A table, replayed on every device or kept on one; without a declared primary key it is keyed by
 /// a generated `id`.
 pub struct Table(rocky_core::TableDefinition);
 impl Table {
     /// A table named `name` keyed by a generated `id`, which Rocky fills when an insert omits it.
     pub fn replayed(name: impl Into<String>) -> Self {
         Self::of(name, rocky_core::TableClass::Replayed)
+    }
+    /// A table whose rows stay on this device: they never sync, are kept across reopening, and are
+    /// deleted with the rest when the device is removed.
+    pub fn local(name: impl Into<String>) -> Self {
+        Self::of(name, rocky_core::TableClass::LocalOnly)
     }
     fn of(name: impl Into<String>, class: rocky_core::TableClass) -> Self {
         Self(rocky_core::TableDefinition {

@@ -109,13 +109,13 @@ async fn explained(
     }
     let mut explained = match next_id {
         Some(table) => node.allocation_refusal(table, &typed).await,
-        None => node.statement_refusal(sql).await,
+        None => node.statement_refusal(sql),
     };
     for write in writes {
         if explained.is_some() {
             break;
         }
-        explained = node.statement_refusal(write).await;
+        explained = node.statement_refusal(write);
     }
     Box::new(match explained {
         Some(explained) => explained,
@@ -522,6 +522,11 @@ impl State {
         }
         let allocation = next_id(sql, &params)?;
         let allocated = allocation.as_ref().map(|(table, _)| table.as_str());
+        if allocation.is_none()
+            && let Some(refused) = self.node.statement_refusal(sql)
+        {
+            return Err(Box::new(refused));
+        }
         let first = match (query_only(sql), &allocation) {
             (Some(set), _) => first_page(self.query_only(set)).await,
             (None, Some((table, values))) => first_page(self.next_id(table, values).await).await,

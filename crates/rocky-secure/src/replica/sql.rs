@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     CommitClass,
-    capture::Plan,
+    capture::{Plan, TableGrant},
     sql::{AbortReason, Control, SqlError, SqlOptions, SqlState, classify},
     sqlite::{self, Run},
     storage,
@@ -63,6 +63,7 @@ impl<A: RowApplication> Drop for Held<A> {
 struct Lease<A: RowApplication> {
     plan: Arc<Plan>,
     writable: BTreeSet<usize>,
+    granted: BTreeMap<usize, TableGrant>,
     held: Option<Held<A>>,
     savepoints: Vec<(String, usize, Reserved, usize)>,
     implicit: bool,
@@ -134,6 +135,7 @@ impl<A: RowApplication> SecureSql<A> {
             lease: Arc::new(tokio::sync::Mutex::new(Lease {
                 plan,
                 writable,
+                granted: BTreeMap::new(),
                 held: None,
                 savepoints: Vec::new(),
                 implicit: false,
@@ -802,6 +804,15 @@ impl<A: RowApplication> SecureSql<A> {
             })
             .map(|(index, _)| index)
             .collect();
+        #[cfg(test)]
+        let unchecked = inner.unchecked_replayed_admission;
+        #[cfg(not(test))]
+        let unchecked = false;
+        lease.granted = if self.migration || unchecked {
+            BTreeMap::new()
+        } else {
+            granted(typed, &plan, &inner.local_grants(now()?)?)
+        };
         lease.plan = Arc::new(plan);
         let (expiry, lapse) = Expiry::start(
             &self.session.replica.lease_clock,
@@ -1001,11 +1012,27 @@ impl<A: RowApplication> SecureSql<A> {
         let capture = conn.capture()?;
         let poisoned = || Error::Corrupt("session state poisoned".into());
         *state.observed.lock().map_err(|_| poisoned())? = lease.observed;
-        state
-            .gate
-            .lock()
-            .map_err(|_| poisoned())?
-            .arm(Some(lease.plan.clone()));
+        {
+            let mut gate = state.gate.lock().map_err(|_| poisoned())?;
+            gate.arm(Some(lease.plan.clone()));
+            let target = analyzed.target.as_deref().and_then(|target| {
+                lease
+                    .plan
+                    .tables
+                    .iter()
+                    .position(|table| table.name.eq_ignore_ascii_case(target))
+            });
+            if write
+                && let Some((index, granted)) = target.and_then(|index| {
+                    lease
+                        .granted
+                        .get(&index)
+                        .map(|granted| (index, granted.clone()))
+                })
+            {
+                gate.restrict_target(index, granted);
+            }
+        }
         capture.lock().map_err(|_| poisoned())?.begin_statement();
         let result = conn
             .set_interrupt(budget, self.cancelled.clone())
@@ -1497,4 +1524,50 @@ fn statement_class(sql: &str) -> Class {
     } else {
         Class::Background
     }
+}
+
+fn granted(
+    typed: &super::typed::Typed,
+    plan: &Plan,
+    grants: &[rocky_core::ResourceGrant],
+) -> BTreeMap<usize, TableGrant> {
+    use rocky_core::Right;
+    plan.tables
+        .iter()
+        .enumerate()
+        .filter_map(|(index, table)| {
+            let projected = typed.by_name(&table.name)?;
+            let logical = typed.rows.schema().table(&table.name)?;
+            let partitioned = typed.partitioned(projected);
+            let covering: Vec<_> = grants
+                .iter()
+                .filter(|grant| {
+                    grant.scope == projected.scope
+                        || partitioned
+                            && grant.scope.domain == projected.scope.domain
+                            && grant.scope.table == projected.scope.table
+                })
+                .collect();
+            let holds = |right: Right| covering.iter().any(|grant| grant.rights.contains(&right));
+            let update = logical
+                .columns
+                .iter()
+                .zip(&projected.table.fields)
+                .filter(|(_, field)| {
+                    covering.iter().any(|grant| {
+                        grant.rights.contains(&Right::Update) && grant.fields.contains(field)
+                    })
+                })
+                .map(|(column, _)| column.sql_name.clone())
+                .collect();
+            Some((
+                index,
+                TableGrant {
+                    insert: holds(Right::Insert),
+                    delete: holds(Right::Delete),
+                    update,
+                },
+            ))
+        })
+        .collect()
 }

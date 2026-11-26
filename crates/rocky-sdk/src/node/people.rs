@@ -1,14 +1,14 @@
-use super::{Node, Root};
+use super::{Node, Root, Shared};
 use crate::{
     AccessError, Device, DeviceId, Me, Partition, Person, PersonId, Removal, TableRights,
     Timestamp,
-    enrollment::{Revoke, RightsChange, now},
+    enrollment::{Revoke, RightsChange, Settings, now},
     partitions::StoredPartition,
     registry::{Changes, MAX_PARTITIONS, Registry},
 };
 use rocky_core::Right;
 use rocky_credentials::{PublicKey, RevocationMode};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn includes(wider: &[rocky_core::ResourceGrant], narrower: &[rocky_core::ResourceGrant]) -> bool {
     narrower
@@ -34,6 +34,16 @@ pub(super) enum Reach {
     Wider,
     Narrower,
 }
+
+pub(super) struct HeldRights {
+    tables: BTreeMap<String, TableRights>,
+    unrestricted: bool,
+}
+
+pub(super) type HeldUnder = (
+    (Shared<Settings>, Arc<crate::domain::Domain>),
+    Arc<HeldRights>,
+);
 
 fn seconds(time: u64) -> Timestamp {
     Timestamp::from_unix_micros(i64::try_from(time.saturating_mul(1_000_000)).unwrap_or(i64::MAX))
@@ -100,15 +110,18 @@ impl Node {
         };
         let mut needed = Vec::new();
         if let Some(written) = &written {
-            match analyzed.kind {
-                Kind::Insert => needed.push((written.clone(), crate::Right::Append)),
-                Kind::Delete => needed.push((written.clone(), crate::Right::Write)),
-                Kind::Update => needed.extend(
-                    rocky_storage::statement::updated_columns(sql)
-                        .into_iter()
-                        .map(|column| (written.clone(), crate::Right::Update(column))),
-                ),
-                Kind::Read => {}
+            let effects = rocky_storage::statement::effects(sql);
+            if effects.inserts {
+                needed.push((written.clone(), crate::Right::Append));
+            }
+            needed.extend(
+                effects
+                    .updates
+                    .into_iter()
+                    .map(|column| (written.clone(), crate::Right::Update(column))),
+            );
+            if effects.deletes {
+                needed.push((written.clone(), crate::Right::Write));
             }
         }
         needed.extend(
@@ -125,8 +138,48 @@ impl Node {
         needed
     }
 
-    pub(crate) async fn statement_refusal(&self, sql: &str) -> Option<crate::Error> {
-        self.refusal(self.statement_needs(sql)).await
+    pub(crate) fn statement_refusal(&self, sql: &str) -> Option<crate::Error> {
+        let settings = self.settings.published();
+        let rights = self.held_rights(&settings)?;
+        if rights.unrestricted {
+            return None;
+        }
+        self.refusal(&settings, &rights.tables, self.statement_needs(sql))
+    }
+
+    fn held_rights(&self, settings: &Shared<Settings>) -> Option<Arc<HeldRights>> {
+        let domain = self.domain();
+        let mut cached = self
+            .held_rights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((under, held)) = cached.as_ref()
+            && under.0.same(settings)
+            && Arc::ptr_eq(&under.1, &domain)
+        {
+            return Some(held.clone());
+        }
+        let tables = self.table_rights(settings).ok()?;
+        let complete = TableRights {
+            read: true,
+            insert: true,
+            update: true,
+            delete: true,
+        };
+        let unrestricted = matches!(settings.access, crate::Access::Full)
+            && domain
+                .logical()
+                .tables
+                .iter()
+                .filter(|table| table.sql_name != crate::domain::REGISTRY)
+                .filter(|table| domain.scope_of(&table.sql_name).is_some())
+                .all(|table| tables.get(&table.sql_name) == Some(&complete));
+        let held = Arc::new(HeldRights {
+            tables,
+            unrestricted,
+        });
+        *cached = Some(((settings.clone(), domain), held.clone()));
+        Some(held)
     }
 
     pub(crate) async fn allocation_refusal(
@@ -140,10 +193,14 @@ impl Node {
                 format!("no such table: {table}"),
             ));
         }
-        if let Some(refused) = self
-            .refusal(vec![(table.to_owned(), crate::Right::Allocate)])
-            .await
-        {
+        let published = self.settings.published();
+        if let Some(refused) = self.held_rights(&published).and_then(|rights| {
+            self.refusal(
+                &published,
+                &rights.tables,
+                vec![(table.to_owned(), crate::Right::Allocate)],
+            )
+        }) {
             return Some(refused);
         }
         let unregistered = match failed.kind() {
@@ -264,12 +321,19 @@ impl Node {
             })
     }
 
-    async fn refusal(&self, needed: Vec<(String, crate::Right)>) -> Option<crate::Error> {
-        let settings = self.settings_snapshot().await;
+    fn refusal(
+        &self,
+        settings: &Settings,
+        rights: &BTreeMap<String, TableRights>,
+        needed: Vec<(String, crate::Right)>,
+    ) -> Option<crate::Error> {
         let domain = self.domain();
-        let rights = self.table_rights(&settings).ok()?;
         for (table, need) in needed {
-            let Some(definition) = domain.logical().table(&table) else {
+            let Some(definition) = domain
+                .logical()
+                .table(&table)
+                .filter(|definition| domain.scope_of(&definition.sql_name).is_some())
+            else {
                 continue;
             };
             let name = definition.sql_name.clone();
@@ -290,14 +354,14 @@ impl Node {
                 crate::Right::Append | crate::Right::Allocate => held.insert,
                 crate::Right::Write => held.delete,
                 crate::Right::Update(_) => {
-                    held.update && Self::access_grants(&domain, &settings, &name, &need)
+                    held.update && Self::access_grants(&domain, settings, &name, &need)
                 }
                 crate::Right::Administer | crate::Right::Sign => true,
             };
             if holds {
                 continue;
             }
-            let reason = Self::denial(&domain, &settings, definition, &need);
+            let reason = Self::denial(&domain, settings, definition, &need);
             return Some(crate::Error::denied(Some(name), need, reason));
         }
         None

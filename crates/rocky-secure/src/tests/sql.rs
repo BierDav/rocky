@@ -659,6 +659,53 @@ async fn an_import_of_another_scope_does_not_make_an_unwritable_table_retry_allo
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_gate_refuses_a_write_the_grants_never_allow_even_when_it_matches_no_row() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let replica = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            vec![
+                grant(
+                    t.items,
+                    &[Right::Read, Right::Insert, Right::Custody],
+                    &t.every_field("items"),
+                ),
+                grant(t.items, &[Right::Update], &t.fields("items", &["title"])),
+            ],
+            &[t.items],
+        )
+        .await;
+    let session = sql(&replica, &[t.items]).await;
+    insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    for refused in [
+        "UPDATE items SET done=1 WHERE key='absent'",
+        "UPDATE items SET title='pears', done=1 WHERE key='a'",
+        "DELETE FROM items WHERE key='absent'",
+        "DELETE FROM items",
+    ] {
+        assert_eq!(
+            sql_error(session.run(refused, vec![]).await),
+            SqlError::Denied,
+            "{refused}"
+        );
+    }
+    for allowed in [
+        "UPDATE items SET title='pears' WHERE key='absent'",
+        "UPDATE items SET title='pears' WHERE key='a'",
+    ] {
+        session.run(allowed, vec![]).await.unwrap();
+    }
+    assert_eq!(
+        select(&session, "SELECT title, done FROM items").await,
+        vec![vec![text("pears"), SqlValue::Integer(0)]]
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     let t = Typed::new();
     let dir = Scratch::new().await;
@@ -768,7 +815,7 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
             .run("UPDATE items SET done=1 WHERE key='a'", vec![])
             .await
             .is_err(),
-        "the commit admits every changed field against the grant"
+        "the statement is refused for a field the grant does not let it change"
     );
     assert_eq!(
         select(&editor, "SELECT title,done FROM items").await,
@@ -777,14 +824,14 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     assert!(
         matches!(
             insert(&editor, "INSERT INTO items VALUES('z','new',0)", vec![]).await,
-            Err(Error::Rejected(_))
+            Err(Error::Sql(SqlError::Denied))
         ),
-        "the table is writable, but the commit refuses an insert"
+        "the table is writable, but the statement is refused an insert"
     );
     assert_eq!(
         select(&editor, "SELECT count(*) FROM items").await,
         vec![vec![SqlValue::Integer(1)]],
-        "a refused commit leaves no row behind"
+        "a refused statement leaves no row behind"
     );
 }
 

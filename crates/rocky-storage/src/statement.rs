@@ -18,6 +18,7 @@ pub struct Analyzed {
     pub sql: String,
     pub kind: Kind,
     pub tables: BTreeSet<String>,
+    pub target: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejection {
@@ -137,6 +138,7 @@ struct Resolver<'r, F> {
     physical: F,
     ctes: BTreeSet<String>,
     tables: BTreeSet<String>,
+    target: Option<String>,
     edits: Vec<(std::ops::Range<usize>, String)>,
     failure: Option<Rejection>,
     migration: bool,
@@ -220,9 +222,10 @@ impl<F: Fn(&str) -> Option<String>> Resolver<'_, F> {
         aliased: bool,
         returning: Option<&Vec<SelectItem>>,
     ) -> Result<(), Rejection> {
-        if single(name).is_none() {
+        let Some(target) = single(name) else {
             return denied("a migration parent is read-only");
-        }
+        };
+        self.target = Some(target.value.to_ascii_lowercase());
         self.table(name, aliased)?;
         let (Some(ident), Some(returning), false) = (single(name), returning, aliased) else {
             return Ok(());
@@ -356,15 +359,47 @@ impl<F: Fn(&str) -> Option<String>> Visitor for Resolver<'_, F> {
     }
 }
 
-pub fn updated_columns(sql: &str) -> Vec<String> {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Effects {
+    pub inserts: bool,
+    pub deletes: bool,
+    pub updates: Vec<String>,
+}
+
+pub fn effects(sql: &str) -> Effects {
+    use sqlparser::ast::{OnConflictAction, OnInsert, SqliteOnConflict};
     let Ok(statements) = crate::parsed::parse(sql) else {
-        return Vec::new();
+        return Effects::default();
     };
-    let [Statement::Update(update)] = &*statements else {
-        return Vec::new();
-    };
-    update
-        .assignments
+    let replaces = |or: &Option<SqliteOnConflict>| *or == Some(SqliteOnConflict::Replace);
+    match &*statements {
+        [Statement::Insert(insert)] => Effects {
+            inserts: true,
+            deletes: insert.replace_into || replaces(&insert.or),
+            updates: match &insert.on {
+                Some(OnInsert::OnConflict(conflict)) => match &conflict.action {
+                    OnConflictAction::DoUpdate(update) => assigned(&update.assignments),
+                    OnConflictAction::DoNothing => Vec::new(),
+                },
+                Some(OnInsert::DuplicateKeyUpdate(assignments)) => assigned(assignments),
+                _ => Vec::new(),
+            },
+        },
+        [Statement::Update(update)] => Effects {
+            inserts: false,
+            deletes: replaces(&update.or),
+            updates: assigned(&update.assignments),
+        },
+        [Statement::Delete(_)] => Effects {
+            deletes: true,
+            ..Effects::default()
+        },
+        _ => Effects::default(),
+    }
+}
+
+fn assigned(assignments: &[sqlparser::ast::Assignment]) -> Vec<String> {
+    assignments
         .iter()
         .flat_map(|assignment| match &assignment.target {
             sqlparser::ast::AssignmentTarget::ColumnName(name) => std::slice::from_ref(name),
@@ -438,6 +473,7 @@ fn analyze_with(
         physical,
         ctes: ctes.0,
         tables: BTreeSet::new(),
+        target: None,
         edits: Vec::new(),
         failure: None,
         migration,
@@ -464,6 +500,7 @@ fn analyze_with(
         sql: rewritten,
         kind,
         tables: resolver.tables,
+        target: resolver.target,
     })
 }
 
@@ -474,11 +511,58 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn an_update_names_the_columns_it_assigns() {
         assert_eq!(
-            updated_columns("UPDATE items SET title = ?, (done, \"Rank\") = (1, 2)"),
+            effects("UPDATE items SET title = ?, (done, \"Rank\") = (1, 2)").updates,
             ["title", "done", "Rank"]
         );
-        assert!(updated_columns("INSERT INTO items(title) VALUES('x')").is_empty());
-        assert!(updated_columns("UPDATE").is_empty());
+        assert_eq!(effects("UPDATE").updates, Vec::<String>::new());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn every_branch_of_an_upsert_or_replace_counts_as_an_effect() {
+        let insert = Effects {
+            inserts: true,
+            ..Effects::default()
+        };
+        assert_eq!(effects("INSERT INTO items(title) VALUES('x')"), insert);
+        assert_eq!(
+            effects("INSERT INTO items(id, title) VALUES(1, 'x') ON CONFLICT(id) DO NOTHING"),
+            insert
+        );
+        assert_eq!(
+            effects(
+                "INSERT INTO items(id, title) VALUES(1, 'x') \
+                 ON CONFLICT(id) DO UPDATE SET title = excluded.title"
+            ),
+            Effects {
+                updates: vec!["title".into()],
+                ..insert.clone()
+            }
+        );
+        let replacing = Effects {
+            deletes: true,
+            ..insert
+        };
+        assert_eq!(
+            effects("INSERT OR REPLACE INTO items(id) VALUES(1)"),
+            replacing
+        );
+        assert_eq!(effects("REPLACE INTO items(id) VALUES(1)"), replacing);
+        assert_eq!(
+            effects("UPDATE OR REPLACE items SET id = 2"),
+            Effects {
+                deletes: true,
+                updates: vec!["id".into()],
+                ..Effects::default()
+            }
+        );
+        assert_eq!(
+            effects("DELETE FROM items"),
+            Effects {
+                deletes: true,
+                ..Effects::default()
+            }
+        );
+        assert_eq!(effects("SELECT 1"), Effects::default());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

@@ -3,7 +3,7 @@ use rocky_core::{
     Affinity, ColumnClass, KeyColumn, LogicalSchema, SqlValue, TableClass, key_components,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -408,17 +408,28 @@ pub enum Access<'a> {
     Neutral,
     Other,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableGrant {
+    pub insert: bool,
+    pub delete: bool,
+    pub update: BTreeSet<String>,
+}
 #[derive(Default)]
 pub struct Gate {
     plan: Option<Arc<Plan>>,
+    target: Option<(usize, TableGrant)>,
     assigned: Vec<(usize, usize)>,
     unresolved: Vec<String>,
 }
 impl Gate {
     pub fn arm(&mut self, plan: Option<Arc<Plan>>) {
         self.plan = plan;
+        self.target = None;
         self.assigned.clear();
         self.unresolved.clear();
+    }
+    pub fn restrict_target(&mut self, table: usize, granted: TableGrant) {
+        self.target = Some((table, granted));
     }
     pub fn unresolved(&mut self) -> Vec<String> {
         std::mem::take(&mut self.unresolved)
@@ -440,6 +451,12 @@ impl Gate {
             return true;
         };
         let writable = |table: &str| plan.table(table);
+        let granted = |index: usize| {
+            self.target
+                .as_ref()
+                .filter(|(target, _)| *target == index)
+                .map(|(_, granted)| granted)
+        };
         match access {
             Access::Neutral => true,
             Access::Other => false,
@@ -451,18 +468,26 @@ impl Gate {
                 }
                 known || column.is_empty()
             }
-            Access::Insert(table) | Access::Delete(table) => writable(table).is_some(),
+            Access::Insert(table) => writable(table)
+                .is_some_and(|index| granted(index).is_none_or(|granted| granted.insert)),
+            Access::Delete(table) => writable(table)
+                .is_some_and(|index| granted(index).is_none_or(|granted| granted.delete)),
             Access::Update(table, column) => {
                 let Some(index) = writable(table) else {
                     return false;
                 };
-                if let Some(column) = plan.tables[index]
+                let Some(position) = plan.tables[index]
                     .names
                     .iter()
                     .position(|name| name.eq_ignore_ascii_case(column))
-                {
-                    self.assigned.push((index, column));
+                else {
+                    return true;
+                };
+                let name = &plan.tables[index].names[position];
+                if granted(index).is_some_and(|granted| !granted.update.contains(name)) {
+                    return false;
                 }
+                self.assigned.push((index, position));
                 true
             }
         }

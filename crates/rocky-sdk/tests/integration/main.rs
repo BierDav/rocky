@@ -99,3 +99,5 @@ mod tcp;
 mod tips;
 #[cfg(not(target_family = "wasm"))]
 mod write_latency;
+#[cfg(not(target_family = "wasm"))]
+mod writes;

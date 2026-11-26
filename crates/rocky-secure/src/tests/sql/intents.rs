@@ -617,9 +617,9 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     assert!(
         matches!(
             sql(&bob, &both).await.run(raise, vec![]).await,
-            Err(Error::Rejected(_))
+            Err(Error::Sql(SqlError::Denied))
         ),
-        "the author's own commit admits its effects as every replica will"
+        "the author's statement is refused for a right its grants never hold"
     );
     skip_the_authors_replayed_admission_check(&bob).await;
     let rows = sql(&bob, &both).await.run(raise, vec![]).await.unwrap();

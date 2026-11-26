@@ -280,6 +280,7 @@ pub(crate) struct Node {
     pub(crate) verified_under_settings: AtomicU64,
     learned: AtomicBool,
     rights_notice: std::sync::Mutex<Option<PublicKey>>,
+    held_rights: std::sync::Mutex<Option<people::HeldUnder>>,
     granted_devices: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     import_sources: std::sync::Mutex<
@@ -339,6 +340,7 @@ impl Node {
                 .map_err(|error| error.to_string()),
             last_reconciliation: Default::default(),
             last_status: Default::default(),
+            held_rights: Default::default(),
             last_syncs: Default::default(),
             mesh: Default::default(),
             link_requests: Default::default(),

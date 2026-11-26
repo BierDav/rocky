@@ -109,6 +109,15 @@ that from its first statement is rolled back and fails with
 body. Reads never wait for a write: `query` and `observe` beside an open write
 see the last commit, and `status` returns the status last observed before it.
 
+`Transaction::execute` and `query` refuse a statement the device's access can
+never allow before it runs, with `Denied` naming the `Right`: an `INSERT` needs
+`Append`, a `DELETE`, `REPLACE` or `INSERT OR REPLACE` needs `Write`, and an
+`UPDATE` needs `Update(column)` for each column it sets, as does each `DO
+UPDATE SET` column of an upsert. The check is the same whether the statement
+would match rows or none, so a refused statement records nothing; partition
+rights are checked as soon as the statement knows its rows. A statement refused
+before it runs leaves the transaction open for the body to go on.
+
 `open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
 and `create` or `join` on one that does with `DatabaseExists`, so a host that
 boots unattended opens first and joins on `NoDatabase`. A join that cannot reach
@@ -362,7 +371,9 @@ device's local commit may be reordered when older transactions arrive, which
 `observe` reports as a `Rebuild`. A replayed transaction that violates a
 constraint, such as a unique index, a foreign key or a `CHECK`, is dropped
 whole, on every device; `observe` reports it in `TableChange::dropped` and
-`transaction_outcome(token)` says what happened to it.
+`transaction_outcome(token)` says what happened to it. `DropReason::Admission`
+means the writer's access narrowed between its commit and the replay; a write
+its access never allowed is refused at the statement instead.
 
 A row's primary key is its identity on every device. A table that declares one
 with `Table::primary_key` holds exactly its declared columns, and a foreign key

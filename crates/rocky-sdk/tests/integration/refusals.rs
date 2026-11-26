@@ -125,10 +125,21 @@ impl Venue {
     }
 }
 async fn write(device: &Device, sql: &str, params: Vec<SqlValue>) -> Result<(), rocky_sdk::Error> {
-    device
+    let mut at_statement = None;
+    let written = device
         .database
-        .write(async |tx| tx.execute(sql, params).await)
-        .await
+        .write(async |tx| {
+            let executed = tx.execute(sql, params).await;
+            at_statement = Some(executed.is_err());
+            executed
+        })
+        .await;
+    assert_eq!(
+        at_statement,
+        Some(written.is_err()),
+        "{sql} is refused when it runs, never only at commit"
+    );
+    written
 }
 async fn insert(device: &Device, table: &str, value: &str) -> Result<(), rocky_sdk::Error> {
     let column = if table == "check_ins" { "gate" } else { "code" };
@@ -366,11 +377,14 @@ async fn a_write_into_a_partition_not_held_is_a_final_partition_refusal() -> Res
             let id = tx
                 .next_id("charts", vec![SqlValue::Text("A".into())])
                 .await?;
-            tx.execute(
-                "INSERT INTO charts(ward,id,note) VALUES('B',?,'moved')",
-                vec![id.sql()],
-            )
-            .await
+            let executed = tx
+                .execute(
+                    "INSERT INTO charts(ward,id,note) VALUES('B',?,'moved')",
+                    vec![id.sql()],
+                )
+                .await;
+            assert!(executed.is_err(), "the insert is refused when it runs");
+            executed
         })
         .await;
     assert_eq!(refused(inserted)?, partition_not_granted(Right::Append));

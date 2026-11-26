@@ -17,6 +17,9 @@ impl<T: Clone> Shared<T> {
     pub fn new(value: T) -> Self {
         Self(Arc::new(value))
     }
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 impl<T: Clone> Deref for Shared<T> {
     type Target = T;

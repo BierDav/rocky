@@ -240,8 +240,18 @@ impl TableDefinition {
         let name = &self.name;
         let generated = |column: &String| column.eq_ignore_ascii_case(GENERATED_ID);
         if self.primary_key.is_empty() {
+            return invalid(if self.class == TableClass::LocalOnly {
+                format!("{name} is a local table and must declare a primary key")
+            } else {
+                format!("{name} needs a primary key: its own columns, or id for a generated one")
+            });
+        }
+        if self.class == TableClass::LocalOnly
+            && self.primary_key.iter().any(generated)
+            && !self.columns.iter().any(|column| generated(&column.name))
+        {
             return invalid(format!(
-                "{name} needs a primary key: its own columns, or id for a generated one"
+                "{name} is a local table and has no generated id; declare a primary key from its columns"
             ));
         }
         if !self.primary_key.iter().any(generated) {
@@ -1286,7 +1296,9 @@ mod replayed_tests {
         let mut unreplayed = restricted(serde_json::json!({
             "name": "rule", "table": "notes", "refuse_update": true, "refuse_delete": true
         }));
-        table(&mut unreplayed, "notes").class = TableClass::LocalOnly;
+        let notes = table(&mut unreplayed, "notes");
+        notes.class = TableClass::LocalOnly;
+        notes.primary_key = vec![notes.columns[0].name.clone()];
         assert_eq!(
             refusal(&unreplayed),
             Some((

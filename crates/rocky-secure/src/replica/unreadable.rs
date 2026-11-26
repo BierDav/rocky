@@ -15,13 +15,14 @@ const SCOPE_RECORDS: [&str; 7] = [
     "secure_rebuild_scopes",
 ];
 
-const UNSCOPED_RECORDS: [&str; 6] = [
+const UNSCOPED_RECORDS: [&str; 7] = [
     "secure_held",
     "secure_held_resolved",
     "secure_outcomes",
     "secure_outcome_members",
     "secure_outcome_divergence",
     "secure_kept_outcomes",
+    "secure_schema_drops",
 ];
 
 impl<A: RowApplication> Inner<A> {
@@ -75,6 +76,57 @@ impl<A: RowApplication> Inner<A> {
         {
             self.save_restoration_guard(scope).await?;
         }
+        if let Some(id) = id {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,sequence,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.based=0",
+                    [id],
+                )
+                .await?;
+            let own = self.config.node.public_key().as_bytes().to_vec();
+            let unsynced = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT r.hash,r.txn,r.clock FROM secure_replayed r WHERE r.scope=?1 AND r.author=?2 AND r.dropped IS NULL AND NOT EXISTS(SELECT 1 FROM secure_ack a WHERE a.hash=r.hash) AND NOT EXISTS(SELECT 1 FROM secure_peer_frontiers f WHERE f.scope=?3 AND f.author=r.author AND f.held>=r.sequence)",
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(own.clone()),
+                            SqlValue::Blob(blob.clone()),
+                        ]),
+                    )
+                    .await?,
+            )
+            .await?;
+            for row in unsynced {
+                let [
+                    SqlValue::Blob(hash),
+                    SqlValue::Blob(txn),
+                    SqlValue::Integer(clock),
+                ] = row.as_slice()
+                else {
+                    return Err(Error::Corrupt("unsynced revoked write".into()));
+                };
+                self.conn
+                    .execute(
+                        "UPDATE secure_kept_outcomes SET dropped='admission',sealed=1,violated=NULL,based=1 WHERE hash=?",
+                        [hash.clone()],
+                    )
+                    .await?;
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO secure_schema_drops VALUES(?,?,?,'admission')",
+                        bindings(vec![
+                            SqlValue::Blob(txn.clone()),
+                            SqlValue::Blob(own.clone()),
+                            SqlValue::Integer(*clock),
+                        ]),
+                    )
+                    .await?;
+                if let Ok(commitment) = txn.as_slice().try_into() {
+                    self.touch_dropped(commitment, rocky_core::replay::DropReason::Admission);
+                }
+            }
+        }
         self.replace_ledger(scope, super::identity::IdentityLedger::default())
             .await?;
         if self.replayed_scope(scope) {
@@ -95,6 +147,9 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("retained operation".into()));
             };
             for table in FRAME_RECORDS {
+                if table == "secure_kept_outcomes" {
+                    continue;
+                }
                 self.conn
                     .execute(format!("DELETE FROM {table} WHERE hash=?"), [hash.clone()])
                     .await?;
@@ -116,6 +171,9 @@ impl<A: RowApplication> Inner<A> {
                 let [SqlValue::Text(table)] = record.as_slice() else {
                     return Err(Error::Corrupt("scope numbered table".into()));
                 };
+                if table == "secure_kept_outcomes" {
+                    continue;
+                }
                 self.conn
                     .execute(format!("DELETE FROM {} WHERE scope=?", quoted(table)), [id])
                     .await?;
@@ -303,10 +361,23 @@ const SCRUB_CHECKPOINT_WAIT: std::time::Duration = std::time::Duration::from_mil
 
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn forget_everything(&self) -> Result<(), Error> {
+        self.forget_everything_and_record(&[], 0).await
+    }
+    pub async fn forget_everything_and_record(
+        &self,
+        entries: &[(&str, Option<&[u8]>)],
+        updated_at: u64,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.lose_keys(|_| true);
         inner.secure_delete(true).await?;
-        let forgotten = transaction!(inner, |inner| inner.forget_everything().await);
+        let forgotten = transaction!(inner, |inner| {
+            inner.forget_everything().await?;
+            if !entries.is_empty() {
+                super::authority::apply_entries(&inner.conn, entries, updated_at).await?;
+            }
+            Ok(())
+        });
         inner.secure_delete(false).await?;
         forgotten?;
         inner.publish_revision().await?;

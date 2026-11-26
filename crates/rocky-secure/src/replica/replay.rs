@@ -28,7 +28,7 @@ const KEPT_OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_kept_outcom
 const REPLAYED_REDERIVE_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)";
 const REPLAYED_STUCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_stuck(id INTEGER PRIMARY KEY CHECK(id=1),inputs BLOB NOT NULL,violation TEXT NOT NULL)";
-const SCHEMA_DROPS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_schema_drops(txn BLOB PRIMARY KEY,node BLOB NOT NULL,written INTEGER NOT NULL) WITHOUT ROWID";
+const SCHEMA_DROPS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_schema_drops(txn BLOB PRIMARY KEY,node BLOB NOT NULL,written INTEGER NOT NULL,reason TEXT NOT NULL) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_TABLE,
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
@@ -197,6 +197,7 @@ pub struct SchemaDrop {
     pub transaction: Commitment,
     pub node: PublicKey,
     pub written: u64,
+    pub reason: DropReason,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -206,7 +207,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner
                 .conn
                 .query(
-                    "SELECT txn,node,written FROM secure_schema_drops ORDER BY written,txn",
+                    "SELECT txn,node,written,reason FROM secure_schema_drops ORDER BY written,txn",
                     (),
                 )
                 .await?,
@@ -218,6 +219,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 SqlValue::Blob(transaction),
                 SqlValue::Blob(node),
                 SqlValue::Integer(written),
+                SqlValue::Text(reason),
             ] => Ok(SchemaDrop {
                 transaction: transaction
                     .as_slice()
@@ -231,6 +233,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .ok_or_else(|| Error::Corrupt("schema drop node".into()))?,
                 written: u64::try_from(*written)
                     .map_err(|_| Error::Corrupt("schema drop time".into()))?,
+                reason: reason_named(reason)?,
             }),
             _ => Err(Error::Corrupt("schema drop".into())),
         })
@@ -1741,11 +1744,12 @@ impl<A: RowApplication> Inner<A> {
             if dropped.reason == DropReason::Schema {
                 self.conn
                     .execute(
-                        "INSERT OR IGNORE INTO secure_schema_drops VALUES(?,?,?)",
+                        "INSERT OR IGNORE INTO secure_schema_drops VALUES(?,?,?,?)",
                         bindings(vec![
                             SqlValue::Blob(transaction.to_vec()),
                             SqlValue::Blob(header.public_key.as_bytes().to_vec()),
                             clock_value(stamp.clock)?,
+                            SqlValue::Text("schema".into()),
                         ]),
                     )
                     .await?;

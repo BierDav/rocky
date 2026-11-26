@@ -1154,6 +1154,7 @@ impl Node {
                     error: (error.to_string()).to_owned(),
                 });
         }
+        self.push_revocations().await;
         Ok(true)
     }
     pub(super) async fn apply(
@@ -1778,6 +1779,8 @@ impl Node {
                 .await?
         {
             self.record_ended(&statement, draft.identity).await?;
+            self.observations.touch();
+            self.wake_sync();
         }
         let rotated = match registry {
             Some(registry) => resumes || draft.begin_exposure_rotation(&registry)?,
@@ -1799,7 +1802,11 @@ impl Node {
             Box::pin(self.complete_revocation()).await?;
         }
         self.refresh_importing().await?;
-        self.sweep_deliveries().await
+        self.sweep_deliveries().await?;
+        if self.learned.load(Ordering::SeqCst) {
+            self.wake_sync();
+        }
+        Ok(())
     }
     async fn bootstrap_pending(
         &self,

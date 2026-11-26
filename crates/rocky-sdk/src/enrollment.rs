@@ -190,21 +190,6 @@ impl RevocationNotice {
         };
         Ok(known.statement().cloned())
     }
-    async fn write(
-        &self,
-        recorded: &mut Option<Recorded>,
-        settings: &Settings,
-        statement: SignedRevocation,
-    ) -> Result<(), Failure> {
-        let bytes = Recorded::encode(settings, statement)?;
-        let written = self
-            .replica
-            .put_authority_state(AUTHORITY_REVOKED_KEY, &bytes, now()?)
-            .await
-            .map_err(Failure::from);
-        *recorded = Recorded::read(settings, &self.replica).await.ok();
-        written
-    }
     pub(crate) async fn revoked(
         &self,
         settings: &Settings,
@@ -221,8 +206,17 @@ impl RevocationNotice {
         if self.known(&mut recorded, settings).await?.is_some() {
             return Ok(false);
         }
-        self.write(&mut recorded, settings, statement).await?;
-        self.replica.forget_everything().await?;
+        let bytes = Recorded::encode(settings, statement)?;
+        let written = self
+            .replica
+            .forget_everything_and_record(
+                &[(AUTHORITY_REVOKED_KEY, Some(bytes.as_slice()))],
+                now()?,
+            )
+            .await
+            .map_err(Failure::from);
+        *recorded = Recorded::read(settings, &self.replica).await.ok();
+        written?;
         Ok(true)
     }
 }
@@ -1243,6 +1237,21 @@ impl Settings {
         settings.credentials =
             crate::identities::with_identity(identity, || settings.certify(&vault, links, &bound))?;
         let node = Settings::node_key(&vault)?;
+        if let Some(authority) = settings.authority.as_mut() {
+            authority
+                .trusted_nodes
+                .entry(settings.identity)
+                .or_default()
+                .insert(
+                    node.public_key(),
+                    crate::membership::AdminObservation {
+                        linked: now()?,
+                        unlinked: None,
+                        read: false,
+                        acknowledged: true,
+                    },
+                );
+        }
         let credentials = settings.credentials.clone();
         let links = credentials.capabilities();
         crate::mesh::create_root(

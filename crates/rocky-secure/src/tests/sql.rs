@@ -69,6 +69,7 @@ impl Typed {
             ],
         );
         drafts.class = TableClass::LocalOnly;
+        drafts.primary_key = vec!["key".into()];
         let schema = LogicalSchema {
             format: LOGICAL_SCHEMA_FORMAT,
             publisher: *publisher.public_key().as_bytes(),
@@ -2061,12 +2062,12 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
             .sql(SqlOptions::default())
             .await
             .unwrap();
-        for name in ["items", "salaries", "drafts"] {
+        for (name, key) in [("items", "id"), ("salaries", "id"), ("drafts", "key")] {
             let result = sql
-                .run(&format!("SELECT id FROM {name}"), vec![])
+                .run(&format!("SELECT {key} FROM {name}"), vec![])
                 .await
                 .unwrap();
-            assert_eq!(result.columns, ["id"]);
+            assert_eq!(result.columns, [key]);
             assert!(result.rows.is_empty());
         }
         drop(sql);
@@ -2085,7 +2086,8 @@ fn identity_fixture() -> Typed {
             {"name": "salaries", "class": "replayed", "columns": [
                 {"name": "amount", "type": "integer", "not_null": true}], "primary_key": ["id"]},
             {"name": "drafts", "class": "local_only", "columns": [
-                {"name": "body", "type": "text"}], "primary_key": ["id"]}
+                {"name": "key", "type": "text", "not_null": true},
+                {"name": "body", "type": "text"}], "primary_key": ["key"]}
         ]
     }"#
     .replace("PUBLISHER", &publisher.public_key().to_string());
@@ -2392,34 +2394,21 @@ async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
         )
         .await;
     let writer = sql(&replica, &[fixture.items]).await;
-    let id = rocky_core::RowIdentity::new(rocky_core::WriterId::from_bytes([99; 32]), 1).unwrap();
     writer
         .run(
-            "INSERT INTO drafts(id,body) VALUES(?,'local')",
-            vec![id.sql()],
+            "INSERT INTO drafts(key,body) VALUES(?,'local')",
+            vec![SqlValue::Text("d1".into())],
         )
         .await
         .unwrap();
-    for (statement, values) in [
-        (
-            "UPDATE drafts SET id=?",
-            vec![
-                rocky_core::RowIdentity::new(id.writer(), id.sequence() + 1)
-                    .unwrap()
-                    .sql(),
-            ],
-        ),
-        ("INSERT INTO drafts(id,body) VALUES(0,'virtual')", vec![]),
-    ] {
-        assert!(writer.run(statement, values).await.is_err());
-    }
+    assert!(writer.next_id("drafts").await.is_err());
     assert_eq!(
         writer
-            .run("SELECT id FROM drafts", vec![])
+            .run("SELECT key FROM drafts", vec![])
             .await
             .unwrap()
             .rows,
-        vec![vec![id.sql()]]
+        vec![vec![SqlValue::Text("d1".into())]]
     );
 }
 

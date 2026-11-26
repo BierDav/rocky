@@ -361,6 +361,16 @@ impl<A: RowApplication> SecureSql<A> {
                 reason: crate::sql::Unavailable::NotHeld,
             })
         };
+        if typed
+            .rows
+            .schema()
+            .table(table)
+            .is_some_and(|logical| logical.class == TableClass::LocalOnly)
+        {
+            return Err(refused(format!(
+                "{table} is a local table and has no generated id"
+            )));
+        }
         let table = typed.by_name(table).ok_or_else(|| not_held(table))?;
         if !typed
             .rows

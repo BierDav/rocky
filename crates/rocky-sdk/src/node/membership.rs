@@ -150,14 +150,13 @@ impl Node {
         if own {
             let notice = crate::enrollment::RevocationNotice::encode(&draft, signed)?;
             settings
-                .commit_with_entries(
+                .commit_and_forget(
                     draft,
                     &self.replica,
                     &[(
                         crate::enrollment::AUTHORITY_REVOKED_KEY,
                         Some(notice.as_slice()),
                     )],
-                    None,
                 )
                 .await?;
             self.revocation_notice.refresh(&settings).await;
@@ -326,17 +325,24 @@ impl Node {
         known: RevocationSet,
     ) -> Result<RevocationSet, Failure> {
         known.verify_in(self.settings.lock().await.database_context()?)?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
+        let registry = {
+            let snapshot = self.settings_snapshot().await;
+            if snapshot.issuer() {
+                Some(self.registry(&snapshot).await?)
+            } else {
+                None
+            }
+        };
         let mut settings = self.settings.lock().await;
         known.verify_in(settings.database_context()?)?;
-        if !known
-            .statements()
-            .any(|signed| signed.root() || !signed.statement.nodes.is_empty())
-        {
-            return Err(refused("the update contains no owner revocation"));
+        if known.statements().next().is_none() {
+            return Err(refused("the update contains no revocation"));
         }
         let mut draft = settings.clone();
-        draft.learn_revocations(&known)?;
+        let added = draft.learn_revocations(&known)?;
+        if !added.is_empty() {
+            self.learned.store(true, Ordering::SeqCst);
+        }
         if let Some(statement) = settings.revoking(&draft.revocations)? {
             if self
                 .revocation_notice
@@ -353,7 +359,15 @@ impl Node {
             self.observations.touch();
             return Ok(known);
         }
-        let rotated = draft.begin_exposure_rotation(&registry)?;
+        let rotated = match &registry {
+            Some(registry) => draft.begin_exposure_rotation(registry)?,
+            None => false,
+        };
+        if !rotated && settings.renews_from_issuer() {
+            drop(settings);
+            self.wake_sync();
+            return Ok(known);
+        }
         if rotated {
             settings.commit(draft, &self.replica).await?;
             let keys = settings
@@ -375,6 +389,51 @@ impl Node {
         self.observations.touch();
         self.wake_sync();
         Ok(known)
+    }
+    pub(super) async fn push_revocations(&self) {
+        if self.sync_mode() != crate::SyncMode::Live {
+            return;
+        }
+        let Some(link) = self.current() else {
+            return;
+        };
+        let (known, contacts) = {
+            let settings = self.settings.lock().await;
+            let mut known = settings.revocations.clone();
+            let Ok(database) = settings.database_context() else {
+                return;
+            };
+            let Ok(time) = now() else {
+                return;
+            };
+            let _ = known.merge_in(&self.replica.revocations().await, database, time);
+            if known.statements().next().is_none() {
+                return;
+            }
+            let own = Settings::node_key(&self.vault).ok().map(|k| k.public_key());
+            let contacts: Vec<crate::enrollment::Contact> = settings
+                .peers
+                .iter()
+                .filter(|(peer, _)| own != Some(**peer))
+                .map(|(_, contact)| contact.clone())
+                .collect();
+            (known, contacts)
+        };
+        if contacts.is_empty() {
+            return;
+        }
+        let request = PeerRequest::Unlink(Box::new(known));
+        let transport = &*link.transport;
+        let scope = self.domain().scope;
+        let request = &request;
+        let deliveries =
+            futures_util::stream::iter(contacts.into_iter().map(|contact| async move {
+                let addresses = contact.addresses(transport);
+                let _ = exchange(transport, &addresses, scope, request).await;
+            }))
+            .buffer_unordered(crate::enrollment::MAX_DIALED);
+        futures_util::pin_mut!(deliveries);
+        while deliveries.next().await.is_some() {}
     }
     pub(super) async fn accept_link(
         &self,

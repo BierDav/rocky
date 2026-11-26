@@ -456,3 +456,157 @@ async fn purge_on_close_removes_the_directory() -> Result<(), Failure> {
     clinic.close([]).await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_device_holds_no_rows_once_it_reports_removed() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    clinic.admit("ada", "ada note", "ada drug").await?;
+    let (clinician, person) = clinic.clinician(&["ada"]).await?;
+    let directory = clinic.directory("clinician");
+    assert_eq!(
+        texts(&clinician, "SELECT body FROM notes").await?,
+        ["ada note"]
+    );
+    clinic.admin.database.remove(person).await?;
+    let mut removed = None;
+    for _ in 0..4 {
+        if let Err(error) = clinician.sync_now().await
+            && error.kind() == &ErrorKind::Removed
+        {
+            removed = Some(error);
+            break;
+        }
+    }
+    let removed = removed.ok_or("the device never reported removed")?;
+    assert_eq!(removed.kind(), &ErrorKind::Removed, "{removed}");
+    for needle in ["ada note", "ada drug"] {
+        assert!(
+            !file_holds(&directory, needle)?,
+            "{needle} stays in the file of an open device that reports removed"
+        );
+    }
+    assert_eq!(
+        refusal(texts(&clinician, "SELECT body FROM notes").await)?,
+        ErrorKind::Removed
+    );
+    clinic.close([clinician]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_unlinked_device_holds_no_rows_once_it_reports_removed() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    clinic.admit("ada", "ada note", "ada drug").await?;
+    let (clinician, _) = clinic.clinician(&["ada"]).await?;
+    let directory = clinic.directory("clinician");
+    assert_eq!(
+        texts(&clinician, "SELECT body FROM notes").await?,
+        ["ada note"]
+    );
+    let own = clinician.database.status().await?.authority().node;
+    clinician.database.unlink(own).await?;
+    assert_eq!(
+        refusal(texts(&clinician, "SELECT body FROM notes").await)?,
+        ErrorKind::Removed
+    );
+    for needle in ["ada note", "ada drug"] {
+        assert!(
+            !file_holds(&directory, needle)?,
+            "{needle} stays in the file of a self-unlinked device that reports removed"
+        );
+    }
+    clinic.close([clinician]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsynced_write_dropped_on_revocation_reports_outcome_and_alert_while_synced_outcome_survives()
+-> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    clinic.admit("ada", "ada note", "ada drug").await?;
+    let (clinician, person) = clinic.clinician(&["ada"]).await?;
+    let directory = clinic.directory("clinician");
+    let synced_token = clinician
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO notes(patient, body) VALUES('ada', 'synced note')",
+                rocky_sdk::params![],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await?;
+    clinic.exchange(&clinician).await?;
+    clinic
+        .admin
+        .database
+        .revoke_partition(person, &chart("ada"))
+        .await?;
+    let offline_token = clinician
+        .database
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO notes(patient, body) VALUES('ada', 'offline note')",
+                rocky_sdk::params![],
+            )
+            .await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await?;
+    clinician.database.sync_now().await?;
+    clinic.exchange(&clinician).await?;
+    assert!(
+        !texts(&clinic.admin, "SELECT body FROM notes")
+            .await?
+            .contains(&"offline note".to_owned()),
+        "admin should not have the offline note"
+    );
+    assert_eq!(
+        clinician
+            .database
+            .transaction_outcome(offline_token)
+            .await?,
+        Some(rocky_sdk::TransactionOutcome::Dropped {
+            reason: rocky_sdk::DropReason::Admission,
+            sealed: true,
+        })
+    );
+    let synced_outcome = clinician.database.transaction_outcome(synced_token).await?;
+    assert!(
+        matches!(
+            synced_outcome,
+            Some(rocky_sdk::TransactionOutcome::Applied { .. })
+        ),
+        "synced write outcome should survive partition revocation, got {synced_outcome:?}"
+    );
+    let alerts = clinician.database.status().await?.alerts().to_vec();
+    assert!(
+        alerts.iter().any(|alert| matches!(
+            alert.kind,
+            rocky_sdk::status::AlertKind::WriteDropped {
+                token,
+                reason: rocky_sdk::DropReason::Admission,
+                ..
+            } if token == offline_token
+        )),
+        "expected WriteDropped alert for offline write, got {alerts:?}"
+    );
+    clinician.database.acknowledge_drop(offline_token).await?;
+    let after_ack = clinician.database.status().await?.alerts().to_vec();
+    assert!(
+        !after_ack.iter().any(|alert| matches!(
+            alert.kind,
+            rocky_sdk::status::AlertKind::WriteDropped { token, .. } if token == offline_token
+        )),
+        "alert should clear after acknowledge"
+    );
+    for needle in ["ada note", "synced note", "offline note"] {
+        assert!(
+            !file_holds(&directory, needle)?,
+            "{needle} stays in the file after partition revocation"
+        );
+    }
+    clinic.close([clinician]).await;
+    Ok(())
+}

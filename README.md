@@ -497,10 +497,16 @@ transaction that ran no write statement records and syncs nothing, so its token
 never gets an outcome; a write that matched no row still records an intent.
 `flush` makes every write that returned durable.
 
+`Database::status_changes()` streams snapshots as status changes; in
+`SyncMode::Live`, await partition grants or revocations on
+`status.data().partitions`, admin promotion on `status.authority().is_issuer`,
+and removal on `status.authority().verified_revocation`.
+
 `Table::local(name)` declares a table whose rows stay on the device: they
-never sync, are kept across reopening, and are deleted with the rest when the
-device is removed. It holds per-device state, such as a till's parked sales or
-its offline switch.
+never sync, are kept across reopening, are not governed by roles, and are
+deleted with the rest when the device is removed. A local table has no
+generated `id` and must declare its own `primary_key`. It holds per-device
+state, such as a till's parked sales or its offline switch.
 
 A write must replay identically everywhere, so Rocky refuses some SQL in a
 transaction with `ErrorKind::Sql { unsupported, .. }`:

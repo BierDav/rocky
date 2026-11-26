@@ -1091,6 +1091,40 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = Device::create(
+        &directory.path().join("owner"),
+        Some(Network::Owned(hub.connector("owner"))),
+    )
+    .await?;
+    let invitation = owner
+        .database
+        .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
+        .await?;
+    let member = Device::join(
+        &directory.path().join("member"),
+        &invitation.code,
+        Network::Owned(hub.connector("member")),
+    )
+    .await?;
+    member.database.sync_now().await?;
+    owner.database.sync_now().await?;
+    let alerts = trusted_alerts(&owner).await?;
+    assert!(
+        !alerts.iter().any(|alert| matches!(
+            alert.kind,
+            rocky_sdk::status::AlertKind::AdminDeviceLinked { .. }
+        )),
+        "owner's own first device should not raise AdminDeviceLinked: {alerts:?}"
+    );
+    member.close().await;
+    owner.close().await;
+    Ok(())
+}
+
 async fn outcome<T, E: Into<Failure>>(
     operation: impl std::future::Future<Output = Result<T, E>>,
 ) -> Result<(String, String), Failure> {

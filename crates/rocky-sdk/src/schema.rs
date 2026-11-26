@@ -345,10 +345,12 @@ impl Table {
     pub fn replayed(name: impl Into<String>) -> Self {
         Self::of(name, rocky_core::TableClass::Replayed)
     }
-    /// A table whose rows stay on this device: they never sync, are kept across reopening, and are
-    /// deleted with the rest when the device is removed.
+    /// A table whose rows stay on this device: they never sync, are kept across reopening, are not
+    /// governed by roles, must declare a `primary_key`, and are deleted when the device is removed.
     pub fn local(name: impl Into<String>) -> Self {
-        Self::of(name, rocky_core::TableClass::LocalOnly)
+        let mut table = Self::of(name, rocky_core::TableClass::LocalOnly);
+        table.0.primary_key.clear();
+        table
     }
     fn of(name: impl Into<String>, class: rocky_core::TableClass) -> Self {
         Self(rocky_core::TableDefinition {

@@ -130,7 +130,7 @@ async fn admin_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
         run(3, steps, &[" mesh ", " make admin "]).await?,
         [
             "admin",
-            r#"mesh ["a: alerts [\"a linked\", \"c linked\"]", "b: alerts [], via a"]"#,
+            r#"mesh ["a: alerts [\"c linked\"]", "b: alerts [], via a"]"#,
             "mesh none"
         ]
     );
@@ -158,10 +158,10 @@ async fn an_admin_node_flags_an_identity_it_has_not_heard_from() -> Result<(), F
         run(3, steps, &[" woken ", " alerts ", " stale after "]).await?,
         [
             "set",
-            r#"alerts ["a linked", "c linked"]"#,
-            r#"alerts ["a linked", "c linked", "c stale"]"#,
-            r#"alerts ["a linked", "c linked", "c stale"]"#,
-            r#"alerts ["a linked", "c linked"]"#
+            r#"alerts ["c linked"]"#,
+            r#"alerts ["c linked", "c stale"]"#,
+            r#"alerts ["c linked", "c stale"]"#,
+            r#"alerts ["c linked"]"#
         ]
     );
     Ok(())

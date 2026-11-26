@@ -308,3 +308,105 @@ async fn a_live_promotion_reaches_the_promoted_device_without_a_sync_call() -> R
     owner.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn live_partition_grant_revocation_and_removal_arrive_via_status_changes()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let schema = Schema::builder("clinic", 1)
+        .table(
+            Table::replayed("notes")
+                .column(Column::new("patient", Affinity::Text).required())
+                .column(Column::new("body", Affinity::Text).required())
+                .partition_by(["patient"])
+                .partition_group("chart"),
+        )
+        .role(
+            Role::new(RoleName::new("clinician")?)
+                .write("notes")
+                .per_partition("chart"),
+        )
+        .build()?;
+    let live = |name: &str| -> Result<Configuration, Failure> {
+        Ok(configuration(&root.path().join(name), &schema, &hub)?.sync(crate::SyncMode::Live))
+    };
+    let owner = live("owner")?.create().await?.database;
+    let ada = crate::Partition::new("chart", vec![crate::SqlValue::Text("ada".into())]);
+    owner.create_partition(&ada).await?;
+    let invitation = owner
+        .invite(Invite::new(Access::Role(RoleName::new("clinician")?)))
+        .await?;
+    let clinician = live("clinician")?.join(&invitation.code).await?.database;
+    clinician.sync_now().await?;
+    owner.sync_now().await?;
+    let mut changes = clinician.status_changes();
+    let person = changes.next().await?.authority().principal;
+
+    owner.grant_partition(person, &ada).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status = changes.next().await?;
+            if status
+                .data()
+                .partitions
+                .iter()
+                .any(|entry| entry.partition == ada && entry.held && entry.complete)
+            {
+                return Ok::<_, Failure>(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "partition grant did not arrive promptly in Live mode")??;
+    clinician
+        .write(async |tx| {
+            tx.execute(
+                "INSERT INTO notes(patient, body) VALUES('ada', 'live note')",
+                crate::params![],
+            )
+            .await
+        })
+        .await?;
+
+    owner.revoke_partition(person, &ada).await?;
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status = changes.next().await?;
+            if !status
+                .data()
+                .partitions
+                .iter()
+                .any(|entry| entry.partition == ada && entry.held)
+            {
+                return Ok::<_, Failure>(());
+            }
+        }
+    })
+    .await;
+    if waited.is_err() {
+        let current = clinician.status().await?;
+        return Err(format!(
+            "partition revocation did not arrive promptly in Live mode; partitions={:?}",
+            current.data().partitions
+        )
+        .into());
+    }
+    waited.unwrap()?;
+
+    owner.remove(person).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status = changes.next().await?;
+            if status.authority().verified_revocation.is_some() {
+                return Ok::<_, Failure>(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "removal did not arrive promptly in Live mode")??;
+
+    clinician.close().await?;
+    owner.close().await?;
+    Ok(())
+}

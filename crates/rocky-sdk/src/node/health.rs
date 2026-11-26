@@ -182,7 +182,7 @@ impl Node {
                 kind: AlertKind::WriteDropped {
                     token: crate::TransactionToken::new(drop.transaction),
                     node: crate::DeviceId::new(drop.node),
-                    reason: crate::DropReason::Schema,
+                    reason: drop.reason,
                 },
                 since: Some(crate::Timestamp::from_unix_micros(
                     i64::try_from(drop.written).unwrap_or(i64::MAX),

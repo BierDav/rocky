@@ -134,6 +134,23 @@ impl SettingsGuard<'_> {
         self.publish();
         Ok(added)
     }
+    pub async fn commit_and_forget(
+        &mut self,
+        draft: Shared<Settings>,
+        replica: &EncryptedReplica<TypedRows>,
+        extra: &[(&str, Option<&[u8]>)],
+    ) -> Result<(), Failure> {
+        let bytes = draft.to_bytes()?;
+        let mut entries = Vec::with_capacity(extra.len() + 1);
+        entries.push((AUTHORITY_IDENTITY_KEY, Some(bytes.as_slice())));
+        entries.extend_from_slice(extra);
+        replica
+            .forget_everything_and_record(&entries, now()?)
+            .await?;
+        *self.held = draft;
+        self.publish();
+        Ok(())
+    }
     pub async fn adopt(
         &mut self,
         replica: &EncryptedReplica<TypedRows>,

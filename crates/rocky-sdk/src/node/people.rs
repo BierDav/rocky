@@ -187,11 +187,15 @@ impl Node {
         table: &str,
         failed: &crate::Error,
     ) -> Option<crate::Error> {
-        if self.domain().logical().table(table).is_none() {
+        let domain = self.domain();
+        let Some(definition) = domain.logical().table(table) else {
             return Some(crate::Error::sql(
                 crate::connection::code::ERROR,
                 format!("no such table: {table}"),
             ));
+        };
+        if definition.class == rocky_core::TableClass::LocalOnly {
+            return None;
         }
         let published = self.settings.published();
         if let Some(refused) = self.held_rights(&published).and_then(|rights| {
@@ -605,12 +609,25 @@ impl Node {
                     group: partition.group.clone(),
                 }));
             }
+            let version = self.settings_snapshot().await.schema.version;
+            self.change_rights_after(None, version, &[person], Reach::Wider)
+                .await?;
             let mut changes = Changes::default();
             changes.grant(&identity, &stored, Some(record))?;
             self.commit(changes).await?;
+            self.complete_rights_change().await?;
         }
-        let nodes = self.identity_nodes(identity).await?;
-        let recipients = self.share_with(&group, &nodes, true).await?;
+        let recipients = if self.sync_mode() == crate::SyncMode::Live {
+            let nodes = self.identity_nodes(identity).await?;
+            self.granted_devices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(nodes);
+            0
+        } else {
+            let nodes = self.identity_nodes(identity).await?;
+            self.share_with(&group, &nodes, true).await?
+        };
         self.activity
             .record(crate::activity::ActivityKind::PartitionShared {
                 partition: partition.clone(),
@@ -648,7 +665,12 @@ impl Node {
 
     pub(super) async fn deliver_grants_to_new_devices(&self) -> Result<(), crate::Failure> {
         let settings = self.settings_snapshot().await;
-        if !settings.issuer() {
+        if !settings.issuer()
+            || settings
+                .authority
+                .as_ref()
+                .is_some_and(|issuing| issuing.rights_change.is_some())
+        {
             return Ok(());
         }
         let registry = self.registry(&settings).await?;

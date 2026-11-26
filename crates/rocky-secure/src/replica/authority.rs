@@ -33,7 +33,7 @@ async fn read_entry(conn: &ScopedConnection, key: &str) -> Result<Option<(Vec<u8
     Ok(Some((value, updated_at)))
 }
 
-async fn apply_entries(
+pub(super) async fn apply_entries(
     conn: &ScopedConnection,
     entries: &[(&str, Option<&[u8]>)],
     updated_at: u64,

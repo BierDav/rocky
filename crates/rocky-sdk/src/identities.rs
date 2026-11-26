@@ -211,7 +211,9 @@ mod tests {
             directory.path().join("secrets"),
         ));
         let key = crate::IdentityKey::generate();
-        let provider = Arc::new(crate::IdentityKey::from_secret(key.secret()));
+        let provider = Arc::new(rocky_credentials::key_bytes::identity_key(
+            rocky_credentials::key_bytes::identity_secret(&key),
+        ));
         let weak = Arc::downgrade(&provider);
         let settings = Settings::create(
             &schema,
@@ -224,7 +226,9 @@ mod tests {
         assert!(settings.identity().is_err());
         for supplied in [
             crate::IdentityKey::from_phrase(&key.phrase())?,
-            crate::IdentityKey::from_secret(key.secret()),
+            rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(&key),
+            ),
         ] {
             let supplied: Option<Arc<dyn crate::IdentityProvider>> = Some(Arc::new(supplied));
             supplying(supplied, async {

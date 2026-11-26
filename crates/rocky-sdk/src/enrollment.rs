@@ -540,10 +540,13 @@ impl Intent {
                     Some((provider.clone(), None))
                 }
                 (true, None, true) => {
-                    let minted = IdentityKey::from_secret(vault.get(MINTED_ROLE)?);
+                    let minted =
+                        rocky_credentials::key_bytes::identity_key(vault.get(MINTED_ROLE)?);
                     (minted.person_key() == previous.identity).then(|| {
                         let provider: Arc<dyn IdentityProvider> =
-                            Arc::new(IdentityKey::from_secret(minted.secret()));
+                            Arc::new(rocky_credentials::key_bytes::identity_key(
+                                rocky_credentials::key_bytes::identity_secret(&minted),
+                            ));
                         (provider, Some(minted))
                     })
                 }
@@ -567,7 +570,9 @@ impl Intent {
         let minted = provider.is_none().then(IdentityKey::generate);
         let provider: Arc<dyn IdentityProvider> = match (provider, &minted) {
             (Some(provider), _) => provider.clone(),
-            (None, Some(minted)) => Arc::new(IdentityKey::from_secret(minted.secret())),
+            (None, Some(minted)) => Arc::new(rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(minted),
+            )),
             (None, None) => return Err("an installation needs an identity".into()),
         };
         let intent = Self {
@@ -582,7 +587,10 @@ impl Intent {
             vault.create(role)?;
         }
         if let Some(minted) = &minted {
-            vault.put(MINTED_ROLE, &minted.secret())?;
+            vault.put(
+                MINTED_ROLE,
+                &rocky_credentials::key_bytes::identity_secret(minted),
+            )?;
         }
         write_private(path, &serde_json::to_vec(&intent)?)?;
         Ok(Prepared {

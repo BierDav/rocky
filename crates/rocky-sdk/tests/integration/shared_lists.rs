@@ -93,7 +93,7 @@ fn ordered() -> Schema {
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 fn key(directory: &Path) -> rocky_sdk::IdentityKey {
-    rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+    rocky_credentials::key_bytes::identity_key(rocky_core::commitment(
         "fixture.lists.identity",
         directory.to_string_lossy().as_bytes(),
     ))

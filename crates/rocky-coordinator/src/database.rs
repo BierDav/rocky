@@ -9,7 +9,10 @@ use crate::{
 };
 use rocky_core::Commitment;
 use rocky_credentials::{IdentityProvider, PrivateKey, PublicKey, Publisher};
-use rocky_sdk::{Database, DeviceCredential};
+use rocky_sdk::{
+    Database,
+    extension::{self, DeviceCredential},
+};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -79,11 +82,11 @@ pub enum CounterError {
     Endpoint(rocky_core::net::Failure),
     /// `Counters::close` switched these counters off; connect again to come back online.
     Closed,
+    /// `register` was given a key other than the database's root key, which only the owner holds.
+    NotRootKey,
 }
 impl CounterError {
     /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
-    /// `register` was given a key other than the database's root key, which only the owner holds.
-    NotRootKey,
     /// `Claim` is safe to send.
     pub fn retryable(&self) -> bool {
         match self {
@@ -99,10 +102,10 @@ impl std::fmt::Display for CounterError {
             Self::Database(error) => write!(f, "database: {error}"),
             Self::Endpoint(error) => write!(f, "client endpoint: {error}"),
             Self::Closed => f.write_str("counters closed"),
+            Self::NotRootKey => f.write_str("registering needs the database's root key"),
         }
     }
 }
-            Self::NotRootKey => f.write_str("registering needs the database's root key"),
 impl std::error::Error for CounterError {}
 impl From<CoordinationError> for CounterError {
     fn from(error: CoordinationError) -> Self {
@@ -193,7 +196,7 @@ impl Counters {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(CounterError::Closed);
         }
-        Ok(self.shared.database.device_credential().await?)
+        Ok(extension::device_credential(&self.shared.database).await?)
     }
     /// Bounds how long each call waits, 12 seconds (`CALL_DEADLINE`) by default.
     pub fn deadline(self, deadline: Duration) -> Self {
@@ -342,11 +345,12 @@ impl Counters {
             (device.node, None, Some(device.chain)),
             now()?,
         );
-        let signature = self
-            .shared
-            .database
-            .sign_extension(REQUEST_LABEL, &request.extension_body()?)
-            .await?;
+        let signature = extension::sign(
+            &self.shared.database,
+            REQUEST_LABEL,
+            &request.extension_body()?,
+        )
+        .await?;
         Ok(self
             .shared
             .client

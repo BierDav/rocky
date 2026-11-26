@@ -114,10 +114,10 @@ impl Launch {
 }
 async fn introduce_in_process_peers(todos: &Todos, others: Vec<Todos>) -> Result<(), Failure> {
     let contact = todos.database().contact().await?.uri;
-    let scope = todos.database().scope();
+    let scope = rocky_sdk::extension::scope(todos.database());
     for other in others
         .into_iter()
-        .filter(|other| other.database().scope() == scope)
+        .filter(|other| rocky_sdk::extension::scope(other.database()) == scope)
     {
         other.database().add_peer(&contact).await?;
         let theirs = other.database().contact().await?.uri;

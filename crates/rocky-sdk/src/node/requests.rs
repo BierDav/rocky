@@ -144,11 +144,11 @@ impl Node {
         }
     }
 
-    async fn device_credential(&self) -> Result<crate::DeviceCredential, Failure> {
+    async fn device_credential(&self) -> Result<crate::extension::DeviceCredential, Failure> {
         let node = Settings::node_key(&self.vault)?.public_key();
         let revocations = self.replica.revocations().await;
         let settings = self.settings.lock().await;
-        Ok(crate::DeviceCredential {
+        Ok(crate::extension::DeviceCredential {
             scope: self.domain().scope,
             application: settings.schema.application.clone(),
             publisher: settings.publisher,

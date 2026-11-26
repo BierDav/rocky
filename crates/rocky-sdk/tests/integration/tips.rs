@@ -121,7 +121,7 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
                 .is_some_and(|signer| signer.len() == 64)
         );
         let scope: rocky_core::ResourceScope = serde_json::from_value(record["scope"].clone())?;
-        assert_eq!(scope.domain, a.database.scope());
+        assert_eq!(scope.domain, rocky_sdk::extension::scope(&a.database));
     }
     let empty_registry = at_first.iter().find(|record| record["rows"] == 0).unwrap();
     let changed = at_first.iter().find(|record| record["rows"] == 2).unwrap();

@@ -254,14 +254,14 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         (info["node"].clone(), info["principal"].clone())
     };
     let (before_a, before_b) = (identity(a).await, identity(b).await);
-    let scope = a.database.scope();
+    let scope = rocky_sdk::extension::scope(&a.database);
     for device in &devices {
         device.close().await;
     }
 
     let a = Device::open(&root.path().join("a"), Some(iroh())).await?;
     let b = Device::open(&root.path().join("b"), Some(iroh())).await?;
-    assert_eq!(a.database.scope(), scope);
+    assert_eq!(rocky_sdk::extension::scope(&a.database), scope);
     assert_eq!(
         (identity(&a).await, identity(&b).await),
         (before_a, before_b)

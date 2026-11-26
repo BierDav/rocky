@@ -82,7 +82,7 @@ pub(crate) enum Request {
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
     Unlink(rocky_credentials::PeerId, Reply<()>),
     NextPartition(String, Reply<crate::CreatedPartition>),
-    DeviceCredential(Reply<crate::DeviceCredential>),
+    DeviceCredential(Reply<crate::extension::DeviceCredential>),
     SignExtension(Vec<u8>, Reply<rocky_credentials::Signature>),
 }
 impl Request {

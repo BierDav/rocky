@@ -69,7 +69,7 @@ async fn join(
     seed.extend_from_slice(invitation.to_string().as_bytes());
     let signer_stable_across_lost_answers_and_restarts =
         rocky_core::commitment("fixture.join-identity", &seed);
-    let identity = Arc::new(rocky_sdk::IdentityKey::from_secret(
+    let identity = Arc::new(rocky_credentials::key_bytes::identity_key(
         signer_stable_across_lost_answers_and_restarts,
     ));
     Device::new(

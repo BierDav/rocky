@@ -42,7 +42,7 @@ enum OpenMode {
 
 struct Db {
     engine: Database,
-    scope: rocky_sdk::Scope,
+    scope: rocky_sdk::transport::Scope,
 }
 impl Db {
     async fn open(
@@ -81,7 +81,7 @@ impl Db {
             OpenMode::Join { invitation } => configuration.join(&invitation).await?.database,
             OpenMode::Resume => configuration.open().await?,
         };
-        let scope = engine.scope();
+        let scope = rocky_sdk::extension::scope(&engine);
         Ok(Self { engine, scope })
     }
     async fn create(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {

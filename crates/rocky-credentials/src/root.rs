@@ -9,7 +9,7 @@ impl RootKey {
     pub fn generate() -> Self {
         Self(PhraseKey::generate())
     }
-    pub fn from_secret(secret: [u8; 32]) -> Self {
+    pub(crate) fn from_secret(secret: [u8; 32]) -> Self {
         Self(PhraseKey::from_secret(secret))
     }
     pub fn from_phrase(phrase: &str) -> Result<Self, Error> {
@@ -18,7 +18,7 @@ impl RootKey {
     pub fn phrase(&self) -> String {
         self.0.phrase()
     }
-    pub fn secret(&self) -> [u8; 32] {
+    pub(crate) fn secret(&self) -> [u8; 32] {
         self.0.secret()
     }
     pub fn identity(&self) -> IdentityKey {

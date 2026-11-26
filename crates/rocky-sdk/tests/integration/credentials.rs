@@ -319,12 +319,12 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     for name in ["publisher", "user"] {
         assert_eq!(secret(root, "i", name)?, None);
     }
-    let scope = a.database.scope();
+    let scope = rocky_sdk::extension::scope(&a.database);
     a.close().await;
 
     let m = join(root, &hub, "m", &i.invite().await).await?;
     manual(&[&m]).await;
-    assert_eq!(m.database.scope(), scope);
+    assert_eq!(rocky_sdk::extension::scope(&m.database), scope);
     synced(&m).await?;
     assert_eq!(m.titles().await, ["Milk"]);
     m.add(2, "Eggs").await;
@@ -346,7 +346,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
         (&reopened["node"], &reopened["principal"]),
         (&creator["node"], &creator["principal"])
     );
-    assert_eq!(a.database.scope(), scope);
+    assert_eq!(rocky_sdk::extension::scope(&a.database), scope);
     a.close().await;
     Ok(())
 }

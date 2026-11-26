@@ -389,7 +389,9 @@ fn an_identity_key_never_signs_as_the_root() {
 fn an_identity_phrase_and_secret_restore_the_same_signer() {
     let identity = IdentityKey::generate();
     let by_phrase = IdentityKey::from_phrase(&identity.phrase()).unwrap();
-    let by_secret = IdentityKey::from_secret(identity.secret());
+    let by_secret = rocky_credentials::key_bytes::identity_key(
+        rocky_credentials::key_bytes::identity_secret(&identity),
+    );
     let node = PrivateKey::new();
     let grant = CredentialChain(vec![
         Authority::owner(&RootKey::generate())

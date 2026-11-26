@@ -519,7 +519,7 @@ impl Database {
     }
     /// Ends one device: one of the person's own, or as an admin a member's lost device.
     pub async fn unlink(&self, device: DeviceId) -> Result<(), crate::Error> {
-        self.send(|reply| Request::Unlink(crate::PeerId::of(device.0), reply))
+        self.send(|reply| Request::Unlink(rocky_credentials::PeerId::of(device.0), reply))
             .await
     }
     /// Ends this device's session; `PurgeOnClose` deletes its data at close.

@@ -27,7 +27,8 @@ mod delivery;
 mod domain;
 mod enrollment;
 mod error;
-mod extension;
+/// What add-on services such as rocky-coordinator use to verify and sign as this device.
+pub mod extension;
 mod generation;
 mod groups;
 mod identities;
@@ -80,7 +81,6 @@ pub use database::{Created, Database};
 #[cfg(any(test, feature = "test-support"))]
 pub use delivery::State as DeliveryState;
 pub use error::{Blockers, DenyReason, Error, ErrorKind, Limit, Right, Unsupported};
-pub use extension::DeviceCredential;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use inspection::*;
 pub use invitation::{
@@ -100,8 +100,8 @@ pub use rocky_core::{Affinity, DeleteAction};
 pub use rocky_core::{
     ForeignKeyName, ForeignKeyRule, InvalidName, NameRule, RefusedChange, RoleError, SchemaError,
 };
-pub use rocky_core::{NotANumber, RowIdentity, Scope, SqlValue};
-pub use rocky_credentials::{IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey};
+pub use rocky_core::{NotANumber, RowIdentity, SqlValue};
+pub use rocky_credentials::{IdentityKey, IdentityProvider, PublicKey, Purpose, RootKey};
 pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{
     Column, ForeignKey, Index, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,

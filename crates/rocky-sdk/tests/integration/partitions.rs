@@ -190,7 +190,7 @@ async fn own_id_partitions_continue_the_table_log() {
         )
     };
     let mut db = options().create().await.unwrap().database;
-    let _scope: Value = serde_json::to_value(db.scope()).unwrap();
+    let _scope: Value = serde_json::to_value(rocky_sdk::extension::scope(&db)).unwrap();
     let mut previous: Option<rocky_sdk::RowIdentity> = None;
     for index in 0..3 {
         if index == 2 {

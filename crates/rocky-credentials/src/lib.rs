@@ -23,6 +23,7 @@ mod identity;
 mod identity_key;
 mod issuance;
 mod issue;
+pub mod key_bytes;
 mod keys;
 mod membership;
 mod migration;

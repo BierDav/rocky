@@ -22,7 +22,7 @@ pub async fn write_authority(directory: &Path, key: &str, bytes: &[u8]) -> Resul
 }
 
 pub fn external_key(directory: &Path) -> rocky_sdk::IdentityKey {
-    rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
+    rocky_credentials::key_bytes::identity_key(rocky_core::commitment(
         "fixture.external-identity",
         directory.to_string_lossy().as_bytes(),
     ))
@@ -37,8 +37,12 @@ pub async fn create_as(
     let root = rocky_sdk::RootKey::generate();
     let database = configuration
         .create_with_root(
-            Arc::new(rocky_sdk::RootKey::from_secret(root.secret())),
-            Arc::new(rocky_sdk::IdentityKey::from_secret(owner.secret())),
+            Arc::new(rocky_credentials::key_bytes::root_key(
+                rocky_credentials::key_bytes::root_secret(&root),
+            )),
+            Arc::new(rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(&owner),
+            )),
         )
         .await?;
     Ok(Created {
@@ -80,7 +84,7 @@ impl From<Created> for Opened {
 }
 pub struct Device {
     pub database: Database,
-    scope: rocky_sdk::Scope,
+    scope: rocky_sdk::transport::Scope,
     root: Option<String>,
 }
 pub fn parsed_schema() -> &'static rocky_sdk::Schema {
@@ -144,7 +148,7 @@ impl Device {
     pub fn new(opened: impl Into<Opened>) -> Result<Self, Failure> {
         let opened = opened.into();
         Ok(Self {
-            scope: opened.database.scope(),
+            scope: rocky_sdk::extension::scope(&opened.database),
             root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
             database: opened.database,
         })
@@ -177,7 +181,7 @@ impl Device {
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         self.root_signer().expect("fixture root")
     }
-    pub fn scope(&self) -> &rocky_sdk::Scope {
+    pub fn scope(&self) -> &rocky_sdk::transport::Scope {
         &self.scope
     }
     pub fn root_signer(&self) -> Result<Arc<dyn rocky_sdk::IdentityProvider>, Failure> {

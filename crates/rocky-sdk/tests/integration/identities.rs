@@ -1,5 +1,6 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
+use rocky_credentials::key_bytes::{identity_key, identity_secret, root_secret};
 use rocky_sdk::{IdentityKey, IdentityProvider, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -296,12 +297,18 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
         IdentityKey::from_phrase(&opened.owner.phrase())?.person_key(),
         opened.owner.person_key()
     );
-    no_identity_secret(&path, &[key.secret(), key.identity().secret()])?;
+    no_identity_secret(
+        &path,
+        &[root_secret(&key), identity_secret(&key.identity())],
+    )?;
     opened.database.close().await?;
     let opened = config.open().await?;
     assert_eq!(outcome(opened.seal()).await?.0, "ok");
     opened.close().await?;
-    no_identity_secret(&path, &[key.secret(), key.identity().secret()])?;
+    no_identity_secret(
+        &path,
+        &[root_secret(&key), identity_secret(&key.identity())],
+    )?;
     Ok(())
 }
 
@@ -336,7 +343,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
     let second_contact = second.contact().await?.uri;
     let third = common::link(
         open(&third_path, &hub, "third", None),
-        Arc::new(IdentityKey::from_secret(key.secret())),
+        Arc::new(identity_key(identity_secret(&key))),
         &second_contact,
         &second.clone(),
     )
@@ -355,7 +362,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
                 .0,
             index as u64
         );
-        no_identity_secret(&root.path().join(name), &[key.secret()])?;
+        no_identity_secret(&root.path().join(name), &[identity_secret(&key)])?;
     }
     for (database, name) in [&reopened, &second, &third]
         .into_iter()
@@ -370,7 +377,7 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
             .0,
             "ok"
         );
-        no_identity_secret(&root.path().join(name), &[key.secret()])?;
+        no_identity_secret(&root.path().join(name), &[identity_secret(&key)])?;
         database.close().await?;
     }
     owner.close().await;
@@ -399,7 +406,7 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         joined.database.me().await?.person.key(),
         minted.person_key()
     );
-    no_identity_secret(&path, &[minted.secret()])?;
+    no_identity_secret(&path, &[identity_secret(&minted)])?;
     joined.database.close().await?;
     let opened = config.open().await?;
     assert_eq!(
@@ -411,7 +418,7 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         .0,
         "ok"
     );
-    no_identity_secret(&path, &[minted.secret()])?;
+    no_identity_secret(&path, &[identity_secret(&minted)])?;
     opened.close().await?;
     owner.close().await;
     Ok(())
@@ -430,7 +437,7 @@ async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> 
         .identity(Arc::new(IdentityKey::generate()))
         .create_with_root(
             signer.clone(),
-            Arc::new(IdentityKey::from_secret(identity.secret())),
+            Arc::new(identity_key(identity_secret(&identity))),
         )
         .await
         .err()
@@ -444,16 +451,13 @@ async fn an_application_root_signer_creates_with_the_owner_key_it_is_given() -> 
         }
     );
     let opened = config
-        .create_with_root(
-            signer,
-            Arc::new(IdentityKey::from_secret(identity.secret())),
-        )
+        .create_with_root(signer, Arc::new(identity_key(identity_secret(&identity))))
         .await?;
     assert_eq!(
         self::identity(root.path(), "custom")?["identity"],
         json!(identity.person_key())
     );
-    no_identity_secret(&path, &[identity.secret()])?;
+    no_identity_secret(&path, &[identity_secret(&identity)])?;
     opened.close().await?;
     let opened = config.open().await?;
     assert_eq!(outcome(opened.seal()).await?.0, "ok");

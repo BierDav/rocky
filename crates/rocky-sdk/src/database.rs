@@ -217,7 +217,7 @@ impl Shared {
 #[derive(Clone)]
 pub struct Database {
     shared: Arc<Shared>,
-    scope: rocky_core::Scope,
+    pub(crate) scope: rocky_core::Scope,
 }
 impl PartialEq for Database {
     fn eq(&self, other: &Self) -> bool {
@@ -443,10 +443,6 @@ impl Database {
             }),
             scope,
         }
-    }
-    /// The database's identity, the same on every device.
-    pub fn scope(&self) -> rocky_core::Scope {
-        self.scope
     }
     pub(crate) async fn send<T>(
         &self,

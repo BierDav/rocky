@@ -307,7 +307,10 @@ async fn a_reader_and_a_removed_person_are_refused_with_typed_refusals() {
         "a reader still reads the counter"
     );
 
-    let removed = writer.device_credential().await.unwrap().identity;
+    let removed = rocky_sdk::extension::device_credential(&writer)
+        .await
+        .unwrap()
+        .identity;
     office
         .publisher
         .remove(PersonId::new(removed))

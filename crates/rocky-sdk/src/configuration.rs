@@ -86,8 +86,12 @@ impl Configuration {
         let owner = root.identity();
         let database = self
             .create_with_root(
-                Arc::new(crate::RootKey::from_secret(root.secret())),
-                Arc::new(crate::IdentityKey::from_secret(owner.secret())),
+                Arc::new(rocky_credentials::key_bytes::root_key(
+                    rocky_credentials::key_bytes::root_secret(&root),
+                )),
+                Arc::new(rocky_credentials::key_bytes::identity_key(
+                    rocky_credentials::key_bytes::identity_secret(&owner),
+                )),
             )
             .await?;
         Ok(Created {

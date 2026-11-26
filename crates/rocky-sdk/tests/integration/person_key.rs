@@ -25,7 +25,9 @@ fn configured(
         schema,
         None,
         person.map(|key| -> Arc<dyn IdentityProvider> {
-            Arc::new(IdentityKey::from_secret(key.secret()))
+            Arc::new(rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(key),
+            ))
         }),
         Some(Network::Owned(hub.connector(&name))),
     )
@@ -72,7 +74,9 @@ async fn second_device(owned: &Owned) -> Result<Device, Failure> {
                 &owned.hub,
                 Some(&owned.person),
             ),
-            Arc::new(IdentityKey::from_secret(owned.person.secret())),
+            Arc::new(rocky_credentials::key_bytes::identity_key(
+                rocky_credentials::key_bytes::identity_secret(&owned.person),
+            )),
             &owned.owner.contact().await,
             &owned.owner.database,
         )

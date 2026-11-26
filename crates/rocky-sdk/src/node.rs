@@ -305,6 +305,7 @@ pub(crate) struct Node {
     last_syncs: std::sync::Mutex<BTreeMap<PublicKey, crate::PeerReconciliation>>,
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     declared: crate::schema::Schema,
+    declared_installed: AtomicBool,
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
     signer: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
 }
@@ -406,6 +407,7 @@ impl Node {
             discovery_skew: AtomicU64::new(0),
             mailbox: Mutex::new(None),
             declared: settings_schema,
+            declared_installed: AtomicBool::new(false),
             signer: None,
             schema_fetch: Mutex::new(()),
             schema_acquisition: Default::default(),
@@ -439,12 +441,46 @@ impl Node {
         }
         settings.application(&self.declared)
     }
-    pub(crate) async fn upgrade_required(&self) -> Result<Option<(u32, u32)>, Failure> {
+    pub(crate) async fn removed_what_the_application_declares(
+        &self,
+    ) -> Result<Option<crate::Error>, Failure> {
         if self.replica.followed_bookmark().await.is_none() {
             return Ok(None);
         }
         let settings = self.settings.lock().await.clone();
-        settings.upgrade_required(&self.declared)
+        Ok(settings
+            .upgrade_required(&self.declared)?
+            .map(|(installed, declared)| crate::Error::schema_mismatch(installed, declared)))
+    }
+    pub(crate) async fn refuse_sql_while_declared_ahead(&self) -> Result<(), Failure> {
+        if self.declared_installed.load(Ordering::Acquire)
+            || self.replica.followed_bookmark().await.is_none()
+        {
+            return Ok(());
+        }
+        let settings = self.settings.lock().await.clone();
+        if settings.application(&self.declared)? == crate::DeclaredSchema::Ahead {
+            return Err(Box::new(crate::Error::schema_mismatch(
+                settings.generation,
+                self.declared.version,
+            )));
+        }
+        self.declared_installed.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub(crate) async fn staged_switch_mismatch(&self, error: Failure) -> Failure {
+        let staged = matches!(
+            error.downcast_ref::<Error>(),
+            Some(Error::Application(cause)) if cause.is::<rocky_secure::MigrationPending>()
+        );
+        if !staged {
+            return error;
+        }
+        let installed = self.settings.lock().await.generation;
+        Box::new(crate::Error::schema_mismatch(
+            installed,
+            self.declared.version,
+        ))
     }
     pub(crate) async fn migration(
         &self,
@@ -507,7 +543,7 @@ impl Node {
         if self.own_revocation().await?.is_some() {
             return Err(Box::new(crate::Error::removed()));
         }
-        Ok(())
+        self.refuse_sql_while_declared_ahead().await
     }
     pub(crate) async fn sql_session(
         &self,
@@ -2327,9 +2363,6 @@ pub(crate) fn waits_on_blockers(error: &Failure) -> bool {
 fn storage_error(error: &Error, detail: String) -> crate::Error {
     use crate::ErrorKind as Kind;
     let kind = match error {
-        Error::Application(cause) if cause.is::<rocky_secure::MigrationPending>() => {
-            Kind::MigrationPending
-        }
         Error::Application(cause) if cause.is::<rocky_secure::StoreSuperseded>() => {
             Kind::StoreSuperseded
         }
@@ -2392,12 +2425,25 @@ mod error_tests {
         )
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_pending_migration_refusal_is_typed() {
-        let pending: Failure =
-            Box::new(Error::Application(Box::new(rocky_secure::MigrationPending)));
-        let typed = crate::Error::from_failure(&pending);
-        assert_eq!(typed.kind(), &crate::ErrorKind::MigrationPending);
-        assert_eq!(code(pending), ("migration_pending".into(), false));
+    fn a_schema_mismatch_names_both_versions_and_who_clears_it() {
+        let behind: Failure = Box::new(crate::Error::schema_mismatch(3, 2));
+        assert_eq!(
+            crate::Error::from_failure(&behind).kind(),
+            &crate::ErrorKind::SchemaMismatch {
+                installed: 3,
+                declared: 2
+            }
+        );
+        assert!(
+            behind.to_string().contains("upgrade the application"),
+            "{behind}"
+        );
+        assert_eq!(code(behind), ("schema_mismatch".into(), false));
+        let ahead = crate::Error::schema_mismatch(2, 3);
+        assert!(
+            ahead.to_string().contains("an admin device must publish"),
+            "{ahead}"
+        );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_superseded_store_refusal_is_typed_and_final() {

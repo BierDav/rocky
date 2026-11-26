@@ -1324,8 +1324,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             node.refresh_importing().await?;
             node.try_ensure_tip_node().await;
             if matches!(setup.install, Install::Installed) {
-                if let Some((current, declared)) = node.upgrade_required().await? {
-                    return Err(crate::Error::upgrade_required(current, declared).into());
+                if let Some(mismatch) = node.removed_what_the_application_declares().await? {
+                    return Err(mismatch.into());
                 }
                 node.publish_schema_at_open(setup.confirmation.as_deref())
                     .await?;
@@ -1794,7 +1794,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     fn held_schema() -> &'static Schema {
         static PARSED: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(|| {
-            Schema::parse(r#"{"application":"held","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
+            Schema::parse(r#"{"application":"held","version":1,"format":10,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
         });
         &PARSED
     }
@@ -2063,7 +2063,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":9,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":10,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         for format in [0, 1, 2, 3, 5] {
             let directory = rocky_platform::fs::Scratch::new().await;
@@ -2118,7 +2118,7 @@ mod tests {
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
         let schema = Schema::parse(
-            r#"{"format":9,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+            r#"{"format":10,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
         )?;
         let directory = rocky_platform::fs::Scratch::new().await;
         let configuration = Configuration::new(directory.path(), &schema)?;
@@ -2168,7 +2168,7 @@ mod tests {
     async fn saturated_waits_cannot_block_close() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"saturation","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"saturation","version":1,"format":10,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()
@@ -2200,7 +2200,7 @@ mod tests {
         use crate::SqlValue;
         let directory = rocky_platform::fs::Scratch::new().await;
         let schema = Schema::parse(
-            r#"{"application":"poolcheck","version":1,"format":9,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+            r#"{"application":"poolcheck","version":1,"format":10,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
         )?;
         let database = Configuration::new(directory.path(), &schema)?
             .create()

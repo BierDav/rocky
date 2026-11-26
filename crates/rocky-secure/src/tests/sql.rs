@@ -1908,7 +1908,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":9, "publisher": "PUBLISHER",
+        "format":10, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"replayed", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -2035,7 +2035,7 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":9, "publisher": "PUBLISHER",
+        "format":10, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "replayed", "columns": [
                 {"name": "key", "type": "text", "not_null": true},

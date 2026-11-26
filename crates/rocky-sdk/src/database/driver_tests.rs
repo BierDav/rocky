@@ -27,7 +27,7 @@ const SQLITE_READONLY: i32 = 8;
 const SQLITE_AUTH: i32 = 23;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 
-const SHOPPING: &str = r#"{"format":9,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":10,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},
@@ -640,7 +640,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
 
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
     let reader_b = b.connect(READER).await?;
-    let events = b.observe(&[]).await?;
+    let mut events = b.observe(&[]).await?;
 
     run(&writer_a, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(
@@ -823,7 +823,7 @@ async fn a_live_commit_reaches_a_connected_peer_without_sync_now_or_a_tick() -> 
             }
             let reader = b.connect(READER).await?;
             assert_eq!(count(&reader, "items").await?, 0);
-            let events = b.observe(&["items"]).await?;
+            let mut events = b.observe(&["items"]).await?;
             let frozen_at = tokio::time::Instant::now();
             let writer = a.connect(WRITER).await?;
             run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
@@ -895,7 +895,7 @@ async fn an_observer_hears_only_of_changed_rows_not_of_renewals_or_idle_syncs()
     .await?
     .database;
     snap::value(b.sync_now()).await?;
-    let events = b.observe(&[]).await?;
+    let mut events = b.observe(&[]).await?;
     b.renew().await?;
     snap::value(b.sync_now()).await?;
     snap::value(b.sync_now()).await?;

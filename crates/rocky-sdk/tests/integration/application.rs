@@ -20,7 +20,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
     let config = Configuration::new(directory.path(), &schema()?)?;
     let db = config.create().await?.database;
     assert!(config.create().await.is_err());
-    let events = db.observe(&["notes"]).await?;
+    let mut events = db.observe(&["notes"]).await?;
     let mut tx = db.transaction().await?;
     assert!(tx.execute("COMMIT", params![]).await.is_err());
     let id = tx.next_id("notes", vec![]).await?;

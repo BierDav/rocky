@@ -33,7 +33,7 @@ impl Fixture {
         Self::build_keyed(constrained, publisher, class, &["list", "key"])
     }
     fn build_keyed(constrained: bool, publisher: PrivateKey, class: &str, key: &[&str]) -> Self {
-        let mut definition = serde_json::json!({"format":9,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":key,"partition_by":["list"]}]});
+        let mut definition = serde_json::json!({"format":10,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":class,"columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":key,"partition_by":["list"]}]});
         if constrained {
             definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
             definition["tables"][0]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true}]);

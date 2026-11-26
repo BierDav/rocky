@@ -15,7 +15,7 @@ mod sealed;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 use bystanders::{Bystanders, plan_table};
 pub(super) use constraints::{
-    Written, cascades, check_member_order, checked, linked, note, written,
+    Written, cascades, check_member_order, checked, linked, note, with_referencing, written,
 };
 pub(super) use restrictions::restricted;
 
@@ -1869,7 +1869,7 @@ impl<A: RowApplication> Inner<A> {
         let off_path = self.off_path(header, schema, logical);
         let mut scopes = BTreeSet::from([scope]);
         scopes.extend(
-            checked(schema, &reached)
+            checked(schema, &with_referencing(schema, &reached))
                 .iter()
                 .filter_map(|name| typed.by_name(name).map(|projected| projected.scope)),
         );

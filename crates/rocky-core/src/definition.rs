@@ -6,7 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 9;
+pub const DEFINITION_FORMAT: u32 = 10;
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 pub const GENERATED_ID: &str = "id";
 
@@ -51,6 +51,7 @@ pub struct TableDefinition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteAction {
+    Restrict,
     Cascade,
     SetNull,
 }
@@ -195,6 +196,7 @@ impl SchemaDefinition {
                     columns: key.columns.clone(),
                     references,
                     on_delete: match key.on_delete {
+                        DeleteAction::Restrict => crate::DELETE_RESTRICT,
                         DeleteAction::Cascade => crate::DELETE_CASCADE,
                         DeleteAction::SetNull => crate::DELETE_SET_NULL,
                     }
@@ -419,7 +421,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":9,
+        "format":10,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -482,7 +484,7 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -491,7 +493,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -688,6 +690,11 @@ mod identity_tests {
         let declared = tickets().build().unwrap();
         let mut definition = tickets();
         definition.tables[0].primary_key = vec!["id".into()];
+        for column in &mut definition.tables[1].columns {
+            if column.name == "ticket" {
+                column.affinity = Affinity::Blob;
+            }
+        }
         let generated = definition.build().unwrap();
         assert!(generated.table("tickets").unwrap().generated_id());
         assert_ne!(
@@ -701,7 +708,7 @@ mod identity_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":10,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -742,7 +749,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":10,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -765,7 +772,7 @@ mod partition_tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
-        let json = r#"{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
+        let json = r#"{"format":10,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -783,11 +790,58 @@ mod partition_tests {
         );
         assert!(schema.delete_triggers(|name| name == "items").is_empty());
     }
+    fn referencing(entry_type: &str, on_delete: &str) -> String {
+        format!(
+            r#"{{"format":10,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"ledger","tables":[{{"name":"accounts","class":"replayed","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["id"]}},{{"name":"entries","class":"replayed","columns":[{{"name":"account","type":"{entry_type}","not_null":true}}],"primary_key":["id"],"foreign_keys":[{{"columns":["account"],"table":"accounts","on_delete":"{on_delete}"}}]}}]}}"#
+        )
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_restrict_reference_installs_an_immediate_restrict_and_acts_on_no_delete() {
+        let schema = SchemaDefinition::parse(referencing("blob", "restrict").as_bytes())
+            .unwrap()
+            .build()
+            .unwrap();
+        schema.supported_on(crate::Profile::Secure).unwrap();
+        let entries = schema.table("entries").unwrap();
+        assert!(
+            entries.create_sql.contains(
+                "FOREIGN KEY(\"account\") REFERENCES \"accounts\"(\"id\") ON DELETE RESTRICT)"
+            ),
+            "{}",
+            entries.create_sql
+        );
+        assert!(!entries.foreign_keys[0].acts_on_delete());
+        assert!(schema.delete_triggers(|_| true).is_empty());
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_reference_whose_affinity_differs_from_its_parent_key_is_refused() {
+        let refused = SchemaDefinition::parse(referencing("text", "restrict").as_bytes())
+            .unwrap()
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            SchemaError::ReferenceType {
+                table: "entries".into(),
+                column: "account".into(),
+                affinity: Affinity::Text,
+                parent: "accounts".into(),
+                parent_column: "id".into(),
+                parent_affinity: Affinity::Blob,
+            }
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("a reference to a generated id is a Blob column"),
+            "{refused}"
+        );
+    }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn removed_table_classes_are_refused() {
         let json = |class: &str| {
             format!(
-                r#"{{"format":9,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
+                r#"{{"format":10,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
             )
         };
         SchemaDefinition::parse(json("replayed").as_bytes()).unwrap();
@@ -846,7 +900,7 @@ mod replayed_tests {
 
     fn definition(extra: serde_json::Value) -> SchemaDefinition {
         let mut json = serde_json::json!({
-            "format": 9,
+            "format": 10,
             "publisher": "1111111111111111111111111111111111111111111111111111111111111111",
             "application": "replayed",
             "tables": [
@@ -958,7 +1012,7 @@ mod replayed_tests {
     fn replayed_tables_declare_generated_columns_and_index_terms() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 9, "publisher": "00".repeat(32), "application": "terms",
+                "format": 10, "publisher": "00".repeat(32), "application": "terms",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true},
                                 {"name": "cap", "type": "integer", "not_null": true},
@@ -1046,7 +1100,7 @@ mod replayed_tests {
     fn conflict_policies_existence_logs_and_update_policies_are_refused() {
         let parsed = |edit: &dyn Fn(&mut serde_json::Value)| {
             let mut json = serde_json::json!({
-                "format": 9, "publisher": "00".repeat(32), "application": "removed",
+                "format": 10, "publisher": "00".repeat(32), "application": "removed",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "name", "type": "text", "not_null": true}],
                     "indexes": [{"name": "by_name", "unique": true,
@@ -1260,7 +1314,7 @@ mod rename_tests {
 
     fn version(items: &str, title: serde_json::Value, extra: serde_json::Value) -> LogicalSchema {
         let mut json = serde_json::json!({
-            "format": 9, "publisher": "11".repeat(32), "application": "budget",
+            "format": 10, "publisher": "11".repeat(32), "application": "budget",
             "tables": [
                 {"name": "lists", "class": "replayed", "primary_key": ["id"],
                  "columns": [{"name": "name", "type": "text"}]},
@@ -1436,7 +1490,7 @@ mod rename_tests {
     fn an_earlier_name_is_never_reused_or_the_row_identity() {
         let parse = |title: serde_json::Value| {
             let json = serde_json::json!({
-                "format": 9, "publisher": "11".repeat(32), "application": "budget",
+                "format": 10, "publisher": "11".repeat(32), "application": "budget",
                 "tables": [{"name": "items", "class": "replayed", "primary_key": ["id"],
                     "columns": [{"name": "key", "type": "text"}, title]}]
             });

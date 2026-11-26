@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 9;
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 10;
 pub const TYPED_RULE: &str = "rocky.sdk.typed.v2";
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -95,6 +95,13 @@ pub struct LogicalForeignKey {
     pub on_update: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
+}
+impl LogicalForeignKey {
+    pub fn acts_on_delete(&self) -> bool {
+        [DELETE_CASCADE, DELETE_SET_NULL]
+            .iter()
+            .any(|action| self.on_delete.eq_ignore_ascii_case(action))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,6 +256,14 @@ pub enum SchemaError {
         rule: ForeignKeyRule,
     },
     Change(crate::RefusedChange),
+    ReferenceType {
+        table: String,
+        column: String,
+        affinity: Affinity,
+        parent: String,
+        parent_column: String,
+        parent_affinity: Affinity,
+    },
 }
 impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -263,6 +278,17 @@ impl std::fmt::Display for SchemaError {
             Self::Change(refusal) => write!(
                 f,
                 "the application schema cannot replace the installed one: {refusal}"
+            ),
+            Self::ReferenceType {
+                table,
+                column,
+                affinity,
+                parent,
+                parent_column,
+                parent_affinity,
+            } => write!(
+                f,
+                "{table}.{column} is {affinity:?} but the {parent}.{parent_column} it references is {parent_affinity:?}, so no value matches; a reference to a generated id is a Blob column"
             ),
         }
     }
@@ -472,6 +498,7 @@ pub fn foreign_key_clause(key: &LogicalForeignKey) -> String {
         key.on_delete
     )
 }
+pub const DELETE_RESTRICT: &str = "RESTRICT";
 pub const DELETE_CASCADE: &str = "CASCADE";
 pub const DELETE_SET_NULL: &str = "SET NULL";
 pub const DELETE_TRIGGERS: &str = "rocky_set_null_";
@@ -873,7 +900,7 @@ impl LogicalTable {
         }
         for key in &self.foreign_keys {
             let clause = self.foreign_key_sql(key);
-            if ![DELETE_CASCADE, DELETE_SET_NULL].contains(&key.on_delete.as_str())
+            if ![DELETE_RESTRICT, DELETE_CASCADE, DELETE_SET_NULL].contains(&key.on_delete.as_str())
                 || key.on_update != "NO ACTION"
                 || !(self.create_sql.contains(&format!("{clause},"))
                     || self.create_sql.contains(&format!("{clause})")))
@@ -1094,6 +1121,27 @@ impl LogicalSchema {
                         key.columns.join(","),
                         parent.sql_name
                     ));
+                }
+                let mismatch =
+                    key.columns
+                        .iter()
+                        .zip(&key.references)
+                        .find_map(|(column, parent_column)| {
+                            let held = table.column(column)?;
+                            let referenced = parent.column(parent_column)?;
+                            (held.affinity != referenced.affinity).then(|| {
+                                SchemaError::ReferenceType {
+                                    table: table.sql_name.clone(),
+                                    column: held.sql_name.clone(),
+                                    affinity: held.affinity,
+                                    parent: parent.sql_name.clone(),
+                                    parent_column: referenced.sql_name.clone(),
+                                    parent_affinity: referenced.affinity,
+                                }
+                            })
+                        });
+                if let Some(mismatch) = mismatch {
+                    return Err(mismatch);
                 }
                 if let Some(rule) = table.set_null_rule(key) {
                     return Err(SchemaError::ForeignKey {

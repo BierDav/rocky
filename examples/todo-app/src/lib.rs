@@ -2,9 +2,9 @@ pub mod position;
 pub mod roles;
 
 use rocky_sdk::{
-    Affinity, Column, Commit, Configuration, Database, DeleteAction, DropReason,
-    ForeignKeyDefinition, IndexColumn, IndexDefinition, Row, RowIdentity, Schema, SqlValue, Table,
-    Transaction, TransactionOutcome, TransactionToken, params,
+    Affinity, Column, Commit, Configuration, Database, DeleteAction, DropReason, ForeignKey, Index,
+    Row, RowIdentity, Schema, SqlValue, Table, Transaction, TransactionOutcome, TransactionToken,
+    params,
 };
 pub use roles::{Member, Role};
 use std::path::PathBuf;
@@ -41,17 +41,12 @@ pub fn schema() -> Result<Schema, Failure> {
         )
         .check(title_check)
         .check("completed IN (0, 1)")
-        .index(unique("todos_list_title", ["list", "title"]))
-        .index(unique("todos_list_position", ["list", "position"]))
+        .index(Index::new("todos_list_title", ["list", "title"]).unique())
+        .index(Index::new("todos_list_position", ["list", "position"]).unique())
         .primary_key(["list", "id"])
         .partition_by(["list"])
         .partition_group(LIST_GROUP)
-        .foreign_key(ForeignKeyDefinition {
-            columns: vec!["list".into()],
-            table: LISTS.into(),
-            on_delete: DeleteAction::Cascade,
-            deferred: false,
-        });
+        .foreign_key(ForeignKey::new(["list"], LISTS).on_delete(DeleteAction::Cascade));
     let devices = Table::replayed(DEVICES)
         .column(Column::new("node", Affinity::Text).required())
         .column(Column::new("role", Affinity::Text).required())
@@ -71,22 +66,6 @@ pub fn schema() -> Result<Schema, Failure> {
         )
         .build()?)
 }
-fn unique<const N: usize>(name: &str, columns: [&str; N]) -> IndexDefinition {
-    IndexDefinition {
-        name: name.into(),
-        columns: columns
-            .into_iter()
-            .map(|name| IndexColumn {
-                name: name.into(),
-                descending: false,
-            })
-            .collect(),
-        unique: true,
-        expressions: Vec::new(),
-        predicate: None,
-    }
-}
-
 pub fn configuration(directory: impl Into<PathBuf>) -> Result<Configuration, Failure> {
     Ok(Configuration::new(directory, &schema()?)?)
 }

@@ -4,13 +4,10 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
 fn release() -> rocky_sdk::Schema {
-    use rocky_sdk::{Affinity, Column, DeleteAction, ForeignKeyDefinition, Table};
+    use rocky_sdk::{Affinity, Column, DeleteAction, ForeignKey, Index, Table};
     let required = |name: &str, affinity| Column::new(name, affinity).required();
-    let reference = |columns: &[&str], table: &str, on_delete| ForeignKeyDefinition {
-        columns: columns.iter().map(|column| (*column).into()).collect(),
-        table: table.into(),
-        on_delete,
-        deferred: false,
+    let reference = |columns: &[&str], table: &str, on_delete| {
+        ForeignKey::new(columns.iter().copied(), table).on_delete(on_delete)
     };
     let in_list = |table: &str| {
         Table::replayed(table)
@@ -33,18 +30,7 @@ fn release() -> rocky_sdk::Schema {
                 .column(required("title", Affinity::Text))
                 .column(required("completed", Affinity::Integer))
                 .column(Column::new("category", Affinity::Blob))
-                .index(rocky_sdk::IndexDefinition {
-                    name: "index_items_list_title".into(),
-                    columns: ["list", "title"]
-                        .map(|name| rocky_sdk::IndexColumn {
-                            name: name.into(),
-                            descending: false,
-                        })
-                        .into(),
-                    unique: true,
-                    expressions: Vec::new(),
-                    predicate: None,
-                })
+                .index(Index::new("index_items_list_title", ["list", "title"]).unique())
                 .foreign_key(reference(
                     &["list", "category"],
                     "categories",

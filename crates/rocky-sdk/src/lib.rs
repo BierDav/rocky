@@ -96,7 +96,7 @@ pub use people::{
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
-pub use rocky_core::{Affinity, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition};
+pub use rocky_core::{Affinity, DeleteAction};
 pub use rocky_core::{
     ForeignKeyName, ForeignKeyRule, InvalidName, NameRule, RefusedChange, RoleError, SchemaError,
 };
@@ -105,7 +105,9 @@ pub use rocky_credentials::{
     FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
 };
 pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
-pub use schema::{Column, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table};
+pub use schema::{
+    Column, ForeignKey, Index, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,
+};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{ContactInfo, Network, ServiceError, StatusChanges, SyncMode};
 pub use sql::{
@@ -113,6 +115,9 @@ pub use sql::{
     TransactionToken,
 };
 pub(crate) use status::*;
+pub use status::{
+    AlertKind, BlockerKind, ClearsBy, DatabaseStatus, DeclaredSchema, MigrationStatus, SyncReport,
+};
 pub use store_only::StoreOnlyRefusal;
 #[cfg(any(test, feature = "test-support"))]
 pub use testing::*;

@@ -6098,6 +6098,7 @@ name = "rocky-sdk"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "futures-core",
  "futures-util",
  "http-body-util",
  "hyper",

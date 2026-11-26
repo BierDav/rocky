@@ -2,8 +2,8 @@ use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, build, introduce, items, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, ErrorKind, ForeignKeyName, IndexColumn, IndexDefinition, Network,
-    RefusedChange, Schema, SchemaError, Table, transport::memory::Hub,
+    Affinity, Column, ErrorKind, ForeignKeyName, Index, Network, RefusedChange, Schema,
+    SchemaError, Table, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -37,17 +37,8 @@ fn nullable_position() -> Schema {
 fn bare_position() -> Schema {
     build(shopping(2).table(items().column(position())))
 }
-fn unique_titles() -> IndexDefinition {
-    IndexDefinition {
-        name: "items_title".into(),
-        columns: vec![IndexColumn {
-            name: "title".into(),
-            descending: false,
-        }],
-        unique: true,
-        expressions: Vec::new(),
-        predicate: None,
-    }
+fn unique_titles() -> Index {
+    Index::new("items_title", ["title"]).unique()
 }
 fn unique() -> Schema {
     build(shopping(1).table(items().index(unique_titles())))
@@ -223,9 +214,19 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
         status["waiting_for_issuer"], true,
         "a member ahead waits for its bookmark to reach its schema"
     );
+    let refused = ahead
+        .database
+        .query("SELECT title FROM items", Vec::new())
+        .await
+        .err()
+        .ok_or("a member ahead of the installed schema read its rows")?;
     assert_eq!(
-        ahead.titles().await,
-        ["apples", unsent_when_issuer_publishes]
+        refused.kind(),
+        &ErrorKind::SchemaMismatch {
+            installed: 1,
+            declared: 2
+        },
+        "a member ahead reads nothing until an admin publishes its schema: {refused}"
     );
     ahead.close().await;
 
@@ -1301,12 +1302,10 @@ fn linkable() -> Schema {
 fn linked() -> Schema {
     linking(
         2,
-        list_items().foreign_key(rocky_sdk::ForeignKeyDefinition {
-            columns: vec!["list".into()],
-            table: "lists".into(),
-            on_delete: rocky_sdk::DeleteAction::SetNull,
-            deferred: false,
-        }),
+        list_items().foreign_key(
+            rocky_sdk::ForeignKey::new(["list"], "lists")
+                .on_delete(rocky_sdk::DeleteAction::SetNull),
+        ),
     )
 }
 

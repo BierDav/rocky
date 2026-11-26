@@ -219,7 +219,9 @@ impl Node {
                 )))
             })
             .collect::<Result<Vec<_>, Failure>>()?;
-        self.replica.publish_tip_statements(&records).await?;
+        if let Err(error) = self.replica.publish_tip_statements(&records).await {
+            return Err(self.staged_switch_mismatch(error.into()).await);
+        }
         self.wake_sync();
         Ok(())
     }
@@ -304,7 +306,9 @@ impl Node {
         let published = self.replica.publish_tip_statements(&statements).await;
         drop(signer);
         self.wake_sync();
-        published?;
+        if let Err(error) = published {
+            return Err(self.staged_switch_mismatch(error.into()).await);
+        }
         self.finalize_seals().await;
         self.followed_tip_changed(before).await;
         self.ensure_tip_node().await?;

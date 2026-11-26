@@ -61,8 +61,6 @@ pub enum ErrorKind {
     /// `Schema::build` refused the schema, or the installed version cannot become it; the
     /// `SchemaError` names the table, column or foreign key and the rule.
     Schema(Box<crate::SchemaError>),
-    /// A migration to the declared schema has not finished on this device.
-    MigrationPending,
     /// A migration step failed and its version was withdrawn; a retry does not clear it.
     MigrationFailed {
         /// The version the migration targeted.
@@ -70,12 +68,13 @@ pub enum ErrorKind {
         /// The failing step, counted from 1 in the order the migration lists its steps.
         step: usize,
     },
-    /// The database is at a version that removed a table or field this application declares;
-    /// upgrade the application.
-    UpgradeRequired {
-        /// The database's version.
-        current: u32,
-        /// The application's declared version.
+    /// The installed schema version and the application's declared one cannot serve this call;
+    /// when `installed` is newer upgrade the application, and when `declared` is newer an admin
+    /// device must publish it first, or this device sync with one that has.
+    SchemaMismatch {
+        /// The version the database runs.
+        installed: u32,
+        /// The version the application declares.
         declared: u32,
     },
     /// This copy is older than what peers have seen from it, as after restoring a backup; it reads
@@ -234,9 +233,8 @@ impl ErrorKind {
             Self::Sql { .. } => "sql",
             Self::Decode(_) => "decode",
             Self::Schema(_) => "invalid_schema",
-            Self::MigrationPending => "migration_pending",
             Self::MigrationFailed { .. } => "migration_failed",
-            Self::UpgradeRequired { .. } => "upgrade_required",
+            Self::SchemaMismatch { .. } => "schema_mismatch",
             Self::StoreSuperseded => "store_superseded",
             Self::StoreOnly(_) => "store_only",
             Self::UnsupportedGeneration => "unsupported_generation",
@@ -373,11 +371,19 @@ impl Error {
         )
     }
 
-    pub(crate) fn upgrade_required(current: u32, declared: u32) -> Self {
+    pub(crate) fn schema_mismatch(installed: u32, declared: u32) -> Self {
+        let remedy = if installed > declared {
+            "it removed a table or field the application uses, so upgrade the application"
+        } else {
+            "an admin device must publish the declared version first, or this device sync with one that has"
+        };
         Self::new(
-            ErrorKind::UpgradeRequired { current, declared },
+            ErrorKind::SchemaMismatch {
+                installed,
+                declared,
+            },
             format!(
-                "the application declares schema version {declared}, but this database is at version {current}, which removed a table or field it uses; upgrade the application"
+                "the application declares schema version {declared}, but this database runs version {installed}: {remedy}"
             ),
         )
     }

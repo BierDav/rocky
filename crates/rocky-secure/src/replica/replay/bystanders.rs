@@ -27,12 +27,6 @@ pub(super) fn plan_table<'a>(
     Ok(plans.get(&lowered))
 }
 
-fn acts_on_delete(key: &rocky_core::LogicalForeignKey) -> bool {
-    ["CASCADE", "SET NULL", "SET DEFAULT"]
-        .iter()
-        .any(|action| key.on_delete.eq_ignore_ascii_case(action))
-}
-
 pub(super) struct Bystanders<'a> {
     schema: &'a rocky_core::LogicalSchema,
     plans: &'a Plans,
@@ -90,7 +84,7 @@ impl<'a> Bystanders<'a> {
                     .foreign_keys
                     .iter()
                     .filter(|reference| reference.table.eq_ignore_ascii_case(&name))
-                    .filter(|reference| acts_on_delete(reference))
+                    .filter(|reference| reference.acts_on_delete())
                 {
                     let referenced = match reference.references.is_empty() {
                         true => &logical.primary_key,

@@ -445,7 +445,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
     use_future(move || {
         let todos = observed.clone();
         async move {
-            let events = match todos.database().observe(&[]).await {
+            let mut events = match todos.database().observe(&[]).await {
                 Ok(events) => events,
                 Err(failure) => return error.set(Some(failure.to_string())),
             };

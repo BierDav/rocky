@@ -1,20 +1,15 @@
 use crate::support;
 use rocky_sdk::{
-    Affinity, Column, Database, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition,
-    MigrationStep, Network, Schema, SchemaBuilder, Table, transport::memory::Hub,
+    Affinity, Column, Database, DeleteAction, ForeignKey, Index, MigrationStep, Network, Schema,
+    SchemaBuilder, Table, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::secrets;
 use support::snapshot as snap;
 
-fn reference(columns: &[&str], table: &str, on_delete: DeleteAction) -> ForeignKeyDefinition {
-    ForeignKeyDefinition {
-        columns: columns.iter().map(|column| (*column).into()).collect(),
-        table: table.into(),
-        on_delete,
-        deferred: false,
-    }
+fn reference(columns: &[&str], table: &str, on_delete: DeleteAction) -> ForeignKey {
+    ForeignKey::new(columns.iter().copied(), table).on_delete(on_delete)
 }
 fn required(name: &str, affinity: Affinity) -> Column {
     Column::new(name, affinity).required()
@@ -30,18 +25,7 @@ fn items() -> Table {
     in_list("items")
         .column(required("title", Affinity::Text))
         .column(Column::new("category", Affinity::Blob))
-        .index(IndexDefinition {
-            name: "index_items_list_title".into(),
-            columns: ["list", "title"]
-                .map(|name| IndexColumn {
-                    name: name.into(),
-                    descending: false,
-                })
-                .into(),
-            unique: true,
-            expressions: Vec::new(),
-            predicate: None,
-        })
+        .index(Index::new("index_items_list_title", ["list", "title"]).unique())
 }
 fn referencing_items() -> Table {
     items()

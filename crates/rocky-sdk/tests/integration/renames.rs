@@ -1,8 +1,8 @@
 use crate::common::{self, Device, Failure, build, introduce, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, Commit, Configuration, DropReason, ErrorKind, IndexColumn, IndexDefinition,
-    MigrationStep, Network, Role, RoleName, Schema, Table, TransactionOutcome, TransactionToken,
-    params, transport::memory::Hub,
+    Affinity, Column, Commit, Configuration, DropReason, ErrorKind, Index, MigrationStep, Network,
+    Role, RoleName, Schema, Table, TransactionOutcome, TransactionToken, params,
+    transport::memory::Hub,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -214,8 +214,8 @@ async fn a_late_write_to_a_renamed_column_lands_in_its_new_name() -> Result<(), 
     assert!(
         matches!(
             old_reader.kind(),
-            ErrorKind::UpgradeRequired {
-                current: 2,
+            ErrorKind::SchemaMismatch {
+                installed: 2,
                 declared: 1
             }
         ),
@@ -389,17 +389,8 @@ async fn a_rename_that_forgets_an_earlier_name_is_refused_before_it_publishes()
 }
 
 const EDITOR: RoleName = RoleName::from_static("editor");
-fn unique(column: &str) -> IndexDefinition {
-    IndexDefinition {
-        name: "items_unique_title".into(),
-        columns: vec![IndexColumn {
-            name: column.into(),
-            descending: false,
-        }],
-        unique: true,
-        expressions: Vec::new(),
-        predicate: None,
-    }
+fn unique(column: &str) -> Index {
+    Index::new("items_unique_title", [column]).unique()
 }
 fn edited(version: u32, title: Column, column: &str) -> Schema {
     build(

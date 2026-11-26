@@ -2,8 +2,8 @@ use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, build, introduce, items, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, DeleteAction, ForeignKeyDefinition, IndexColumn, IndexDefinition, Network,
-    Schema, Table, transport::memory::Hub,
+    Affinity, Column, DeleteAction, ForeignKey, Index, Network, Schema, Table,
+    transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -15,22 +15,10 @@ fn shelved() -> Schema {
                 items()
                     .column(Column::new("category", Affinity::Text))
                     .column(Column::new("shelf", Affinity::Text))
-                    .index(IndexDefinition {
-                        name: "items_category".into(),
-                        columns: vec![IndexColumn {
-                            name: "category".into(),
-                            descending: false,
-                        }],
-                        unique: true,
-                        expressions: Vec::new(),
-                        predicate: None,
-                    })
-                    .foreign_key(ForeignKeyDefinition {
-                        columns: vec!["shelf".into()],
-                        table: "shelves".into(),
-                        on_delete: DeleteAction::SetNull,
-                        deferred: false,
-                    }),
+                    .index(Index::new("items_category", ["category"]).unique())
+                    .foreign_key(
+                        ForeignKey::new(["shelf"], "shelves").on_delete(DeleteAction::SetNull),
+                    ),
             )
             .table(
                 Table::replayed("shelves")

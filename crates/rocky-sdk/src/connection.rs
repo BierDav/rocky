@@ -103,9 +103,9 @@ async fn explained(
         unsupported: None,
         ..
     } = typed.kind()
-        && let Ok(Some((current, declared))) = node.upgrade_required().await
+        && let Ok(Some(mismatch)) = node.removed_what_the_application_declares().await
     {
-        return Box::new(crate::Error::upgrade_required(current, declared));
+        return Box::new(mismatch);
     }
     let mut explained = match next_id {
         Some(table) => node.allocation_refusal(table, &typed).await,
@@ -1053,50 +1053,63 @@ impl From<rocky_storage::observe::Cause> for ChangeCause {
     }
 }
 
-/// Changes to observed tables, from `Database::observe`.
+/// Changes to observed tables, from `Database::observe`, as a `Stream` that ends when the
+/// database closes; each item is an invalidation to read the tables again, not a row diff.
 pub struct TableEvents {
-    observer: Mutex<TableObserver>,
+    observer: TableObserver,
+    carried: Option<TableChange>,
 }
 /// One or more coalesced changes; read the tables again to see them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableChange {
-    /// The changed tables.
+    /// The changed tables; empty only when `dropped` is not.
     pub tables: Vec<String>,
     /// Why they changed.
     pub causes: Vec<ChangeCause>,
     /// Committed transactions that replay dropped, such as by a constraint violation or a schema
     /// that can no longer apply them.
     pub dropped: Vec<DroppedTransaction>,
-    /// Transactions whose outcome became final.
+    /// Transactions whose outcome became final since the previous change; finality alone emits
+    /// no change, so ask `transaction_outcome` for a token you wait on.
     pub sealed: Vec<crate::TransactionToken>,
     /// Set when more than 4096 outcomes coalesced, so `dropped` and `sealed` are empty; ask
     /// `transaction_outcome` for the tokens you track.
     pub reconcile: bool,
 }
-/// A committed transaction replay dropped on every device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DroppedTransaction {
-    /// The transaction.
-    pub token: crate::TransactionToken,
-    /// Why it was dropped.
-    pub reason: rocky_core::replay::DropReason,
-}
-impl TableEvents {
-    pub(crate) fn new(observer: TableObserver) -> Self {
-        Self {
-            observer: Mutex::new(observer),
-        }
+impl TableChange {
+    fn visible(&self) -> bool {
+        !self.tables.is_empty() || !self.dropped.is_empty()
     }
-    /// Waits for the next change.
-    pub async fn next(&self) -> Result<TableChange, crate::Error> {
-        let change = self
-            .observer
-            .lock()
-            .await
-            .next()
-            .await
-            .map_err(|error| crate::Error::failed(error.into()))?;
-        Ok(TableChange {
+    fn after(mut self, earlier: Option<Self>) -> Self {
+        let Some(earlier) = earlier else {
+            return self;
+        };
+        for cause in earlier.causes {
+            if !self.causes.contains(&cause) {
+                self.causes.push(cause);
+            }
+        }
+        self.causes.sort_unstable();
+        let mut sealed = earlier.sealed;
+        for token in std::mem::take(&mut self.sealed) {
+            if !sealed.contains(&token) {
+                sealed.push(token);
+            }
+        }
+        self.sealed = sealed;
+        self.reconcile |= earlier.reconcile
+            || self.sealed.len() + self.dropped.len()
+                > rocky_storage::observe::MAX_PENDING_OUTCOMES;
+        if self.reconcile {
+            self.sealed.clear();
+            self.dropped.clear();
+        }
+        self
+    }
+}
+impl From<rocky_storage::observe::TableChange> for TableChange {
+    fn from(change: rocky_storage::observe::TableChange) -> Self {
+        Self {
             tables: change.tables.into_iter().collect(),
             causes: change.causes.into_iter().map(ChangeCause::from).collect(),
             dropped: change
@@ -1113,7 +1126,132 @@ impl TableEvents {
                 .map(crate::TransactionToken::new)
                 .collect(),
             reconcile: change.reconcile,
+        }
+    }
+}
+/// A committed transaction replay dropped on every device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DroppedTransaction {
+    /// The transaction.
+    pub token: crate::TransactionToken,
+    /// Why it was dropped.
+    pub reason: rocky_core::replay::DropReason,
+}
+impl TableEvents {
+    pub(crate) fn new(observer: TableObserver) -> Self {
+        Self {
+            observer,
+            carried: None,
+        }
+    }
+    /// Waits for the next change, as `StreamExt::next` does without importing it; fails with
+    /// `ErrorKind::Closed` once the database closed.
+    pub async fn next(&mut self) -> Result<TableChange, crate::Error> {
+        std::future::poll_fn(|cx| self.poll_change(cx)).await
+    }
+    fn poll_change(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<TableChange, crate::Error>> {
+        use std::task::Poll;
+        loop {
+            let change = match self.observer.poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(change)) => TableChange::from(change).after(self.carried.take()),
+                Poll::Ready(Err(rocky_storage::Error::Closed)) => {
+                    return Poll::Ready(Err(crate::Error::closed("the database closed")));
+                }
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(crate::Error::failed(error.into())));
+                }
+            };
+            if change.visible() {
+                return Poll::Ready(Ok(change));
+            }
+            self.carried = Some(change);
+        }
+    }
+}
+impl futures_core::Stream for TableEvents {
+    type Item = Result<TableChange, crate::Error>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().poll_change(cx).map(|change| match change {
+            Err(error) if error.kind() == &crate::ErrorKind::Closed => None,
+            change => Some(change),
         })
+    }
+}
+
+#[cfg(test)]
+mod table_events_tests {
+    use super::*;
+    use futures_core::Stream;
+    use rocky_storage::observe::{Cause, Outcomes, TableEvents as Registry};
+    use std::task::{Context, Poll, Waker};
+
+    fn poll(events: &mut TableEvents) -> Poll<Option<Result<TableChange, crate::Error>>> {
+        std::pin::Pin::new(events).poll_next(&mut Context::from_waker(Waker::noop()))
+    }
+    fn tables(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn sealing_alone_emits_no_change_and_rides_with_the_next_visible_one() {
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([1; 16]),
+            domain: rocky_core::DomainId([1; 16]),
+        };
+        let registry = Registry::new(scope, ["items".to_owned(), "tags".to_owned()]);
+        let observer = TableObserver::new();
+        registry
+            .register(&observer, Some(&[("items".into(), "items".into())]))
+            .unwrap();
+        let mut events = TableEvents::new(observer);
+        assert!(poll(&mut events).is_pending());
+        registry.publish_outcomes(
+            1,
+            &Outcomes {
+                dropped: BTreeMap::new(),
+                sealed: [[7; 32]].into(),
+            },
+        );
+        assert!(
+            poll(&mut events).is_pending(),
+            "a change with no table and no drop is never emitted"
+        );
+        registry.publish(Some(&tables(&["tags"])), 2, &[Cause::Local]);
+        assert!(poll(&mut events).is_pending());
+        registry.publish(Some(&tables(&["items"])), 3, &[Cause::Local]);
+        let change = match poll(&mut events) {
+            Poll::Ready(Some(Ok(change))) => change,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(change.tables, ["items"]);
+        assert_eq!(change.causes, [ChangeCause::Local, ChangeCause::Sync]);
+        assert_eq!(change.sealed, [crate::TransactionToken::new([7; 32])]);
+        registry.publish_outcomes(
+            4,
+            &Outcomes {
+                dropped: [([9; 32], rocky_core::replay::DropReason::Constraint)].into(),
+                sealed: BTreeSet::new(),
+            },
+        );
+        let change = match poll(&mut events) {
+            Poll::Ready(Some(Ok(change))) => change,
+            other => panic!("{other:?}"),
+        };
+        assert!(change.tables.is_empty());
+        assert_eq!(change.dropped.len(), 1, "a drop alone is visible");
+        drop(registry);
+        assert!(
+            matches!(poll(&mut events), Poll::Ready(None)),
+            "the stream ends when the database closes"
+        );
     }
 }
 

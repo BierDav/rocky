@@ -2,9 +2,12 @@ use crate::Error;
 use rocky_core::{Commitment, Scope, replay::DropReason};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex, Weak},
+    task::{Context, Poll},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, futures::OwnedNotified};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Cause {
@@ -58,7 +61,7 @@ struct Pending {
 #[derive(Default)]
 struct Slot {
     pending: Mutex<Pending>,
-    notify: Notify,
+    notify: Arc<Notify>,
 }
 impl Slot {
     fn offer(&self, labels: Vec<String>, scope: Scope, revision: u64, causes: &[Cause]) {
@@ -249,6 +252,7 @@ impl TableEvents {
 pub struct TableObserver {
     slot: Arc<Slot>,
     registered: BTreeMap<Scope, u64>,
+    waiting: Option<Pin<Box<OwnedNotified>>>,
 }
 impl TableObserver {
     pub fn new() -> Self {
@@ -268,13 +272,24 @@ impl TableObserver {
             None => Ok(None),
         }
     }
-    pub async fn next(&mut self) -> Result<TableChange, Error> {
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<TableChange, Error>> {
         loop {
             if let Some(change) = self.try_next()? {
-                return Ok(change);
+                self.waiting = None;
+                return Poll::Ready(Ok(change));
             }
-            self.slot.notify.notified().await;
+            let notify = &self.slot.notify;
+            let waiting = self
+                .waiting
+                .get_or_insert_with(|| Box::pin(Arc::clone(notify).notified_owned()));
+            if waiting.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            self.waiting = None;
         }
+    }
+    pub async fn next(&mut self) -> Result<TableChange, Error> {
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
     }
 }
 

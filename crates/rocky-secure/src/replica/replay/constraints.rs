@@ -39,7 +39,7 @@ pub(in crate::replica) fn cascades(
             let acts = child
                 .foreign_keys
                 .iter()
-                .any(|key| key.table.eq_ignore_ascii_case(&parent) && key.on_delete != "NO ACTION");
+                .any(|key| key.table.eq_ignore_ascii_case(&parent) && key.acts_on_delete());
             let name = child.sql_name.to_ascii_lowercase();
             if child.class == TableClass::Replayed && acts && reached.insert(name.clone()) {
                 work.push(name);
@@ -47,6 +47,27 @@ pub(in crate::replica) fn cascades(
         }
     }
     reached
+}
+
+pub(in crate::replica) fn with_referencing(
+    schema: &rocky_core::LogicalSchema,
+    deleted: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut read = deleted.clone();
+    for child in schema
+        .tables
+        .iter()
+        .filter(|child| child.class == TableClass::Replayed)
+    {
+        if child
+            .foreign_keys
+            .iter()
+            .any(|key| deleted.contains(&key.table.to_ascii_lowercase()))
+        {
+            read.insert(child.sql_name.to_ascii_lowercase());
+        }
+    }
+    read
 }
 
 pub(in crate::replica) fn referenced(

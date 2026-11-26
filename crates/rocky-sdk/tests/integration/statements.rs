@@ -299,13 +299,8 @@ fn accounts() -> Table {
         .column(Column::new("code", Affinity::Text).required())
         .primary_key(["code"])
 }
-fn set_null(column: &str) -> rocky_sdk::ForeignKeyDefinition {
-    rocky_sdk::ForeignKeyDefinition {
-        columns: vec![column.into()],
-        table: "accounts".into(),
-        on_delete: rocky_sdk::DeleteAction::SetNull,
-        deferred: false,
-    }
+fn set_null(column: &str) -> rocky_sdk::ForeignKey {
+    rocky_sdk::ForeignKey::new([column], "accounts").on_delete(rocky_sdk::DeleteAction::SetNull)
 }
 fn refused_foreign_key(schema: rocky_sdk::SchemaBuilder) -> Option<SchemaError> {
     match schema.build().err().map(|error| error.kind().clone()) {

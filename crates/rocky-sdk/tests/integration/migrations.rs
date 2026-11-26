@@ -4,8 +4,8 @@ mod replayed;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, build, introduce, items, required, shopping};
 use rocky_sdk::{
-    Affinity, Column, DeleteAction, ForeignKeyDefinition, MigrationStep, Network, Schema,
-    SchemaBuilder, Table, transport::memory::Hub,
+    Affinity, Column, DeleteAction, ForeignKey, MigrationStep, Network, Schema, SchemaBuilder,
+    Table, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -912,13 +912,8 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     Ok(())
 }
 
-fn set_null(column: &str, table: &str) -> ForeignKeyDefinition {
-    ForeignKeyDefinition {
-        columns: vec![column.into()],
-        table: table.into(),
-        on_delete: DeleteAction::SetNull,
-        deferred: false,
-    }
+fn set_null(column: &str, table: &str) -> ForeignKey {
+    ForeignKey::new([column], table).on_delete(DeleteAction::SetNull)
 }
 fn listed_items() -> Table {
     items().column(Column::new("list", Affinity::Blob))
@@ -926,7 +921,7 @@ fn listed_items() -> Table {
 fn first_items() -> Table {
     Table::replayed("lists")
         .column(required("name", Affinity::Text))
-        .column(Column::new("first", Affinity::Blob))
+        .column(Column::new("first", Affinity::Text))
         .foreign_key(set_null("first", "items"))
 }
 fn listed() -> Schema {
@@ -1348,8 +1343,8 @@ async fn a_late_write_a_removal_no_longer_applies_is_dropped_loudly() -> Result<
 #[tokio::test(flavor = "multi_thread")]
 async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Failure> {
     let mut late = LateWriter::create().await?;
-    let upgrade = rocky_sdk::ErrorKind::UpgradeRequired {
-        current: 3,
+    let upgrade = rocky_sdk::ErrorKind::SchemaMismatch {
+        installed: 3,
         declared: 1,
     };
     let mut tx = late.bob.database.transaction().await?;

@@ -1,8 +1,7 @@
 use crate::common::{self, Device, Failure, introduce};
 use rocky_sdk::{
-    Affinity, Commit, Database, DropReason, ErrorKind, ForeignKeyDefinition, Network, RowIdentity,
-    SqlValue, Table, TransactionOutcome, TransactionToken, Unsupported, params,
-    transport::memory::Hub,
+    Affinity, Commit, Database, DropReason, ErrorKind, ForeignKey, Network, RowIdentity, SqlValue,
+    Table, TransactionOutcome, TransactionToken, Unsupported, params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -19,12 +18,10 @@ fn schema() -> rocky_sdk::Schema {
                 Table::replayed("check_ins")
                     .column(common::required("gate", Affinity::Text))
                     .column(common::required("ticket", Affinity::Text))
-                    .foreign_key(ForeignKeyDefinition {
-                        columns: vec!["ticket".into()],
-                        table: "tickets".into(),
-                        on_delete: rocky_sdk::DeleteAction::Cascade,
-                        deferred: false,
-                    }),
+                    .foreign_key(
+                        ForeignKey::new(["ticket"], "tickets")
+                            .on_delete(rocky_sdk::DeleteAction::Cascade),
+                    ),
             ),
     )
 }

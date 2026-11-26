@@ -14,6 +14,8 @@ mod continuous_sync;
 #[cfg(not(target_family = "wasm"))]
 mod credentials;
 #[cfg(not(target_family = "wasm"))]
+mod declared_schema;
+#[cfg(not(target_family = "wasm"))]
 mod device_copies;
 #[cfg(not(target_family = "wasm"))]
 mod discovery;
@@ -56,6 +58,8 @@ mod readiness;
 #[cfg(not(target_family = "wasm"))]
 mod readme_examples;
 #[cfg(not(target_family = "wasm"))]
+mod references;
+#[cfg(not(target_family = "wasm"))]
 mod refusals;
 #[cfg(not(target_family = "wasm"))]
 mod registry;
@@ -75,6 +79,8 @@ mod replayed;
 mod revocations;
 #[cfg(not(target_family = "wasm"))]
 mod roles;
+#[cfg(not(target_family = "wasm"))]
+mod root_exports;
 #[cfg(not(target_family = "wasm"))]
 mod shared_lists;
 #[cfg(not(target_family = "wasm"))]

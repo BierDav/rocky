@@ -1,4 +1,6 @@
-use rocky_core::{InvalidName, NameRule, RoleDefinition, RoleTable, SchemaError, TableAccess};
+use rocky_core::{
+    DeleteAction, InvalidName, NameRule, RoleDefinition, RoleTable, SchemaError, TableAccess,
+};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -177,8 +179,7 @@ impl Schema {
         }
     }
 
-    /// The engine's form of this schema, as published under `publisher`.
-    pub fn definition(&self, publisher: [u8; 32]) -> rocky_core::SchemaDefinition {
+    pub(crate) fn definition(&self, publisher: [u8; 32]) -> rocky_core::SchemaDefinition {
         rocky_core::SchemaDefinition {
             format: self.format,
             publisher: data_encoding::HEXLOWER.encode(&publisher),
@@ -238,7 +239,8 @@ impl SchemaBuilder {
         self
     }
     /// Validates the schema; a refusal is `ErrorKind::Schema`, such as `SchemaError::InvalidName`
-    /// for a bad name or `SchemaError::ForeignKey` for a foreign key SQLite could not enforce.
+    /// for a bad name, `SchemaError::ForeignKey` for a foreign key SQLite could not enforce, or
+    /// `SchemaError::ReferenceType` for a reference column whose affinity differs from its parent's.
     pub fn build(self) -> Result<Schema, crate::Error> {
         Ok(self.0.validated()?)
     }
@@ -358,10 +360,15 @@ impl Table {
             foreign_keys: Vec::new(),
         })
     }
-    /// Adds a column.
+    /// Adds a column, and the foreign key `Column::references` declared on it.
     #[must_use]
     pub fn column(mut self, column: Column) -> Self {
-        self.0.columns.push(column.0);
+        if let Some(parent) = column.references {
+            self.0
+                .foreign_keys
+                .push(ForeignKey::new([column.definition.name.clone()], parent).0);
+        }
+        self.0.columns.push(column.definition);
         self
     }
     /// Declares the row's key, which never changes and must list the partition columns; a key
@@ -385,14 +392,14 @@ impl Table {
     }
     /// Adds an index.
     #[must_use]
-    pub fn index(mut self, index: rocky_core::IndexDefinition) -> Self {
-        self.0.indexes.push(index);
+    pub fn index(mut self, index: Index) -> Self {
+        self.0.indexes.push(index.0);
         self
     }
-    /// Adds a foreign key, checked when writes replay.
+    /// Adds a foreign key, enforced at every write and again when writes replay.
     #[must_use]
-    pub fn foreign_key(mut self, foreign_key: rocky_core::ForeignKeyDefinition) -> Self {
-        self.0.foreign_keys.push(foreign_key);
+    pub fn foreign_key(mut self, key: ForeignKey) -> Self {
+        self.0.foreign_keys.push(key.0);
         self
     }
     /// Adds a `CHECK` constraint, checked when writes replay.
@@ -411,31 +418,37 @@ impl Table {
 }
 
 /// A table column.
-pub struct Column(rocky_core::ColumnDefinition);
+pub struct Column {
+    definition: rocky_core::ColumnDefinition,
+    references: Option<String>,
+}
 impl Column {
     /// A nullable column with no default.
     pub fn new(name: impl Into<String>, affinity: rocky_core::Affinity) -> Self {
-        Self(rocky_core::ColumnDefinition {
-            name: name.into(),
-            affinity,
-            not_null: false,
-            default: None,
-            collation: rocky_core::Collation::Binary,
-            derived: None,
-            local_only: false,
-            renamed_from: Vec::new(),
-        })
+        Self {
+            definition: rocky_core::ColumnDefinition {
+                name: name.into(),
+                affinity,
+                not_null: false,
+                default: None,
+                collation: rocky_core::Collation::Binary,
+                derived: None,
+                local_only: false,
+                renamed_from: Vec::new(),
+            },
+            references: None,
+        }
     }
     /// Makes the column `NOT NULL`.
     #[must_use]
     pub fn required(mut self) -> Self {
-        self.0.not_null = true;
+        self.definition.not_null = true;
         self
     }
     /// Sets the value an insert that omits the column gets.
     #[must_use]
     pub fn default(mut self, value: impl crate::IntoSqlValue) -> Self {
-        self.0.default = Some(match value.into_sql_value() {
+        self.definition.default = Some(match value.into_sql_value() {
             rocky_core::SqlValue::Null => serde_json::Value::Null,
             rocky_core::SqlValue::Integer(value) => value.into(),
             rocky_core::SqlValue::Real(value) => value.get().into(),
@@ -448,7 +461,96 @@ impl Column {
     /// per earlier name, oldest first, and keep every call in later versions.
     #[must_use]
     pub fn renamed_from(mut self, old: impl Into<String>) -> Self {
-        self.0.renamed_from.push(old.into());
+        self.definition.renamed_from.push(old.into());
+        self
+    }
+    /// References the single-column primary key of `parent`, refusing to delete a parent row that
+    /// rows still reference; a generated `id` is a `Blob`, so the column must be one too.
+    #[must_use]
+    pub fn references(mut self, parent: impl Into<String>) -> Self {
+        self.references = Some(parent.into());
+        self
+    }
+}
+
+/// An index over a table's columns, ascending unless added with `descending`.
+pub struct Index(rocky_core::IndexDefinition);
+impl Index {
+    /// An index named `name` over `columns`, in ascending order.
+    pub fn new(
+        name: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self(rocky_core::IndexDefinition {
+            name: name.into(),
+            columns: columns
+                .into_iter()
+                .map(|column| rocky_core::IndexColumn {
+                    name: column.into(),
+                    descending: false,
+                })
+                .collect(),
+            unique: false,
+            expressions: Vec::new(),
+            predicate: None,
+        })
+    }
+    /// Refuses two rows with the same values in the index.
+    #[must_use]
+    pub fn unique(mut self) -> Self {
+        self.0.unique = true;
+        self
+    }
+    /// Appends a column in descending order.
+    #[must_use]
+    pub fn descending(mut self, column: impl Into<String>) -> Self {
+        self.0.columns.push(rocky_core::IndexColumn {
+            name: column.into(),
+            descending: true,
+        });
+        self
+    }
+    /// Appends a deterministic expression over the table's columns, after the columns.
+    #[must_use]
+    pub fn expression(mut self, sql: impl Into<String>) -> Self {
+        self.0.expressions.push(sql.into());
+        self
+    }
+    /// Indexes only the rows for which this deterministic expression holds.
+    #[must_use]
+    pub fn filter(mut self, sql: impl Into<String>) -> Self {
+        self.0.predicate = Some(sql.into());
+        self
+    }
+}
+
+/// A foreign key from a table's columns to the primary key of `parent`.
+pub struct ForeignKey(rocky_core::ForeignKeyDefinition);
+impl ForeignKey {
+    /// References the primary key of `parent`, column by column; deleting a parent row that rows
+    /// still reference is refused until `on_delete` says otherwise.
+    pub fn new(
+        columns: impl IntoIterator<Item = impl Into<String>>,
+        parent: impl Into<String>,
+    ) -> Self {
+        Self(rocky_core::ForeignKeyDefinition {
+            columns: columns.into_iter().map(Into::into).collect(),
+            table: parent.into(),
+            on_delete: DeleteAction::Restrict,
+            deferred: false,
+        })
+    }
+    /// What deleting a referenced parent row does; `DeleteAction::Restrict` by default.
+    #[must_use]
+    pub fn on_delete(mut self, action: DeleteAction) -> Self {
+        self.0.on_delete = action;
+        self
+    }
+    /// Lets a transaction write a row before the parent row it references, checking the key at
+    /// commit; a `Restrict` delete is still refused at once.
+    #[must_use]
+    pub fn deferred(mut self) -> Self {
+        self.0.deferred = true;
         self
     }
 }

@@ -42,7 +42,7 @@ async fn seal(world: &World) -> Result<String, Failure> {
     Ok(tip)
 }
 
-async fn notified(events: &TableEvents, token: TransactionToken) -> Result<(), Failure> {
+async fn notified(events: &mut TableEvents, token: TransactionToken) -> Result<(), Failure> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if events
@@ -90,8 +90,8 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     for device in [&phone, &tablet] {
         assert_eq!(titles(device, list).await?.len(), 4);
     }
-    let laptop_events = laptop.database().observe(&[]).await?;
-    let phone_events = phone.database().observe(&[]).await?;
+    let mut laptop_events = laptop.database().observe(&[]).await?;
+    let mut phone_events = phone.database().observe(&[]).await?;
 
     let (on_laptop, on_phone, on_tablet) = tokio::join!(
         async {
@@ -148,9 +148,9 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     };
     assert!(drops[2].is_some() != drops[5].is_some());
     let author_of_dropped_add = if lost == on_laptop[2] {
-        &laptop_events
+        &mut laptop_events
     } else {
-        &phone_events
+        &mut phone_events
     };
     notified(author_of_dropped_add, lost).await?;
 

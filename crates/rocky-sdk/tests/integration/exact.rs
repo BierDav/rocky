@@ -8,7 +8,7 @@ use std::{path::Path, sync::Arc};
 
 use crate::common;
 
-const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":9,
+const SCHEMA: &str = r#"{"application":"ledger","version":1,"format":10,
     "tables":[
         {"name":"balances","class":"replayed",
          "columns":[{"name":"key","type":"text","not_null":true},

@@ -371,6 +371,58 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
   is the largest one statement carries, and an `INSERT … SELECT` records the
   rows it read.
 
+### Indexes, defaults and references
+
+`Table::index(Index::new(name, columns))` adds an index; `unique()` refuses two
+rows with the same values, `descending(column)` appends a column in descending
+order, and `expression` and `filter` index a deterministic expression or only
+the rows a predicate holds for. `Column::default(value)` sets what an insert
+that omits the column gets.
+
+`Column::references(parent)` references the parent's single-column primary key.
+A reference to a generated `id` is a `Blob` column holding the `RowIdentity`,
+not its hex text: `build()` compares each reference column's affinity with the
+parent key column's and refuses a mismatch with `SchemaError::ReferenceType`,
+naming the column and both affinities. `Table::foreign_key(ForeignKey::new(columns,
+parent))` references a multi-column key, such as a partitioned parent's
+`(partition, id)`.
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+fn ledger() -> Result<Schema, rocky_sdk::Error> {
+    let accounts = Table::replayed("accounts")
+        .column(Column::new("name", Affinity::Text).required())
+        .column(
+            Column::new("currency", Affinity::Text)
+                .required()
+                .default("EUR"),
+        )
+        .index(Index::new("accounts_by_name", ["name"]).unique());
+    let entries = Table::replayed("entries")
+        .column(
+            Column::new("account", Affinity::Blob)
+                .required()
+                .references("accounts"),
+        )
+        .column(Column::new("cents", Affinity::Integer).required())
+        .column(Column::new("booked", Affinity::Integer).required())
+        .index(Index::new("entries_by_account", ["account"]).descending("booked"));
+    Schema::builder("ledger", 1)
+        .table(accounts)
+        .table(entries)
+        .build()
+}
+```
+
+A foreign key deletes with `DeleteAction::Restrict` unless
+`ForeignKey::on_delete` says `Cascade` or `SetNull`: deleting an account its
+entries still reference fails at `execute` with `ErrorKind::Sql`, so a ledger
+keeps its history. Replay enforces the same rule, partitioned tables included:
+when one device deletes an account offline while another books an entry
+against it, whichever transaction comes later in the global order is dropped
+whole on every device, as for any other constraint. `ForeignKey::deferred`
+lets a transaction write a row before the parent it references and checks the
+key at commit; a `Restrict` delete is still refused at once.
+
 ## Sync
 
 `Configuration::sync` picks the mode a database opens in and `set_sync`
@@ -395,9 +447,13 @@ tells the other device this one's current route, so an issuer reaches the
 device that joined with its invitation, and peers follow a device that reopens
 on another port, without `add_peer`; a dial-only device tells none.
 
-`observe(&["notes"])` streams `TableChange`s for the named tables, or all
-tables for an empty list, with their `causes`: `Local`, `Sync`, `Rebuild` or
-`Authority`, when the device's access changed what it may read. `status`
+`observe(&["notes"])` returns `TableEvents`, a `Stream` of `TableChange`s for
+the named tables, or all tables for an empty list; `TableEvents::next` reads one
+without importing `StreamExt`, and the stream ends when the database closes. A
+change is a coalesced invalidation, not a row diff: it names the tables to read
+again, with their `causes` (`Local`, `Sync`, `Rebuild` or `Authority`, when the
+device's access changed what it may read), and every change names a table or a
+dropped transaction. `status`
 returns a `DatabaseStatus`, and `status_changes` yields one each time it
 changes. `status().data.blockers` lists data that cannot be read yet, each with
 what clears it (`ClearsBy`); a read of such data fails with `ErrorKind::Blocked
@@ -470,17 +526,22 @@ Other kinds an application meets:
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
   named blockers clear. It always names at least one.
 - `TooLarge { limit, size, max }`: a write exceeds a size limit.
-- `UpgradeRequired { current, declared }`: the database is at a schema version
-  that removed something this application declares; upgrade the application.
+- `SchemaMismatch { installed, declared }`: the database runs a schema version
+  this application cannot use. When `installed` is newer, it removed something
+  the application declares: upgrade the application. When `declared` is newer,
+  an admin device must publish it first, or this device sync with one that has;
+  until then every read and write is refused before it runs, while `status` and
+  sync keep working.
 - `MigrationFailed { version, step }`: a migration step failed and its version
   was withdrawn; a retry does not clear it.
 - `Sql { code, message, unsupported }`: SQLite refused the statement, or
   Rocky did for a replayed write when `unsupported` is set.
 - `Schema(SchemaError)`: `build()` refused the schema, or the installed version
   cannot become it. `SchemaError::ForeignKey { key, rule }` names a foreign key
-  SQLite could not enforce, such as `SetNull` over required columns, and
-  `SchemaError::Change(RefusedChange)` names the table, field or foreign key a
-  new version may not change that way.
+  SQLite could not enforce, such as `SetNull` over required columns,
+  `SchemaError::ReferenceType` a reference column whose affinity differs from
+  its parent key's, and `SchemaError::Change(RefusedChange)` the table, field or
+  foreign key a new version may not change that way.
 
 `Invite`, `Join`, `Link`, `Access` and `Service` carry the typed cause of an
 invitation, link, access or network failure, and `Internal` is never
@@ -493,7 +554,36 @@ and declare the SQL that brings the data there with
 `SchemaBuilder::migration(version, steps)`. A step may read the previous
 version's rows, under that version's names, as `parent.<table>`, but not
 correlated with the row it writes. When a step fails, `MigrationFailed {
-version, step }` counts steps from 1.
+version, step }` counts steps from 1. Adding a nullable column needs no step:
+existing rows hold `NULL`, or the column's default.
+
+Migration steps run once, when an admin device publishes the version. A write
+that a device still on the older version makes afterwards, offline or before it
+upgrades, reaches the new version holding only the new column's default. An
+application that derives the column from other fields runs its rule again after
+sync, for example when `observe` reports a `Sync` cause:
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+fn notes(version: u32) -> Result<Schema, rocky_sdk::Error> {
+    let mut notes =
+        Table::replayed("notes").column(Column::new("title", Affinity::Text).required());
+    let mut schema = Schema::builder("notes", version);
+    if version >= 2 {
+        notes = notes.column(Column::new("slug", Affinity::Text));
+        schema = schema.migration(2, [FILL_SLUGS]);
+    }
+    schema.table(notes).build()
+}
+
+const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NULL";
+
+async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
+    let mut transaction = database.transaction().await?;
+    transaction.execute(FILL_SLUGS, params![]).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+```
 
 Rename a column or table in one version with `Column::renamed_from` or
 `Table::renamed_from`, with no copy step and no drop:
@@ -527,7 +617,10 @@ changes: a version that adds, drops or swaps a key column fails to open with
 with `MigrationStep::insert`. Every other change the installed version cannot
 take fails to open with a `RefusedChange` too, such as a retyped field, a new
 required field without a default, or a foreign key over a field existing rows
-already hold.
+already hold. A new required field with a reference fails with
+`SchemaError::Change(RefusedChange::AddedReference(key))`, since existing rows
+would hold no parent: declare the field optional with `references` and fill it
+with an `UPDATE` migration step.
 
 An admin device publishes a new version when it opens with it. A version that
 drops tables or fields or narrows a role fails to open with
@@ -539,9 +632,12 @@ An application that declares an older version than the database runs
 (`DeclaredSchema::Behind` in `status`, and `DatabaseStatus::schema_version`
 reads the installed version) keeps working. Only when a newer version removed
 or renamed a table or field it declares does open, or a statement using it,
-fail with `UpgradeRequired`: an application still on the old name has to
-upgrade, though the writes it made before the device learned of the rename
-still land under the new name.
+fail with `SchemaMismatch { installed, declared }`: an application still on the
+old name has to upgrade, though the writes it made before the device learned of
+the rename still land under the new name. An application that declares a newer
+version than the database runs (`DeclaredSchema::Ahead`) gets
+`SchemaMismatch` from every read and write until an admin device publishes that
+version and this device syncs with it.
 
 A write made under an earlier version that a later one can no longer apply,
 such as a late write into a removed field, including one that a later version

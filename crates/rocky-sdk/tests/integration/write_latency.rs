@@ -77,7 +77,7 @@ async fn probe(
     table: &str,
     period: Duration,
 ) -> Result<(), Failure> {
-    let events = database.observe(&[table]).await?;
+    let mut events = database.observe(&[table]).await?;
     let (mut written, mut observed) = (Vec::new(), Vec::new());
     let mut ticks = interval(period);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);

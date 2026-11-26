@@ -108,7 +108,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
         Some(TransactionOutcome::Applied { sealed: false })
     );
 
-    let events = b.database.observe(&[]).await?;
+    let mut events = b.database.observe(&[]).await?;
     create(&a.database, "k", 1).await?;
     let later = create(&b.database, "k", 2).await?;
     assert_eq!(
@@ -189,7 +189,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
         }
         Ok::<_, Failure>(())
     };
-    let events = b.database.observe(&[]).await?;
+    let mut events = b.database.observe(&[]).await?;
     let token = create(&b.database, "k", 1).await?;
     let provisional = Some(TransactionOutcome::Applied { sealed: false });
     assert_eq!(b.database.transaction_outcome(token).await?, provisional);
@@ -206,6 +206,7 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
     for device in [&a, &b] {
         assert_eq!(device.database.transaction_outcome(token).await?, sealed);
     }
+    create(&b.database, "after_the_seal", 2).await?;
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         while !events.next().await?.sealed.contains(&token) {}
         Ok::<_, Failure>(())

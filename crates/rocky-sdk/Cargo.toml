@@ -28,6 +28,7 @@ rocky-platform.workspace = true
 # `std::time` natively; the browser clock on wasm32.
 web-time = "1"
 data-encoding = "2"
+futures-core = "0.3"
 futures-util = "0.3"
 sha2 = "0.10"
 

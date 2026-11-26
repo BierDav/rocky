@@ -1,5 +1,7 @@
 use crate::common::Failure;
-use rocky_sdk::{Affinity, Column, Role, RoleName, Schema, Table};
+use rocky_sdk::{
+    Affinity, Column, Database, ErrorKind, Index, Role, RoleName, Schema, Table, params,
+};
 use std::path::Path;
 
 const DOCTOR: RoleName = RoleName::from_static("doctor");
@@ -20,6 +22,50 @@ fn clinic() -> Result<Schema, rocky_sdk::Error> {
         .table(charts)
         .role(doctor)
         .build()
+}
+
+fn ledger() -> Result<Schema, rocky_sdk::Error> {
+    let accounts = Table::replayed("accounts")
+        .column(Column::new("name", Affinity::Text).required())
+        .column(
+            Column::new("currency", Affinity::Text)
+                .required()
+                .default("EUR"),
+        )
+        .index(Index::new("accounts_by_name", ["name"]).unique());
+    let entries = Table::replayed("entries")
+        .column(
+            Column::new("account", Affinity::Blob)
+                .required()
+                .references("accounts"),
+        )
+        .column(Column::new("cents", Affinity::Integer).required())
+        .column(Column::new("booked", Affinity::Integer).required())
+        .index(Index::new("entries_by_account", ["account"]).descending("booked"));
+    Schema::builder("ledger", 1)
+        .table(accounts)
+        .table(entries)
+        .build()
+}
+
+fn notes(version: u32) -> Result<Schema, rocky_sdk::Error> {
+    let mut notes =
+        Table::replayed("notes").column(Column::new("title", Affinity::Text).required());
+    let mut schema = Schema::builder("notes", version);
+    if version >= 2 {
+        notes = notes.column(Column::new("slug", Affinity::Text));
+        schema = schema.migration(2, [FILL_SLUGS]);
+    }
+    schema.table(notes).build()
+}
+
+const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NULL";
+
+async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
+    let mut transaction = database.transaction().await?;
+    transaction.execute(FILL_SLUGS, params![]).await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 mod one_device {
@@ -90,6 +136,125 @@ fn every_rust_block_in_the_readme_appears_verbatim_in_its_example_file() -> Resu
 #[test]
 fn the_readme_role_recipe_names_its_partition_group_after_the_table() -> Result<(), Failure> {
     clinic()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_readme_ledger_refuses_deleting_an_account_its_entries_reference() -> Result<(), Failure>
+{
+    let directory = tempfile::tempdir()?;
+    let database = rocky_sdk::Configuration::new(directory.path(), &ledger()?)?
+        .create()
+        .await?
+        .database;
+    let mut transaction = database.transaction().await?;
+    let account = transaction.next_id("accounts", Vec::new()).await?;
+    transaction
+        .execute(
+            "INSERT INTO accounts(id, name) VALUES(?, 'Cash')",
+            params![account],
+        )
+        .await?;
+    transaction
+        .execute(
+            "INSERT INTO entries(account, cents, booked) VALUES(?, 250, 1)",
+            params![account],
+        )
+        .await?;
+    transaction.commit().await?;
+    let currency: String = database
+        .query("SELECT currency FROM accounts", params![])
+        .await?
+        .collect()
+        .await?
+        .first()
+        .ok_or("no account")?
+        .get("currency")?;
+    assert_eq!(currency, "EUR");
+    let mut transaction = database.transaction().await?;
+    let refused = transaction
+        .execute("DELETE FROM accounts WHERE id = ?", params![account])
+        .await
+        .err()
+        .ok_or("an account its entries reference was deleted")?;
+    assert!(
+        matches!(refused.kind(), ErrorKind::Sql { .. }),
+        "{refused:?}"
+    );
+    transaction.rollback().await?;
+    database.close().await?;
+    Ok(())
+}
+
+async fn note(database: &Database, title: &str) -> Result<(), rocky_sdk::Error> {
+    let mut transaction = database.transaction().await?;
+    transaction
+        .execute("INSERT INTO notes(title) VALUES(?)", params![title])
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+async fn slugs(database: &Database) -> Result<Vec<Option<String>>, Failure> {
+    Ok(database
+        .query("SELECT slug FROM notes ORDER BY title", params![])
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|row| row.get("slug"))
+        .collect::<Result<_, _>>()?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_readme_slug_rule_fills_a_late_write_from_an_older_version_after_sync()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = std::sync::Arc::new(rocky_sdk::transport::memory::Hub::default());
+    let (owner_path, member_path) = (root.path().join("owner"), root.path().join("member"));
+    let configure = |path: &Path, name: &str, schema: &Schema| {
+        crate::common::configuration(
+            path,
+            schema,
+            None,
+            Some(crate::common::external_identity(path)),
+            Some(rocky_sdk::Network::Owned(hub.connector(name))),
+        )
+    };
+    let owner = crate::common::Device::new(
+        crate::common::create_as(
+            configure(&owner_path, "owner", &notes(1)?),
+            crate::common::external_key(&owner_path),
+        )
+        .await?,
+    )?;
+    let invitation = owner.invite_as(rocky_sdk::Access::Full).await;
+    let member = crate::common::Device::new(
+        configure(&member_path, "member", &notes(1)?)
+            .join(&invitation)
+            .await?,
+    )?;
+    crate::common::introduce(&owner, &member).await;
+    note(&owner.database, "Early").await?;
+    owner.close().await;
+    let owner =
+        crate::common::Device::new(configure(&owner_path, "owner", &notes(2)?).open().await?)?;
+    assert_eq!(slugs(&owner.database).await?, [Some("early".into())]);
+    note(&member.database, "Late").await?;
+    for device in [&member, &owner, &member] {
+        device.sync().await.map_err(|error| error.to_string())?;
+    }
+    assert_eq!(
+        slugs(&owner.database).await?,
+        [Some("early".into()), None],
+        "the migration ran once at publish, so the late write holds only the column default"
+    );
+    fill_slugs(&owner.database).await?;
+    assert_eq!(
+        slugs(&owner.database).await?,
+        [Some("early".into()), Some("late".into())]
+    );
+    owner.close().await;
+    member.close().await;
     Ok(())
 }
 

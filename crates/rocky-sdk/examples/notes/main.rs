@@ -20,7 +20,7 @@ async fn main() -> Result<(), Error> {
     } else {
         configuration.open().await?
     };
-    let changes = database.observe(&["notes"]).await?;
+    let mut changes = database.observe(&["notes"]).await?;
     app::add(&database, "Try Rocky from Rust").await?;
     println!("Committed changes: {:?}", changes.next().await?);
     for note in app::notes(&database).await? {

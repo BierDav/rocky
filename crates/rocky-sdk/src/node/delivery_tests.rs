@@ -14,7 +14,7 @@ use std::{
 
 type Failure = crate::Failure;
 
-const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":9,"tables":[
+const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":10,"tables":[
  {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;

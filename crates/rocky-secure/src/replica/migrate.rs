@@ -294,30 +294,61 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Result<(), BrokenReference>, Error> {
         let removed_tables = leaf_first(removed_replayed(installed, schema));
         let removed = !removed_tables.is_empty();
-        for table in removed_tables {
-            self.touch(&table.sql_name);
-            self.conn
-                .execute(
-                    format!("DROP TABLE IF EXISTS {}", quoted(&table.sql_name)),
-                    (),
-                )
-                .await?;
-        }
-        self.record_projection_access(projected).await?;
-        let mut replayed = Vec::new();
-        for table in schema.tables.iter().filter(|table| {
-            table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
-        }) {
-            self.touch(&table.sql_name);
-            match table.class {
-                TableClass::Replayed => replayed.push(table),
-                TableClass::LocalOnly => self.replace_indexes(installed, table).await?,
-            }
-        }
-        if let Err(refused) = self
-            .rebuild_replayed(installed, schema, &replayed, carried)
-            .await?
-        {
+        let rebuilt = self
+            .deferring_foreign_keys_or_rollback(async || {
+                self.conn
+                    .execute("SAVEPOINT install_projection", ())
+                    .await?;
+                let outcome = async {
+                    for table in &removed_tables {
+                        self.touch(&table.sql_name);
+                        self.conn
+                            .execute(
+                                format!("DROP TABLE IF EXISTS {}", quoted(&table.sql_name)),
+                                (),
+                            )
+                            .await?;
+                    }
+                    self.record_projection_access(projected).await?;
+                    let mut replayed = Vec::new();
+                    for table in schema.tables.iter().filter(|table| {
+                        table.class == TableClass::LocalOnly
+                            || projected.by_name(&table.sql_name).is_some()
+                    }) {
+                        self.touch(&table.sql_name);
+                        match table.class {
+                            TableClass::Replayed => replayed.push(table),
+                            TableClass::LocalOnly => self.replace_indexes(installed, table).await?,
+                        }
+                    }
+                    self.rebuild_replayed(installed, schema, &replayed, carried)
+                        .await
+                }
+                .await;
+                match outcome {
+                    Ok(Ok(())) => {
+                        self.conn.execute("RELEASE install_projection", ()).await?;
+                        Ok(Ok(()))
+                    }
+                    Ok(Err(refused)) => {
+                        self.conn
+                            .execute("ROLLBACK TO install_projection", ())
+                            .await?;
+                        self.conn.execute("RELEASE install_projection", ()).await?;
+                        Ok(Err(refused))
+                    }
+                    Err(error) => {
+                        let _ = self
+                            .conn
+                            .execute("ROLLBACK TO install_projection", ())
+                            .await;
+                        let _ = self.conn.execute("RELEASE install_projection", ()).await;
+                        Err(error)
+                    }
+                }
+            })
+            .await?;
+        if let Err(refused) = rebuilt {
             return Ok(Err(refused));
         }
         self.install_delete_triggers(projected).await?;

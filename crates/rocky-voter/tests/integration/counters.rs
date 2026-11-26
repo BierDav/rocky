@@ -264,6 +264,18 @@ async fn devices_of_a_database_claim_gap_free_numbers_from_in_process_voters_and
         ),
         "a lifetime beyond the coordinator's longest is refused before it is sent"
     );
+    assert!(
+        matches!(
+            mine.register(
+                &RootKey::generate(),
+                &Tenant::generate(),
+                MAX_CONTROL_LIFETIME
+            )
+            .await,
+            Err(CounterError::NotRootKey)
+        ),
+        "only the database's root key registers it"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,5 +1,5 @@
 use crate::{
-    CoordinationError, Refusal,
+    CoordinationError,
     certified::{ControlCertificate, DomainControl, TrustBundle, encode, now},
     client::{CALL_DEADLINE, NetworkCoordinator},
     counters::{Claim, Claimed, Name},
@@ -82,11 +82,13 @@ pub enum CounterError {
 }
 impl CounterError {
     /// Whether sending the same call again may succeed; after `OutcomeUnknown` only the same
+    /// `register` was given a key other than the database's root key, which only the owner holds.
+    NotRootKey,
     /// `Claim` is safe to send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::Coordination(error) => error.retryable(),
-            Self::Database(_) | Self::Endpoint(_) | Self::Closed => false,
+            Self::Database(_) | Self::Endpoint(_) | Self::Closed | Self::NotRootKey => false,
         }
     }
 }
@@ -100,6 +102,7 @@ impl std::fmt::Display for CounterError {
         }
     }
 }
+            Self::NotRootKey => f.write_str("registering needs the database's root key"),
 impl std::error::Error for CounterError {}
 impl From<CoordinationError> for CounterError {
     fn from(error: CoordinationError) -> Self {
@@ -196,8 +199,8 @@ impl Counters {
     pub fn deadline(self, deadline: Duration) -> Self {
         Self { deadline, ..self }
     }
-    /// Registers the database with the coordinator under `tenant`, signed by the database's root
-    /// key; `lifetime` is in seconds, at most the coordinator's `max_control_lifetime`.
+    /// Registers the database with the coordinator under `tenant`, signed by the owner's root key;
+    /// `lifetime` is in seconds, at most the coordinator's `max_control_lifetime`.
     pub async fn register(
         &self,
         owner: &dyn IdentityProvider,
@@ -206,7 +209,7 @@ impl Counters {
     ) -> Result<ControlReceipt, CounterError> {
         let device = self.device().await?;
         if owner.public_key().ok() != Some(device.publisher) {
-            return Err(CoordinationError::Denied(Refusal::InvalidGrant).into());
+            return Err(CounterError::NotRootKey);
         }
         let time = now()?;
         let certificate = self.control(&device, tenant, 1, time, lifetime)?;

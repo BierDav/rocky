@@ -22,7 +22,8 @@ pub enum CoordinationError {
     /// The trust bundle, a name or a lifetime is invalid, or the transport is not one the bundle
     /// lists.
     Configuration,
-    /// The same request or claim id came back with different contents.
+    /// A remembered request id came back with different contents; never a `Claim`, which the
+    /// counter matches by key, so a retry with a new expiry answers the held number.
     RequestConflict,
     /// A message failed to decode or held an unexpected answer.
     Corrupt,

@@ -26,11 +26,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 Copy Rocky's dev profile into your own `Cargo.toml`. Cargo applies only the
 root package's profile, and unoptimized crypto and SQLite make a debug build's
-loopback sync take seconds instead of about 100 ms.
+loopback sync take seconds instead of about 100 ms. Line tables keep file and
+line numbers in a dependency's backtrace for less than full debug info costs.
 
 ```toml
 [profile.dev.package."*"]
 opt-level = 2
+debug = "line-tables-only"
 
 [profile.dev.package.rocky-core]
 opt-level = 3
@@ -48,7 +50,12 @@ toolchain with a `rust-toolchain.toml` next to your `Cargo.toml`:
 channel = "1.99.0"
 ```
 
-On a host with less than 8 GB of memory, build with `cargo build -j2`.
+The first build compiles 121 crates, among them C code (SQLite and ring), so
+the host needs a C compiler. With this profile, a cold debug build of an app
+that depends on `rocky-sdk` and `rocky-tcp` took 96 s on an 18-core Apple M5
+Pro and left 1.7 GB in `target/`; with Cargo's full debug info for
+dependencies it took 141 s and 2.4 GB. On a host with less than 8 GB of
+memory, build with `cargo build -j2`.
 
 ## One device
 
@@ -1121,13 +1128,6 @@ Rocky links its own SQLite build in the browser (`rocky-sqlite`, see
 depends on it with `default-features = false`, since rusqlite's default
 `ffi-sqlite-wasm-rs` links another SQLite and the link fails.
 
-### Testing in a browser
-
-Browser tests are `wasm-bindgen-test` tests in a dedicated Worker:
-
-1. Install the `wasm-bindgen-test-runner` of the `wasm-bindgen` version in
-   your `Cargo.lock` (`cargo install wasm-bindgen-cli --version <it>`) and set
-   it as the runner under `[target.wasm32-unknown-unknown]`.
 ### A browser app
 
 [examples/browser-notes](examples/browser-notes) is a notes app to copy. Its
@@ -1158,6 +1158,13 @@ but cannot link another device; keep its phrase if it should. Outside this
 repository, install the `wasm-bindgen` CLI of the version in your `Cargo.lock`
 with `cargo install wasm-bindgen-cli --version <it>`.
 
+### Testing in a browser
+
+Browser tests are `wasm-bindgen-test` tests in a dedicated Worker:
+
+1. Install the `wasm-bindgen-test-runner` of the `wasm-bindgen` version in
+   your `Cargo.lock` (`cargo install wasm-bindgen-cli --version <it>`) and set
+   it as the runner under `[target.wasm32-unknown-unknown]`.
 2. Install headless Firefox with `geckodriver`, or a Chrome with the
    `chromedriver` of its major version, and name the driver in `GECKODRIVER`
    or `CHROMEDRIVER`.

@@ -1,7 +1,5 @@
 use crate::{Error, PrivateKey, PublicKey, Signature};
-use rocky_platform::fs;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Publisher(pub PublicKey);
@@ -28,49 +26,5 @@ impl IdentityProvider for PrivateKey {
     }
     fn sign(&self, _: Purpose, message: &[u8]) -> Result<Signature, Error> {
         Ok(PrivateKey::sign(self, message))
-    }
-}
-
-pub struct FileIdentityProvider {
-    directory: PathBuf,
-    key: PrivateKey,
-}
-impl FileIdentityProvider {
-    pub fn open(directory: impl Into<PathBuf>) -> Result<Self, Error> {
-        let directory = directory.into();
-        let path = directory.join("identity");
-        let provider = |error: std::io::Error| Error::Provider(error.into());
-        let key = match fs::read(&path) {
-            Ok(bytes) => {
-                let bytes: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| Error::Provider("the identity key is corrupt".into()))?;
-                PrivateKey::from_bytes(&bytes)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_private_dir_all(&directory).map_err(provider)?;
-                let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-                match fs::create_new(&path, key.as_bytes()) {
-                    Ok(()) => key,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        return Self::open(directory);
-                    }
-                    Err(error) => return Err(provider(error)),
-                }
-            }
-            Err(error) => return Err(provider(error)),
-        };
-        Ok(Self { directory, key })
-    }
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-}
-impl IdentityProvider for FileIdentityProvider {
-    fn public_key(&self) -> Result<PublicKey, Error> {
-        Ok(self.key.public_key())
-    }
-    fn sign(&self, _: Purpose, message: &[u8]) -> Result<Signature, Error> {
-        Ok(self.key.sign(message))
     }
 }

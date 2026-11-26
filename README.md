@@ -186,15 +186,16 @@ commit to Bob at once; `sync_now` makes the example deterministic. Run it with
 `create` returns the root and the owner's person key once, and `join` returns
 a minted person key in `Opened::identity`; each of those sessions signs with
 its key. The owner's person key is derived from the root, so
-`RootKey::identity` recovers it from the root phrase. `PersonId::of(&key)`
-names the person a key signs for, as `Invite::for_identity` and `remove` take
-it. An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
+`RootKey::identity` recovers it from the root phrase. `PersonId::of(&key)?`
+names the person any `IdentityProvider` signs for, as `Invite::for_identity`
+and `remove` take it. An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
 `Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later
 opens get the person key from `Configuration::identity`, and a call that needs
 it without one is `Denied` with `IdentityRequired`.
 `create_with_root(root, owner)` takes signers the application keeps
-elsewhere, such as passkey-backed ones, and `FileIdentityProvider` keeps a
-person key in a native file.
+elsewhere, such as passkey-backed ones. Rocky never stores a person key: its
+one persisted form is the 24-word phrase, which the app keeps in its own
+storage and reopens with `IdentityKey::from_phrase`.
 
 ## People, access and partitions
 
@@ -287,6 +288,11 @@ with `make_admin(person, root)` and `revoke_admin(person, removal, root)`, where
 credentials they issued; an admin who should stay a member is invited again.
 A promotion or access change reaches each of the person's devices at its next
 sync with an admin device, including a device still joining when it was made.
+`make_admin` returns once the owner's device recorded the promotion; in
+`SyncMode::Live` the promoted person's connected devices receive it at once,
+and each observes it on its own `status_changes()`, as in
+`while !changes.next().await?.authority.is_issuer {}`, after which it reads
+and administers as an admin.
 Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
 an admin links or unlinks a device, and `AdminStale` when no device of an admin
 was heard from for 30 days (`Configuration::admin_stale_after`).
@@ -325,16 +331,16 @@ device that has not synced since a change still holds what it held.
 A fleet of headless hosts, such as kiosks or servers, joins without anyone at
 each host:
 
-1. Provision each host with its own person key, for example
-   `FileIdentityProvider::open(dir)`, which creates one on first use, and read
-   its `PersonId` there.
-2. On an admin device that stays online, issue one invitation per host with
-   `Invite::new(access).for_identity(person).valid_for(..)`. Such a code
-   carries no secret and admits only that person, so it can travel with the
-   host's configuration.
-3. At boot, the host configures `Configuration::identity` with that provider
-   and calls `open`; on `NoDatabase` or `JoinUnfinished` it calls `join` with
-   its code instead, which needs the issuing admin device online.
+1. On an admin device that stays online, issue one default invitation per host
+   with `Invite::new(access).valid_for(..)` and hand the host its code, one
+   line that fits an environment variable or a provisioning file.
+2. At boot, the host calls `open`, configured with
+   `Configuration::identity(Arc::new(IdentityKey::from_phrase(&phrase)?))`
+   once it holds a stored phrase; on `NoDatabase` or `JoinUnfinished` it calls
+   `join` with its code instead, which needs the issuing admin device online.
+3. `join` returns the person key it minted in `Opened::identity`, once: the
+   host stores `identity.phrase()` in its own storage before anything else, and
+   every later boot reopens from that phrase.
 
 ## How merging works
 

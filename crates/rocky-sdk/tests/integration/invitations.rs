@@ -87,7 +87,11 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
         .ok_or("a joiner without an identity gets one")?;
     let member = Device::new(opened.database)?;
     let me = member.database.me().await?;
-    assert_eq!(me.person.key(), minted.person_key());
+    assert_eq!(
+        me.person,
+        PersonId::of(&minted)?,
+        "the minted key names the joined person"
+    );
     assert_eq!(me.access, writer());
     common::introduce(&owner, &member).await;
     member.sync().await.map_err(|error| error.to_string())?;
@@ -96,13 +100,13 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     let pending = owner.database.invitations().await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].label.as_deref(), Some("Alice"));
-    assert_eq!(pending[0].redeemed_by, Some(PersonId::of(&minted)));
+    assert_eq!(pending[0].redeemed_by, Some(PersonId::of(&minted)?));
     let recorded = owner
         .database
         .people()
         .await?
         .into_iter()
-        .find(|record| record.id == PersonId::of(&minted))
+        .find(|record| Ok(record.id) == PersonId::of(&minted))
         .ok_or("the issuer recorded no admission")?;
     assert_eq!(recorded.invitation, Some(invitation.id));
     assert_eq!(recorded.label.as_deref(), Some("Alice"));
@@ -179,7 +183,11 @@ async fn an_identity_code_admits_only_that_identity() -> Result<(), Failure> {
         opened.identity.is_none(),
         "a configured identity is never returned"
     );
-    assert_eq!(opened.database.me().await?.person.key(), identity);
+    assert_eq!(
+        opened.database.me().await?.person,
+        PersonId::of(&*person)?,
+        "the configured provider names the joined person"
+    );
     assert_eq!(
         owner.database.invitations().await?[0].redeemed_by,
         Some(PersonId::new(identity))

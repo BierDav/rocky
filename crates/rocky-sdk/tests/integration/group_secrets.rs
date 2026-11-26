@@ -907,8 +907,7 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
-    let person: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::FileIdentityProvider::open(root.path().join("person")).unwrap());
+    let person: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(rocky_sdk::IdentityKey::generate());
     let first_directory = root.path().join("first");
     let first_store = Arc::new(Store::default());
     let invitation = issuer
@@ -1019,8 +1018,7 @@ fn the_budgeted_store_meets_the_key_provider_contract() {
 }
 
 async fn full_person(issuer: &Peer, root: &Path, name: &str) -> (Peer, Peer, PublicKey) {
-    let person: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(rocky_sdk::FileIdentityProvider::open(root.join(name)).unwrap());
+    let person: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(rocky_sdk::IdentityKey::generate());
     let identity = person.public_key().unwrap();
     let invitation = issuer
         .database

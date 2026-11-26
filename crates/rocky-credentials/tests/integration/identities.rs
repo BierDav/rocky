@@ -60,8 +60,8 @@ impl Domain {
             fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
         }
     }
-    async fn issuer(&self) -> (FileIdentity, CredentialChain) {
-        let identity = FileIdentity::new().await;
+    async fn issuer(&self) -> (StoredIdentity, CredentialChain) {
+        let identity = StoredIdentity::new();
         let link = Authority::owner_in(
             &self.owner,
             DatabaseContext {
@@ -102,21 +102,20 @@ impl Domain {
     }
 }
 
-struct FileIdentity {
-    _directory: rocky_platform::fs::Scratch,
-    provider: FileIdentityProvider,
+struct StoredIdentity {
+    phrase: String,
+    provider: IdentityKey,
 }
-impl FileIdentity {
-    async fn new() -> Self {
-        let directory = rocky_platform::fs::Scratch::new().await;
-        let provider = FileIdentityProvider::open(directory.path()).expect("identity");
+impl StoredIdentity {
+    fn new() -> Self {
+        let provider = IdentityKey::generate();
         Self {
-            _directory: directory,
+            phrase: provider.phrase(),
             provider,
         }
     }
-    fn reopen(&self) -> FileIdentityProvider {
-        FileIdentityProvider::open(self.provider.directory()).expect("identity")
+    fn reopen(&self) -> IdentityKey {
+        IdentityKey::from_phrase(&self.phrase).expect("identity")
     }
     fn key(&self) -> PublicKey {
         self.provider.public_key().expect("key")
@@ -146,8 +145,8 @@ fn node(
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_file_identity_reopens_with_its_one_key() {
-    let identity = FileIdentity::new().await;
+async fn a_stored_phrase_reopens_the_one_person_key() {
+    let identity = StoredIdentity::new();
     let again = identity.reopen();
     assert_eq!(
         identity.provider.public_key().expect("key"),
@@ -162,7 +161,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     let domain = Domain::new();
     let (issuer, issuing) = domain.issuer().await;
     let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
-    let member = FileIdentity::new().await;
+    let member = StoredIdentity::new();
     let link = authority
         .issue(member.key(), vec![domain.grant()], VALIDITY)
         .expect("granted");
@@ -232,7 +231,7 @@ async fn links_from_different_issuers_never_collide_because_a_node_authors_under
     for _ in 0..2 {
         let (issuer, issuing) = domain.issuer().await;
         let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
-        let member = FileIdentity::new().await;
+        let member = StoredIdentity::new();
         let link = authority
             .issue(member.key(), vec![domain.grant()], VALIDITY)
             .expect("granted");
@@ -265,7 +264,7 @@ async fn links_from_different_issuers_never_collide_because_a_node_authors_under
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     let domain = Domain::new();
-    let member = FileIdentity::new().await;
+    let member = StoredIdentity::new();
     let link = Authority::owner(&domain.owner)
         .issue(member.key(), vec![domain.grant()], VALIDITY)
         .expect("granted");
@@ -435,7 +434,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
-    let identity = FileIdentity::new().await;
+    let identity = StoredIdentity::new();
     let (node, answering) = (PrivateKey::new(), PrivateKey::new());
     let domain = Domain::new();
     let database = DatabaseContext {
@@ -540,7 +539,7 @@ async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_confirmation_code_is_six_digits_both_nodes_derive_alike() {
-    let identity = FileIdentity::new().await;
+    let identity = StoredIdentity::new();
     let (node, answering) = (PrivateKey::new(), PrivateKey::new());
     let domain = Domain::new();
     let database = DatabaseContext {

@@ -746,7 +746,7 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
 }
 
 struct DescriptorIdentity {
-    provider: rocky_sdk::FileIdentityProvider,
+    provider: rocky_sdk::IdentityKey,
     attempts: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 impl rocky_sdk::IdentityProvider for DescriptorIdentity {
@@ -774,7 +774,7 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
     let root = crate::support::small_directory()?;
     let directory = root.path().join("database");
     let identity = Arc::new(DescriptorIdentity {
-        provider: rocky_sdk::FileIdentityProvider::open(root.path().join("identity"))?,
+        provider: rocky_sdk::IdentityKey::generate(),
         attempts: Default::default(),
     });
     let options = |schema: &Schema| {

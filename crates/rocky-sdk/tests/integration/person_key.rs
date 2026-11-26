@@ -199,8 +199,8 @@ async fn the_owner_is_the_person_the_root_derives_and_an_arc_shares_its_key() ->
     let created = Configuration::new(root.path().join("owner"), common::parsed_schema())?
         .create()
         .await?;
-    let owner = rocky_sdk::PersonId::of(&created.owner);
-    assert_eq!(owner, rocky_sdk::PersonId::of(&created.root.identity()));
+    let owner = rocky_sdk::PersonId::of(&created.owner)?;
+    assert_eq!(owner, rocky_sdk::PersonId::of(&created.root.identity())?);
     assert_eq!(created.database.me().await?.person, owner);
     created.database.close().await?;
     let shared = Arc::new(created.owner);
@@ -210,7 +210,7 @@ async fn the_owner_is_the_person_the_root_derives_and_an_arc_shares_its_key() ->
         .await?;
     assert_eq!(
         reopened.me().await?.person,
-        rocky_sdk::PersonId::of(&shared)
+        rocky_sdk::PersonId::of(&*shared)?
     );
     reopened.close().await?;
     Ok(())

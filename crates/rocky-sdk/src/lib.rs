@@ -101,9 +101,7 @@ pub use rocky_core::{
     ForeignKeyName, ForeignKeyRule, InvalidName, NameRule, RefusedChange, RoleError, SchemaError,
 };
 pub use rocky_core::{NotANumber, RowIdentity, Scope, SqlValue};
-pub use rocky_credentials::{
-    FileIdentityProvider, IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey,
-};
+pub use rocky_credentials::{IdentityKey, IdentityProvider, PeerId, PublicKey, Purpose, RootKey};
 pub use rollout::{RemovalImpact, RoleInUse, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{
     Column, ForeignKey, Index, MigrationStep, Role, RoleName, Schema, SchemaBuilder, Table,

@@ -9,7 +9,7 @@ async fn main() -> Result<(), Failure> {
         let identity = IdentityKey::generate();
         println!(
             "Invite relay identity {} with store-only access (Invite::new(Access::Store).for_identity(..)),",
-            PersonId::of(&identity)
+            PersonId::of(&identity)?
         );
         println!("then run with ROCKY_RELAY_PHRASE=\"{}\"", identity.phrase());
         return Ok(());

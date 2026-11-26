@@ -859,9 +859,8 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let routes = || vec![crate::Route::try_from(String::from("memory:issuer")).expect("a route")];
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
-    let invite = |profile: crate::Access| {
-        crate::Invite::new(profile).for_identity(crate::PersonId::of(&person))
-    };
+    let person_id = crate::PersonId::of(&person)?;
+    let invite = |profile: crate::Access| crate::Invite::new(profile).for_identity(person_id);
     let open = |book: &mut Book, profile: crate::Access| {
         settings.invite(
             (&node.vault, routes()),
@@ -927,10 +926,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
             .find(|open| open.id == id)
             .map(|open| open.redeemed_by)
     };
-    assert_eq!(
-        redeemer(issued.id),
-        Some(Some(crate::PersonId::of(&person)))
-    );
+    assert_eq!(redeemer(issued.id), Some(Some(person_id)));
     assert_eq!(redeemer(spare.id), Some(None));
     assert_eq!(redeemer(conflicting.id), Some(None));
     let snapshot = node.settings_snapshot().await;

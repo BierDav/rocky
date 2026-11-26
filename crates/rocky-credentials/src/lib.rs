@@ -49,7 +49,7 @@ pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
-pub use identity::{FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose};
+pub use identity::{Identity, IdentityProvider, Publisher, Purpose};
 pub use identity_key::IdentityKey;
 pub use issuance::Validity;
 pub use issue::{Authority, Granted, NEVER, device_chain};

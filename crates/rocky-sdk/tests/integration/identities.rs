@@ -1,8 +1,6 @@
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{
-    FileIdentityProvider, IdentityKey, IdentityProvider, Network, transport::memory::Hub,
-};
+use rocky_sdk::{IdentityKey, IdentityProvider, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -23,7 +21,18 @@ fn open(
     )
 }
 fn person(directory: &Path) -> Result<Arc<dyn IdentityProvider>, Failure> {
-    Ok(Arc::new(FileIdentityProvider::open(directory)?))
+    let stored = directory.join("phrase");
+    let key = match std::fs::read_to_string(&stored) {
+        Ok(phrase) => IdentityKey::from_phrase(&phrase)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = IdentityKey::generate();
+            std::fs::create_dir_all(directory)?;
+            std::fs::write(&stored, key.phrase())?;
+            key
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Arc::new(key))
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     common::authority_json(&root.join(name), "identity")

@@ -12,9 +12,13 @@ impl PersonId {
     pub fn new(key: PublicKey) -> Self {
         Self(key)
     }
-    /// The person a person key signs for, as `Invite::for_identity` and `remove` take it.
-    pub fn of(key: &crate::IdentityKey) -> Self {
-        Self(key.person_key())
+    /// The person a person key signs for, as `Invite::for_identity` and `remove` take it; fails
+    /// when the provider cannot name its key.
+    pub fn of(provider: &dyn crate::IdentityProvider) -> Result<Self, crate::Error> {
+        provider
+            .public_key()
+            .map(Self)
+            .map_err(|error| crate::Error::failed(Box::new(error)))
     }
     /// The person key.
     pub fn key(&self) -> PublicKey {

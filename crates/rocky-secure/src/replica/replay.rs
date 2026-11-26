@@ -15,7 +15,8 @@ mod sealed;
 pub(super) use base::{SCHEMA as BASE_SCHEMA, add_row, base_sets, fields_of};
 use bystanders::{Bystanders, plan_table};
 pub(super) use constraints::{
-    Written, cascades, check_member_order, checked, linked, note, with_referencing, written,
+    Written, cascades, check_member_order, checked, leaf_first, leaf_first_ranks, linked, note,
+    with_referencing, written,
 };
 pub(super) use restrictions::restricted;
 
@@ -44,6 +45,7 @@ pub(super) const SCHEMA: &[&str] = &[
 const MIGRATION_CAPTURE: (usize, usize) = (usize::MAX, usize::MAX);
 const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.based FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
+#[derive(Clone)]
 pub(super) struct Undo {
     pub(super) table: String,
     pub(super) key: Vec<SqlValue>,
@@ -647,17 +649,43 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        struct RewindGroup {
+            order: Order,
+            transaction: Commitment,
+            hashes: Vec<Hash>,
+            undo: Vec<Undo>,
+        }
+        let mut groups: Vec<RewindGroup> = Vec::new();
+        for ((order, _), (hash, transaction, _, undo)) in rewound.iter().rev() {
+            match groups
+                .last_mut()
+                .filter(|group| group.order == *order && group.transaction == *transaction)
+            {
+                Some(group) => {
+                    group.hashes.push(*hash);
+                    group.undo.extend(undo.iter().cloned());
+                }
+                None => groups.push(RewindGroup {
+                    order: order.clone(),
+                    transaction: *transaction,
+                    hashes: vec![*hash],
+                    undo: undo.clone(),
+                }),
+            }
+        }
         let mut plans = BTreeMap::new();
-        for (hash, _, _, undo) in rewound.values().rev() {
-            self.undo(undo, &mut plans).await?;
-            self.conn
-                .execute(
-                    "DELETE FROM secure_replayed WHERE hash=?",
-                    [hash.as_bytes().to_vec()],
-                )
-                .await?;
-            #[cfg(any(test, feature = "qualification"))]
-            self.crash_at(|point| point == CrashPoint::Rewind)?;
+        for group in groups {
+            self.undo(&group.undo, &mut plans).await?;
+            for hash in group.hashes {
+                self.conn
+                    .execute(
+                        "DELETE FROM secure_replayed WHERE hash=?",
+                        [hash.as_bytes().to_vec()],
+                    )
+                    .await?;
+                #[cfg(any(test, feature = "qualification"))]
+                self.crash_at(|point| point == CrashPoint::Rewind)?;
+            }
         }
         let scopes: BTreeSet<i64> = rewound.keys().map(|(_, scope)| *scope).collect();
         for id in scopes {
@@ -711,6 +739,13 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         let plans = &*plans;
+        let ranks = leaf_first_ranks(schema);
+        let rank_of = |name: &str| {
+            ranks
+                .get(&name.to_ascii_lowercase())
+                .copied()
+                .unwrap_or(usize::MAX)
+        };
         let tables = undo
             .iter()
             .map(|undo| {
@@ -719,46 +754,70 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(corrupt)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut deletes: Vec<_> = tables
+            .iter()
+            .zip(undo)
+            .enumerate()
+            .filter(|(_, (_, undo))| undo.before.is_none())
+            .collect();
+        deletes.sort_by_key(|(index, (_, undo))| (rank_of(&undo.table), std::cmp::Reverse(*index)));
+        let mut restores: Vec<_> = tables
+            .iter()
+            .zip(undo)
+            .enumerate()
+            .filter_map(|(index, (table, undo))| {
+                undo.before
+                    .as_ref()
+                    .map(|before| (index, *table, undo, before))
+            })
+            .collect();
+        restores
+            .sort_by_key(|(index, _, undo, _)| (std::cmp::Reverse(rank_of(&undo.table)), *index));
         let mut bystanders = Bystanders::new(schema, plans, undo);
         self.deferring_foreign_keys(async || {
-            for (table, undo) in tables.iter().zip(undo) {
-                if undo.before.is_none() {
-                    bystanders.keep(self, &undo.table, &undo.key).await?;
-                    self.conn
-                        .execute(&table.delete_by_key(), bindings(undo.key.clone()))
-                        .await?;
-                }
-            }
-            let mut collided = Vec::new();
-            for (table, undo) in tables.iter().zip(undo) {
-                let Some(before) = &undo.before else {
-                    continue;
-                };
-                match self.restore_in_place(table, &undo.key, before).await {
-                    Ok(_) => {}
-                    Err(error) if error.is_constraint() => collided.push((table, undo, before)),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            for (table, undo, _) in &collided {
+            for (_, (table, undo)) in deletes {
                 bystanders.keep(self, &undo.table, &undo.key).await?;
                 self.conn
                     .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                     .await?;
             }
-            for (table, _, before) in &collided {
+            let mut collided = Vec::new();
+            for (index, table, undo, before) in restores {
+                match self.restore_in_place(table, &undo.key, before).await {
+                    Ok(_) => {}
+                    Err(error) if error.is_constraint() => {
+                        collided.push((index, table, undo, before));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            collided.sort_by_key(|(index, _, undo, _)| {
+                (rank_of(&undo.table), std::cmp::Reverse(*index))
+            });
+            for (_, table, undo, _) in &collided {
+                bystanders.keep(self, &undo.table, &undo.key).await?;
+                self.conn
+                    .execute(&table.delete_by_key(), bindings(undo.key.clone()))
+                    .await?;
+            }
+            collided.sort_by_key(|(index, _, undo, _)| {
+                (std::cmp::Reverse(rank_of(&undo.table)), *index)
+            });
+            for (_, table, _, before) in &collided {
                 self.conn
                     .execute(&table.insert_image(), bindings(table.stored(before)))
                     .await?;
             }
-            for (table, key, image) in bystanders.kept() {
+            let mut kept: Vec<_> = bystanders.kept().collect();
+            kept.sort_by_key(|(table, _, _)| std::cmp::Reverse(rank_of(&table.name)));
+            for (table, key, image) in kept {
                 self.restore_in_place(table, key, image).await?;
             }
             Ok(())
         })
         .await
     }
-    async fn restore_in_place(
+    pub(super) async fn restore_in_place(
         &self,
         table: &rocky_storage::capture::Table,
         key: &[SqlValue],
@@ -896,21 +955,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        let mut left: Vec<_> = copies.iter().map(|copy| copy.installed).collect();
-        while !left.is_empty() {
-            let leaf = left
-                .iter()
-                .position(|table| {
-                    !left.iter().any(|child| {
-                        child.sql_name != table.sql_name
-                            && child
-                                .foreign_keys
-                                .iter()
-                                .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
-                    })
-                })
-                .unwrap_or(0);
-            let table = left.remove(leaf);
+        for table in leaf_first(copies.iter().map(|copy| copy.installed)) {
             self.conn
                 .execute(
                     format!(

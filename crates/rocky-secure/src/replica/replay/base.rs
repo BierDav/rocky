@@ -795,7 +795,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    fn current_images(
+    pub(super) fn current_images(
         &self,
         scope: ResourceScope,
         source: TipId,
@@ -929,28 +929,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         self.deferring_foreign_keys(async || self.insert_images(scope, source, rows).await)
             .await
-    }
-    pub(in crate::replica) async fn restore_staged(
-        &self,
-        scope: ResourceScope,
-        source: TipId,
-        id: i64,
-    ) -> Result<(), Error> {
-        let ordinals = self.stored_field_ordinals().await?;
-        self.deferring_foreign_keys(async || {
-            let mut after = None;
-            loop {
-                let rows = self
-                    .stored_page("secure_replayed_staged", id, after, &ordinals)
-                    .await?;
-                let Some((last, _)) = rows.last() else {
-                    return Ok(());
-                };
-                after = Some(*last);
-                self.insert_images(scope, source, &rows).await?;
-            }
-        })
-        .await
     }
     async fn insert_images(
         &self,

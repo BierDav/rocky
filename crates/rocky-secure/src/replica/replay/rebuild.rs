@@ -100,6 +100,294 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         self.redo_recorded(redo, time, None, false).await
     }
+    async fn mark_rederive(&mut self, id: Option<i64>) -> Result<(), Error> {
+        if let Some(id) = id {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
+                    [id],
+                )
+                .await?;
+            self.rederive_marked = true;
+        }
+        Ok(())
+    }
+    async fn delete_referencing_descendants(
+        &self,
+        parent: &str,
+        parent_rows: &[Vec<SqlValue>],
+    ) -> Result<usize, Error> {
+        let corrupt = || Error::Corrupt("replayed scope".into());
+        let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
+        let schema = typed.rows.schema();
+        let mut plans = BTreeMap::new();
+        for table in schema
+            .tables
+            .iter()
+            .filter(|table| table.class == TableClass::Replayed)
+        {
+            plan_table(typed, &mut plans, &table.sql_name)?;
+        }
+        let parent_lower = parent.to_ascii_lowercase();
+        let mut work: Vec<(String, Vec<SqlValue>)> = parent_rows
+            .iter()
+            .cloned()
+            .map(|row| (parent_lower.clone(), row))
+            .collect();
+        let mut initial = BTreeSet::new();
+        if let Some(plan) = plans.get(&parent_lower) {
+            for row in parent_rows {
+                if let Some(key) = plan
+                    .key
+                    .iter()
+                    .map(|index| row.get(*index).cloned())
+                    .collect::<Option<Vec<_>>>()
+                {
+                    initial.insert((parent_lower.clone(), values_blob(&key)));
+                }
+            }
+        }
+        let mut seen = initial;
+        let mut targets: Vec<(String, Vec<SqlValue>)> = Vec::new();
+        while let Some((name, image)) = work.pop() {
+            let Some(logical) = schema.table(&name) else {
+                continue;
+            };
+            for child in schema
+                .tables
+                .iter()
+                .filter(|child| child.class == TableClass::Replayed)
+            {
+                let child_name = child.sql_name.to_ascii_lowercase();
+                let Some(plan) = plans.get(&child_name) else {
+                    continue;
+                };
+                for reference in child
+                    .foreign_keys
+                    .iter()
+                    .filter(|reference| reference.table.eq_ignore_ascii_case(&name))
+                {
+                    let referenced = match reference.references.is_empty() {
+                        true => &logical.primary_key,
+                        false => &reference.references,
+                    };
+                    let values = referenced
+                        .iter()
+                        .map(|column| {
+                            logical
+                                .columns
+                                .iter()
+                                .position(|known| known.sql_name.eq_ignore_ascii_case(column))
+                                .and_then(|position| image.get(position).cloned())
+                                .ok_or_else(|| Error::Corrupt("referenced column".into()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if values.iter().any(|value| matches!(value, SqlValue::Null)) {
+                        continue;
+                    }
+                    let matching = reference
+                        .columns
+                        .iter()
+                        .map(|column| format!("{}=?", typed::quoted(column)))
+                        .collect::<Vec<_>>()
+                        .join(" AND ");
+                    let referencing = collect_rows(
+                        self.conn
+                            .query(&format!("{} WHERE {matching}", plan.scan), bindings(values))
+                            .await?,
+                    )
+                    .await?;
+                    for row in referencing {
+                        let key = plan
+                            .key
+                            .iter()
+                            .map(|index| row.get(*index).cloned())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(|| Error::Corrupt("referencing row key".into()))?;
+                        let id = (child_name.clone(), values_blob(&key));
+                        if seen.insert(id) {
+                            targets.push((child_name.clone(), key));
+                            work.push((child_name.clone(), row));
+                        }
+                    }
+                }
+            }
+        }
+        let ranks = leaf_first_ranks(schema);
+        targets.sort_by_key(|(name, _)| ranks.get(name).copied().unwrap_or(usize::MAX));
+        let count = targets.len();
+        for (name, key) in targets {
+            if let Some(plan) = plans.get(&name) {
+                self.touch(&plan.name);
+                self.conn
+                    .execute(&plan.delete_by_key(), bindings(key))
+                    .await?;
+            }
+        }
+        Ok(count)
+    }
+    pub(in crate::replica) async fn replace_replayed_with_staged(
+        &mut self,
+        scope: ResourceScope,
+        source: TipId,
+        id: i64,
+    ) -> Result<(), Error> {
+        self.keep_outcomes(id).await?;
+        self.conn
+            .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
+            .await?;
+        let Some((table_name, condition, values)) = self.scope_rows(scope)? else {
+            return Ok(());
+        };
+        let corrupt = || Error::Corrupt("replayed scope".into());
+        let table = {
+            let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
+            let projected = typed.by_scope(scope).ok_or_else(corrupt)?;
+            typed
+                .plan(&BTreeSet::from([scope]))?
+                .tables
+                .into_iter()
+                .find(|table| table.name.eq_ignore_ascii_case(&projected.table.sql_name))
+                .ok_or_else(corrupt)?
+        };
+        self.touch(&table.name);
+        let ordinals = self.stored_field_ordinals().await?;
+        let touched_children = self
+            .deferring_foreign_keys(async || {
+                let mut kept_keys = BTreeSet::new();
+                let mut collided = Vec::new();
+                let mut after = None;
+                loop {
+                    let rows = self
+                        .stored_page("secure_replayed_staged", id, after, &ordinals)
+                        .await?;
+                    let Some((last, _)) = rows.last() else {
+                        break;
+                    };
+                    after = Some(*last);
+                    let images = self.current_images(scope, source, &rows)?;
+                    for (_, image) in images {
+                        let key = table
+                            .key
+                            .iter()
+                            .map(|index| image.get(*index).cloned())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(corrupt)?;
+                        kept_keys.insert(values_blob(&key));
+                        match self.restore_in_place(&table, &key, &image).await {
+                            Ok(_) => {}
+                            Err(error) if error.is_constraint() => collided.push((key, image)),
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+                let existing = collect_rows(
+                    self.conn
+                        .query(
+                            &format!("{} WHERE {condition}", table.scan),
+                            bindings(values),
+                        )
+                        .await?,
+                )
+                .await?;
+                let mut obsolete = Vec::new();
+                for row in existing {
+                    let key = table
+                        .key
+                        .iter()
+                        .map(|index| row.get(*index).cloned())
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(corrupt)?;
+                    if !kept_keys.contains(&values_blob(&key)) {
+                        obsolete.push((key, row));
+                    }
+                }
+                let mut touched_children = false;
+                for (key, image) in &obsolete {
+                    let before = self.conn.connection().total_changes()?;
+                    match self
+                        .conn
+                        .execute(&table.delete_by_key(), bindings(key.clone()))
+                        .await
+                    {
+                        Ok(_) => {
+                            if self.conn.connection().total_changes()? - before > 1 {
+                                touched_children = true;
+                            }
+                        }
+                        Err(error) if error.is_constraint() => {
+                            self.delete_referencing_descendants(
+                                &table_name,
+                                std::slice::from_ref(image),
+                            )
+                            .await?;
+                            self.conn
+                                .execute(&table.delete_by_key(), bindings(key.clone()))
+                                .await?;
+                            touched_children = true;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let mut pending = collided;
+                loop {
+                    let mut next = Vec::new();
+                    let mut progressed = false;
+                    for (key, image) in pending {
+                        match self.restore_in_place(&table, &key, &image).await {
+                            Ok(_) => progressed = true,
+                            Err(error) if error.is_constraint() => next.push((key, image)),
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    pending = next;
+                    if !progressed || pending.is_empty() {
+                        break;
+                    }
+                }
+                let still_collided = pending;
+                for (key, _) in &still_collided {
+                    let before = self.conn.connection().total_changes()?;
+                    match self
+                        .conn
+                        .execute(&table.delete_by_key(), bindings(key.clone()))
+                        .await
+                    {
+                        Ok(_) => {
+                            if self.conn.connection().total_changes()? - before > 1 {
+                                touched_children = true;
+                            }
+                        }
+                        Err(error) if error.is_constraint() => {
+                            let current = collect_rows(
+                                self.conn
+                                    .query(&table.select, bindings(key.clone()))
+                                    .await?,
+                            )
+                            .await?;
+                            self.delete_referencing_descendants(&table_name, &current)
+                                .await?;
+                            self.conn
+                                .execute(&table.delete_by_key(), bindings(key.clone()))
+                                .await?;
+                            touched_children = true;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                for (_, image) in &still_collided {
+                    self.conn
+                        .execute(&table.insert_image(), bindings(table.stored(image)))
+                        .await?;
+                }
+                Ok(touched_children)
+            })
+            .await?;
+        if touched_children {
+            self.mark_rederive(Some(id)).await?;
+        }
+        Ok(())
+    }
     pub(in crate::replica) async fn clear_replayed(
         &mut self,
         scope: ResourceScope,
@@ -123,21 +411,52 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         let before = self.conn.connection().total_changes()?;
-        self.conn
+        match self
+            .conn
             .execute(
                 format!("DELETE FROM {quoted} WHERE {condition}"),
-                bindings(values),
+                bindings(values.clone()),
             )
-            .await?;
-        let changed = self.conn.connection().total_changes()? - before;
-        if let Some(id) = id.filter(|_| changed > held as u64) {
-            self.conn
-                .execute(
-                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
-                    [id],
+            .await
+        {
+            Ok(_) => {
+                let changed = self.conn.connection().total_changes()? - before;
+                if changed > held as u64 {
+                    self.mark_rederive(id).await?;
+                }
+            }
+            Err(error) if error.is_constraint() => {
+                let corrupt = || Error::Corrupt("replayed scope".into());
+                let scan = {
+                    let typed = self.workspace.typed.as_ref().ok_or_else(corrupt)?;
+                    typed
+                        .plan(&BTreeSet::from([scope]))?
+                        .tables
+                        .into_iter()
+                        .find(|plan| plan.name.eq_ignore_ascii_case(&table))
+                        .ok_or_else(corrupt)?
+                        .scan
+                };
+                let existing = collect_rows(
+                    self.conn
+                        .query(
+                            &format!("{scan} WHERE {condition}"),
+                            bindings(values.clone()),
+                        )
+                        .await?,
                 )
                 .await?;
-            self.rederive_marked = true;
+                self.delete_referencing_descendants(&table, &existing)
+                    .await?;
+                self.conn
+                    .execute(
+                        format!("DELETE FROM {quoted} WHERE {condition}"),
+                        bindings(values),
+                    )
+                    .await?;
+                self.mark_rederive(id).await?;
+            }
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
@@ -620,21 +939,17 @@ impl<A: RowApplication> Inner<A> {
                 bounds.insert(*id, *bound);
             }
         }
-        for table in &typed.tables {
-            if typed
-                .rows
-                .schema()
-                .table(&table.table.sql_name)
-                .is_some_and(|logical| logical.class == TableClass::Replayed)
-            {
-                self.touch(&table.table.sql_name);
-                self.conn
-                    .execute(
-                        format!("DELETE FROM {}", typed::quoted(&table.table.sql_name)),
-                        (),
-                    )
-                    .await?;
-            }
+        let schema = typed.rows.schema();
+        for table in leaf_first(schema.tables.iter().filter(|logical| {
+            logical.class == TableClass::Replayed && typed.by_name(&logical.sql_name).is_some()
+        })) {
+            self.touch(&table.sql_name);
+            self.conn
+                .execute(
+                    format!("DELETE FROM {}", typed::quoted(&table.sql_name)),
+                    (),
+                )
+                .await?;
         }
         let mut recorded = BTreeMap::new();
         for (id, _) in &scopes {
@@ -670,9 +985,23 @@ impl<A: RowApplication> Inner<A> {
             self.reset_replay_ledger(*id, based.get(id).map_or(&[][..], Vec::as_slice))
                 .await?;
         }
-        for (scope, source, rows) in &restored {
-            self.restore_images(*scope, *source, rows).await?;
-        }
+        let ranks = leaf_first_ranks(schema);
+        restored.sort_by_key(|(scope, _, _)| {
+            std::cmp::Reverse(
+                typed
+                    .by_scope(*scope)
+                    .and_then(|projected| ranks.get(&projected.table.sql_name.to_ascii_lowercase()))
+                    .copied()
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        self.deferring_foreign_keys(async || {
+            for (scope, source, rows) in &restored {
+                self.restore_images(*scope, *source, rows).await?;
+            }
+            Ok(())
+        })
+        .await?;
         members.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         let mut redo: Vec<Redo> = Vec::new();
         for (order, _, transaction, member) in members {

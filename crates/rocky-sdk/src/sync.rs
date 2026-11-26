@@ -466,25 +466,39 @@ async fn rows(
         planning.close().await?;
         None
     };
-    let mut pending = stream::iter(exchange.changed.iter().copied().map(|scope| {
+    let chains = replica
+        .in_dependency_chains(exchange.changed, |scope| *scope)
+        .await?;
+    let mut pending = stream::iter(chains.into_iter().map(|chain| {
         let progress = &progress;
         async move {
-            let mut moved = Transfer::default();
-            let result = rows_scope(replica, upstream, &[scope], progress, &mut moved, None).await;
-            (scope, moved, result)
+            let mut done = Vec::with_capacity(chain.len());
+            for scope in chain {
+                let mut moved = Transfer::default();
+                let result =
+                    rows_scope(replica, upstream, &[scope], progress, &mut moved, None).await;
+                let learned = matches!(&result, Err(error) if error.is::<Learned>());
+                done.push((scope, moved, result));
+                if learned {
+                    break;
+                }
+            }
+            done
         }
     }))
     .buffer_unordered(PARALLEL);
-    while let Some((scope, moved, result)) = pending.next().await {
-        transfer.extend(moved);
-        match result {
-            Ok(session) => session.close().await?,
-            Err(error) => {
-                if error.is::<Learned>() {
-                    return Err(error);
+    while let Some(done) = pending.next().await {
+        for (scope, moved, result) in done {
+            transfer.extend(moved);
+            match result {
+                Ok(session) => session.close().await?,
+                Err(error) => {
+                    if error.is::<Learned>() {
+                        return Err(error);
+                    }
+                    transfer.request_failed(scope, &error);
+                    progress(false);
                 }
-                transfer.request_failed(scope, &error);
-                progress(false);
             }
         }
     }

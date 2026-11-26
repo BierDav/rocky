@@ -106,6 +106,7 @@ pub(super) struct Lineage {
     pub(super) domain: Scope,
     pub(super) partitioned: bool,
     pub(super) linked: bool,
+    pub(super) restricted: bool,
     pub(super) children_first: bool,
     pub(super) local_draft: bool,
     pub(super) local_note_from: Option<u32>,
@@ -243,6 +244,7 @@ impl Lineage {
             domain,
             partitioned: false,
             linked: false,
+            restricted: false,
             children_first: false,
             local_draft: false,
             local_note_from: None,
@@ -298,7 +300,12 @@ impl Lineage {
             let mut tag_keys = Vec::new();
             if self.linked {
                 let deferred = self.deferred_from.is_some_and(|from| generation >= from);
-                for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
+                let actions = if self.restricted {
+                    [("item", "RESTRICT"), ("also", "RESTRICT")]
+                } else {
+                    [("item", "CASCADE"), ("also", "SET NULL")]
+                };
+                for (name, action) in actions {
                     tags.push(column(name, Affinity::Blob, false));
                     if self.unlinked_at != Some(generation) {
                         tag_keys.push(item_reference(name, action, deferred));
@@ -930,7 +937,7 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
             replica
                 .install_tables(renamed, lineage.domain, lineage.readers(1))
                 .await,
-            Err(Error::Incompatible(_))
+            Err(Error::Application(cause)) if cause.is::<rocky_core::SchemaError>()
         ),
         "a renamed field is another field, refused before a plan"
     );

@@ -311,6 +311,7 @@ async fn import_while_a_frame_waits(
     let a = open(lineage, dir, "a", &keys[0]).await;
     follow_main(lineage, &a).await;
     insert(&a, "p", "parent").await;
+    insert(&a, "s", "swap").await;
     tag(&a, "old", "p").await;
     seal(lineage, &a).await;
     a.compact(lineage.domain, 0).await.unwrap();
@@ -323,8 +324,21 @@ async fn import_while_a_frame_waits(
     insert(&b, "l", "late").await;
     let late = tag(&b, "x", "l").await;
     tag(&b, "y", "p").await;
-    let expected = tagged(&[("old", "p"), ("x", "l"), ("y", "p")]);
-    assert_eq!(tags(&b).await, expected);
+    assert_eq!(
+        tags(&b).await,
+        tagged(&[("old", "p"), ("x", "l"), ("y", "p")])
+    );
+    let s = session(&a).await;
+    s.run("UPDATE items SET key='tmp' WHERE key='p'", vec![])
+        .await
+        .unwrap();
+    s.run("UPDATE items SET key='p' WHERE key='s'", vec![])
+        .await
+        .unwrap();
+    s.run("UPDATE items SET key='s' WHERE key='tmp'", vec![])
+        .await
+        .unwrap();
+    let expected = tagged(&[("old", "s"), ("x", "l"), ("y", "s")]);
     insert(&a, "q", "owner").await;
     seal(lineage, &a).await;
     a.compact(lineage.domain, 0).await.unwrap();
@@ -1401,4 +1415,179 @@ async fn a_partial_replica_holding_a_child_without_its_parent_keeps_its_rows_and
     );
     b.rebuild_projection(tag_scope).await.unwrap();
     assert_eq!(orphaned_tags(b).await, vec![vec![text("t")]]);
+}
+
+fn restricted_lineage(seed: u8) -> Lineage {
+    let mut lineage = Lineage::pinned(seed);
+    lineage.linked = true;
+    lineage.restricted = true;
+    lineage
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn restricted_foreign_key_replays_from_frames_in_either_table_id_order() {
+    let parent_first = (1u8..=u8::MAX)
+        .find(|seed| {
+            let lineage = restricted_lineage(*seed);
+            lineage.scope("items").table < lineage.scope("tags").table
+        })
+        .expect("a seed where items sorts before tags by TableId");
+    let child_first = (1u8..=u8::MAX)
+        .find(|seed| {
+            let lineage = restricted_lineage(*seed);
+            lineage.scope("tags").table < lineage.scope("items").table
+        })
+        .expect("a seed where tags sorts before items by TableId");
+    for seed in [parent_first, child_first] {
+        let lineage = restricted_lineage(seed);
+        let dir = Scratch::new().await;
+        let replica = open(&lineage, &dir, "keep", &PrivateKey::new()).await;
+        follow_main(&lineage, &replica).await;
+        insert(&replica, "a", "first").await;
+        insert(&replica, "b", "second").await;
+        tag(&replica, "t", "a").await;
+        tag(&replica, "u", "b").await;
+        churn(&replica, RIVAL_CHURN, "c").await;
+        let sealed = rivalled_seal(&lineage, &replica).await;
+        replica.compact(lineage.domain, 0).await.unwrap();
+        let before = tags(&replica).await;
+        assert_eq!(before, tagged(&[("t", "a"), ("u", "b")]));
+        let (_, statements) = rival(&lineage, &sealed);
+        replica.receive_tip_statements(&statements).await.unwrap();
+        let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+        replica.replay_at_seals(tag_scope, false).await.unwrap();
+        replica.replay_at_seals(items, true).await.unwrap();
+        assert_eq!(tags(&replica).await, before);
+        replica.audit(items).await.unwrap();
+        replica.audit(tag_scope).await.unwrap();
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn importing_parent_checkpoint_with_restricted_children_updates_in_place_and_deletes_obsolete()
+ {
+    let lineage = restricted_lineage(1);
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "p1", "kept").await;
+    insert(&a, "p2", "removed").await;
+    tag(&a, "t1", "p1").await;
+    tag(&a, "t2", "p2").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    assert_eq!(tags(&b).await, tagged(&[("t1", "p1"), ("t2", "p2")]));
+
+    insert(&a, "p3", "added").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    assert_eq!(tags(&b).await, tagged(&[("t1", "p1"), ("t2", "p2")]));
+    assert!(!marked_for_rederive(&b).await);
+
+    session(&a)
+        .await
+        .run("DELETE FROM tags WHERE key='t2'", vec![])
+        .await
+        .unwrap();
+    delete(&a, "p2").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    b.settle().await.unwrap();
+    assert_eq!(tags(&b).await, tagged(&[("t1", "p1")]));
+    assert!(!marked_for_rederive(&b).await);
+    b.audit(items).await.unwrap();
+    b.audit(tag_scope).await.unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn rewinding_multi_table_restricted_transaction_succeeds_when_child_sorts_before_parent() {
+    let mut lineage = restricted_lineage(1);
+    lineage.children_first = true;
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    follow_main(&lineage, &a).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+
+    let (items, badges) = (lineage.scope("items"), lineage.scope("badges"));
+    let s_a = session(&a).await;
+    s_a.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
+    identity_insert(
+        &s_a,
+        "INSERT INTO items(key,title) VALUES(?,'early')",
+        vec![text("a1")],
+    )
+    .await
+    .unwrap();
+    let a_id = s_a
+        .run("SELECT id FROM items WHERE key='a1'", vec![])
+        .await
+        .unwrap()
+        .rows
+        .remove(0)
+        .remove(0);
+    identity_insert(
+        &s_a,
+        "INSERT INTO badges(key,label,item,also) VALUES(?,'l',?,?)",
+        vec![text("ba1"), a_id.clone(), a_id],
+    )
+    .await
+    .unwrap();
+    s_a.run("COMMIT", vec![]).await.unwrap();
+
+    insert(&b, "bump", "advance clock").await;
+    let s_b = session(&b).await;
+    s_b.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
+    identity_insert(
+        &s_b,
+        "INSERT INTO items(key,title) VALUES(?,'later')",
+        vec![text("b1")],
+    )
+    .await
+    .unwrap();
+    let b_id = s_b
+        .run("SELECT id FROM items WHERE key='b1'", vec![])
+        .await
+        .unwrap()
+        .rows
+        .remove(0)
+        .remove(0);
+    identity_insert(
+        &s_b,
+        "INSERT INTO badges(key,label,item,also) VALUES(?,'l',?,?)",
+        vec![text("bb1"), b_id.clone(), b_id],
+    )
+    .await
+    .unwrap();
+    s_b.run("COMMIT", vec![]).await.unwrap();
+
+    for scope in [items, badges] {
+        sync_scope(&lineage, &a, &b, &keys[1], scope).await;
+    }
+    let rows = select(
+        &b,
+        "SELECT b.key,i.key FROM badges b JOIN items i ON i.id=b.item ORDER BY b.key",
+    )
+    .await;
+    assert_eq!(
+        rows,
+        vec![vec![text("ba1"), text("a1")], vec![text("bb1"), text("b1")],]
+    );
+    b.audit(items).await.unwrap();
+    b.audit(badges).await.unwrap();
 }

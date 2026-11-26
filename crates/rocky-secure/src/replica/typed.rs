@@ -29,21 +29,19 @@ impl Typed {
         domain: Scope,
         readers: &BTreeMap<String, Commitment>,
     ) -> Result<Self, Error> {
-        let incompatible = |reason: String| Error::Incompatible(reason);
+        let refused =
+            |reason: String| Error::Application(Box::new(rocky_core::SchemaError::Invalid(reason)));
         let rows = TypedRows::new(schema.clone(), vec![domain.domain])
-            .map_err(|error| incompatible(error.to_string()))?;
+            .map_err(|error| Error::Application(Box::new(error)))?;
         let mut tables = Vec::new();
         let typed: Vec<_> = rows.tables().collect();
         for table in typed.iter() {
             if schema.table(&table.sql_name).is_none() {
-                return Err(incompatible(format!(
-                    "{} is not in the schema",
-                    table.sql_name
-                )));
+                return Err(refused(format!("{} is not in the schema", table.sql_name)));
             }
             let encryption = readers
                 .get(&table.sql_name)
-                .ok_or_else(|| incompatible(format!("{} has no reader scope", table.sql_name)))?;
+                .ok_or_else(|| refused(format!("{} has no reader scope", table.sql_name)))?;
             tables.push(Projected {
                 scope: ResourceScope {
                     domain,
@@ -54,7 +52,7 @@ impl Typed {
             });
         }
         if readers.len() != typed.len() {
-            return Err(incompatible("a reader scope names no typed table".into()));
+            return Err(refused("a reader scope names no typed table".into()));
         }
         let whole_tables = rocky_credentials::WholeTables::new(
             &rows.manifest(),
@@ -218,7 +216,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         schema
             .require_row_identity()
-            .map_err(|error| Error::Incompatible(error.to_string()))?;
+            .map_err(|error| Error::Application(Box::new(error)))?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.validate_typed(&schema, domain)?;
         let typed = inner
@@ -227,7 +225,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let record = [
             schema
                 .canonical()
-                .map_err(|error| Error::Incompatible(error.to_string()))?,
+                .map_err(|error| Error::Application(Box::new(error)))?,
             encode(&domain)?,
             encode(&readers)?,
         ];
@@ -285,7 +283,7 @@ impl<A: RowApplication> Inner<A> {
     fn validate_typed(&self, schema: &LogicalSchema, domain: Scope) -> Result<(), Error> {
         schema
             .require_row_identity()
-            .map_err(|error| Error::Incompatible(error.to_string()))?;
+            .map_err(|error| Error::Application(Box::new(error)))?;
         let domains: Vec<_> = self
             .definition
             .domains
@@ -297,16 +295,20 @@ impl<A: RowApplication> Inner<A> {
         }
         let expected = schema.manifest_at(&domains, self.definition.schema, self.definition.engine);
         if expected.hash() != self.manifest {
-            return Err(Error::Incompatible(
-                "the schema's definition differs from the signed manifest".into(),
-            ));
+            return Err(Error::Application(Box::new(
+                rocky_core::SchemaError::Invalid(
+                    "the schema's definition differs from the signed manifest".into(),
+                ),
+            )));
         }
         if schema
             .tables
             .iter()
             .any(|table| table.sql_name.to_ascii_lowercase().starts_with("secure_"))
         {
-            return Err(Error::Incompatible("secure_ names are reserved".into()));
+            return Err(Error::Application(Box::new(
+                rocky_core::SchemaError::Invalid("secure_ names are reserved".into()),
+            )));
         }
         Ok(())
     }

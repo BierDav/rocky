@@ -28,6 +28,39 @@ pub(in crate::replica) fn written(
     Ok((logical.sql_name.to_ascii_lowercase(), partition))
 }
 
+pub(in crate::replica) fn leaf_first<'a>(
+    tables: impl IntoIterator<Item = &'a rocky_core::LogicalTable>,
+) -> Vec<&'a rocky_core::LogicalTable> {
+    let mut left: Vec<_> = tables.into_iter().collect();
+    let mut ordered = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        let leaf = left
+            .iter()
+            .position(|table| {
+                !left.iter().any(|child| {
+                    !child.sql_name.eq_ignore_ascii_case(&table.sql_name)
+                        && child
+                            .foreign_keys
+                            .iter()
+                            .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
+                })
+            })
+            .unwrap_or(0);
+        ordered.push(left.remove(leaf));
+    }
+    ordered
+}
+
+pub(in crate::replica) fn leaf_first_ranks(
+    schema: &rocky_core::LogicalSchema,
+) -> BTreeMap<String, usize> {
+    leaf_first(&schema.tables)
+        .into_iter()
+        .enumerate()
+        .map(|(rank, table)| (table.sql_name.to_ascii_lowercase(), rank))
+        .collect()
+}
+
 pub(in crate::replica) fn cascades(
     schema: &rocky_core::LogicalSchema,
     table: &str,

@@ -44,37 +44,6 @@ impl Domain {
             app: logical.app_id(),
             domain,
         };
-        let mut readers: BTreeMap<String, String> = logical
-            .tables
-            .iter()
-            .map(|table| (table.sql_name.clone(), table.identity().to_owned()))
-            .collect();
-        loop {
-            let mut changed = false;
-            for table in &logical.tables {
-                for key in &table.foreign_keys {
-                    let left = readers
-                        .get(&table.sql_name)
-                        .ok_or("missing child reader scope")?
-                        .clone();
-                    let right = readers
-                        .get(&key.table)
-                        .ok_or("missing parent reader scope")?
-                        .clone();
-                    let first = left.min(right);
-                    for name in [&table.sql_name, &key.table] {
-                        let reader = readers.get_mut(name).ok_or("missing reader scope")?;
-                        if *reader != first {
-                            *reader = first.clone();
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
         let tables: BTreeMap<String, ResourceScope> = logical
             .typed()
             .map(|table| {
@@ -84,9 +53,7 @@ impl Domain {
                         domain: scope,
                         encryption: rocky_core::commitment(
                             "rocky.sdk.readers.v1",
-                            readers
-                                .get(&table.sql_name)
-                                .map_or(table.identity().as_bytes(), |name| name.as_bytes()),
+                            table.identity().as_bytes(),
                         ),
                         table: logical.table_id(table),
                     },
@@ -265,7 +232,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
+    fn identity_references_keep_independent_readers_and_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
             r#"{"format":10,"application":"references","version":1,"tables":[
             {"name":"parents","class":"replayed","columns":[{"name":"next","type":"blob"}],"primary_key":["id"],
@@ -279,11 +246,15 @@ mod tests {
         let resources: BTreeMap<_, _> = domain.scopes().collect();
         let child = resources.get("children").ok_or("child")?;
         let parent = resources.get("parents").ok_or("parent")?;
-        assert_eq!(child.encryption, parent.encryption);
+        assert_ne!(child.encryption, parent.encryption);
         assert_ne!(child.table, parent.table);
         assert_eq!(
             child.encryption,
             rocky_core::commitment("rocky.sdk.readers.v1", b"children")
+        );
+        assert_eq!(
+            parent.encryption,
+            rocky_core::commitment("rocky.sdk.readers.v1", b"parents")
         );
         assert_eq!(
             resources.get("other").ok_or("other")?.encryption,

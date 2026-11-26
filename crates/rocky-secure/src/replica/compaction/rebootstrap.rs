@@ -314,7 +314,22 @@ impl<A: RowApplication> Inner<A> {
         domain: Scope,
     ) -> Result<bool, Error> {
         let mut installed = false;
-        for need in self.seal_rebootstraps(domain).await? {
+        let mut needs = self.seal_rebootstraps(domain).await?;
+        if let Some(typed) = self.workspace.typed.as_ref() {
+            let ranks = super::super::replay::leaf_first_ranks(typed.rows.schema());
+            needs.sort_by_key(|need| {
+                std::cmp::Reverse(
+                    typed
+                        .by_scope(need.scope)
+                        .and_then(|projected| {
+                            ranks.get(&projected.table.sql_name.to_ascii_lowercase())
+                        })
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                )
+            });
+        }
+        for need in needs {
             let Some(id) = self.find_scope_id(need.scope).await? else {
                 continue;
             };

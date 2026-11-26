@@ -54,8 +54,9 @@ The first build compiles 121 crates, among them C code (SQLite and ring), so
 the host needs a C compiler. With this profile, a cold debug build of an app
 that depends on `rocky-sdk` and `rocky-tcp` took 96 s on an 18-core Apple M5
 Pro and left 1.7 GB in `target/`; with Cargo's full debug info for
-dependencies it took 141 s and 2.4 GB. On a host with less than 8 GB of
-memory, build with `cargo build -j2`.
+dependencies it took 141 s and 2.4 GB. Adding `rocky-iroh`,
+`rocky-coordinator` or `rocky-voter` brings further dependencies and build
+time. On a host with less than 8 GB of memory, build with `cargo build -j2`.
 
 ## One device
 
@@ -287,11 +288,12 @@ credentials (`status().credentials_expired()`) until it does.
 `Database::invitations` lists open and redeemed invitations, and
 `cancel_invitation` ends an unused one.
 
-`Access` is `Full`, `Read`, `Store` or a `Role` the schema declares with
-`SchemaBuilder::role`. A role reads, writes, appends to or updates named
-columns of the tables it lists, and grants on one table compose: this doctor
-reads wards, adds charts and edits only their notes, in the wards they are
-granted.
+`Access` is `Full`, `Read`, `Store` or
+`Access::Role(RoleName::from_static("doctor"))`, naming a `Role` the schema
+declares with `SchemaBuilder::role`. A role reads, writes, appends to or
+updates named columns of the tables it lists, and grants on one table compose:
+this doctor reads wards, adds charts and edits only their notes, in the wards
+they are granted.
 
 ```rust crates/rocky-sdk/tests/integration/readme_examples.rs
 fn clinic() -> Result<Schema, rocky_sdk::Error> {
@@ -394,10 +396,29 @@ then syncs that partition's rows anew.
 
 A person links another device with `Configuration::link(contact)` on the new
 device, configured with their person key, where `contact` is
-`Database::contact().uri` of a device they hold. The
-person compares `PendingLink::code` with `Database::link_requests` there,
-approves with `approve_link` and finishes with `PendingLink::confirm`. A
-person who lost their only device cannot link: an admin `unlink`s the lost
+`Database::contact().uri` of a device they hold. The person compares
+`PendingLink::code` with `Database::link_requests` there, approves with
+`approve_link` and finishes with `PendingLink::confirm`:
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+async fn link_device(
+    existing: &Database,
+    new_device: Configuration,
+    identity: Arc<IdentityKey>,
+) -> Result<Database, Box<dyn std::error::Error>> {
+    let contact = existing.contact().await?;
+    let pending = new_device.identity(identity).link(&contact.uri).await?;
+    let requests = existing.link_requests().await?;
+    let request = requests
+        .iter()
+        .find(|request| request.device == pending.device() && &request.code == pending.code())
+        .ok_or("no matching link request")?;
+    existing.approve_link(request.device, &request.code).await?;
+    Ok(pending.confirm().await?.database)
+}
+```
+
+A person who lost their only device cannot link: an admin `unlink`s the lost
 device and invites the person again with `Invite::for_identity(person)` and the
 same access, and the replacement joins with the person's key and every
 partition they were granted.
@@ -515,6 +536,8 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
   `Unsupported::NonDeterministic(function)`, whose message says to bind the
   value as a parameter instead;
 - a `WITH` clause is `Unsupported::With`;
+- a correlated subquery—any subquery reading another table or partition that
+  refers to the outer statement—is refused with `Unsupported::Statement`;
 - a write to a primary-key column, including `id` and the partition columns, is
   `Unsupported::KeyUpdate`, since a row's key never changes; delete the row and
   insert it again;
@@ -607,9 +630,13 @@ covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.
 `DeviceId`. `remove_peer` forgets a peer however the device learned it and
 keeps a handover or discovery from bringing it back, also after a restart,
 until `add_peer` adds it again; removing an unknown peer succeeds. Each sync
-tells the other device this one's current route, so an issuer reaches the
-device that joined with its invitation, and peers follow a device that reopens
-on another port, without `add_peer`; a dial-only device tells none.
+also hands over peers' current routes, so devices form a mesh by default: an
+issuer reaches the device that joined with its invitation, peers learn of and
+dial each other through a shared peer, and peers follow a device that reopens
+on another port, all without `add_peer`. For a hub-and-spoke topology where
+clients should connect only to a server and never be dialed by other peers,
+open clients with `rocky_tcp::Options::dialer()`: a dial-only device advertises
+no route, so peers neither learn one nor try to dial it.
 
 `observe(&["notes"])` returns `TableEvents`, a `Stream` of `TableChange`s for
 the named tables, or all tables for an empty list; `TableEvents::next` reads one
@@ -721,8 +748,9 @@ retryable.
 Raise the version in `Schema::builder(application, version)` with every change
 and declare the SQL that brings the data there with
 `SchemaBuilder::migration(version, steps)`. A step may read the previous
-version's rows, under that version's names, as `parent.<table>`, but not
-correlated with the row it writes. When a step fails, `MigrationFailed {
+version's rows, under that version's names, as `parent.<table>`; as in any
+replayed write, no subquery reading another table (including `parent.<table>`)
+may refer to the outer statement. When a step fails, `MigrationFailed {
 version, step }` counts steps from 1. Adding a nullable column needs no step:
 existing rows hold `NULL`, or the column's default.
 
@@ -1067,10 +1095,13 @@ ticket once at each door.
 `counters.claim(&name, &claim)` takes a counter's next number for any person
 whose access holds insert, update or delete rights; a reader is refused with
 `Refusal::ReadOnly` and a removed person with `Refusal::Revoked`. The
-application writes the number, an `i64` from 1 up, in its own transaction.
-Commit the business row and `flush` before claiming: the claim takes its
-number on the coordinator at once, so a device that crashes before its row is
-durable consumes a number for a sale it lost.
+application writes the number, an `i64` from 1 up, in its own transaction:
+recording it on the business row requires update permission on that column
+(`Role::update_columns`), while an append-only role writes the claimed number
+into a second append-only table instead. Commit the business row and `flush`
+before claiming: the claim takes its number on the coordinator at once, so a
+device that crashes before its row is durable consumes a number for a sale it
+lost.
 
 `Claim::new(key, attempt, created)` names the business key, such as a ticket
 or an order id, the application's own id for this try, such as the scan row's

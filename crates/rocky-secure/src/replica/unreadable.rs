@@ -231,17 +231,14 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         };
         let schema = typed.rows.schema();
-        let dropped: Vec<&str> = schema
-            .tables
-            .iter()
-            .rev()
-            .filter(|table| {
-                table.class == TableClass::Replayed
-                    && typed.by_name(&table.sql_name).is_some()
-                    && narrowed.by_name(&table.sql_name).is_none()
-            })
-            .map(|table| table.sql_name.as_str())
-            .collect();
+        let dropped: Vec<&str> = super::replay::leaf_first(schema.tables.iter().filter(|table| {
+            table.class == TableClass::Replayed
+                && typed.by_name(&table.sql_name).is_some()
+                && narrowed.by_name(&table.sql_name).is_none()
+        }))
+        .into_iter()
+        .map(|table| table.sql_name.as_str())
+        .collect();
         for table in dropped {
             self.touch(table);
             self.conn
@@ -251,11 +248,24 @@ impl<A: RowApplication> Inner<A> {
         self.record_projection_access(narrowed).await?;
         self.install_delete_triggers(narrowed).await
     }
+    fn leaf_first_scopes(&self, mut scopes: Vec<ResourceScope>) -> Vec<ResourceScope> {
+        if let Some(typed) = self.workspace.typed.as_ref() {
+            let ranks = super::replay::leaf_first_ranks(typed.rows.schema());
+            scopes.sort_by_key(|scope| {
+                typed
+                    .by_scope(*scope)
+                    .and_then(|projected| ranks.get(&projected.table.sql_name.to_ascii_lowercase()))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        scopes
+    }
     pub(super) async fn forget_unreadable(
         &mut self,
         allowed: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
-        let scopes = self.no_longer_readable().await?;
+        let scopes = self.leaf_first_scopes(self.no_longer_readable().await?);
         let narrowed = match allowed {
             Some(allowed) => self.narrowed_projection(allowed).await?,
             None => None,
@@ -306,6 +316,7 @@ impl<A: RowApplication> Inner<A> {
                 _ => Err(Error::Corrupt("scope state".into())),
             })
             .collect::<Result<_, _>>()?;
+        let scopes = self.leaf_first_scopes(scopes);
         let mut ids = Vec::new();
         for scope in &scopes {
             ids.extend(self.forget_scope_data(*scope).await?);
@@ -324,7 +335,7 @@ impl<A: RowApplication> Inner<A> {
             .execute("UPDATE secure_retained SET records=0,bytes=0", ())
             .await?;
         if let Some(typed) = self.workspace.typed.clone() {
-            for table in typed.rows.schema().tables.iter().rev() {
+            for table in super::replay::leaf_first(&typed.rows.schema().tables) {
                 if typed.installs(&table.sql_name) {
                     self.touch(&table.sql_name);
                     self.conn

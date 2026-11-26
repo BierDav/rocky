@@ -1285,7 +1285,22 @@ impl<A: RowApplication> Inner<A> {
         path: &BTreeSet<Commitment>,
     ) -> Result<(), Error> {
         let mut installed = false;
-        for (scope, id) in self.domain_scopes(domain).await? {
+        let mut scopes = self.domain_scopes(domain).await?;
+        if let Some(typed) = self.workspace.typed.as_ref() {
+            let ranks = super::replay::leaf_first_ranks(typed.rows.schema());
+            scopes.sort_by_key(|(scope, _)| {
+                std::cmp::Reverse(
+                    typed
+                        .by_scope(*scope)
+                        .and_then(|projected| {
+                            ranks.get(&projected.table.sql_name.to_ascii_lowercase())
+                        })
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                )
+            });
+        }
+        for (scope, id) in scopes {
             if self.base_off_path(scope, id).await?
                 && self
                     .pulled_seal(id)

@@ -1,9 +1,9 @@
 use crate::common::Failure;
 use rocky_sdk::{
-    Access, Affinity, Column, Database, DenyReason, ErrorKind, Index, Partition, PersonId, Role,
-    RoleName, Schema, Table, params,
+    Access, Affinity, Column, Configuration, Database, DenyReason, ErrorKind, IdentityKey, Index,
+    Partition, PersonId, Role, RoleName, Schema, Table, params,
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 const DOCTOR: RoleName = RoleName::from_static("doctor");
 
@@ -92,6 +92,22 @@ async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
     database
         .write(async |tx| tx.execute(FILL_SLUGS, params![]).await)
         .await
+}
+
+async fn link_device(
+    existing: &Database,
+    new_device: Configuration,
+    identity: Arc<IdentityKey>,
+) -> Result<Database, Box<dyn std::error::Error>> {
+    let contact = existing.contact().await?;
+    let pending = new_device.identity(identity).link(&contact.uri).await?;
+    let requests = existing.link_requests().await?;
+    let request = requests
+        .iter()
+        .find(|request| request.device == pending.device() && &request.code == pending.code())
+        .ok_or("no matching link request")?;
+    existing.approve_link(request.device, &request.code).await?;
+    Ok(pending.confirm().await?.database)
 }
 
 mod one_device {
@@ -366,4 +382,33 @@ fn the_refused_write_example_matches_a_clock_value_in_a_replayed_write()
 fn the_renamed_column_example_lands_an_offline_write_under_the_new_name()
 -> Result<(), Box<dyn std::error::Error>> {
     renamed_column::run()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_readme_device_link_flow_links_a_second_device_and_syncs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(rocky_sdk::transport::memory::Hub::default());
+    let schema = notes(1)?;
+    let configure = |name: &str| {
+        Configuration::new(root.path().join(name), &schema)
+            .map(|config| config.network(rocky_sdk::Network::Owned(hub.connector(name))))
+    };
+    let created = configure("phone")?.create().await?;
+    let identity = Arc::new(created.owner);
+    note(&created.database, "Synced").await?;
+    let laptop = link_device(&created.database, configure("laptop")?, identity).await?;
+    laptop.sync_now().await?;
+    let titles: Vec<String> = laptop
+        .query("SELECT title FROM notes", params![])
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|row| row.get("title"))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles, vec!["Synced".to_owned()]);
+    laptop.close().await?;
+    created.database.close().await?;
+    Ok(())
 }

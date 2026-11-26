@@ -1,4 +1,4 @@
-use super::replay::{BrokenReference, Rebuilding, column_carried, table_carried};
+use super::replay::{BrokenReference, Rebuilding, column_carried, leaf_first, table_carried};
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::{LogicalSchema, SchemaChange, Scope, TableClass};
@@ -81,29 +81,30 @@ impl<A: RowApplication> Inner<A> {
         readers: &BTreeMap<String, Commitment>,
         cause: PlanCause,
     ) -> Result<(), Error> {
-        let incompatible = |reason: String| Error::Incompatible(reason);
+        let schema_error =
+            |reason: String| Error::Application(Box::new(rocky_core::SchemaError::Invalid(reason)));
         let descriptor = schema
             .canonical()
-            .map_err(|error| incompatible(error.to_string()))?;
+            .map_err(|error| Error::Application(Box::new(error)))?;
         if let Some(pending) = self.plan_record().await? {
             if pending.schema == *schema && pending.domain == domain && pending.readers == *readers
             {
                 return Ok(());
             }
-            return Err(incompatible(
+            return Err(Error::Incompatible(
                 "another projection plan is pending; reopen to finish it first".into(),
             ));
         }
         let Some((installed, installed_domain, installed_readers)) = self.installed_typed().await?
         else {
-            return Err(incompatible("no typed tables are installed".into()));
+            return Err(schema_error("no typed tables are installed".into()));
         };
         let kept_table_changes_reader = installed_readers.iter().any(|(name, reader)| {
             readers.get(name).is_some_and(|new| new != reader)
                 || (readers.get(name).is_none() && schema.table(name).is_some())
         });
         if installed_domain != domain || kept_table_changes_reader {
-            return Err(incompatible(
+            return Err(schema_error(
                 "a projection plan keeps the domain and reader scopes".into(),
             ));
         }
@@ -137,7 +138,7 @@ impl<A: RowApplication> Inner<A> {
                 .table(&table.sql_name)
                 .is_none_or(|new| new.class != table.class || new.create_sql != table.create_sql)
             {
-                return Err(incompatible(format!(
+                return Err(schema_error(format!(
                     "local table {} must stay as it is; only its indexes may change",
                     table.sql_name
                 )));
@@ -291,8 +292,9 @@ impl<A: RowApplication> Inner<A> {
         projected: &Typed,
         carried: Option<&super::schemas::PathFields>,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        let removed = removed_replayed(installed, schema).next().is_some();
-        for table in removed_replayed(installed, schema) {
+        let removed_tables = leaf_first(removed_replayed(installed, schema));
+        let removed = !removed_tables.is_empty();
+        for table in removed_tables {
             self.touch(&table.sql_name);
             self.conn
                 .execute(
@@ -333,7 +335,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         let descriptor = schema
             .canonical()
-            .map_err(|error| Error::Incompatible(error.to_string()))?;
+            .map_err(|error| Error::Application(Box::new(error)))?;
         self.conn
             .execute(
                 "UPDATE secure_typed SET descriptor=?,domain=?,readers=? WHERE id=1",

@@ -1580,3 +1580,441 @@ async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> R
     owner.close().await;
     Ok(())
 }
+
+fn ledger_v1() -> Schema {
+    build(
+        Schema::builder("finance", 1)
+            .table(Table::replayed("accounts").column(required("name", Affinity::Text)))
+            .table(
+                Table::replayed("transactions")
+                    .column(
+                        Column::new("account", Affinity::Blob)
+                            .required()
+                            .references("accounts"),
+                    )
+                    .column(required("amount", Affinity::Integer))
+                    .column(required("description", Affinity::Text)),
+            ),
+    )
+}
+
+fn ledger_v2() -> Schema {
+    build(
+        Schema::builder("finance", 2)
+            .table(Table::replayed("accounts").column(required("name", Affinity::Text)))
+            .table(Table::replayed("categories").column(required("name", Affinity::Text)))
+            .table(
+                Table::replayed("transactions")
+                    .column(
+                        Column::new("account", Affinity::Blob)
+                            .required()
+                            .references("accounts"),
+                    )
+                    .column(required("amount", Affinity::Integer))
+                    .column(required("description", Affinity::Text))
+                    .column(Column::new("category_name", Affinity::Text)),
+            )
+            .migration(
+                2,
+                [
+                    "UPDATE transactions SET category_name = 'uncategorized' WHERE category_name IS NULL"
+                        .into(),
+                    MigrationStep::insert("categories", "SELECT 'uncategorized' AS name"),
+                ],
+            ),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn offline_v1_peer_syncs_v2_with_restricted_foreign_key() -> Result<(), Failure> {
+    let v1 = ledger_v1();
+    let v2 = ledger_v2();
+    for round in 0..8 {
+        let root = crate::support::small_directory()?;
+        let hub = Arc::new(Hub::default());
+        let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+        let dirs = |name: &str| root.path().join(name);
+        let alice = Device::new(
+            common::create_as(
+                open(&dirs("alice"), &v1, network("alice")),
+                common::external_key(&dirs("alice")),
+            )
+            .await?,
+        )?;
+        let bob = Device::new(
+            open(&dirs("bob"), &v1, network("bob"))
+                .join(&alice.invite().await)
+                .await?,
+        )?;
+        let carol = Device::new(
+            open(&dirs("carol"), &v1, network("carol"))
+                .join(&alice.invite().await)
+                .await?,
+        )?;
+        introduce(&alice, &bob).await;
+        introduce(&alice, &carol).await;
+        introduce(&bob, &carol).await;
+        let acct = alice
+            .database
+            .write(async |tx| {
+                let id = tx.next_id("accounts").await?;
+                tx.execute(
+                    "INSERT INTO accounts(id, name) VALUES(?, 'Checking')",
+                    rocky_sdk::params![id],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO transactions(account, amount, description) VALUES(?, 100, 'Coffee')",
+                    rocky_sdk::params![id],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await?;
+        bob.sync().await.unwrap();
+        carol.sync().await.unwrap();
+        carol.database.set_sync(rocky_sdk::SyncMode::Off).await?;
+        carol
+            .database
+            .write(async |tx| {
+                let id = tx.next_id("accounts").await?;
+                tx.execute(
+                    "INSERT INTO accounts(id, name) VALUES(?, 'Savings')",
+                    rocky_sdk::params![id],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO transactions(account, amount, description) VALUES(?, 250, 'Offline')",
+                    rocky_sdk::params![id],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(id)
+            })
+            .await?;
+        alice.close().await;
+
+        let alice = reopen(&dirs("alice"), &v2, network("alice")).await?;
+        bob.close().await;
+        let bob = reopen(&dirs("bob"), &v2, network("bob")).await?;
+        bob.sync().await.unwrap();
+        bob.database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO transactions(account, amount, description, category_name) VALUES(?, 300, 'Lunch', 'food')",
+                    rocky_sdk::params![acct],
+                )
+                .await
+            })
+            .await?;
+        alice.sync().await.unwrap();
+
+        carol.close().await;
+        let carol = reopen(&dirs("carol"), &v2, network("carol")).await?;
+        carol.database.set_sync(rocky_sdk::SyncMode::Manual).await?;
+        carol.database.sync_now().await.map_err(|error| {
+            format!(
+                "round {round} first sync failed: kind={:?} {error}",
+                error.kind()
+            )
+        })?;
+        carol.database.sync_now().await.map_err(|error| {
+            format!(
+                "round {round} second sync failed: kind={:?} {error}",
+                error.kind()
+            )
+        })?;
+        assert_eq!(carol.database.status().await?.schema_version(), 2);
+        let count: i64 = carol
+            .database
+            .query(
+                "SELECT COUNT(*) AS n FROM transactions",
+                rocky_sdk::params![],
+            )
+            .await?
+            .collect()
+            .await?[0]
+            .get("n")?;
+        assert_eq!(count, 3, "round {round} lost transactions");
+        carol.close().await;
+        bob.close().await;
+        alice.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rewinding_multi_table_restricted_foreign_key_write_succeeds() -> Result<(), Failure> {
+    let child_first = build(
+        Schema::builder("child_first_ledger", 1)
+            .table(Table::replayed("ledgers").column(required("name", Affinity::Text)))
+            .table(
+                Table::replayed("entries")
+                    .column(required("ledger", Affinity::Blob).references("ledgers"))
+                    .column(required("amount", Affinity::Integer)),
+            ),
+    );
+    for (label, schema, parent, child, fk_col) in [
+        (
+            "parent_first",
+            ledger_v1(),
+            "accounts",
+            "transactions",
+            "account",
+        ),
+        ("child_first", child_first, "ledgers", "entries", "ledger"),
+    ] {
+        for round in 0..4 {
+            let root = crate::support::small_directory()?;
+            let hub = Arc::new(Hub::default());
+            let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+            let dirs = |name: &str| root.path().join(name);
+            let alice = Device::new(
+                common::create_as(
+                    open(&dirs("alice"), &schema, network("alice")),
+                    common::external_key(&dirs("alice")),
+                )
+                .await?,
+            )?;
+            let bob = Device::new(
+                open(&dirs("bob"), &schema, network("bob"))
+                    .join(&alice.invite().await)
+                    .await?,
+            )?;
+            let carol = Device::new(
+                open(&dirs("carol"), &schema, network("carol"))
+                    .join(&alice.invite().await)
+                    .await?,
+            )?;
+            let insert_parent = format!("INSERT INTO {parent}(id, name) VALUES(?, ?)");
+            let insert_child = if child == "transactions" {
+                format!("INSERT INTO {child}({fk_col}, amount, description) VALUES(?, ?, 'Item')")
+            } else {
+                format!("INSERT INTO {child}({fk_col}, amount) VALUES(?, ?)")
+            };
+            bob.database
+                .write(async |tx| {
+                    let id = tx.next_id(parent).await?;
+                    tx.execute(&insert_parent, rocky_sdk::params![id, "BobFirst"])
+                        .await?;
+                    tx.execute(&insert_child, rocky_sdk::params![id, 10])
+                        .await?;
+                    Ok::<_, rocky_sdk::Error>(id)
+                })
+                .await?;
+            alice
+                .database
+                .write(async |tx| {
+                    let id = tx.next_id(parent).await?;
+                    tx.execute(&insert_parent, rocky_sdk::params![id, "AliceLater"])
+                        .await?;
+                    tx.execute(&insert_child, rocky_sdk::params![id, 20])
+                        .await?;
+                    Ok::<_, rocky_sdk::Error>(id)
+                })
+                .await?;
+            carol.database.sync_now().await?;
+            introduce(&bob, &carol).await;
+            carol.database.sync_now().await.map_err(|error| {
+                format!(
+                    "{label} round {round} rewind sync failed: kind={:?} {error}",
+                    error.kind()
+                )
+            })?;
+            let count: i64 = carol
+                .database
+                .query(
+                    &format!("SELECT COUNT(*) AS n FROM {child}"),
+                    rocky_sdk::params![],
+                )
+                .await?
+                .collect()
+                .await?[0]
+                .get("n")?;
+            assert_eq!(count, 2, "{label} round {round} missing child rows");
+            carol.close().await;
+            bob.close().await;
+            alice.close().await;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_optional_reference_to_new_table_in_v2_succeeds() -> Result<(), Failure> {
+    let v1 = build(
+        Schema::builder("expenses", 1).table(
+            Table::replayed("transactions")
+                .column(required("amount", Affinity::Integer))
+                .column(required("description", Affinity::Text)),
+        ),
+    );
+    let v2_without_migration = build(
+        Schema::builder("expenses", 2)
+            .table(Table::replayed("categories").column(required("name", Affinity::Text)))
+            .table(
+                Table::replayed("transactions")
+                    .column(required("amount", Affinity::Integer))
+                    .column(required("description", Affinity::Text))
+                    .column(Column::new("category", Affinity::Blob).references("categories")),
+            ),
+    );
+    let v2_with_migration = build(
+        Schema::builder("expenses", 2)
+            .table(Table::replayed("categories").column(required("name", Affinity::Text)))
+            .table(
+                Table::replayed("transactions")
+                    .column(required("amount", Affinity::Integer))
+                    .column(required("description", Affinity::Text))
+                    .column(Column::new("category", Affinity::Blob).references("categories")),
+            )
+            .migration(
+                2,
+                [
+                    MigrationStep::insert("categories", "SELECT 'general' AS name"),
+                    "UPDATE transactions SET category = (SELECT id FROM categories WHERE name = 'general') WHERE category IS NULL"
+                        .into(),
+                ],
+            ),
+    );
+    for (label, v2, migrated) in [
+        ("without_migration", &v2_without_migration, false),
+        ("with_migration", &v2_with_migration, true),
+    ] {
+        let root = crate::support::small_directory()?;
+        let hub = Arc::new(Hub::default());
+        let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+        let dirs = |name: &str| root.path().join(name);
+        let alice = Device::new(
+            common::create_as(
+                open(&dirs("alice"), &v1, network("alice")),
+                common::external_key(&dirs("alice")),
+            )
+            .await?,
+        )?;
+        let bob = Device::new(
+            open(&dirs("bob"), &v1, network("bob"))
+                .join(&alice.invite().await)
+                .await?,
+        )?;
+        alice
+            .database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO transactions(amount, description) VALUES(100, 'Coffee')",
+                    rocky_sdk::params![],
+                )
+                .await
+            })
+            .await?;
+        bob.sync().await.unwrap();
+        alice.close().await;
+        bob.close().await;
+
+        let alice = reopen(&dirs("alice"), v2, network("alice")).await?;
+        assert_eq!(
+            alice.database.status().await?.schema_version(),
+            2,
+            "{label}"
+        );
+        let bob = reopen(&dirs("bob"), v2, network("bob")).await?;
+        bob.sync().await.unwrap();
+        assert_eq!(bob.database.status().await?.schema_version(), 2, "{label}");
+        if migrated {
+            let linked: Vec<String> = bob
+                .database
+                .query(
+                    "SELECT c.name FROM transactions t JOIN categories c ON c.id = t.category",
+                    rocky_sdk::params![],
+                )
+                .await?
+                .collect()
+                .await?
+                .iter()
+                .map(|row| Ok::<_, rocky_sdk::Error>(row.get("name")?))
+                .collect::<Result<_, _>>()?;
+            assert_eq!(linked, vec!["general".to_owned()], "{label}");
+        } else {
+            let category = alice
+                .database
+                .write(async |tx| {
+                    let id = tx.next_id("categories").await?;
+                    tx.execute(
+                        "INSERT INTO categories(id, name) VALUES(?, 'Food')",
+                        rocky_sdk::params![id],
+                    )
+                    .await?;
+                    tx.execute(
+                        "UPDATE transactions SET category = ?",
+                        rocky_sdk::params![id],
+                    )
+                    .await?;
+                    Ok::<_, rocky_sdk::Error>(id)
+                })
+                .await?;
+            bob.sync().await.unwrap();
+            let linked: Vec<rocky_sdk::RowIdentity> = bob
+                .database
+                .query("SELECT category FROM transactions", rocky_sdk::params![])
+                .await?
+                .collect()
+                .await?
+                .iter()
+                .map(|row| Ok::<_, rocky_sdk::Error>(row.get("category")?))
+                .collect::<Result<_, _>>()?;
+            assert_eq!(linked, vec![category], "{label}");
+        }
+        bob.close().await;
+        alice.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_local_table_change_reports_schema_error_not_unsupported_generation()
+-> Result<(), Failure> {
+    let v1 = build(
+        Schema::builder("local_change", 1)
+            .table(Table::replayed("notes").column(required("title", Affinity::Text)))
+            .table(
+                Table::local("device_state")
+                    .column(required("key", Affinity::Text))
+                    .column(Column::new("flag", Affinity::Integer))
+                    .primary_key(["key"]),
+            ),
+    );
+    let v2 = build(
+        Schema::builder("local_change", 2)
+            .table(Table::replayed("notes").column(required("title", Affinity::Text)))
+            .table(
+                Table::local("device_state")
+                    .column(required("key", Affinity::Text))
+                    .column(Column::new("flag", Affinity::Text))
+                    .primary_key(["key"]),
+            ),
+    );
+    let root = crate::support::small_directory()?;
+    let alice = Device::new(
+        common::create_as(
+            open(root.path(), &v1, None),
+            common::external_key(root.path()),
+        )
+        .await?,
+    )?;
+    alice.close().await;
+
+    let error = open(root.path(), &v2, None)
+        .open()
+        .await
+        .err()
+        .ok_or("altering a local table column opened")?;
+    assert!(
+        matches!(error.kind(), rocky_sdk::ErrorKind::Schema(_)),
+        "expected ErrorKind::Schema, got {:?}: {error}",
+        error.kind()
+    );
+    assert!(
+        !matches!(error.kind(), rocky_sdk::ErrorKind::UnsupportedGeneration),
+        "schema refusals must never report UnsupportedGeneration: {error}"
+    );
+    Ok(())
+}

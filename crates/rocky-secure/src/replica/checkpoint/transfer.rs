@@ -2315,8 +2315,8 @@ impl<A: RowApplication> Inner<A> {
         };
         let reapply = self.supersede(scope, &statement, &mut report).await?;
         if let Some(linked) = linked {
-            self.clear_replayed(scope).await?;
-            self.restore_staged(scope, statement.tip, id).await?;
+            self.replace_replayed_with_staged(scope, statement.tip, id)
+                .await?;
             self.redo_linked_replay(linked, time).await?;
             self.mark_rederive_if_orphaned(scope, id).await?;
             self.cover_kept(scope, id, &statement).await?;

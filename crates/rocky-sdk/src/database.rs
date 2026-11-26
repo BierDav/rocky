@@ -1002,7 +1002,9 @@ pub(crate) async fn insert_rows(
     table: &str,
     select: &str,
 ) -> Result<(), rocky_secure::Error> {
-    let refused = |reason: String| rocky_secure::Error::Incompatible(reason);
+    let refused = |reason: String| {
+        rocky_secure::Error::Application(Box::new(rocky_core::SchemaError::Invalid(reason)))
+    };
     let logical = schema
         .table(table)
         .ok_or_else(|| refused(format!("{table} is not a table")))?;

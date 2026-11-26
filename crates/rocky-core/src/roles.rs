@@ -90,6 +90,11 @@ pub enum RoleError {
         role: String,
         group: String,
     },
+    MissingReferencedTable {
+        role: String,
+        table: String,
+        parent: String,
+    },
     TooWide {
         role: String,
         grants: usize,
@@ -122,6 +127,14 @@ impl std::fmt::Display for RoleError {
             Self::PartitionGroupWithoutTable { role, group } => {
                 write!(f, "role {role} grants no table of partition group {group}")
             }
+            Self::MissingReferencedTable {
+                role,
+                table,
+                parent,
+            } => write!(
+                f,
+                "role {role} reads {table} without referenced table {parent}"
+            ),
             Self::TooWide { role, grants } => write!(
                 f,
                 "role {role} compiles to {grants} grants; a credential holds at most {MAX_GRANTS}"
@@ -213,6 +226,7 @@ impl LogicalSchema {
                     }
                 }
             }
+            self.validate_role_references(role)?;
             let mut per_partition = BTreeSet::new();
             for group in &role.per_partition {
                 if !groups.contains(group) {
@@ -246,6 +260,27 @@ impl LogicalSchema {
                     grants,
                 }
                 .into());
+            }
+        }
+        Ok(())
+    }
+    pub fn validate_role_references(&self, role: &RoleDefinition) -> Result<(), RoleError> {
+        let granted: BTreeSet<String> = role
+            .tables
+            .iter()
+            .map(|entry| entry.table.to_ascii_lowercase())
+            .collect();
+        for entry in &role.tables {
+            if let Some(table) = self.table(&entry.table) {
+                for reference in &table.foreign_keys {
+                    if !granted.contains(&reference.table.to_ascii_lowercase()) {
+                        return Err(RoleError::MissingReferencedTable {
+                            role: role.name.clone(),
+                            table: table.sql_name.clone(),
+                            parent: reference.table.clone(),
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -454,6 +489,68 @@ mod tests {
                 role: "editor".into(),
                 grants: 66
             })
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_role_reading_a_child_without_its_referenced_parent_is_refused() {
+        let schema = |roles: serde_json::Value| -> SchemaDefinition {
+            serde_json::from_value(serde_json::json!({
+                "format": crate::DEFINITION_FORMAT,
+                "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                "application": "ledger",
+                "tables": [
+                    {"name": "accounts", "class": "replayed",
+                     "columns": [{"name": "name", "type": "text"}], "primary_key": ["id"]},
+                    {"name": "transactions", "class": "replayed",
+                     "columns": [{"name": "account", "type": "blob", "not_null": true}],
+                     "primary_key": ["id"],
+                     "foreign_keys": [{"columns": ["account"], "table": "accounts", "on_delete": "restrict"}]},
+                    {"name": "splits", "class": "replayed",
+                     "columns": [{"name": "txn", "type": "blob", "not_null": true}],
+                     "primary_key": ["id"],
+                     "foreign_keys": [{"columns": ["txn"], "table": "transactions", "on_delete": "restrict"}]}
+                ],
+                "roles": roles,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            schema(serde_json::json!([
+                {"name": "r", "tables": [{"table": "transactions", "access": "read"}]}
+            ]))
+            .build()
+            .unwrap_err(),
+            SchemaError::Role(RoleError::MissingReferencedTable {
+                role: "r".into(),
+                table: "transactions".into(),
+                parent: "accounts".into(),
+            })
+        );
+        assert_eq!(
+            schema(serde_json::json!([
+                {"name": "r", "tables": [
+                    {"table": "splits", "access": "read"},
+                    {"table": "transactions", "access": "read"}
+                ]}
+            ]))
+            .build()
+            .unwrap_err(),
+            SchemaError::Role(RoleError::MissingReferencedTable {
+                role: "r".into(),
+                table: "transactions".into(),
+                parent: "accounts".into(),
+            })
+        );
+        assert!(
+            schema(serde_json::json!([
+                {"name": "r", "tables": [
+                    {"table": "accounts", "access": "read"},
+                    {"table": "transactions", "access": "append"}
+                ]}
+            ]))
+            .build()
+            .is_ok()
         );
     }
 }

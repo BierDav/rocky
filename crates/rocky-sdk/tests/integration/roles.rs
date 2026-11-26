@@ -1101,3 +1101,45 @@ async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Resu
     admin.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn role_reading_child_without_referenced_parent_is_rejected() -> Result<(), Failure> {
+    let reader = RoleName::from_static("reader");
+    let refused = Schema::builder("ledger", 1)
+        .table(Table::replayed("accounts").column(Column::new("name", Affinity::Text).required()))
+        .table(
+            Table::replayed("transactions")
+                .column(Column::new("account", Affinity::Blob).required().references("accounts")),
+        )
+        .role(Role::new(reader.clone()).read("transactions"))
+        .build()
+        .err()
+        .ok_or("a role reading a child without its FK parent was accepted")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Schema(error)
+                if matches!(
+                    error.as_ref(),
+                    rocky_sdk::SchemaError::Role(
+                        rocky_sdk::RoleError::MissingReferencedTable {
+                            role,
+                            table,
+                            parent,
+                        }
+                    ) if role == "reader" && table == "transactions" && parent == "accounts"
+                )
+        ),
+        "{refused:?}"
+    );
+    let accepted = Schema::builder("ledger", 1)
+        .table(Table::replayed("accounts").column(Column::new("name", Affinity::Text).required()))
+        .table(
+            Table::replayed("transactions")
+                .column(Column::new("account", Affinity::Blob).required().references("accounts")),
+        )
+        .role(Role::new(reader).read("accounts").read("transactions"))
+        .build();
+    assert!(accepted.is_ok(), "{accepted:?}");
+    Ok(())
+}

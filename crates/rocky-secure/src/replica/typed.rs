@@ -339,7 +339,7 @@ impl<A: RowApplication> Inner<A> {
                 now()?,
             )
             .map_err(credential)?;
-        Ok(typed
+        let allowed: BTreeSet<String> = typed
             .tables
             .iter()
             .filter(|table| {
@@ -353,7 +353,28 @@ impl<A: RowApplication> Inner<A> {
                     })
             })
             .map(|table| table.table.sql_name.clone())
-            .collect())
+            .collect();
+        let schema = typed.rows.schema();
+        for table in &typed.tables {
+            if !allowed.contains(&table.table.sql_name) {
+                continue;
+            }
+            let Some(logical) = schema.table(&table.table.sql_name) else {
+                continue;
+            };
+            for key in &logical.foreign_keys {
+                if let Some(parent) = schema.table(&key.table)
+                    && parent.class == TableClass::Replayed
+                    && !allowed.contains(&parent.sql_name)
+                {
+                    return Err(denied(&format!(
+                        "readable table {} references {} which is not granted for read",
+                        logical.sql_name, parent.sql_name
+                    )));
+                }
+            }
+        }
+        Ok(allowed)
     }
     pub(super) async fn authorized_projection(&self, typed: Typed) -> Result<Typed, Error> {
         match self.projection_access().await? {

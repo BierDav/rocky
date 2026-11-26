@@ -83,6 +83,9 @@ impl Domain {
         let role = logical
             .role(name.as_str())
             .ok_or_else(|| UnknownRole(name.clone()))?;
+        logical
+            .validate_role_references(role)
+            .map_err(|error| Box::new(rocky_core::SchemaError::Role(error)))?;
         if let Some(stray) = partitions
             .iter()
             .find(|held| !role.per_partition.contains(&held.group))

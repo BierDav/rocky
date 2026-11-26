@@ -22,7 +22,7 @@ use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, tim
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
 const BOOK_VERSION: u32 = 4;
-const INVITE_VERSION: u8 = 6;
+const INVITE_VERSION: u8 = 7;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const CHECK_LEN: usize = 4;
 const SKEW: u64 = 300;
@@ -317,11 +317,7 @@ struct Code {
 }
 impl Code {
     fn fits(routes: &[Route]) -> bool {
-        !routes.is_empty()
-            && Contact::checked(routes.to_vec()).is_ok()
-            && routes
-                .iter()
-                .all(|route| u8::try_from(route.as_str().len()).is_ok())
+        !routes.is_empty() && Contact::checked(routes.to_vec()).is_ok()
     }
     fn body(&self) -> Vec<u8> {
         let scope = &self.database.scope;
@@ -342,13 +338,13 @@ impl Code {
         }
         for route in &self.routes {
             let route = route.as_str().as_bytes();
-            bytes.extend(u8::try_from(route.len()));
+            put_length(&mut bytes, route.len());
             bytes.extend_from_slice(route);
         }
         bytes
     }
     fn check(body: &[u8]) -> [u8; CHECK_LEN] {
-        let digest = rocky_core::commitment("rocky.sdk.invitation-code.v6", body);
+        let digest = rocky_core::commitment("rocky.sdk.invitation-code.v7", body);
         let mut check = [0; CHECK_LEN];
         check.copy_from_slice(&digest[..CHECK_LEN]);
         check
@@ -385,8 +381,8 @@ impl Code {
         };
         let mut routes = Vec::new();
         while !reader.0.is_empty() {
-            let [len] = reader.array::<1>()?;
-            let route = reader.take(usize::from(len))?;
+            let len = reader.length()?;
+            let route = reader.take(len)?;
             routes.push(Route::try_from(String::from_utf8(route.to_vec())?)?);
         }
         if !Self::fits(&routes) {
@@ -402,8 +398,26 @@ impl Code {
         })
     }
 }
+fn put_length(bytes: &mut Vec<u8>, len: usize) {
+    let mut rest = len;
+    while rest >= 0x80 {
+        bytes.push(rest.to_le_bytes()[0] | 0x80);
+        rest >>= 7;
+    }
+    bytes.push(rest.to_le_bytes()[0]);
+}
 struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
+    fn length(&mut self) -> Result<usize, Failure> {
+        let [low] = self.array()?;
+        if low < 0x80 {
+            return Ok(usize::from(low));
+        }
+        match self.array()? {
+            [high @ 1..0x80] => Ok(usize::from(low & 0x7f) | usize::from(high) << 7),
+            _ => Err("invitation route length".into()),
+        }
+    }
     fn take(&mut self, len: usize) -> Result<&'a [u8], Failure> {
         let (taken, rest) = self
             .0
@@ -417,8 +431,8 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The text a joiner redeems with `Configuration::join`: one URL-safe string of about 250
-/// characters that names the issuing device's routes when it issued the code.
+/// The text a joiner redeems with `Configuration::join`: one URL-safe string, about 260
+/// characters with a TCP route and 400 with an iroh one, naming the issuer's routes at issue.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitationCode(Box<Code>);
 impl InvitationCode {
@@ -1162,6 +1176,45 @@ mod tests {
     }
 
     #[test]
+    fn a_code_carries_a_route_of_the_longest_length_next_to_a_short_one() -> Result<(), Failure> {
+        let longest = Route::try_from(format!("iroh:{}", "A".repeat(Route::MAX_LEN - 5)))?;
+        let token = InvitationCode(Box::new(Code {
+            routes: vec![longest, code(None).0.routes[0].clone()],
+            ..*code(None).0
+        }));
+        assert!(token.to_string().parse::<InvitationCode>()? == token);
+        Ok(())
+    }
+
+    #[test]
+    fn an_iroh_code_from_a_host_with_many_interfaces_stays_short() -> Result<(), Failure> {
+        let address = rocky_iroh::iroh::EndpointAddr::new(
+            rocky_iroh::iroh::SecretKey::from_bytes(&[9; 32]).public(),
+        )
+        .with_relay_url("https://euc1-1.relay.n0.iroh-canary.iroh.link./".parse()?)
+        .with_addrs(
+            [
+                "100.101.102.103:50123",
+                "[fd7a:115c:a1e0::1234:5678]:50123",
+                "192.168.178.20:50123",
+                "10.0.0.5:50123",
+                "172.17.0.1:50123",
+                "[fe80::1c2b:3aff:fe4d:5e6f]:50123",
+                "127.0.0.1:50123",
+            ]
+            .map(|text| rocky_iroh::iroh::TransportAddr::Ip(text.parse().expect("a socket"))),
+        );
+        let token = InvitationCode(Box::new(Code {
+            routes: vec![Route::try_from(rocky_iroh::route(&address)?)?],
+            ..*code(None).0
+        }));
+        let text = token.to_string();
+        assert!(text.len() <= 460, "{} characters: {text}", text.len());
+        assert!(text.parse::<InvitationCode>()? == token);
+        Ok(())
+    }
+
+    #[test]
     fn a_tampered_truncated_or_other_version_code_is_invalid() {
         let text = code(None).to_string();
         let mut tampered = text.clone().into_bytes();
@@ -1173,6 +1226,12 @@ mod tests {
         older[0] = INVITE_VERSION - 1;
         older.extend_from_slice(&Code::check(&older));
         let older = format!("{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&older));
+        let mut padded = code(None).0.body();
+        let length = padded.len() - code(None).0.routes[0].as_str().len() - 1;
+        padded[length] |= 0x80;
+        padded.insert(length + 1, 0);
+        padded.extend_from_slice(&Code::check(&padded));
+        let padded = format!("{INVITE_PREFIX}{}", BASE64URL_NOPAD.encode(&padded));
         let routeless = InvitationCode(Box::new(Code {
             routes: Vec::new(),
             ..*code(None).0
@@ -1182,6 +1241,7 @@ mod tests {
             tampered.as_str(),
             truncated,
             &older,
+            &padded,
             &routeless,
             "rocky://invite/",
         ] {

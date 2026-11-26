@@ -1,3 +1,4 @@
+use crate::address::{MAX_DIRECT, put_socket, reachable_first, take, take_socket};
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -15,7 +16,7 @@ use rocky_core::{
 };
 use rocky_platform::time::{SystemTime, UNIX_EPOCH};
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::{Arc, PoisonError},
     time::Duration,
 };
@@ -106,37 +107,13 @@ impl Entry {
             .unwrap_or_default();
         out.push(relay.len() as u8);
         out.extend(relay.as_bytes());
-        let sockets: Vec<&SocketAddr> = self
-            .address
-            .addrs
-            .iter()
-            .filter_map(|addr| match addr {
-                TransportAddr::Ip(socket) => Some(socket),
-                _ => None,
-            })
-            .take(2)
-            .collect();
+        let sockets: Vec<&SocketAddr> = reachable_first(&self.address).take(MAX_DIRECT).collect();
         out.push(sockets.len() as u8);
         for socket in sockets {
-            match socket.ip() {
-                IpAddr::V4(ip) => {
-                    out.push(4);
-                    out.extend(ip.octets());
-                }
-                IpAddr::V6(ip) => {
-                    out.push(6);
-                    out.extend(ip.octets());
-                }
-            }
-            out.extend(socket.port().to_le_bytes());
+            put_socket(out, socket);
         }
     }
     fn decode(bytes: &mut &[u8]) -> Option<Self> {
-        fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Option<&'a [u8]> {
-            let (head, rest) = bytes.split_at_checked(count)?;
-            *bytes = rest;
-            Some(head)
-        }
         let node = take(bytes, 32)?.try_into().ok()?;
         let id = EndpointId::from_bytes(take(bytes, 32)?.try_into().ok()?).ok()?;
         let seen = u64::from_le_bytes(take(bytes, 8)?.try_into().ok()?);
@@ -152,19 +129,11 @@ impl Entry {
                 .insert(TransportAddr::Relay(relay.parse::<RelayUrl>().ok()?));
         }
         let sockets = take(bytes, 1)?[0];
-        if sockets > 2 {
+        if usize::from(sockets) > MAX_DIRECT {
             return None;
         }
         for _ in 0..sockets {
-            let ip = match take(bytes, 1)?[0] {
-                4 => IpAddr::from(<[u8; 4]>::try_from(take(bytes, 4)?).ok()?),
-                6 => IpAddr::from(<[u8; 16]>::try_from(take(bytes, 16)?).ok()?),
-                _ => return None,
-            };
-            let port = u16::from_le_bytes(take(bytes, 2)?.try_into().ok()?);
-            address
-                .addrs
-                .insert(TransportAddr::Ip(SocketAddr::new(ip, port)));
+            address.addrs.insert(TransportAddr::Ip(take_socket(bytes)?));
         }
         Some(Self {
             node,
@@ -530,6 +499,7 @@ impl Discovery for Finder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     fn entry(node: u8, seen: u64) -> Entry {
         let mut address = EndpointAddr::new(SecretKey::from_bytes(&[node; 32]).public());

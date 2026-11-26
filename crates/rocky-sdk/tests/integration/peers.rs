@@ -381,8 +381,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer"))).await?;
     let invite = a.invite().await;
-    assert_eq!(common::invitation_bytes(&invite)?[0], 6);
-    for version in [0, 5, 7, u8::MAX] {
+    assert_eq!(common::invitation_bytes(&invite)?[0], 7);
+    for version in [0, 6, 8, u8::MAX] {
         let directory = root.path().join(format!("join-{version}"));
         assert!(
             common::with_version(&invite, version)?

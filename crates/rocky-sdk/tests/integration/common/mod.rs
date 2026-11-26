@@ -456,7 +456,7 @@ pub fn invitation_bytes(code: &rocky_sdk::InvitationCode) -> Result<Vec<u8>, Fai
     Ok(data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?)
 }
 fn resealed(mut body: Vec<u8>) -> String {
-    let check = rocky_core::commitment("rocky.sdk.invitation-code.v6", &body);
+    let check = rocky_core::commitment("rocky.sdk.invitation-code.v7", &body);
     body.extend_from_slice(&check[..INVITE_CHECK]);
     format!(
         "{INVITE_PREFIX}{}",

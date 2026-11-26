@@ -252,6 +252,48 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
 }
 
 #[tokio::test]
+async fn an_issuer_whose_route_is_longer_than_255_bytes_invites_a_joiner_that_redeems()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let name = format!("issuer-{}", "interface".repeat(32));
+            let a = enrolled(&root.path().join("a"), &hub, &name, None).await?;
+            let routes = a.own_routes().await;
+            assert!(
+                routes.iter().any(|route| route.as_str().len() > 255),
+                "{routes:?}"
+            );
+            let invitation = a.invite(&crate::Invite::new(crate::Access::Full)).await?;
+            assert_eq!(
+                invitation
+                    .code
+                    .to_string()
+                    .parse::<crate::InvitationCode>()?,
+                invitation.code
+            );
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, crate::Access::Full)),
+            )
+            .await?;
+            let issuer = b.settings.lock().await.targets().into_iter().next();
+            assert_eq!(
+                issuer.ok_or("the issuer's contact")?.1.routes,
+                routes,
+                "the joiner dials the issuer at the route its invitation named"
+            );
+            a.detach().await;
+            b.detach().await;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(async {

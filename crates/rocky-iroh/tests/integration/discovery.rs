@@ -1,7 +1,5 @@
 use rocky_core::net::{Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH};
-use rocky_iroh::{
-    Attachment, Discover, Lookup, Options, Topic, iroh::EndpointAddr, testing::LookupServer,
-};
+use rocky_iroh::{Attachment, Discover, Lookup, Options, Topic, testing::LookupServer};
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -51,7 +49,7 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
     let (at_a, at_b) = tokio::try_join!(found(&a, [12; 32]), found(&b, [11; 32]))?;
     assert!(at_a.local && at_b.local);
     assert_eq!(at_a.path, LOCAL_PATH);
-    let address = endpoint(&at_a.address)?;
+    let address = rocky_iroh::endpoint_addr(&at_a.address)?;
     assert_eq!(address.id, b.endpoint().id());
     assert!(
         address.ip_addrs().next().is_some(),
@@ -99,7 +97,7 @@ async fn members_of_a_topic_find_each_other_through_the_rendezvous_record() -> R
     let at_b = found(&b, [14; 32]).await?;
     assert!(!at_b.local);
     assert_eq!(at_b.path, TOPIC_PATH);
-    let address = endpoint(&at_b.address)?;
+    let address = rocky_iroh::endpoint_addr(&at_b.address)?;
     assert_eq!(address, a.endpoint().addr());
     tokio::time::timeout(WAIT, server.wait_for_contacts(&previous, 2)).await?;
     assert_eq!(
@@ -168,11 +166,4 @@ fn a_disabled_lookup_service_makes_the_topic_unavailable_with_its_reason() {
         Options::isolated("127.0.0.1:0").discover(),
         Discover::default()
     );
-}
-
-fn endpoint(route: &str) -> Result<EndpointAddr, Failure> {
-    let encoded = route.strip_prefix("iroh:").ok_or("not an iroh: route")?;
-    Ok(serde_json::from_slice(
-        &data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?,
-    )?)
 }

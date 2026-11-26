@@ -272,8 +272,8 @@ needs the issuing device online when it redeems the code. An invite can add
 person, and a validity from one minute to 30 days (`Invite::valid_for`, ten
 minutes by default). Every code admits one device once. A default code admits
 whoever holds it, as a person key Rocky mints and returns in
-`Opened::identity`. A code prints as one URL-safe line of about 250 characters
-(`Display`, and `FromStr` to read it back) holding a secret, the database, the
+`Opened::identity`. A code prints as one URL-safe line of about 260 characters
+with a TCP route and 400 with an iroh route (`Display`, and `FromStr` to read it back) holding a secret, the database, the
 issuing device and its routes at issue time: an admin device that issues codes
 for later binds a fixed port or sets `rocky_tcp::Options::advertise` to a
 stable URL, while iroh routes are keys and stay valid. The code holds no access
@@ -841,7 +841,10 @@ syncs.
   lookup service, finds the database's other devices by topic and on the local
   network, and runs in the browser through relays; its `relay` takes a
   `rocky_iroh::Relay` and its `lookup` a `rocky_iroh::Lookup`, each `Default`,
-  `Disabled` or `Custom(url)`. It claims `iroh:` routes. An
+  `Disabled` or `Custom(url)`. It claims `iroh:` routes, which name the
+  endpoint, its first relay and its two direct addresses most likely reachable
+  from another network, public before private before CGNAT, link-local and
+  loopback; the relay, lookup and local discovery find its other paths. An
   application with its own iroh endpoint registers
   `rocky_iroh::Attachment::new(endpoint)` on its router and passes
   `attachment.transport()` as `Network::Borrowed`. On iOS, also copy the

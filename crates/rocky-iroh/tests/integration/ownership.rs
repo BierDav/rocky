@@ -179,17 +179,9 @@ async fn a_dial_rebinds_a_dead_starter_on_its_fixed_port() -> Result<(), Failure
     rocky(&first, &second).await?;
     rocky(&second, &first).await?;
     assert!(
-        String::from_utf8(
-            data_encoding::BASE64URL_NOPAD.decode(
-                first
-                    .address()
-                    .await?
-                    .ok_or("no route")?
-                    .trim_start_matches("iroh:")
-                    .as_bytes(),
-            )?
-        )?
-        .contains(&format!(":{port}")),
+        rocky_iroh::endpoint_addr(&first.address().await?.ok_or("no route")?)?
+            .ip_addrs()
+            .any(|address| address.port() == port),
         "the next dial heals the starter on its fixed port without a foreground"
     );
     first.endpoint().close().await;

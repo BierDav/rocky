@@ -11,6 +11,9 @@ use rocky_core::{
 use serde::{Deserialize, Serialize};
 mod diagnostics;
 pub use diagnostics::{NetworkPath, RelayStatus};
+mod address;
+use address::SCHEME;
+pub use address::{endpoint_addr, route};
 mod scoped;
 use scoped::Route;
 use std::{
@@ -61,25 +64,6 @@ fn protocol_named(name: &[u8]) -> Option<Protocol> {
         .find(|protocol| alpn(*protocol) == name)
 }
 
-const SCHEME: &str = "iroh";
-
-/// The `iroh:` route that names an endpoint, its relay and its direct addresses.
-pub fn route(address: &EndpointAddr) -> Result<String, Failure> {
-    Ok(format!(
-        "{SCHEME}:{}",
-        data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(address)?)
-    ))
-}
-
-fn endpoint_addr(route: &str) -> Result<EndpointAddr, Failure> {
-    let encoded = route
-        .strip_prefix(SCHEME)
-        .and_then(|rest| rest.strip_prefix(':'))
-        .ok_or("not an iroh: route")?;
-    Ok(serde_json::from_slice(
-        &data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?,
-    )?)
-}
 const TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING: usize = 32;
 const CONNECTIONS: usize = 64;

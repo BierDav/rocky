@@ -349,7 +349,10 @@ impl Node {
             Some(kind) => {
                 let since = match prior {
                     Some(prior) if !turned => prior.since,
-                    _ => self.status_time().ok(),
+                    _ => self
+                        .status_time()
+                        .ok()
+                        .map(crate::Timestamp::from_unix_seconds),
                 };
                 if turned {
                     match kind {

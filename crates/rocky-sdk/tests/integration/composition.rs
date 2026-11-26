@@ -63,7 +63,7 @@ async fn sync(database: &Database) -> Result<Value, Value> {
     snap::observe(database.sync_now()).await
 }
 async fn transport(database: &Database) -> Vec<String> {
-    database.status().await.expect("status").network.schemes
+    database.status().await.expect("status").network().schemes
 }
 
 fn memory(hub: &Arc<Hub>, name: &'static str) -> Arc<Memory> {
@@ -107,7 +107,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     let root = tempfile::tempdir()?;
     let directory = root.path().join("a");
     let database = open(&directory, None).create().await?.database;
-    assert!(database.status().await?.authority.is_issuer);
+    assert!(database.status().await?.authority().is_issuer);
     assert!(transport(&database).await.is_empty());
     add(&database, 1, "Milk").await;
     assert_eq!(titles(&database).await, ["Milk"]);

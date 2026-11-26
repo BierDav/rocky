@@ -265,7 +265,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         !m.database
             .status()
             .await?
-            .authority
+            .authority()
             .renewal_routes
             .is_empty()
     );

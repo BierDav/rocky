@@ -26,7 +26,7 @@ fn starter(lookup: Option<&rocky_iroh::Url>, local: bool) -> Network {
 }
 async fn discovered(device: &Device) -> Option<Value> {
     let peers = snap::ok(async {
-        let network = device.database.status().await?.network;
+        let network = device.database.status().await?.network();
         Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await;
@@ -59,7 +59,7 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     for member in [&a, &b] {
         snap::ok(member.database.remove_peer(snap::device_id(&(node)))).await;
         let peers = snap::ok(async {
-            let network = member.database.status().await?.network;
+            let network = member.database.status().await?.network();
             Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;
@@ -171,7 +171,7 @@ async fn simulator_peer() -> Result<(), Failure> {
     let found = tokio::time::timeout(WAIT, async {
         loop {
             let peers = snap::ok(async {
-                let network = host.database.status().await?.network;
+                let network = host.database.status().await?.network();
                 Ok::<_, rocky_sdk::Error>(
                     json!({"peers":network.peers,"discovery":network.discovery}),
                 )
@@ -271,7 +271,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     .await?;
     let topic = a.database.discovery_topic().await?;
     tokio::time::timeout(WAIT, server.wait_for_contacts(&topic, 1)).await?;
-    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network()) })
         .await["discovery"]
         .clone();
     assert_eq!(
@@ -283,7 +283,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     assert_eq!(endpoint.address_lookup()?.len(), services);
     a.database.detach().await?;
     assert_eq!(endpoint.address_lookup()?.len(), services);
-    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network()) })
         .await["discovery"]
         .clone();
     assert_eq!(discovery["announcing"], false);
@@ -297,7 +297,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
         Some(Network::Borrowed(plain.transport())),
     )
     .await?;
-    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network) })
+    let discovery = snap::ok(async { a.database.status().await.map(|status| status.network()) })
         .await["discovery"]
         .clone();
     assert_eq!(

@@ -68,7 +68,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     );
     let creator = snap::ok(snap::device(&c.database)).await;
     let creators: Vec<Value> = snap::ok(async {
-        let network = c.database.status().await?.network;
+        let network = c.database.status().await?.network();
         Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
     })
     .await["peers"]
@@ -87,7 +87,8 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .any(|attempt| attempt["outcome"] == "failed")
     );
     assert_ne!(creators[0]["node"], creator["node"]);
-    let network = snap::ok(async { c.database.status().await.map(|status| status.network) }).await;
+    let network =
+        snap::ok(async { c.database.status().await.map(|status| status.network()) }).await;
     assert_eq!(network["attachment"], "attached");
     assert_eq!(network["schemes"], json!(["memory"]));
     assert_eq!(network["inbound"]["limit"], 32);
@@ -111,7 +112,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         !b.database
             .status()
             .await?
-            .authority
+            .authority()
             .renewal_routes
             .is_empty()
     );
@@ -120,7 +121,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         b.database
             .status()
             .await?
-            .authority
+            .authority()
             .renewal_routes
             .is_empty(),
         "the last issuer contact can be removed, leaving no known renewal candidates"
@@ -267,7 +268,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         (before_a, before_b)
     );
     assert_eq!(
-        snap::ok(async { a.database.status().await.map(|status| status.network) }).await["schemes"],
+        snap::ok(async { a.database.status().await.map(|status| status.network()) }).await["schemes"],
         json!(["iroh"])
     );
     assert_eq!(b.titles().await, ["Milk"]);
@@ -466,7 +467,7 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
             .attach(Network::Attached(transport.clone()))
             .await?;
         assert_eq!(
-            snap::ok(async { a.database.status().await.map(|status| status.network) }).await["ownership"],
+            snap::ok(async { a.database.status().await.map(|status| status.network()) }).await["ownership"],
             json!("application")
         );
         a.close().await;
@@ -550,7 +551,7 @@ async fn a_pass_that_reaches_no_peer_names_why_each_peer_failed() -> Result<(), 
         return Err(format!("expected NoPeerReached, got {error:?}").into());
     };
     let peer = report
-        .peers
+        .peers()
         .iter()
         .find(|peer| peer.node.to_string() == b_node)
         .ok_or("the report names the closed peer")?;

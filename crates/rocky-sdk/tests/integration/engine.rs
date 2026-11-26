@@ -192,7 +192,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         Some(a_keys.clone()),
     )
     .await?;
-    assert!(creator.engine.status().await?.authority.is_issuer);
+    assert!(creator.engine.status().await?.authority().is_issuer);
     let member = Db::with_secrets(
         &root.path().join("b"),
         OpenMode::Join {
@@ -202,7 +202,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         Some(b_keys.clone()),
     )
     .await?;
-    assert!(!member.engine.status().await?.authority.is_issuer);
+    assert!(!member.engine.status().await?.authority().is_issuer);
     assert_eq!(member.scope, creator.scope);
 
     let milk = creator.add(1, "Milk").await;
@@ -546,7 +546,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
         async move { Db::start(&directory, mode, &application("shopping"), network, None).await }
     };
     let creator = open("a", OpenMode::Create, "a").await?;
-    assert_eq!(creator.engine.status().await?.network.schemes, ["memory"]);
+    assert_eq!(creator.engine.status().await?.network().schemes, ["memory"]);
     let invitation = creator.invite().await;
     let member = open(
         "b",

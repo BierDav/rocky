@@ -92,7 +92,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .await
         .unwrap()
         .database;
-    let reader_identity = reader.status().await.unwrap().authority.principal;
+    let reader_identity = reader.status().await.unwrap().authority().principal;
     snap::ok(db.grant_partition(
         reader_identity,
         &rocky_sdk::Partition::new("items", values("A")),
@@ -113,7 +113,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
             .len(),
         1
     );
-    let progress = reader.status().await.unwrap().data.partitions;
+    let progress = reader.status().await.unwrap().data().partitions;
     assert_eq!(
         progress
             .iter()

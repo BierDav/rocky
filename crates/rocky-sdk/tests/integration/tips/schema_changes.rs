@@ -36,7 +36,7 @@ async fn additive_publication_moves_main_and_an_old_app_opens_behind() -> Result
         a.database
             .status()
             .await
-            .map(|status| status.data.generation)
+            .map(|status| status.data().generation)
     })
     .await;
     assert_eq!(status["application"], "current", "{status}");
@@ -49,7 +49,7 @@ async fn additive_publication_moves_main_and_an_old_app_opens_behind() -> Result
         a.database
             .status()
             .await
-            .map(|status| status.data.generation)
+            .map(|status| status.data().generation)
     })
     .await;
     assert_eq!(status["application"], "behind", "{status}");
@@ -70,7 +70,7 @@ async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Res
             a.database
                 .status()
                 .await
-                .map(|status| status.data.generation)
+                .map(|status| status.data().generation)
         })
         .await;
         assert_eq!(status["application"], "current", "{status}");

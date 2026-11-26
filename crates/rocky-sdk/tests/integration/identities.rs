@@ -908,7 +908,8 @@ async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::status::Alert>
         .database
         .status()
         .await?
-        .alerts
+        .alerts()
+        .to_vec()
         .into_iter()
         .filter(|alert| {
             matches!(

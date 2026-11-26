@@ -56,7 +56,7 @@ async fn generation(device: &Device) -> Value {
             .database
             .status()
             .await
-            .map(|status| status.data.generation)
+            .map(|status| status.data().generation)
     })
     .await
 }
@@ -533,7 +533,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
         b.database
             .status()
             .await?
-            .data
+            .data()
             .generation
             .waiting_for_issuer
     );

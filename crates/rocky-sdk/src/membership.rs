@@ -168,18 +168,18 @@ impl AdminObservation {
                 kind: crate::AlertKind::AdminDeviceLinked {
                     identity,
                     node,
-                    linked: self.linked,
+                    linked: crate::Timestamp::from_unix_seconds(self.linked),
                 },
-                since: Some(self.linked),
+                since: Some(crate::Timestamp::from_unix_seconds(self.linked)),
             })
             .into_iter()
             .chain(self.unlinked.map(|unlinked| crate::Alert {
                 kind: crate::AlertKind::AdminDeviceUnlinked {
                     identity,
                     node,
-                    unlinked,
+                    unlinked: crate::Timestamp::from_unix_seconds(unlinked),
                 },
-                since: Some(unlinked),
+                since: Some(crate::Timestamp::from_unix_seconds(unlinked)),
             }))
     }
 }

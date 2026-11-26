@@ -67,7 +67,7 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
 async fn revocations(device: &Device) -> RevocationStatus {
     for _ in 0..3 {
         match device.database.status().await {
-            Ok(status) => return status.authority.revocations,
+            Ok(status) => return status.authority().revocations,
             Err(error) if matches!(error.kind(), rocky_sdk::ErrorKind::Blocked { .. }) => {
                 let _ = device.sync_now().await;
             }
@@ -79,7 +79,7 @@ async fn revocations(device: &Device) -> RevocationStatus {
         .status()
         .await
         .expect("status once the blocked scope settles")
-        .authority
+        .authority()
         .revocations
 }
 const INSERT_ITEM: &str = "INSERT INTO items(key,title,completed) VALUES(?,?,0)";
@@ -228,7 +228,7 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
             json!({"items": [1, 2], "notes": [1, 2]}),
             "{name}"
         );
-        assert!(!device.database.status().await?.data.bootstrap_pending);
+        assert!(!device.database.status().await?.data().bootstrap_pending);
     }
     create_row(&m, 3, INSERT_ITEM, "after").await;
     create_row(&n, 4, INSERT_NOTE, "after").await;
@@ -251,7 +251,7 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
                 .database
                 .status()
                 .await?
-                .authority
+                .authority()
                 .verified_revocation
                 .is_some(),
             "each revoked device is told why by its own issuer"
@@ -357,7 +357,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     let status = early.database.status().await?;
     assert_eq!(
         status
-            .authority
+            .authority()
             .verified_revocation
             .as_ref()
             .map(|notice| &notice.reason),

@@ -125,12 +125,12 @@ async fn a_restored_copy_never_authors_and_rejoins_as_a_new_device() -> Result<(
     let status = restored.database.status().await?;
     let restored_node = restored.node().await;
     assert!(
-        status.alerts.iter().any(|alert| matches!(
+        status.alerts().iter().any(|alert| matches!(
             &alert.kind,
             AlertKind::StoreSuperseded { node, .. } if node.to_string() == restored_node
         )),
         "{:?}",
-        status.alerts
+        status.alerts()
     );
     restored.close().await;
     drop(restored);

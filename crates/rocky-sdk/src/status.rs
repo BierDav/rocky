@@ -1,4 +1,45 @@
-pub use rocky_core::{Blocker, BlockerKind, ClearsBy, FrameReplay, WaitReason};
+use crate::Timestamp;
+pub use rocky_core::{BlockerKind, ClearsBy, FrameReplay, WaitReason};
+
+/// Data that cannot be read yet, and what clears it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Blocker {
+    /// The table or partition it holds back.
+    pub scope: String,
+    /// What it waits for.
+    pub kind: BlockerKind,
+    /// Who or what can clear it.
+    pub clears_by: ClearsBy,
+    /// When it was first seen, or `None` when not recorded.
+    pub since: Option<Timestamp>,
+}
+impl From<&rocky_core::Blocker> for Blocker {
+    fn from(blocker: &rocky_core::Blocker) -> Self {
+        Self {
+            scope: blocker.scope.clone(),
+            kind: blocker.kind.clone(),
+            clears_by: blocker.clears_by.clone(),
+            since: blocker.since.map(Timestamp::from_unix_seconds),
+        }
+    }
+}
+impl From<&Blocker> for rocky_core::Blocker {
+    fn from(blocker: &Blocker) -> Self {
+        Self {
+            scope: blocker.scope.clone(),
+            kind: blocker.kind.clone(),
+            clears_by: blocker.clears_by.clone(),
+            since: blocker
+                .since
+                .and_then(|since| u64::try_from(since.unix_micros() / 1_000_000).ok()),
+        }
+    }
+}
+impl std::fmt::Display for Blocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        rocky_core::Blocker::from(self).fmt(f)
+    }
+}
 use serde::{Deserialize, Serialize};
 
 mod attempts;
@@ -403,7 +444,7 @@ pub struct DataStatus {
     /// The schema.
     pub generation: GenerationStatus,
     /// Why some data cannot be read yet and what clears each; empty when everything is readable.
-    pub blockers: Vec<Blocker>,
+    pub blockers: Vec<rocky_core::Blocker>,
     /// Whether the first download has not finished.
     pub bootstrap_pending: bool,
     /// Progress of the first download.
@@ -590,8 +631,8 @@ pub struct NetworkStatus {
 pub struct Alert {
     /// What happened.
     pub kind: AlertKind,
-    /// When it was raised, in Unix seconds.
-    pub since: Option<u64>,
+    /// When it was raised, or `None` when not recorded.
+    pub since: Option<Timestamp>,
 }
 /// Why a routine seal was skipped.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -655,8 +696,8 @@ pub enum AlertKind {
         identity: crate::PersonId,
         /// The device.
         node: crate::DeviceId,
-        /// When, in Unix seconds.
-        linked: u64,
+        /// When.
+        linked: Timestamp,
     },
     /// An admin unlinked a device.
     AdminDeviceUnlinked {
@@ -664,15 +705,15 @@ pub enum AlertKind {
         identity: crate::PersonId,
         /// The device.
         node: crate::DeviceId,
-        /// When, in Unix seconds.
-        unlinked: u64,
+        /// When.
+        unlinked: Timestamp,
     },
     /// No device of an admin has been heard from within `ADMIN_STALE_AFTER`.
     AdminStale {
         /// The admin.
         identity: crate::PersonId,
         /// When one of its devices was last heard from.
-        last_heard_epoch_seconds: u64,
+        last_heard: Timestamp,
     },
     /// A routine seal was skipped.
     SealSkipped {
@@ -771,30 +812,124 @@ pub struct MeshDevice {
 }
 /// How long a device may go without a health report before it counts as silent.
 pub const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
-/// A snapshot of the database: who this device is, the data and the network.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A snapshot of what an application acts on: blockers, alerts, credentials, schema and sync.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DatabaseStatus {
     #[serde(skip)]
     pub(crate) token: String,
-    /// When it was taken.
-    pub observed_at_epoch_millis: Option<u64>,
-    /// This device's credentials.
-    pub authority: AuthorityStatus,
-    /// The local data and its blockers.
-    pub data: DataStatus,
-    /// The network and peers.
-    pub network: NetworkStatus,
-    /// Conditions that need attention.
-    pub alerts: Vec<Alert>,
-    /// Every device's health report, or `None` on a device that is not an admin's.
-    pub mesh: Option<Vec<MeshDevice>>,
+    pub(crate) observed_at_epoch_millis: Option<u64>,
+    pub(crate) authority: AuthorityStatus,
+    pub(crate) data: DataStatus,
+    pub(crate) network: NetworkStatus,
+    pub(crate) alerts: Vec<Alert>,
+    pub(crate) mesh: Option<Vec<MeshDevice>>,
 }
 impl DatabaseStatus {
+    /// When it was taken.
+    pub fn observed_at(&self) -> Option<Timestamp> {
+        self.observed_at_epoch_millis
+            .map(Timestamp::from_unix_millis)
+    }
+    /// Data that cannot be read yet and what clears each; empty when everything is readable.
+    pub fn blockers(&self) -> Vec<Blocker> {
+        self.data.blockers.iter().map(Blocker::from).collect()
+    }
+    /// Whether the first download of the data has not finished.
+    pub fn bootstrapping(&self) -> bool {
+        self.data.bootstrap_pending
+    }
+    /// Conditions that need attention, until their cause clears.
+    pub fn alerts(&self) -> &[Alert] {
+        &self.alerts
+    }
+    /// Whether this is an admin device, which issues credentials and publishes schemas.
+    pub fn admin(&self) -> bool {
+        self.authority.is_issuer
+    }
+    /// When this device's credentials expire; a sync with an admin device renews them.
+    pub fn credentials_expire_at(&self) -> Timestamp {
+        Timestamp::from_unix_seconds(self.authority.expires_at_epoch_seconds)
+    }
+    /// Whether this device's credentials expired, which holds back sync until an admin renews them.
+    pub fn credentials_expired(&self) -> bool {
+        self.authority.expired
+    }
     /// The schema version installed on this device, which can differ from the one the application
     /// declares.
     pub fn schema_version(&self) -> u32 {
         self.data.generation.current.schema
     }
+    /// How the application's declared schema version compares with the installed one.
+    pub fn declared_schema(&self) -> DeclaredSchema {
+        self.data.generation.application
+    }
+    /// The state of a migration to the declared schema version, or `None` when none runs.
+    pub fn migration(&self) -> Option<MigrationStatus> {
+        self.data.generation.migration
+    }
+    /// Whether this build of Rocky can run the database's schema.
+    pub fn engine(&self) -> EngineStatus {
+        self.data.generation.engine
+    }
+    /// The sync mode.
+    pub fn sync_mode(&self) -> crate::SyncMode {
+        self.network.sync
+    }
+    /// Whether a sync pass runs now.
+    pub fn syncing(&self) -> bool {
+        self.network.reconciling
+    }
+    /// Whether the attached transport only dials out, so no peer can dial this device.
+    pub fn dial_only(&self) -> bool {
+        self.network.dial_only
+    }
+    /// The peer devices this device knows.
+    pub fn peers(&self) -> Vec<PeerStatus> {
+        self.network
+            .peers
+            .iter()
+            .map(|peer| PeerStatus {
+                device: peer.node,
+                connected: peer.link.state == LinkState::Open,
+                last_exchange: peer
+                    .last_authenticated_exchange_at_epoch_seconds
+                    .map(Timestamp::from_unix_seconds),
+            })
+            .collect()
+    }
+    /// The last sync pass, or `None` before the first.
+    pub fn last_sync(&self) -> Option<&SyncReport> {
+        self.network.last_reconciliation.as_ref()
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl DatabaseStatus {
+    /// This device's credentials in detail.
+    pub fn authority(&self) -> AuthorityStatus {
+        self.authority.clone()
+    }
+    /// The local data in detail.
+    pub fn data(&self) -> DataStatus {
+        self.data.clone()
+    }
+    /// The network and peers in detail.
+    pub fn network(&self) -> NetworkStatus {
+        self.network.clone()
+    }
+    /// Every device's health report, or `None` on a device that is not an admin's.
+    pub fn mesh(&self) -> Option<Vec<MeshDevice>> {
+        self.mesh.clone()
+    }
+}
+/// One known peer device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerStatus {
+    /// The device.
+    pub device: crate::DeviceId,
+    /// Whether a replication link to it is open.
+    pub connected: bool,
+    /// When it last proved its identity in an exchange, or `None` if never.
+    pub last_exchange: Option<Timestamp>,
 }
 /// What one scope exchanged with a peer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -899,16 +1034,36 @@ pub struct TimeoutCount {
 /// What one `Database::sync_now` pass did; it prints as one line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncReport {
-    /// Contact resolutions in the pass.
-    pub contact_resolutions: Vec<AttemptObservation>,
-    /// When the pass started.
-    pub started_at_epoch_millis: Option<u64>,
-    /// When it ended.
-    pub ended_at_epoch_millis: Option<u64>,
+    pub(crate) contact_resolutions: Vec<AttemptObservation>,
+    pub(crate) started_at_epoch_millis: Option<u64>,
+    pub(crate) ended_at_epoch_millis: Option<u64>,
+    pub(crate) peers: Vec<PeerReconciliation>,
+}
+#[cfg(any(test, feature = "test-support"))]
+impl SyncReport {
     /// Each peer the pass knew.
-    pub peers: Vec<PeerReconciliation>,
+    pub fn peers(&self) -> &[PeerReconciliation] {
+        &self.peers
+    }
+    /// Contact resolutions in the pass.
+    pub fn contact_resolutions(&self) -> &[AttemptObservation] {
+        &self.contact_resolutions
+    }
 }
 impl SyncReport {
+    /// When the pass started.
+    pub fn started_at(&self) -> Option<Timestamp> {
+        self.started_at_epoch_millis
+            .map(Timestamp::from_unix_millis)
+    }
+    /// When the pass ended.
+    pub fn ended_at(&self) -> Option<Timestamp> {
+        self.ended_at_epoch_millis.map(Timestamp::from_unix_millis)
+    }
+    /// Peers the pass knew.
+    pub fn known(&self) -> usize {
+        self.peers.len()
+    }
     /// Peers that reconciled.
     pub fn reconciled(&self) -> usize {
         self.peers.iter().filter(|peer| peer.reconciled()).count()

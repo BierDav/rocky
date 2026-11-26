@@ -332,7 +332,7 @@ impl Device {
                 .status()
                 .await
                 .expect("status")
-                .authority
+                .authority()
                 .is_issuer
             {
                 return;
@@ -349,7 +349,7 @@ impl Device {
             .status()
             .await
             .expect("status")
-            .authority
+            .authority()
             .node
             .to_string()
     }
@@ -358,7 +358,7 @@ impl Device {
             .status()
             .await
             .expect("status")
-            .authority
+            .authority()
             .principal
             .to_string()
     }
@@ -371,7 +371,7 @@ impl Device {
     }
     pub async fn peer(&self, node: &str) -> Value {
         let peers = snap::ok(async {
-            let network = self.database.status().await?.network;
+            let network = self.database.status().await?.network();
             Ok::<_, rocky_sdk::Error>(json!({"peers":network.peers,"discovery":network.discovery}))
         })
         .await;

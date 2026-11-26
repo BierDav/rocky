@@ -244,7 +244,7 @@ impl Peer {
             .await
             .unwrap()
             .database;
-        let authority = database.status().await.unwrap().authority;
+        let authority = database.status().await.unwrap().authority();
         (
             Peer::new(database, store, self.hub.clone()),
             NodeKeys {
@@ -656,7 +656,7 @@ async fn a_granted_phone_holds_every_table_of_its_list_and_nothing_else() {
     for table in TABLES {
         assert_eq!(subscribed[table], true, "{table}");
     }
-    let progress = phone.database.status().await.unwrap().data.partitions;
+    let progress = phone.database.status().await.unwrap().data().partitions;
     assert_eq!(
         progress
             .iter()
@@ -1073,7 +1073,7 @@ async fn holds(peer: &Peer) -> Vec<(rocky_sdk::Partition, bool)> {
         .status()
         .await
         .unwrap()
-        .data
+        .data()
         .partitions
         .into_iter()
         .map(|progress| (progress.partition, progress.held))

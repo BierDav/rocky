@@ -8,7 +8,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 #[derive(Default)]
 pub(super) struct AdminWatch {
@@ -45,9 +45,11 @@ impl AdminWatch {
             .map(|(identity, last)| Alert {
                 kind: AlertKind::AdminStale {
                     identity: crate::PersonId::new(identity),
-                    last_heard_epoch_seconds: last,
+                    last_heard: crate::Timestamp::from_unix_seconds(last),
                 },
-                since: Some(last.saturating_add(self.stale_after)),
+                since: Some(crate::Timestamp::from_unix_seconds(
+                    last.saturating_add(self.stale_after),
+                )),
             })
     }
     fn deadline(&self, time: u64) -> Option<u64> {
@@ -182,7 +184,9 @@ impl Node {
                     node: crate::DeviceId::new(drop.node),
                     reason: crate::DropReason::Schema,
                 },
-                since: Some(drop.written),
+                since: Some(crate::Timestamp::from_unix_micros(
+                    i64::try_from(drop.written).unwrap_or(i64::MAX),
+                )),
             })
             .collect())
     }
@@ -842,10 +846,8 @@ mod tests {
         watch.nodes.remove(&nodes[1]);
         assert!(matches!(
             watch.alerts(210).next().map(|alert| alert.kind),
-            Some(AlertKind::AdminStale {
-                last_heard_epoch_seconds: 150,
-                ..
-            })
+            Some(AlertKind::AdminStale { last_heard, .. })
+                if last_heard == crate::Timestamp::from_unix_seconds(150)
         ));
         watch.hear(&nodes[1], 300);
         assert_eq!(watch.last().collect::<Vec<_>>(), [(identity, 150)]);

@@ -53,7 +53,7 @@ async fn synced(device: &Device) -> Result<SyncReport, rocky_sdk::Error> {
 }
 fn reconciled_with(report: &SyncReport, node: &str) -> bool {
     report
-        .peers
+        .peers()
         .iter()
         .any(|peer| peer.node.to_string() == node && peer.reconciled())
 }
@@ -72,7 +72,7 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     Err("the rows never became readable".into())
 }
 async fn device_info(device: &Device) -> rocky_sdk::status::AuthorityStatus {
-    device.database.status().await.expect("status").authority
+    device.database.status().await.expect("status").authority()
 }
 async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
     device.close().await;
@@ -151,7 +151,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         b.database
             .status()
             .await?
-            .network
+            .network()
             .peers
             .iter()
             .any(|peer| peer.node.to_string() == late_node
@@ -199,7 +199,12 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         )
         .await?;
     assert_eq!(
-        b.database.status().await?.authority.revocations.statements,
+        b.database
+            .status()
+            .await?
+            .authority()
+            .revocations
+            .statements,
         1,
         "with the root, a trusted node revokes the lost one"
     );
@@ -221,7 +226,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         let status = early.database.status().await?;
         assert_eq!(
             status
-                .authority
+                .authority()
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
@@ -239,7 +244,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         let status = early.database.status().await?;
         assert_eq!(
             status
-                .authority
+                .authority()
                 .verified_revocation
                 .as_ref()
                 .map(|notice| &notice.reason),
@@ -444,7 +449,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     let status = enrolled_by_t.database.status().await?;
     assert_eq!(
         status
-            .authority
+            .authority()
             .verified_revocation
             .as_ref()
             .map(|revoked| &revoked.reason),
@@ -493,7 +498,7 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
             .database
             .status()
             .await?
-            .authority
+            .authority()
             .verified_revocation
             .map(|notice| notice.reason),
         Some(rocky_sdk::status::RevocationReason::Identity)

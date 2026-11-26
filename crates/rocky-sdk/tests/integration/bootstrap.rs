@@ -557,7 +557,12 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     c.add_peer(&b.contact().await).await.expect("c knows b");
     let _ = c.sync().await;
     assert_eq!(
-        c.database.status().await?.authority.revocations.statements,
+        c.database
+            .status()
+            .await?
+            .authority()
+            .revocations
+            .statements,
         1,
         "c learns the revocation from b before it meets its inviter"
     );

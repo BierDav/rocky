@@ -85,7 +85,7 @@ async fn generation(device: &Device) -> Value {
             .database
             .status()
             .await
-            .map(|status| status.data.generation)
+            .map(|status| status.data().generation)
     })
     .await
 }

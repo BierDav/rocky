@@ -143,7 +143,7 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
         a.database
             .status()
             .await?
-            .network
+            .network()
             .inbound
             .ok_or("database admission")?
             .active,

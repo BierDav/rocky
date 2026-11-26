@@ -88,7 +88,7 @@ async fn second_device(owned: &Owned) -> Result<Device, Failure> {
 async fn the_person_key_publishes_a_new_schema_version_without_the_root() -> Result<(), Failure> {
     let declared = newer_schema();
     let owned = reopened_with_the_person_key_alone(&declared).await?;
-    let generation = owned.owner.database.status().await?.data.generation;
+    let generation = owned.owner.database.status().await?.data().generation;
     assert_eq!(generation.application, DeclaredSchema::Current);
     assert_eq!(generation.current.schema, 2);
     owned.owner.close().await;

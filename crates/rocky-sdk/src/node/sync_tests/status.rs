@@ -236,7 +236,7 @@ async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arri
             assert_eq!(pending.clears_by, rocky_core::ClearsBy::AnyPeer);
             assert_eq!(failure.blockers(), &**blockers);
             assert!(
-                b.observed_status().await?.data.blockers.contains(pending),
+                b.observed_status().await?.blockers().contains(pending),
                 "status reports the blocker the read names"
             );
 
@@ -248,7 +248,7 @@ async fn an_incomplete_read_names_the_blocker_status_reports_until_the_data_arri
                 vec![vec![SqlValue::Integer(2)]]
             );
             assert!(
-                !b.observed_status().await?.data.blockers.contains(pending),
+                !b.observed_status().await?.blockers().contains(pending),
                 "the blocker clears once the missing frame arrives"
             );
             a.detach().await;

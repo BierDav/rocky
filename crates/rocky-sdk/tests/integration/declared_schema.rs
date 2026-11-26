@@ -89,7 +89,13 @@ async fn an_application_ahead_of_its_database_is_refused_sql_but_keeps_status_an
         .ok_or("a write ran while the application was ahead")?;
     assert_eq!(refused.kind(), &ahead, "{refused}");
     assert_eq!(
-        member.database.status().await?.data.generation.application,
+        member
+            .database
+            .status()
+            .await?
+            .data()
+            .generation
+            .application,
         DeclaredSchema::Ahead,
         "status stays available"
     );
@@ -99,7 +105,13 @@ async fn an_application_ahead_of_its_database_is_refused_sql_but_keeps_status_an
     let owner = Device::new(open(&owner_path, &hub, "owner", 2).open().await?)?;
     sync(&owner, &member).await?;
     assert_eq!(
-        member.database.status().await?.data.generation.application,
+        member
+            .database
+            .status()
+            .await?
+            .data()
+            .generation
+            .application,
         DeclaredSchema::Current
     );
     assert_eq!(

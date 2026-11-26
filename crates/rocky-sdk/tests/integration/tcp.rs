@@ -32,7 +32,7 @@ async fn enroll_and_sync_both_ways(network: fn() -> Network) -> Result<(), Failu
     let invitation = a.invite().await;
     let b = Device::join(&root.path().join("b"), &invitation, network()).await?;
     b.sync().await.map_err(|error| error.to_string())?;
-    let network = a.database.status().await?.network;
+    let network = a.database.status().await?.network();
     assert_eq!(network.schemes, ["tcp", "ws", "wss"]);
     assert!(!network.dial_only);
 
@@ -66,7 +66,7 @@ async fn dial_only_syncs_with(listening: fn() -> Network) -> Result<(), Failure>
     let a = Device::create(&root.path().join("a"), Some(listening())).await?;
     let b = Device::join(&root.path().join("b"), &a.invite().await, listening()).await?;
     let c = Device::join(&root.path().join("c"), &a.invite().await, dial_only()).await?;
-    let status = c.database.status().await?.network;
+    let status = c.database.status().await?.network();
     assert!(status.dial_only, "{status:?}");
     assert!(
         c.database.contact().await?.routes.is_empty(),
@@ -102,10 +102,10 @@ async fn dial_only_syncs_with(listening: fn() -> Network) -> Result<(), Failure>
 
 async fn known_peers_and_complete(device: &Device) -> Result<(usize, bool), Failure> {
     match device.sync_now().await {
-        Ok(report) => Ok((report.peers.len(), report.complete())),
+        Ok(report) => Ok((report.peers().len(), report.complete())),
         Err(error) => match error.kind() {
             ErrorKind::Service(ServiceError::NoPeerReached(report)) => {
-                Ok((report.peers.len(), false))
+                Ok((report.peers().len(), false))
             }
             _ => Err(error.into()),
         },

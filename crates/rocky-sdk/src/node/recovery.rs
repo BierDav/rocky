@@ -111,10 +111,11 @@ impl Node {
                 );
                 if !same {
                     tracing::warn!(%reason, "this admin node skipped a due seal");
-                    let since = current
-                        .as_ref()
-                        .and_then(|alert| alert.since)
-                        .or_else(|| self.status_time().ok());
+                    let since = current.as_ref().and_then(|alert| alert.since).or_else(|| {
+                        self.status_time()
+                            .ok()
+                            .map(crate::Timestamp::from_unix_seconds)
+                    });
                     *skipped = Some(crate::Alert {
                         kind: crate::AlertKind::SealSkipped { reason },
                         since,

@@ -86,7 +86,7 @@ async fn sync(device: &Device) {
         eprintln!("migration report: {report}");
     }
     for failure in report
-        .peers
+        .peers()
         .iter()
         .flat_map(|peer| &peer.attempts)
         .filter_map(|attempt| attempt.failure.as_ref())
@@ -100,7 +100,7 @@ async fn generation(device: &Device) -> Value {
             .database
             .status()
             .await
-            .map(|status| status.data.generation)
+            .map(|status| status.data().generation)
     })
     .await
 }
@@ -1191,7 +1191,8 @@ async fn dropped_alerts(device: &Device) -> Result<Vec<rocky_sdk::TransactionTok
         .database
         .status()
         .await?
-        .alerts
+        .alerts()
+        .to_vec()
         .into_iter()
         .filter_map(|alert| match alert.kind {
             rocky_sdk::status::AlertKind::WriteDropped {
@@ -1523,7 +1524,7 @@ async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> R
     let bob = reopen(&dirs("bob"), &unmemoed(), network("bob")).await?;
     introduce(&relay, &bob).await;
     sync(&bob).await;
-    let blockers = bob.database.status().await?.data.blockers;
+    let blockers = bob.database.status().await?.blockers();
     let waiting: Vec<_> = blockers
         .iter()
         .filter(|blocker| waits_for_removal_checkpoint(blocker))
@@ -1568,8 +1569,7 @@ async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> R
         !bob.database
             .status()
             .await?
-            .data
-            .blockers
+            .blockers()
             .iter()
             .any(waits_for_removal_checkpoint),
         "the next sync with an admin clears the wait"

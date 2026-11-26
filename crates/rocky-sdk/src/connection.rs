@@ -73,11 +73,16 @@ fn blocked_table(node: &Node, sql: &str, error: &crate::Error) -> Option<crate::
             .filter(|blocker| blocker.scope == label || blocker.scope == whole)
             .cloned()
             .collect();
-        crate::Blockers::new(own).map(|own| (referenced.clone(), own))
+        crate::Blockers::of(own).map(|own| (referenced.clone(), own))
     })?;
     let detail = format!(
         "{table} is not available: {}",
-        rocky_core::describe_blockers(&blockers)
+        rocky_core::describe_blockers(
+            &blockers
+                .iter()
+                .map(rocky_core::Blocker::from)
+                .collect::<Vec<_>>()
+        )
     );
     Some(crate::Error::new(
         crate::ErrorKind::Blocked {

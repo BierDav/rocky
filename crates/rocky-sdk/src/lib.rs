@@ -39,8 +39,11 @@ mod invitation;
 mod membership;
 mod mesh;
 mod node;
-/// Partition progress and key deliveries.
+/// Partition progress, for Rocky's own tests.
+#[cfg(any(test, feature = "test-support"))]
 pub mod partitions;
+#[cfg(not(any(test, feature = "test-support")))]
+mod partitions;
 mod pause;
 mod peer;
 mod people;
@@ -56,8 +59,11 @@ mod service;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod simulation;
 mod sql;
-/// The reports `Database::status` and `sync_now` return.
+/// The diagnostic detail behind `DatabaseStatus` and `SyncReport`, for Rocky's own tests.
+#[cfg(any(test, feature = "test-support"))]
 pub mod status;
+#[cfg(not(any(test, feature = "test-support")))]
+mod status;
 mod store_only;
 mod sync;
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -114,7 +120,8 @@ pub use sql::{
 };
 pub(crate) use status::*;
 pub use status::{
-    AlertKind, BlockerKind, ClearsBy, DatabaseStatus, DeclaredSchema, MigrationStatus, SyncReport,
+    Alert, AlertKind, Blocker, BlockerKind, ClearsBy, DatabaseStatus, DeclaredSchema, EngineStatus,
+    FrameReplay, MigrationStatus, PeerStatus, SealSkip, SyncReport, WaitReason,
 };
 pub use store_only::StoreOnlyRefusal;
 #[cfg(any(test, feature = "test-support"))]

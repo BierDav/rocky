@@ -69,7 +69,7 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
 
 impl Todos {
     pub async fn node(&self) -> Result<String, Failure> {
-        Ok(self.database.status().await?.authority.node.to_string())
+        Ok(self.database.me().await?.device.to_string())
     }
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
         let invitation = self

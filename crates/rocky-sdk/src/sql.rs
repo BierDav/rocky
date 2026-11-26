@@ -217,9 +217,18 @@ impl FromSqlValue for Timestamp {
 
 /// A point in time as Unix microseconds, stored as an integer column; it prints as RFC 3339 in UTC,
 /// such as `2026-11-25T09:30:00.000000Z`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct Timestamp(i64);
 impl Timestamp {
+    pub(crate) fn from_unix_seconds(seconds: u64) -> Self {
+        Self(i64::try_from(seconds).map_or(i64::MAX, |seconds| seconds.saturating_mul(1_000_000)))
+    }
+    pub(crate) fn from_unix_millis(millis: u64) -> Self {
+        Self(i64::try_from(millis).map_or(i64::MAX, |millis| millis.saturating_mul(1_000)))
+    }
     /// The instant `micros` after the Unix epoch.
     pub const fn from_unix_micros(micros: i64) -> Self {
         Self(micros)

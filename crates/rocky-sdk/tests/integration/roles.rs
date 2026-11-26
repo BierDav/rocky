@@ -927,8 +927,7 @@ async fn a_partitioned_table_without_a_granted_partition_says_which_grant_clears
             .database
             .status()
             .await?
-            .data
-            .blockers
+            .blockers()
             .iter()
             .any(|blocker| matches!(
                 &blocker.kind,
@@ -982,8 +981,7 @@ async fn a_role_holding_only_partitioned_tables_opens_and_names_the_missing_gran
             .database
             .status()
             .await?
-            .data
-            .blockers
+            .blockers()
             .iter()
             .all(|blocker| !matches!(
                 blocker.kind,

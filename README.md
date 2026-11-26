@@ -283,7 +283,7 @@ application's. The issuing device has then admitted the device, so the join
 stays unfinished: repeating it in the same directory with the right schema
 resumes it. A device's credentials last 180 days and renew at every sync with
 an admin device; a device that meets none for 180 days holds expired
-credentials (`status().authority.expired`) until it does.
+credentials (`status().credentials_expired()`) until it does.
 `Database::invitations` lists open and redeemed invitations, and
 `cancel_invitation` ends an unused one.
 
@@ -347,7 +347,7 @@ async fn open_ward(admin: &Database, doctor: PersonId, ward: &str) -> Result<(),
 A person whose role is `per_partition` and who holds no partition of the
 group is refused every read of the group's tables, a plain `SELECT note FROM
 charts` included, with `Denied` and `PartitionNotGranted { group }`, and
-`status().data.blockers` lists a matching blocker. Rocky refuses on purpose
+`status().blockers()` lists a matching blocker. Rocky refuses on purpose
 rather than return no rows, which would look like a ward with no charts: show
 the person that they wait for an admin's grant, and read again when
 `status_changes()` drops the blocker. Once the person holds a partition, a
@@ -414,7 +414,7 @@ sync with an admin device, including a device still joining when it was made.
 `make_admin` returns once the owner's device recorded the promotion; in
 `SyncMode::Live` the promoted person's connected devices receive it at once,
 and each observes it on its own `status_changes()`, as in
-`while !changes.next().await?.authority.is_issuer {}`, after which it reads
+`while !changes.next().await?.admin() {}`, after which it reads
 and administers as an admin.
 Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
 an admin links or unlinks a device, and `AdminStale` when no device of an admin
@@ -613,7 +613,7 @@ again, with their `causes` (`Local`, `Sync`, `Rebuild` or `Authority`, when the
 device's access changed what it may read), and every change names a table or a
 dropped transaction. `status`
 returns a `DatabaseStatus`, and `status_changes` yields one each time it
-changes. `status().data.blockers` lists data that cannot be read yet, each with
+changes. `status().blockers()` lists data that cannot be read yet, each with
 what clears it (`ClearsBy`); a read of such data fails with `ErrorKind::Blocked
 { table, blockers }` naming the same blockers.
 
@@ -864,7 +864,7 @@ syncs.
 - **Dial-only**: `rocky_tcp::Options::dialer()` natively, and every browser
   transport, listen nowhere and name no route. Such a device syncs over the
   connections it opens itself; its peers never dial it and keep no route to it,
-  so their syncs stay complete without it. Its `status().network.dial_only` is
+  so their syncs stay complete without it. Its `status().dial_only()` is
   true.
 - **Custom**: implement `rocky_sdk::transport::Transport`, claiming its
   schemes, and pass it as `Network::Borrowed`; `Network::Attached` also

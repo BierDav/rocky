@@ -228,11 +228,10 @@ async fn status_reports_the_rebootstrap_a_member_promoted_after_a_seal_waits_on(
         .status()
         .await
         .expect("a blocker is reported inside the status, never as its error");
-    assert!(waiting.authority.is_issuer);
+    assert!(waiting.authority().is_issuer);
     let rebootstrap = waiting
-        .data
-        .blockers
-        .iter()
+        .blockers()
+        .into_iter()
         .find(|blocker| matches!(blocker.kind, BlockerKind::SealRebootstrap { .. }))
         .expect("the newly readable registry history waits on a peer");
     assert_eq!(rebootstrap.clears_by, ClearsBy::AnyPeer);
@@ -241,12 +240,11 @@ async fn status_reports_the_rebootstrap_a_member_promoted_after_a_seal_waits_on(
     let cleared = promoted.database.status().await?;
     assert!(
         !cleared
-            .data
-            .blockers
+            .blockers()
             .iter()
             .any(|blocker| matches!(blocker.kind, BlockerKind::SealRebootstrap { .. })),
         "a sync with any peer clears it: {:?}",
-        cleared.data.blockers
+        cleared.blockers()
     );
     Ok(())
 }

@@ -279,7 +279,7 @@ async fn a_created_database_follows_main_and_seals_routinely() -> Result<(), Fai
         db.sync_now().await.err().is_some_and(|error| matches!(
             error.kind(),
             rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached(report))
-                if report.peers.is_empty()
+                if report.peers().is_empty()
         )),
         "a pass that knows no peer still seals, and says it reconciled with none"
     );

@@ -77,7 +77,7 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
-    let status = snap::ok(async { a.database.status().await.map(|status| status.network) }).await;
+    let status = snap::ok(async { a.database.status().await.map(|status| status.network()) }).await;
     assert_eq!(
         (&status["schemes"], &status["ownership"]),
         (&json!(["iroh"]), &json!("application"))

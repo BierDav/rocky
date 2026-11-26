@@ -10,12 +10,12 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     let device = Device::create(root.path(), None).await?;
     let mut changes = device.database.status_changes();
     let status = changes.next().await?;
-    assert!(!status.authority.expired);
+    assert!(!status.authority().expired);
     assert_eq!(
-        status.network.attachment,
+        status.network().attachment,
         rocky_sdk::status::AttachmentState::Detached
     );
-    assert!(matches!(status.authority.access, rocky_sdk::Access::Full));
+    assert!(matches!(status.authority().access, rocky_sdk::Access::Full));
     device.add(1, "apples").await;
     let next = changes.next().await?;
     assert_ne!(
@@ -44,8 +44,8 @@ async fn status_tracks_committed_work_and_logout_and_close_ends_a_status_wait()
     let database = &member.database;
     database.logout(rocky_sdk::Logout::KeepData).await?;
     let logged_out = database.status().await?;
-    assert!(logged_out.authority.logged_out);
-    assert_eq!(logged_out.network.connected_peer_count, 0);
+    assert!(logged_out.authority().logged_out);
+    assert_eq!(logged_out.network().connected_peer_count, 0);
     assert!(database.sync_now().await.is_err());
     for mode in [
         rocky_sdk::SyncMode::Off,

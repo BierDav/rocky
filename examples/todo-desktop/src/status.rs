@@ -1,7 +1,7 @@
 use crate::{Shared, short};
 use dioxus::prelude::*;
-use rocky_sdk::{SyncMode, status::DatabaseStatus};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use rocky_sdk::{DatabaseStatus, SyncMode, Timestamp};
+use std::time::{Duration, SystemTime};
 use todo_app::Member;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -32,8 +32,9 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
     let Some(current) = status() else {
         return rsx! { div { class: "box muted", "Reading sync status…" } };
     };
-    let network = &current.network;
-    let online = network.sync != SyncMode::Off;
+    let online = current.sync_mode() != SyncMode::Off;
+    let peers = current.peers();
+    let connected = peers.iter().filter(|peer| peer.connected).count();
     let name = |node: &str| {
         members
             .iter()
@@ -43,17 +44,16 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                 |member| format!("{} ({})", member.name, member.role),
             )
     };
-    let last_pass = network
-        .last_reconciliation
-        .as_ref()
-        .and_then(|report| report.ended_at_epoch_millis)
-        .map(|millis| ago(millis / 1000));
-    let blockers = current.data.blockers.len();
+    let last_pass = current
+        .last_sync()
+        .and_then(|report| report.ended_at())
+        .map(ago);
+    let blockers = current.blockers().len();
     let state = if !online {
         ("offline", "Offline")
-    } else if network.reconciling || syncing() {
+    } else if current.syncing() || syncing() {
         ("busy", "Syncing")
-    } else if network.connected_peer_count > 0 {
+    } else if connected > 0 {
         ("ok", "Online")
     } else {
         ("idle", "No peer connected")
@@ -67,7 +67,7 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                 strong { "{state.1}" }
             }
             p { class: "muted small sync-line",
-                "{network.connected_peer_count} of {network.peers.len()} peers connected"
+                "{connected} of {peers.len()} peers connected"
                 if let Some(last) = last_pass { " · last pass {last}" }
             }
             div { class: "row",
@@ -85,21 +85,21 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                     if online { "Go offline" } else { "Go online" }
                 }
             }
-            if blockers > 0 || current.data.bootstrap_pending {
+            if blockers > 0 || current.bootstrapping() {
                 p { class: "muted small",
-                    if current.data.bootstrap_pending { "Bootstrapping from a peer. " }
+                    if current.bootstrapping() { "Bootstrapping from a peer. " }
                     if blockers > 0 { "{blockers} scopes still wait for keys or data." }
                 }
             }
-            if !network.peers.is_empty() {
+            if !peers.is_empty() {
                 table { class: "peers small",
                     thead { tr { th { "Peer" } th { "Link" } th { "Last exchange" } } }
                     tbody {
-                        for peer in network.peers.iter() {
+                        for peer in peers.iter() {
                             tr {
-                                td { "{name(&peer.node.to_string())}" }
-                                td { {format!("{:?}", peer.link.state).to_lowercase()} }
-                                td { {peer.last_authenticated_exchange_at_epoch_seconds.map_or("never".into(), ago)} }
+                                td { "{name(&peer.device.to_string())}" }
+                                td { if peer.connected { "open" } else { "closed" } }
+                                td { {peer.last_exchange.map_or("never".into(), ago)} }
                             }
                         }
                     }
@@ -110,11 +110,12 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
     }
 }
 
-fn ago(seconds: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(seconds, |now| now.as_secs());
-    match now.saturating_sub(seconds) {
+fn ago(at: Timestamp) -> String {
+    let elapsed = at
+        .system_time()
+        .and_then(|at| SystemTime::now().duration_since(at).ok())
+        .map_or(0, |elapsed| elapsed.as_secs());
+    match elapsed {
         0..=2 => "just now".into(),
         elapsed @ 3..=119 => format!("{elapsed} s ago"),
         elapsed @ 120..=7199 => format!("{} min ago", elapsed / 60),

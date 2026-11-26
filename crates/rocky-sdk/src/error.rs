@@ -1,4 +1,4 @@
-use rocky_core::Blocker;
+use crate::status::Blocker;
 
 /// The one error every SDK call returns; match on `kind()`, and its message explains the cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +153,10 @@ pub enum Right {
 pub struct Blockers(Vec<Blocker>);
 
 impl Blockers {
-    pub(crate) fn new(blockers: Vec<Blocker>) -> Option<Self> {
+    pub(crate) fn new(blockers: Vec<rocky_core::Blocker>) -> Option<Self> {
+        Self::of(blockers.iter().map(Blocker::from).collect())
+    }
+    pub(crate) fn of(blockers: Vec<Blocker>) -> Option<Self> {
         (!blockers.is_empty()).then_some(Self(blockers))
     }
 }

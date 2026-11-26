@@ -17,7 +17,7 @@ pub fn peerless_ok(
             if matches!(
                 error.kind(),
                 rocky_sdk::ErrorKind::Service(rocky_sdk::ServiceError::NoPeerReached(report))
-                    if report.peers.is_empty()
+                    if report.peers().is_empty()
             ) =>
         {
             Ok(None)

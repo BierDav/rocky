@@ -27,7 +27,7 @@ serialized!(
     sdk::inspection::RetentionLimits
 );
 pub async fn device(database: &sdk::Database) -> Result<Value, sdk::Error> {
-    let authority = database.status().await?.authority;
+    let authority = database.status().await?.authority();
     Ok(
         json!({"principal":authority.principal,"node":authority.node,"revocations":authority.revocations,"expires":authority.expires_at_epoch_seconds.to_string(),"issuer":authority.is_issuer,"access":authority.access}),
     )

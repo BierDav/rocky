@@ -115,10 +115,37 @@ struct QuicStream {
     read_incomplete: bool,
     write_incomplete: bool,
     _slot: Option<Slot>,
+    port: PortState,
+}
+enum PortState {
+    Unbound,
+    Open(Pin<Box<dyn Future<Output = ()> + Send>>),
+    Closed,
+}
+impl PortState {
+    fn of(route: &Route) -> Self {
+        let mut closed = route.closed.subscribe();
+        Self::Open(Box::pin(async move {
+            if closed.wait_for(|closed| *closed).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }))
+    }
 }
 impl QuicStream {
     fn was_cancelled(&self) -> bool {
         self.read_incomplete || self.write_incomplete
+    }
+    fn port_closed(&mut self, cx: &mut Context<'_>) -> Option<std::io::Error> {
+        if let PortState::Open(closed) = &mut self.port
+            && closed.as_mut().poll(cx).is_ready()
+        {
+            self.port = PortState::Closed;
+            let _ = self.io.reader_mut().stop(CLOSED.into());
+            let _ = self.io.writer_mut().reset(CLOSED.into());
+        }
+        matches!(self.port, PortState::Closed)
+            .then(|| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "the port closed"))
     }
 }
 impl Drop for QuicStream {
@@ -163,6 +190,9 @@ impl AsyncRead for QuicStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if let Some(closed) = self.port_closed(cx) {
+            return Poll::Ready(Err(closed));
+        }
         let result = Pin::new(&mut self.io).poll_read(cx, buf);
         self.read_incomplete = !matches!(result, Poll::Ready(Ok(())));
         result
@@ -174,16 +204,25 @@ impl AsyncWrite for QuicStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if let Some(closed) = self.port_closed(cx) {
+            return Poll::Ready(Err(closed));
+        }
         let result = Pin::new(&mut self.io).poll_write(cx, buf);
         self.write_incomplete = !matches!(result, Poll::Ready(Ok(_)));
         result
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if let Some(closed) = self.port_closed(cx) {
+            return Poll::Ready(Err(closed));
+        }
         let result = Pin::new(&mut self.io).poll_flush(cx);
         self.write_incomplete = !matches!(result, Poll::Ready(Ok(())));
         result
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if let Some(closed) = self.port_closed(cx) {
+            return Poll::Ready(Err(closed));
+        }
         let result = Pin::new(&mut self.io).poll_shutdown(cx);
         self.write_incomplete = !matches!(result, Poll::Ready(Ok(())));
         result
@@ -193,6 +232,7 @@ fn stream(
     connection: Connection,
     (send, recv): (SendStream, RecvStream),
     reusable: Arc<AtomicBool>,
+    port: PortState,
 ) -> Stream {
     Stream::new(QuicStream {
         _connection: connection,
@@ -201,7 +241,14 @@ fn stream(
         read_incomplete: false,
         write_incomplete: false,
         _slot: None,
+        port,
     })
+}
+fn refuse_closed_port(route: Option<&Route>) -> Result<(), Failure> {
+    if route.is_some_and(|route| *route.closed.borrow()) {
+        return Err("the port is closed".into());
+    }
+    Ok(())
 }
 
 struct LinkConnection(
@@ -293,6 +340,7 @@ async fn link_stream(
         }
         links.push(Arc::downgrade(&owner));
     }
+    refuse_closed_port(route_owner.as_deref())?;
     let mut lanes: Vec<Box<dyn SessionStream>> = Vec::new();
     let mut routed: Option<Arc<Route>> = None;
     for lane in 0..LINK_LANES {
@@ -624,7 +672,7 @@ impl ProtocolHandler for Handler {
                 break;
             };
             active.send_modify(|active| *active += 1);
-            let mut inbound = Stream::new(QuicStream {
+            let mut inbound = QuicStream {
                 _connection: connection.clone(),
                 reusable: None,
                 io: tokio::io::join(recv, send),
@@ -634,7 +682,8 @@ impl ProtocolHandler for Handler {
                     _permit: slot,
                     active: active.clone(),
                 }),
-            });
+                port: PortState::Unbound,
+            };
             let route = if protocol == Protocol::Coordinate {
                 self.0
                     .routes
@@ -649,6 +698,8 @@ impl ProtocolHandler for Handler {
                     .and_then(Result::ok)
             };
             let Some(route) = route else { continue };
+            inbound.port = PortState::of(&route);
+            let inbound = Stream::new(inbound);
             if protocol == Protocol::Rpc {
                 let Ok(permit) = self.0.rpc.clone().try_acquire_owned() else {
                     self.0.refused.fetch_add(1, Ordering::Relaxed);
@@ -770,10 +821,16 @@ impl Attachment {
                     if *self.0.closed.borrow() {
                         return Err("the iroh attachment is closed".into());
                     }
+                    refuse_closed_port(route_owner.as_deref())?;
                     if self.endpoint().is_closed() {
                         self.revive().await?;
                     }
                     let address = endpoint_addr(address)?;
+                    let port = || {
+                        route_owner
+                            .as_deref()
+                            .map_or(PortState::Unbound, PortState::of)
+                    };
                     let key = (address.id, protocol);
                     let cached = self.0.connections.lock().await.get(&key).cloned();
                     if protocol != Protocol::Link
@@ -790,7 +847,7 @@ impl Attachment {
                                 ..cached.clone()
                             },
                         );
-                        let mut stream = stream(cached.connection, pair, cached.reusable);
+                        let mut stream = stream(cached.connection, pair, cached.reusable, port());
                         if protocol != Protocol::Coordinate {
                             scoped::outbound(&mut stream, scope, 0).await?;
                         }
@@ -839,7 +896,7 @@ impl Attachment {
                         },
                     );
                     drop(connections);
-                    let mut stream = stream(connection, pair, reusable);
+                    let mut stream = stream(connection, pair, reusable, port());
                     if protocol != Protocol::Coordinate {
                         scoped::outbound(&mut stream, scope, 0).await?;
                     }
@@ -860,6 +917,7 @@ impl Attachment {
         scope: Scope,
         route_owner: Arc<Route>,
     ) -> Result<Stream, Failure> {
+        refuse_closed_port(Some(&route_owner))?;
         let mut failure: Failure = "no route".into();
         for address in addresses {
             match rocky_platform::time::timeout(
@@ -1208,10 +1266,11 @@ impl Attachment {
             Ok(())
         })
     }
-    /// Stops the endpoint, its router and every database's route on it.
+    /// Stops every database's route on it and, for an endpoint `Options` bound, the endpoint
+    /// and its router; an application's own endpoint stays open.
     pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
-            let _restart = self.0.restart.lock().await;
+            let restart = self.0.restart.lock().await;
             self.0.closed.send_replace(true);
             self.0.default_route.closed.send_replace(true);
             if let Some(finder) = &self.0.finder {
@@ -1253,6 +1312,9 @@ impl Attachment {
                 .take();
             if let Some(router) = router {
                 let _ = router.shutdown().await;
+            }
+            if restart.is_some() {
+                self.endpoint().close().await;
             }
         })
     }
@@ -1384,10 +1446,12 @@ impl Options {
         Ok(builder.bind().await?)
     }
     /// Binds under a fresh random key and serves no protocol, for a client such as a coordinator
-    /// connection; the application keeps the attachment and closes its transport.
+    /// connection; closing the attachment or any of its transports stops the endpoint.
     pub async fn client(&self) -> Result<Attachment, Failure> {
-        let endpoint = self.bind(rocky_platform::entropy::random()).await?;
-        Ok(Attachment::serving(endpoint, Vec::new()))
+        let secret = rocky_platform::entropy::random();
+        let attachment = Attachment::serving(self.bind(secret).await?, Vec::new());
+        *attachment.0.restart.lock().await = Some((self.clone(), secret));
+        Ok(attachment)
     }
     /// Binds and serves every Rocky protocol, returning an attachment the application keeps.
     pub async fn start(&self, route_secret: [u8; 32]) -> Result<Attachment, Failure> {
@@ -1433,7 +1497,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn coordinate(client: &Attachment, server: &Attachment) -> Result<(), Failure> {
+    async fn coordinate(client: &dyn Transport, server: &Attachment) -> Result<(), Failure> {
         let mut near = client
             .connect(
                 &server.address().await?.ok_or("no route")?,
@@ -1548,6 +1612,122 @@ mod tests {
             drop((far, healthy, healthy_far));
             client.close().await;
             client.endpoint().close().await;
+            router.shutdown().await?;
+            Ok::<_, Failure>(())
+        })
+        .await?
+    }
+
+    async fn coordinator_server(secret: u8) -> Result<(Attachment, Router), Failure> {
+        let server = Attachment::serving(
+            Options::isolated("127.0.0.1:0").bind([secret; 32]).await?,
+            vec![Protocol::Coordinate],
+        );
+        let router = server.register(Router::builder(server.endpoint())).spawn();
+        server.listen(None, true)?;
+        Ok((server, router))
+    }
+
+    async fn open_stream(
+        port: &dyn Transport,
+        server: &Attachment,
+    ) -> Result<(Stream, Stream), Failure> {
+        let mut near = port
+            .connect(
+                &server.address().await?.ok_or("no route")?,
+                Protocol::Coordinate,
+                None,
+            )
+            .await?;
+        near.write_u8(7).await?;
+        let Some(Incoming::Stream(Protocol::Coordinate, mut far)) = server.accept().await else {
+            return Err("coordinator stream expected".into());
+        };
+        assert_eq!(far.read_u8().await?, 7);
+        Ok((near, far))
+    }
+
+    #[tokio::test]
+    async fn closing_a_client_port_ends_its_streams_refuses_cached_dials_and_stops_the_endpoint()
+    -> Result<(), Failure> {
+        rocky_platform::time::timeout(Duration::from_secs(30), async {
+            let (server, router) = coordinator_server(83).await?;
+            let client = Options::isolated("127.0.0.1:0").client().await?;
+            let port = client.transport();
+            coordinate(&*port, &server).await?;
+            let (mut open, _far) = open_stream(&*port, &server).await?;
+
+            port.close().await;
+
+            assert!(
+                open.read_u8().await.is_err(),
+                "a stream open through the port ends when the port closes"
+            );
+            assert!(
+                port.connect(
+                    &server.address().await?.ok_or("no route")?,
+                    Protocol::Coordinate,
+                    None
+                )
+                .await
+                .is_err(),
+                "a closed port dials nothing, not even over a cached connection"
+            );
+            assert!(
+                client.endpoint().is_closed(),
+                "closing a client's port stops the endpoint the client bound"
+            );
+            router.shutdown().await?;
+            Ok::<_, Failure>(())
+        })
+        .await?
+    }
+
+    #[tokio::test]
+    async fn closing_one_port_of_an_application_endpoint_leaves_its_other_ports_and_the_endpoint()
+    -> Result<(), Failure> {
+        rocky_platform::time::timeout(Duration::from_secs(30), async {
+            let (server, router) = coordinator_server(84).await?;
+            let application = Attachment::serving(
+                Options::isolated("127.0.0.1:0").bind([85; 32]).await?,
+                vec![],
+            );
+            let closing = application.transport();
+            let staying = application.transport();
+            coordinate(&*closing, &server).await?;
+            let (mut open, _far) = open_stream(&*closing, &server).await?;
+            let (mut kept, mut kept_far) = open_stream(&*staying, &server).await?;
+
+            closing.close().await;
+
+            assert!(
+                open.read_u8().await.is_err(),
+                "a stream open through the closed port ends"
+            );
+            assert!(
+                closing
+                    .connect(
+                        &server.address().await?.ok_or("no route")?,
+                        Protocol::Coordinate,
+                        None
+                    )
+                    .await
+                    .is_err(),
+                "the closed port dials nothing"
+            );
+            kept_far.write_u8(9).await?;
+            assert_eq!(
+                kept.read_u8().await?,
+                9,
+                "another port's stream on the same connection carries on"
+            );
+            coordinate(&*staying, &server).await?;
+            assert!(
+                !application.endpoint().is_closed(),
+                "a port never closes the application's endpoint"
+            );
+            application.close().await;
+            application.endpoint().close().await;
             router.shutdown().await?;
             Ok::<_, Failure>(())
         })

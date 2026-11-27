@@ -671,6 +671,54 @@ async fn a_dial_only_device_redials_a_peer_that_closed_its_link_until_it_detache
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_dial_only_device_redials_after_the_peers_authority_changes() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let server = enrolled(&root.path().join("server"), &hub, "server", None).await?;
+            let device = enrolled(
+                &root.path().join("device"),
+                &hub,
+                "device",
+                Some((&server, crate::Access::Read)),
+            )
+            .await?;
+            relink(&device, &hub, "device", true).await?;
+            targets(&device, std::slice::from_ref(&server)).await?;
+            server.automatic.store(true, Ordering::SeqCst);
+            start(&device, true).await?;
+            let server_key = PrivateKey::from_bytes(&server.vault.get("node")?).public_key();
+            let links = device.current().ok_or("service")?;
+            until(|| links.live.contains(server_key)).await;
+            settled(&device).await;
+
+            let first = links.live.id(server_key);
+            let chain = server.settings.lock().await.credentials.clone();
+            server.replica.renew_credentials(chain.clone()).await?;
+            until(|| links.live.id(server_key) != first).await;
+            assert!(
+                device.retry_deadline().is_none(),
+                "the signed authority close requests fresh admission without backoff"
+            );
+            until(|| links.live.contains(server_key)).await;
+            settled(&device).await;
+
+            let second = links.live.id(server_key);
+            server.replica.renew_credentials(chain).await?;
+            until(|| links.live.id(server_key) != second).await;
+            let retry = device.retry_deadline().ok_or("repeated closes back off")?;
+            assert!(!links.live.contains(server_key));
+            tokio::time::advance(retry.duration_since(rocky_platform::time::Instant::now())).await;
+            until(|| links.live.contains(server_key)).await;
+            device.detach().await;
+            server.detach().await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {

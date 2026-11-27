@@ -421,6 +421,8 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     frontier_decodes: AtomicU64,
     #[cfg(test)]
+    frontier_author_decodes: AtomicU64,
+    #[cfg(test)]
     position_oracles: positions::OracleStats,
     #[cfg(test)]
     pub(crate) compare_finalization: bool,
@@ -1089,6 +1091,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             frontier_queries: AtomicU64::new(0),
             #[cfg(test)]
             frontier_decodes: AtomicU64::new(0),
+            #[cfg(test)]
+            frontier_author_decodes: AtomicU64::new(0),
             #[cfg(test)]
             position_oracles: Default::default(),
             #[cfg(test)]

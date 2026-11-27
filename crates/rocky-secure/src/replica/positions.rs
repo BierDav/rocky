@@ -367,12 +367,12 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<ScopeFrontier, Error> {
         #[cfg(test)]
         self.frontier_queries.fetch_add(1, Ordering::Relaxed);
-        let mut positions = BTreeMap::<PublicKey, (Runs, Runs)>::new();
+        let mut positions = BTreeMap::<[u8; 32], (Runs, Runs)>::new();
         let graph = self.graph_for(scope.domain)?;
         let mut paths = BTreeMap::new();
         for row in collect_rows(self.conn.query("SELECT author,tip,applied,domain_author,delta,start,end FROM secure_log_ranges WHERE scope=?", [encode(&scope)?]).await?).await? {
             let [SqlValue::Blob(author),SqlValue::Blob(tip),SqlValue::Integer(applied),SqlValue::Blob(domain_author),SqlValue::Integer(delta),SqlValue::Integer(start),SqlValue::Integer(end)] = row.as_slice() else { return Err(Error::Corrupt("log range".into())); };
-            let author = PublicKey::from_bytes(author.as_slice().try_into().map_err(|_| Error::Corrupt("log range signer".into()))?).map_err(|_| Error::Corrupt("log range signer".into()))?;
+            let author: [u8; 32] = author.as_slice().try_into().map_err(|_| Error::Corrupt("log range signer".into()))?;
             let tip = TipId(tip.as_slice().try_into().map_err(|_| Error::Corrupt("log range tip".into()))?);
             let domain_author = stored_writer(domain_author)?;
             let (start, mut end) = interval(*start,*end)?;
@@ -393,7 +393,7 @@ impl<A: RowApplication> Inner<A> {
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, prefix) in self.logs(id, None, false, MAX_CHECKPOINT_LOGS + 1).await? {
                 if prefix >= 0 {
-                    starts.insert(log.author, prefix as u64 + 1);
+                    starts.insert(*log.author.as_bytes(), prefix as u64 + 1);
                 }
             }
         }
@@ -411,8 +411,11 @@ impl<A: RowApplication> Inner<A> {
                     (held.through(start), applied.through(start))
                 });
             if held > 0 {
+                #[cfg(test)]
+                self.frontier_author_decodes.fetch_add(1, Ordering::Relaxed);
                 logs.push(FrontierLog {
-                    author,
+                    author: PublicKey::from_bytes(&author)
+                        .map_err(|_| Error::Corrupt("log range signer".into()))?,
                     held,
                     applied: applied.min(held),
                 });

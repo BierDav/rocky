@@ -132,4 +132,7 @@ impl<A> Inner<A> {
             self.frontier_decodes.load(Ordering::Relaxed),
         )
     }
+    pub(crate) fn frontier_author_decodes(&self) -> u64 {
+        self.frontier_author_decodes.load(Ordering::Relaxed)
+    }
 }

@@ -388,3 +388,57 @@ async fn audit_rejects_a_range_table_with_the_wrong_shape() {
         Err(Error::Corrupt(_))
     ));
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_frontier_decodes_each_author_once_however_many_ranges_it_spans() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        dir.path().join("ranges.db"),
+        f.app(),
+        f.config(&node, f.full(), &[f.public, f.private]),
+    )
+    .await
+    .unwrap();
+    for n in 0_u64..8 {
+        for scope in [f.public, f.private] {
+            let mut row = [0; 32];
+            row[..8].copy_from_slice(&n.to_be_bytes());
+            row[8] = u8::from(scope == f.private);
+            replica
+                .author(
+                    row,
+                    vec![RowChange {
+                        scope,
+                        row,
+                        before: None,
+                        after: Some(if scope == f.private {
+                            f.app().salary("42")
+                        } else {
+                            f.app().name("row")
+                        }),
+                    }],
+                    vec![],
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let [SqlValue::Integer(ranges)] = rows(&inner.conn, "SELECT count(*) FROM secure_log_ranges")
+        .await
+        .unwrap()
+        .remove(0)[..]
+    else {
+        panic!("range count");
+    };
+    let before = inner.frontier_author_decodes();
+    let frontier = inner.compute_tip_frontier(f.public).await.unwrap();
+    assert!(
+        ranges > 2,
+        "the author's ranges interleave across two scopes"
+    );
+    assert_eq!(frontier.logs.len(), 1);
+    assert_eq!(inner.frontier_author_decodes() - before, 1);
+}

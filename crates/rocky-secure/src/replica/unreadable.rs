@@ -87,7 +87,7 @@ impl<A: RowApplication> Inner<A> {
             let unsynced = collect_rows(
                 self.conn
                     .query(
-                        "SELECT r.hash,r.txn,r.clock FROM secure_replayed r WHERE r.scope=?1 AND r.author=?2 AND r.dropped IS NULL AND NOT EXISTS(SELECT 1 FROM secure_ack a WHERE a.hash=r.hash) AND NOT EXISTS(SELECT 1 FROM secure_peer_frontiers f WHERE f.scope=?3 AND f.author=r.author AND f.held>=r.sequence)",
+                        "SELECT r.hash,r.txn,r.clock FROM secure_replayed r JOIN secure_operations o ON o.hash=r.hash WHERE r.scope=?1 AND r.author=?2 AND r.dropped IS NULL AND NOT EXISTS(SELECT 1 FROM secure_ack a WHERE a.hash=r.hash) AND NOT EXISTS(SELECT 1 FROM secure_peer_frontiers f WHERE f.scope=?3 AND f.author=o.author AND f.held>o.sequence)",
                         bindings(vec![
                             SqlValue::Integer(id),
                             SqlValue::Blob(own.clone()),

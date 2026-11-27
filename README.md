@@ -19,8 +19,8 @@ Depend on Rocky by git tag. `rocky-sdk` has no networking of its own; add
 
 ```toml
 [dependencies]
-rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.4" }
-rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.4" }
+rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.5" }
+rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.5" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -251,7 +251,7 @@ ones an application calls, and the sections below explain each.
 | | `create_partition`, `grant_partition`, `revoke_partition` | Opens a partition and gives or takes it |
 | | `link_requests`, `approve_link`, `unlink` | Adds or ends one of a person's devices |
 | Status | `status`, `status_changes` | Blockers, alerts, network and schema, now or as they change |
-| | `schema_version` | The schema version installed on this device |
+| | `status().await?.schema_version()` | The schema version installed on this device |
 | | `renew` | Renews this device's credentials with an admin device now |
 
 ## Keys
@@ -993,10 +993,10 @@ Rocky's encryption and authorization apply on top of every transport.
 
 ```toml
 [dependencies]
-rocky-coordinator = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.4" }
+rocky-coordinator = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.5" }
 
 [dev-dependencies]
-rocky-voter = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.4", default-features = false }
+rocky-voter = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.5", default-features = false }
 ```
 
 `rocky-coordinator` adds gap-free counters and admit-once claims to a

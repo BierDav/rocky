@@ -1139,6 +1139,10 @@ async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result
         Some(Network::Owned(hub.connector("owner"))),
     )
     .await?;
+    assert!(
+        trusted_alerts(&owner).await?.is_empty(),
+        "creating the owner's first device must not raise a membership alert"
+    );
     let invitation = owner
         .database
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
@@ -1160,6 +1164,75 @@ async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result
         "owner's own first device should not raise AdminDeviceLinked: {alerts:?}"
     );
     member.close().await;
+    owner.close().await;
+    let owner = Device::open(
+        &directory.path().join("owner"),
+        Some(Network::Owned(hub.connector("owner"))),
+    )
+    .await?;
+    assert!(
+        trusted_alerts(&owner).await?.is_empty(),
+        "reopening the owner's first device must not raise a membership alert"
+    );
+    owner.close().await;
+    let upgraded = common::build(common::shopping(2).table(common::items()));
+    let database = common::configuration(
+        &directory.path().join("owner"),
+        &upgraded,
+        None,
+        Some(common::external_identity(&directory.path().join("owner"))),
+        Some(Network::Owned(hub.connector("owner"))),
+    )
+    .open()
+    .await?;
+    let owner = Device::new(database)?;
+    let alerts = trusted_alerts(&owner).await?;
+    assert!(
+        alerts.is_empty(),
+        "upgrading the owner's first device must not raise a membership alert: {alerts:?}"
+    );
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_owner_keeps_its_first_device_acknowledged_after_a_migration()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let schema = common::schema();
+    let created = rocky_sdk::Configuration::new(directory.path(), &schema)?
+        .sync(rocky_sdk::SyncMode::Manual)
+        .create()
+        .await?;
+    let identity: Arc<dyn IdentityProvider> = Arc::new(created.owner);
+    let owner = Device::new(created.database)?;
+    let alerts = trusted_alerts(&owner).await?;
+    assert!(alerts.is_empty(), "creation: {alerts:?}");
+    owner.close().await;
+    let owner = Device::new(
+        rocky_sdk::Configuration::new(directory.path(), &schema)?
+            .identity(identity.clone())
+            .sync(rocky_sdk::SyncMode::Manual)
+            .open()
+            .await?,
+    )?;
+    let alerts = trusted_alerts(&owner).await?;
+    assert!(alerts.is_empty(), "reopen: {alerts:?}");
+    owner.close().await;
+    let upgraded = common::build(
+        common::shopping(2)
+            .table(common::items())
+            .migration(2, ["UPDATE items SET completed = 1"]),
+    );
+    let owner = Device::new(
+        rocky_sdk::Configuration::new(directory.path(), &upgraded)?
+            .identity(identity)
+            .sync(rocky_sdk::SyncMode::Manual)
+            .open()
+            .await?,
+    )?;
+    let alerts = trusted_alerts(&owner).await?;
+    assert!(alerts.is_empty(), "migration: {alerts:?}");
     owner.close().await;
     Ok(())
 }

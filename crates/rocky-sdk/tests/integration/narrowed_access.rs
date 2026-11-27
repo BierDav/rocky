@@ -539,10 +539,9 @@ async fn unsynced_write_dropped_on_revocation_reports_outcome_and_alert_while_sy
         })
         .await?;
     clinic.exchange(&clinician).await?;
-    clinic
-        .admin
+    clinician
         .database
-        .revoke_partition(person, &chart("ada"))
+        .set_sync(rocky_sdk::SyncMode::Off)
         .await?;
     let offline_token = clinician
         .database
@@ -555,7 +554,27 @@ async fn unsynced_write_dropped_on_revocation_reports_outcome_and_alert_while_sy
             Ok::<_, rocky_sdk::Error>(tx.token())
         })
         .await?;
+    clinic
+        .admin
+        .database
+        .revoke_partition(person, &chart("ada"))
+        .await?;
+    clinician
+        .database
+        .set_sync(rocky_sdk::SyncMode::Manual)
+        .await?;
     clinician.database.sync_now().await?;
+    assert_eq!(
+        clinician
+            .database
+            .transaction_outcome(offline_token)
+            .await?,
+        Some(rocky_sdk::TransactionOutcome::Dropped {
+            reason: rocky_sdk::DropReason::Admission,
+            sealed: true,
+        }),
+        "the first sync that learns revocation must report the offline write as dropped"
+    );
     clinic.exchange(&clinician).await?;
     assert!(
         !texts(&clinic.admin, "SELECT body FROM notes")
@@ -609,5 +628,65 @@ async fn unsynced_write_dropped_on_revocation_reports_outcome_and_alert_while_sy
         );
     }
     clinic.close([clinician]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_partition_drops_the_first_write_after_a_peer_frontier() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let schema = schema()?;
+    let network = || rocky_tcp::Options::new(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    let admin = Configuration::new(directory.path().join("admin"), &schema)?
+        .network(network().into())
+        .create()
+        .await?;
+    let partition = chart("ada");
+    admin.database.create_partition(&partition).await?;
+    let invitation = admin
+        .database
+        .invite(Invite::new(Access::Role(CLINICIAN)).partition(partition.clone()))
+        .await?;
+    let key = Arc::new(rocky_sdk::IdentityKey::generate());
+    let person = PersonId::of(key.as_ref())?;
+    let clinician = Configuration::new(directory.path().join("clinician"), &schema)?
+        .network(network().into())
+        .identity(key)
+        .join(&invitation.code)
+        .await?;
+    let write = async |body: &str| {
+        clinician
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO notes(patient, body) VALUES('ada', ?)",
+                    rocky_sdk::params![body],
+                )
+                .await?;
+                Ok::<_, rocky_sdk::Error>(tx.token())
+            })
+            .await
+    };
+    let synced = write("synced note").await?;
+    clinician.sync_now().await?;
+    clinician.set_sync(rocky_sdk::SyncMode::Off).await?;
+    let offline = write("offline note").await?;
+    admin.database.revoke_partition(person, &partition).await?;
+    clinician.set_sync(rocky_sdk::SyncMode::Manual).await?;
+    clinician.sync_now().await?;
+    clinician.sync_now().await?;
+    assert_eq!(
+        clinician.transaction_outcome(offline).await?,
+        Some(rocky_sdk::TransactionOutcome::Dropped {
+            reason: rocky_sdk::DropReason::Admission,
+            sealed: true,
+        })
+    );
+    assert!(matches!(
+        clinician.transaction_outcome(synced).await?,
+        Some(rocky_sdk::TransactionOutcome::Applied { .. })
+    ));
+    let status = clinician.status().await?;
+    assert!(status.alerts().iter().any(|alert| matches!(alert.kind, rocky_sdk::AlertKind::WriteDropped { token, .. } if token == offline)), "{status:?}");
+    clinician.close().await?;
+    admin.database.close().await?;
     Ok(())
 }

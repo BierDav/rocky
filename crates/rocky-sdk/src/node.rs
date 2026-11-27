@@ -218,6 +218,29 @@ async fn settle() {
         rocky_platform::time::sleep(LOCAL_SETTLE).await;
     }
 }
+struct PublicationPace {
+    window: std::time::Duration,
+    last: Option<rocky_platform::time::Instant>,
+}
+impl PublicationPace {
+    fn new(window: std::time::Duration) -> Self {
+        Self { window, last: None }
+    }
+    fn wait_until(
+        &self,
+        now: rocky_platform::time::Instant,
+    ) -> Option<rocky_platform::time::Instant> {
+        self.last
+            .map(|last| last + self.window)
+            .filter(|due| *due > now)
+    }
+    async fn start(&mut self) {
+        if let Some(due) = self.wait_until(rocky_platform::time::Instant::now()) {
+            rocky_platform::time::sleep_until(due).await;
+        }
+        self.last = Some(rocky_platform::time::Instant::now());
+    }
+}
 
 pub(crate) struct Node {
     owner: std::sync::OnceLock<std::sync::Weak<Node>>,
@@ -2498,3 +2521,32 @@ mod rights_change_tests;
 mod sync_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod wide_schema_tests;
+#[cfg(test)]
+mod publication_pace_tests {
+    use super::PublicationPace;
+    use rocky_platform::time::Instant;
+    use std::time::Duration;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_lone_change_publishes_at_once_and_a_burst_waits_out_the_window() {
+        let window = Duration::from_millis(20);
+        let start = Instant::now();
+        let mut pace = PublicationPace::new(window);
+        assert_eq!(
+            pace.wait_until(start),
+            None,
+            "the first publication starts at once"
+        );
+        pace.last = Some(start);
+        assert_eq!(
+            pace.wait_until(start + Duration::from_millis(5)),
+            Some(start + window),
+            "a change inside the window coalesces until the window ends"
+        );
+        assert_eq!(
+            pace.wait_until(start + window),
+            None,
+            "a change after a quiet window publishes at once"
+        );
+    }
+}

@@ -459,6 +459,7 @@ impl Node {
         let mut revisions = self.replica.observe_revision();
         let mut ready = service.live.events.subscribe();
         let mut passes = stream::FuturesUnordered::new();
+        let mut pace = PublicationPace::new(LOCAL_SETTLE);
         loop {
             tokio::select! {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
@@ -468,7 +469,11 @@ impl Node {
                 changed = revisions.changed() => { if changed.is_err() { break; } },
                 Some(()) = passes.next(), if !passes.is_empty() => continue,
             }
-            settle().await;
+            pace.start().await;
+            membership.borrow_and_update();
+            frames.borrow_and_update();
+            ready.borrow_and_update();
+            revisions.borrow_and_update();
             if self.sync_mode() == crate::SyncMode::Live {
                 for (peer, id) in service.live.claim_publications() {
                     passes.push(self.publish_peer(&service, peer, id));

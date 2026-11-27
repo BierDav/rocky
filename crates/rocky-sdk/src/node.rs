@@ -2121,9 +2121,12 @@ impl Node {
             return Err(ServiceError::no_route("the peer", transport).into());
         }
         for _ in 0..4 {
-            service.live.wait_inbound_short(peer).await?;
+            service.live.wait_for_dial_slot(peer, automatic).await?;
             if let Some(open) = service.live.handle(peer) {
                 return Ok(open);
+            }
+            if automatic && service.live.registered(peer) {
+                continue;
             }
             if automatic
                 && self
@@ -2133,9 +2136,9 @@ impl Node {
                     .get(&peer)
                     .is_some_and(|state| !state.retry.ready())
             {
-                return Err(
-                    ServiceError::dial_failed("peer dial is deferred by backoff".into()).into(),
-                );
+                return Err(ServiceError::dial_failed(
+                    "peer dial is deferred by backoff".into(),
+                ));
             }
             let _opening = self.opening(&service, peer);
             let current_attempt = attempt.insert(self.observations.begin(

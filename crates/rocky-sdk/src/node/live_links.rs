@@ -33,6 +33,13 @@ struct Entry {
     tokens: BTreeMap<ResourceScope, ScopeToken>,
     cursors: BTreeMap<ResourceScope, rocky_secure::ScopeFrontier>,
 }
+impl Entry {
+    fn usable(&self) -> bool {
+        self.close.borrow().is_none()
+            && !self.handle.is_closed()
+            && !self.authority.has_changed().unwrap_or(true)
+    }
+}
 pub(super) struct Registry {
     #[cfg(test)]
     pub(super) publishing: Mutex<()>,
@@ -42,6 +49,8 @@ pub(super) struct Registry {
     events: watch::Sender<()>,
     #[cfg(test)]
     pub closing: AtomicU64,
+    #[cfg(test)]
+    pub(super) authority_close_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
     #[cfg(test)]
     pub(super) push_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
     #[cfg(test)]
@@ -60,6 +69,8 @@ impl Default for Registry {
             events: watch::channel(()).0,
             #[cfg(test)]
             closing: AtomicU64::new(0),
+            #[cfg(test)]
+            authority_close_gate: Default::default(),
             #[cfg(test)]
             push_gate: Default::default(),
             #[cfg(test)]
@@ -294,19 +305,31 @@ impl Registry {
         }
     }
 
-    pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
+    pub async fn wait_for_dial_slot(
+        &self,
+        peer: PublicKey,
+        automatic: bool,
+    ) -> Result<(), Failure> {
         let mut events = self.events.subscribe();
         rocky_platform::time::timeout(Duration::from_secs(10), async {
             loop {
                 events.borrow_and_update();
-                if !self.inbound_short(peer) {
+                let occupied = self
+                    .entries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&peer)
+                    .is_some_and(|entry| {
+                        (!entry.persistent && !entry.dialed) || (automatic && !entry.usable())
+                    });
+                if !occupied {
                     return Ok(());
                 }
                 events.changed().await.map_err(|_| "link registry ended")?;
             }
         })
         .await
-        .map_err(|_| "incoming short reconcile did not finish")?
+        .map_err(|_| "previous link did not finish")?
     }
 
     pub fn inbound_short(&self, peer: PublicKey) -> bool {
@@ -361,11 +384,7 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&peer)
-            .filter(|entry| {
-                entry.close.borrow().is_none()
-                    && !entry.handle.is_closed()
-                    && !entry.authority.has_changed().unwrap_or(true)
-            })
+            .filter(|entry| entry.usable())
             .map(|entry| entry.handle.clone())
     }
     pub async fn wait_empty(&self) {
@@ -400,11 +419,13 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&peer)
-            .is_some_and(|entry| {
-                entry.close.borrow().is_none()
-                    && !entry.handle.is_closed()
-                    && !entry.authority.has_changed().unwrap_or(true)
-            })
+            .is_some_and(Entry::usable)
+    }
+    pub(super) fn registered(&self, peer: PublicKey) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&peer)
     }
     #[cfg(test)]
     pub fn dialed(&self, peer: PublicKey) -> Option<bool> {
@@ -513,7 +534,7 @@ impl Node {
                 let service = service.clone();
                 let settings = settings.clone();
                 async move {
-                    if service.live.contains(peer)
+                    if service.live.registered(peer)
                         || !node
                             .retries
                             .lock()
@@ -730,10 +751,7 @@ impl Node {
                     true => old.dialed == preferred,
                     false => !restarted_peer_relinks,
                 };
-                let old_is_live = !old.handle.is_closed()
-                    && old.close.borrow().is_none()
-                    && !old.authority.has_changed().unwrap_or(true);
-                old_direction_kept && old_is_live
+                old_direction_kept && old.usable()
             });
             if existing_link_wins {
                 false
@@ -831,13 +849,25 @@ impl Node {
                 .run_link(&service, opened, close_rx, changed_tx, authority)
                 .await;
             node.link_ended(peer);
+            let still_open = *service.stage.borrow() == Stage::Open;
+            let authority_close = matches!(result, Ok(CloseReason::Authority));
+            let redial_authority = authority_close
+                && still_open
+                && (persistent || dialed)
+                && node.sync_mode() == crate::SyncMode::Live;
             let removed = {
+                let mut redial = redial_authority
+                    .then(|| node.retries.lock().unwrap_or_else(PoisonError::into_inner));
                 let mut entries = service
                     .live
                     .entries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if entries.get(&peer).is_some_and(|entry| entry.id == id) {
+                    if let Some(state) = redial.as_mut().and_then(|retries| retries.get_mut(&peer))
+                    {
+                        state.redial_after_authority_change(started.elapsed());
+                    }
                     entries.remove(&peer);
                     true
                 } else {
@@ -860,17 +890,10 @@ impl Node {
                 {
                     node.link_pending(peer);
                 }
-                let still_open = *service.stage.borrow() == Stage::Open;
-                if still_open {
-                    match result {
-                        Ok(CloseReason::Authority) if persistent || dialed => {
-                            node.redial_after_authority_change(peer, started.elapsed());
-                        }
-                        Ok(_) if persistent && dialed => {
-                            node.redial_closed_link(peer, started.elapsed());
-                        }
-                        _ => {}
-                    }
+                if redial_authority {
+                    node.link_events.send_replace(());
+                } else if still_open && result.is_ok() && !authority_close && persistent && dialed {
+                    node.redial_closed_link(peer, started.elapsed());
                 }
                 if let Err(error) = &result
                     && still_open
@@ -1085,33 +1108,6 @@ impl Node {
             "rocky.link-batch.v1",
             &serde_json::to_vec(&state)?,
         ))
-    }
-    fn redial_after_authority_change(&self, peer: PublicKey, lived: Duration) {
-        if self.sync_mode() != crate::SyncMode::Live {
-            return;
-        }
-        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(state) = retries.get_mut(&peer) else {
-            return;
-        };
-        state.link = true;
-        state.short = false;
-        state.generation = state.generation.wrapping_add(1);
-        state.link_retry.survived(lived);
-        let now = rocky_platform::time::Instant::now();
-        if state
-            .last_immediate_authority_redial
-            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
-        {
-            state.link_retry.failed();
-            state.retry.wait_at_least_as_long_as(&state.link_retry);
-        } else {
-            state.last_immediate_authority_redial = Some(now);
-            state.link_retry.wake();
-            state.retry.wake();
-        }
-        drop(retries);
-        self.link_events.send_replace(());
     }
     fn redial_closed_link(&self, peer: PublicKey, lived: Duration) {
         if self.sync_mode() != crate::SyncMode::Live {

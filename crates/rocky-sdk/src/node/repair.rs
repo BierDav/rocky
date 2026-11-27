@@ -19,6 +19,25 @@ impl RepairWork {
     }
 }
 impl PeerRetry {
+    pub(super) fn redial_after_authority_change(&mut self, lived: Duration) {
+        self.link = true;
+        self.short = false;
+        self.generation = self.generation.wrapping_add(1);
+        self.link_retry.survived(lived);
+        let now = rocky_platform::time::Instant::now();
+        if self
+            .last_immediate_authority_redial
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+        {
+            self.link_retry.failed();
+            self.retry.wait_at_least_as_long_as(&self.link_retry);
+        } else {
+            self.last_immediate_authority_redial = Some(now);
+            self.link_retry.wake();
+            self.retry.wake();
+        }
+    }
+
     pub(super) fn finish_repair(&mut self, generation: u64) {
         if self.work_generation == generation {
             self.pending = RepairWork::Empty;

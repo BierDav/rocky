@@ -102,7 +102,7 @@ impl Node {
             {
                 continue;
             }
-            let link = match self.request_link(transport, peer, &contact).await {
+            let link = match self.request_link(transport, peer, &contact, true).await {
                 Ok(link) => link,
                 Err(_) => continue,
             };

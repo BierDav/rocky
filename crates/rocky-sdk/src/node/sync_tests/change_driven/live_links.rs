@@ -705,9 +705,33 @@ async fn a_dial_only_device_redials_after_the_peers_authority_changes() -> Resul
             settled(&device).await;
 
             let second = links.live.id(server_key);
+            device
+                .retries
+                .lock()
+                .unwrap()
+                .get_mut(&server_key)
+                .ok_or("peer retry state")?
+                .repair_all();
             server.replica.renew_credentials(chain).await?;
             until(|| links.live.id(server_key) != second).await;
             let retry = device.retry_deadline().ok_or("repeated closes back off")?;
+            let dials = hub.dials_to("server");
+            let mut worked = device.worker_running.subscribe();
+            worked.wait_for(|running| *running).await?;
+            worked.wait_for(|running| !*running).await?;
+            let contact = device.settings.lock().await.peers[&server_key].clone();
+            assert!(
+                device
+                    .request_link(&*links.transport, server_key, &contact, true)
+                    .await
+                    .is_err(),
+                "a repair selected before the close must also respect backoff"
+            );
+            assert_eq!(
+                hub.dials_to("server"),
+                dials,
+                "pending repair must wait for the same fresh connection as live sync"
+            );
             assert!(!links.live.contains(server_key));
             tokio::time::advance(retry.duration_since(rocky_platform::time::Instant::now())).await;
             until(|| links.live.contains(server_key)).await;
@@ -872,7 +896,7 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
                 tokio::join!(
                     async {
                         let handle = lower
-                            .request_link(&*low_service.transport, higher_key, &low_contact)
+                            .request_link(&*low_service.transport, higher_key, &low_contact, false)
                             .await?;
                         let reconcile = handle.begin_reconcile().await?;
                         waiting.await?;
@@ -881,7 +905,7 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
                     },
                     async {
                         let handle = higher
-                            .request_link(&*high_service.transport, lower_key, &high_contact)
+                            .request_link(&*high_service.transport, lower_key, &high_contact, false)
                             .await?;
                         ready.send(()).map_err(|_| "request ended")?;
                         Ok::<_, Failure>(handle)
@@ -1008,7 +1032,7 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
             let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let no_route = Contact { routes: Vec::new() };
             assert!(
-                b.reconcile(&*transport(&b).await?, peer, &no_route)
+                b.reconcile(&*transport(&b).await?, peer, &no_route, false)
                     .await
                     .is_err()
             );
@@ -1980,7 +2004,7 @@ async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), 
             hub.stall_peer("b", true);
             let transport = transport(&a).await?;
             let contact = a.settings.lock().await.peers[&peer].clone();
-            let mut opening = Box::pin(a.request_link(&*transport, peer, &contact));
+            let mut opening = Box::pin(a.request_link(&*transport, peer, &contact, false));
             assert!(futures_util::poll!(opening.as_mut()).is_pending());
             assert_eq!(
                 a.observed_peers().await[0].link.state,

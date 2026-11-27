@@ -24,6 +24,7 @@ impl PassOutcome {
 }
 
 struct Pass<'a> {
+    automatic: bool,
     transport: &'a dyn Transport,
     settings: &'a Settings,
     needed: Vec<ResourceScope>,
@@ -154,6 +155,7 @@ impl Node {
             return Ok(self.unchanged_outcome());
         }
         let pass = Pass {
+            automatic,
             transport,
             settings: &settings,
             needed: self.unpartitioned_scopes(),
@@ -512,7 +514,7 @@ impl Node {
             let attempts = stream::iter(batch)
                 .map(|target| async move {
                     let result = self
-                        .reconcile_and_deliver_epochs(pass.transport, &target)
+                        .reconcile_and_deliver_epochs(pass.transport, &target, pass.automatic)
                         .await;
                     Attempted { target, result }
                 })
@@ -547,16 +549,21 @@ impl Node {
         &self,
         transport: &dyn Transport,
         target: &Target,
+        automatic: bool,
     ) -> Result<Exchanged, Failure> {
         let peer = target.peer;
-        let mut result = self.reconcile(transport, peer, &target.contact).await;
+        let mut result = self
+            .reconcile(transport, peer, &target.contact, automatic)
+            .await;
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error.downcast_ref::<rocky_secure::Error>(),
                 Some(rocky_secure::Error::Conflict)
             )
         }) {
-            result = self.reconcile(transport, peer, &target.contact).await;
+            result = self
+                .reconcile(transport, peer, &target.contact, automatic)
+                .await;
         }
         let settings = self.settings.lock().await.clone();
         let sources = settings.epoch_sources();
@@ -569,7 +576,10 @@ impl Node {
             return result;
         }
         match self.renew(Some(transport), true, Some(peer), true).await {
-            Ok(true) => self.reconcile(transport, peer, &target.contact).await,
+            Ok(true) => {
+                self.reconcile(transport, peer, &target.contact, automatic)
+                    .await
+            }
             Ok(false) => result,
             Err(error) => {
                 self.activity

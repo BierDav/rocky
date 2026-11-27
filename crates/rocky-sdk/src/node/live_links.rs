@@ -1095,6 +1095,8 @@ impl Node {
             return;
         };
         state.link = true;
+        state.short = false;
+        state.generation = state.generation.wrapping_add(1);
         state.link_retry.survived(lived);
         let now = rocky_platform::time::Instant::now();
         if state
@@ -1102,12 +1104,11 @@ impl Node {
             .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
         {
             state.link_retry.failed();
+            state.retry.wait_at_least_as_long_as(&state.link_retry);
         } else {
             state.last_immediate_authority_redial = Some(now);
             state.link_retry.wake();
             state.retry.wake();
-            state.short = false;
-            state.generation = state.generation.wrapping_add(1);
         }
         drop(retries);
         self.link_events.send_replace(());

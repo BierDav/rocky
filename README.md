@@ -204,8 +204,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `join` returns after its first pull from the issuing device, so Bob's first
-read already sees Alice's rows. `SyncMode::Live`, the default, pushes Alice's
-commit to Bob at once; `sync_now` makes the example deterministic. Run it with
+read already sees Alice's rows. `SyncMode::Live`, the default, sends Alice's
+commits automatically; `sync_now` makes the example deterministic. Run it with
 `cargo run -p rocky-sdk --example two_devices`.
 
 `open` on a directory that holds no database fails with `ErrorKind::NoDatabase`,
@@ -382,7 +382,10 @@ others, and a write into a partition they do not hold, or no longer hold
 after `revoke_partition`, is `Denied` with `PartitionNotGranted`.
 
 On any device, `me().await?.partitions` lists the partitions this device holds,
-such as a clinician's own patients. `people()` lists each `Person` with the
+such as a clinician's own patients. To check a particular grant, look for that
+partition on the recipient device, then query for the data the screen needs.
+The group's `PartitionNotGranted` blocker can clear after the first grant.
+`people()` lists each `Person` with the
 partitions granted to them in `Person::partitions`. `Full` and `Read` reach
 every partition without a grant, so an admin asking who reads a partition
 counts them too:
@@ -459,8 +462,8 @@ credentials they issued; an admin who should stay a member is invited again.
 A promotion or access change reaches each of the person's devices at its next
 sync with an admin device, including a device still joining when it was made.
 `make_admin` returns once the owner's device recorded the promotion; in
-`SyncMode::Live` the promoted person's connected devices receive it at once,
-and each observes it on its own `status_changes()`, as in
+`SyncMode::Live` each promoted device syncs automatically and observes the
+promotion on its own `status_changes()`, as in
 `while !changes.next().await?.admin() {}`, after which it reads
 and administers as an admin.
 Admin devices raise `AdminDeviceLinked` and `AdminDeviceUnlinked` alerts when
@@ -550,8 +553,8 @@ nothing, so its token never gets an outcome. `flush` makes every write that
 returned durable.
 
 `Database::status_changes()` streams snapshots as status changes; in
-`SyncMode::Live`, await admin promotion on `status.admin()` and data that
-arrives, such as a newly granted partition, on `status.blockers()` emptying.
+`SyncMode::Live`, await admin promotion on `status.admin()` and use
+`status.blockers()` to see what prevents data from being read.
 A removed device learns it at its next sync, after which reads, commits and
 `sync_now` fail with `ErrorKind::Removed`.
 
@@ -678,8 +681,8 @@ changes it:
 When a peer drops or closes its live link, for example because it restarts, a
 `Live` device that dialed the peer redials it on its own, with a backoff that
 starts near a second and doubles up to a minute, until the peer answers or the
-database closes. A link closed because authority changed gets an immediate
-attempt at fresh admission; repeated closes can still back off.
+database closes. After a link closes because authority changed, the next
+attempt can run without the usual backoff. Repeated closes still back off.
 
 A successful `write` is a local commit. Live sync may send several commits
 together, and delivery can pause while peers catch up, including after
@@ -691,7 +694,8 @@ off and with `NoPeerReached(report)` when no peer reconciled, which is also
 what an owner with no other device yet gets. Its `SyncReport` prints as one
 line; `complete()` is true when every known peer reconciled or another peer
 covered it, and `pulled()` and `pushed()` count encrypted frames transferred
-in that pass. Live deliveries outside the pass do not count toward its totals.
+in that pass. For example, `pushed()` can be zero if Live already delivered
+the write before the pass began.
 `add_peer`, `remove_peer` and `contact` manage peers, each named by its
 `DeviceId`. `remove_peer` forgets a peer however the device learned it and
 keeps a handover or discovery from bringing it back, also after a restart,

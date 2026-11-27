@@ -194,8 +194,7 @@ pub enum SyncMode {
     Off,
     /// Serves peers but reaches out only on `sync_now`.
     Manual,
-    /// The default: serves peers, syncs on its own and pushes each commit to connected peers at
-    /// once.
+    /// The default: serves peers and syncs commits automatically.
     Live,
 }
 

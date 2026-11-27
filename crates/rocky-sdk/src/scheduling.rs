@@ -41,6 +41,12 @@ impl Retry {
         self.deadline = Some(Instant::now() + Duration::from_secs(1));
         self.epoch_millis = crate::status::epoch_millis().map(|time| time.saturating_add(1000));
     }
+    pub fn wait_at_least_as_long_as(&mut self, other: &Self) {
+        if self.deadline < other.deadline {
+            self.deadline = other.deadline;
+            self.epoch_millis = other.epoch_millis;
+        }
+    }
     pub fn reset(&mut self) {
         self.failures = 0;
         self.wake();

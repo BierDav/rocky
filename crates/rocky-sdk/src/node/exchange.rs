@@ -24,13 +24,14 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
         attempt: &mut crate::status::Attempt,
     ) -> Result<Exchanged, Failure> {
         let mut node = peer.to_hex();
         node.truncate(12);
         let span = tracing::info_span!("exchange", peer = node, outcome = tracing::field::Empty);
         let result = tracing::Instrument::instrument(
-            self.exchange_inner(transport, peer, contact, attempt),
+            self.exchange_inner(transport, peer, contact, automatic, attempt),
             span.clone(),
         )
         .await;
@@ -42,13 +43,16 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
         attempt: &mut crate::status::Attempt,
     ) -> Result<Exchanged, Failure> {
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
-        let link = self.request_link(transport, peer, contact).await?;
+        let link = self
+            .request_link(transport, peer, contact, automatic)
+            .await?;
         let repair_generation = self
             .retries
             .lock()

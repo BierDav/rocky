@@ -518,10 +518,12 @@ parameters. Every device replays every transaction in one global order, so a
 device's local commit may be reordered when older transactions arrive, which
 `observe` reports as a `Rebuild`. A replayed transaction that violates a
 constraint, such as a unique index, a foreign key or a `CHECK`, is dropped
-whole, on every device; `observe` reports it in `TableChange::dropped` and
-`transaction_outcome(token)` says what happened to it. `DropReason::Admission`
-means the writer's access narrowed between its commit and the replay; a write
-its access never allowed is refused at the statement instead.
+whole, on every device; `observe` reports it in `TableChange::dropped`,
+`transaction_outcome(token)` says what happened to it, and once the drop is
+sealed the writer's device and every admin device raise a `WriteDropped` alert
+until `acknowledge_drop(token)`. `DropReason::Admission` means the writer's
+access narrowed between its commit and the replay; a write its access never
+allowed is refused at the statement instead.
 
 A row's primary key is its identity on every device. A table that declares one
 with `Table::primary_key` holds exactly its declared columns, and a foreign key

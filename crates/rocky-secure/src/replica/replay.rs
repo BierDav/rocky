@@ -1458,6 +1458,12 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn
             .execute(
+                format!("INSERT OR IGNORE INTO secure_schema_drops SELECT txn,(SELECT o.author FROM secure_operations o WHERE o.hash=secure_replayed.hash),clock,dropped FROM secure_replayed WHERE {SEALING} AND dropped='constraint' AND EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=secure_replayed.hash)"),
+                [scope, through],
+            )
+            .await?;
+        self.conn
+            .execute(
                 format!("UPDATE secure_replayed SET sealed=1,undo=NULL WHERE {SEALING}"),
                 [scope, through],
             )

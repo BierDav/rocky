@@ -262,6 +262,19 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
                 sealed: true,
             })
         );
+        let status = device.database.status().await?;
+        let alerts = status.alerts();
+        assert!(
+            alerts.iter().any(|alert| matches!(
+                alert.kind,
+                rocky_sdk::AlertKind::WriteDropped {
+                    token,
+                    reason: DropReason::Constraint,
+                    ..
+                } if token == later
+            )),
+            "the writer and the admin learn of the final drop: {alerts:?}"
+        );
     }
     a.close().await;
     b.close().await;

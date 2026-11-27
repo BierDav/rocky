@@ -19,8 +19,8 @@ Depend on Rocky by git tag. `rocky-sdk` has no networking of its own; add
 
 ```toml
 [dependencies]
-rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.6" }
-rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.6" }
+rocky-sdk = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.7" }
+rocky-tcp = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.7" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -993,10 +993,10 @@ Rocky's encryption and authorization apply on top of every transport.
 
 ```toml
 [dependencies]
-rocky-coordinator = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.6" }
+rocky-coordinator = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.7" }
 
 [dev-dependencies]
-rocky-voter = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.6", default-features = false }
+rocky-voter = { git = "https://github.com/BierDav/rocky", tag = "v0.1.0-beta.7", default-features = false }
 ```
 
 `rocky-coordinator` adds gap-free counters and admit-once claims to a

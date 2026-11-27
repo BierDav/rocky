@@ -861,9 +861,16 @@ impl Node {
                     node.link_pending(peer);
                 }
                 let still_open = *service.stage.borrow() == Stage::Open;
-                let authority_reopens_it = matches!(result, Ok(CloseReason::Authority));
-                if result.is_ok() && !authority_reopens_it && still_open && persistent && dialed {
-                    node.redial_closed_link(peer, started.elapsed());
+                if still_open {
+                    match result {
+                        Ok(CloseReason::Authority) if persistent || dialed => {
+                            node.redial_after_authority_change(peer, started.elapsed());
+                        }
+                        Ok(_) if persistent && dialed => {
+                            node.redial_closed_link(peer, started.elapsed());
+                        }
+                        _ => {}
+                    }
                 }
                 if let Err(error) = &result
                     && still_open
@@ -1079,14 +1086,30 @@ impl Node {
             &serde_json::to_vec(&state)?,
         ))
     }
-    fn reopen_link(&self, peer: PublicKey) {
-        self.reset_retry(Some(peer));
-        self.retries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(peer)
-            .or_default()
-            .link = true;
+    fn redial_after_authority_change(&self, peer: PublicKey, lived: Duration) {
+        if self.sync_mode() != crate::SyncMode::Live {
+            return;
+        }
+        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = retries.get_mut(&peer) else {
+            return;
+        };
+        state.link = true;
+        state.link_retry.survived(lived);
+        let now = rocky_platform::time::Instant::now();
+        if state
+            .last_immediate_authority_redial
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+        {
+            state.link_retry.failed();
+        } else {
+            state.last_immediate_authority_redial = Some(now);
+            state.link_retry.wake();
+            state.retry.wake();
+            state.short = false;
+            state.generation = state.generation.wrapping_add(1);
+        }
+        drop(retries);
         self.link_events.send_replace(());
     }
     fn redial_closed_link(&self, peer: PublicKey, lived: Duration) {

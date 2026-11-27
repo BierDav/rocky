@@ -150,9 +150,11 @@ impl Node {
                             }));
                         }
                         Message::Close {
-                            reason: CloseReason::Authority | CloseReason::Busy,
+                            reason: CloseReason::Busy,
                         } => return Err("peer closed link".into()),
-                        Message::Close { reason } => return Ok::<_, Failure>(reason),
+                        Message::Close { reason } if frame.direction != direction => {
+                            return Ok::<_, Failure>(reason);
+                        }
                         _ => return Err("invalid link direction".into()),
                     }
                 }
@@ -217,9 +219,6 @@ impl Node {
                     io.finish().await
                 })
                 .await;
-                if reason == CloseReason::Authority {
-                    self.reopen_link(peer);
-                }
                 Ok(reason)
             }
         }

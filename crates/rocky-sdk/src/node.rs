@@ -177,6 +177,7 @@ struct PeerRetry {
     pending: RepairWork,
     link: bool,
     link_retry: crate::scheduling::Retry,
+    last_immediate_authority_redial: Option<rocky_platform::time::Instant>,
     generation: u64,
     work_generation: u64,
 }

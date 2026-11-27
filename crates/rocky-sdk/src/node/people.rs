@@ -501,7 +501,7 @@ impl Node {
                 continue;
             }
             let devices = membership
-                .nodes(identity)
+                .devices(identity)
                 .filter(|linked| !settings.tombstoned(&linked.node))
                 .map(|linked| Device {
                     id: DeviceId::new(linked.node),

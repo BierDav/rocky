@@ -12,6 +12,7 @@ pub const MAX_SEEN: usize = crate::registry::MAX_IDENTITIES * 32;
 pub struct LinkedNode {
     pub node: PublicKey,
     pub linked: u64,
+    pub line_signer: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +74,7 @@ impl Membership {
                     node: LinkedNode {
                         node: *node,
                         linked: seen.linked,
+                        line_signer: false,
                     },
                 },
             );
@@ -95,7 +97,14 @@ impl Membership {
                 })
                 .or_insert(Member {
                     identity: leaf.issuer,
-                    node: LinkedNode { node, linked },
+                    node: LinkedNode {
+                        node,
+                        linked,
+                        line_signer: leaf
+                            .capability
+                            .extended()
+                            .is_ok_and(|held| held.line_signer),
+                    },
                 });
         }
         membership
@@ -112,11 +121,16 @@ impl Membership {
                 continue;
             }
             let linked = certificate.capability.not_before;
+            let line_signer = certificate.capability.extended()?.line_signer;
             match view.0.entry(node) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(Member {
                         identity,
-                        node: LinkedNode { node, linked },
+                        node: LinkedNode {
+                            node,
+                            linked,
+                            line_signer,
+                        },
                     });
                 }
                 Entry::Occupied(mut held) if held.get().identity == identity => {
@@ -135,6 +149,9 @@ impl Membership {
             .values()
             .filter(move |member| member.identity == *identity)
             .map(|member| &member.node)
+    }
+    pub fn devices(&self, identity: &PublicKey) -> impl Iterator<Item = &LinkedNode> {
+        self.nodes(identity).filter(|linked| !linked.line_signer)
     }
     #[cfg(test)]
     pub fn identity_of(&self, node: &PublicKey) -> Option<PublicKey> {
@@ -199,6 +216,7 @@ pub(crate) fn observe_admins(
         let identity = certificate.issuer;
         let node = certificate.capability.subject;
         if !admins.contains(&identity)
+            || certificate.capability.extended()?.line_signer
             || known.contests_node(node)
             || !membership.accepts(certificate.id()?)
         {

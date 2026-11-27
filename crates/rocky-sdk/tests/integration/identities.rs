@@ -1216,6 +1216,11 @@ async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result
         alerts.is_empty(),
         "upgrading the owner's first device must not raise a membership alert: {alerts:?}"
     );
+    assert_eq!(
+        owner_devices(&owner).await?,
+        Some(vec![owner.database.me().await?.device]),
+        "the migration's line signer is not listed as a device"
+    );
     owner.close().await;
     Ok(())
 }

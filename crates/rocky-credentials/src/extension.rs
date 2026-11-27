@@ -1,7 +1,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 19;
+const EXTENSION_VERSION: u32 = 20;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +25,7 @@ struct Body {
     previous: Option<rocky_core::Commitment>,
     database: Option<DatabaseContext>,
     possession: Option<crate::NodePossession>,
+    line_signer: bool,
 }
 #[derive(Deserialize)]
 struct Versioned {
@@ -44,6 +45,7 @@ pub struct Extended {
     pub previous: Option<rocky_core::Commitment>,
     pub database: Option<DatabaseContext>,
     pub possession: Option<crate::NodePossession>,
+    pub line_signer: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -78,6 +80,7 @@ impl Extension {
             previous: extended.previous,
             database: extended.database,
             possession: extended.possession,
+            line_signer: extended.line_signer,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -97,6 +100,9 @@ impl Extension {
             || (body.possession.is_some() && body.node.is_none())
         {
             return Err(denied("invalid membership link"));
+        }
+        if body.line_signer && body.possession.is_none() {
+            return Err(denied("only a node certificate names a line signer"));
         }
         if body.owner && body.trusted.is_none() {
             return Err(denied("only a trusted grant names the owner"));
@@ -120,6 +126,7 @@ impl Extension {
             previous: body.previous,
             database: body.database,
             possession: body.possession,
+            line_signer: body.line_signer,
         })
     }
 }
@@ -133,7 +140,7 @@ mod tests {
         let current = Extension::new(Extended::default()).unwrap();
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
-        assert_eq!(EXTENSION_VERSION, 19);
+        assert_eq!(EXTENSION_VERSION, 20);
         assert_eq!(body.version, EXTENSION_VERSION);
         for version in (0..EXTENSION_VERSION).chain([EXTENSION_VERSION + 1, u32::MAX]) {
             let other = Extension(
@@ -151,6 +158,7 @@ mod tests {
                     previous: None,
                     database: None,
                     possession: None,
+                    line_signer: false,
                 })
                 .unwrap(),
             );

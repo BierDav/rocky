@@ -1140,7 +1140,7 @@ impl Settings {
     pub fn another_issuer(&self, registry: &Registry, membership: &Membership) -> bool {
         let own = self.identity;
         !self.issuers.is_empty()
-            || membership.nodes(&own).count() > 1
+            || membership.devices(&own).count() > 1
             || registry.records.iter().any(|(identity, record)| {
                 *identity != own && !record.revoked && registry.admins.contains_key(identity)
             })

@@ -368,6 +368,7 @@ pub(crate) fn node_certificate(
     database: crate::DatabaseContext,
     not_before: u64,
     (sequence, previous): (u64, Option<rocky_core::Commitment>),
+    line_signer: bool,
 ) -> Result<SignedCapability, Error> {
     let possession = crate::NodePossession::sign(node, holder.public_key()?, database)?;
     let leaf = Capability {
@@ -383,6 +384,7 @@ pub(crate) fn node_certificate(
             previous,
             database: Some(database),
             possession: Some(possession),
+            line_signer,
             ..Extended::default()
         })?,
     };
@@ -397,11 +399,29 @@ impl CredentialChain {
         self.certify_member(holder, node, 0, None)
     }
     pub fn certify_member(
-        mut self,
+        self,
         holder: &dyn IdentityProvider,
         node: &PrivateKey,
         sequence: u64,
         previous: Option<rocky_core::Commitment>,
+    ) -> Result<Self, Error> {
+        self.certify_node(holder, node, (sequence, previous), false)
+    }
+    pub fn certify_line_signer(
+        self,
+        holder: &dyn IdentityProvider,
+        node: &PrivateKey,
+        sequence: u64,
+        previous: Option<rocky_core::Commitment>,
+    ) -> Result<Self, Error> {
+        self.certify_node(holder, node, (sequence, previous), true)
+    }
+    fn certify_node(
+        mut self,
+        holder: &dyn IdentityProvider,
+        node: &PrivateKey,
+        (sequence, previous): (u64, Option<rocky_core::Commitment>),
+        line_signer: bool,
     ) -> Result<Self, Error> {
         if (sequence == 0) != previous.is_none() {
             return Err(denied("invalid membership sequence"));
@@ -413,7 +433,14 @@ impl CredentialChain {
                 .issuer,
         )?;
         let not_before = self.holder(holder)?.not_before;
-        let leaf = node_certificate(holder, node, database, not_before, (sequence, previous))?;
+        let leaf = node_certificate(
+            holder,
+            node,
+            database,
+            not_before,
+            (sequence, previous),
+            line_signer,
+        )?;
         self.0.push(leaf);
         Ok(self)
     }

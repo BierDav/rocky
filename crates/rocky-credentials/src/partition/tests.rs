@@ -394,6 +394,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         previous: None,
         database: certified.database,
         possession: certified.possession,
+        line_signer: false,
     })
     .unwrap();
     assert!(

@@ -164,7 +164,7 @@ impl Node {
             .map(|head| head.certificate);
         let certificate = links
             .clone()
-            .certify_member(&*identity, &key, sequence, previous)?
+            .certify_line_signer(&*identity, &key, sequence, previous)?
             .0
             .pop()
             .ok_or("missing node certificate")?;
@@ -178,18 +178,6 @@ impl Node {
         });
         self.save_line_nodes(&saved)?;
         settings.learn_revocations(&known)?;
-        let own = settings.identity;
-        if let Some(authority) = settings.authority.as_mut() {
-            authority.trusted_nodes.entry(own).or_default().insert(
-                node.key.public_key(),
-                crate::membership::AdminObservation {
-                    linked: now()?,
-                    unlinked: None,
-                    read: false,
-                    acknowledged: true,
-                },
-            );
-        }
         settings.save(&self.replica).await?;
         self.replica.learn_revocations(&known).await?;
         self.replica.register_line_node(node).await?;

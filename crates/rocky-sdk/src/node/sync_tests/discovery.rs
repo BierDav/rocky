@@ -234,7 +234,11 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             announce(&c).await?;
             until(async || b.settings.lock().await.revocations.revokes(&c_key)).await?;
             let b_port = b.current().ok_or("link")?.transport.clone();
-            assert!(b.reconcile(&*b_port, c_key, &c_contact).await.is_err());
+            assert!(
+                b.reconcile(&*b_port, c_key, &c_contact, false)
+                    .await
+                    .is_err()
+            );
             let _ = pass(&c).await;
             announced(&hub, |hub| hub.topics("c").is_empty()).await?;
             for node in [&a, &b, &c, &outsider_domain] {

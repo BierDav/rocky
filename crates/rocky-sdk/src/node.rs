@@ -1930,9 +1930,12 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
     ) -> Result<Exchanged, Failure> {
         let _ = self.observations.partial_transfer(&peer.to_hex());
-        let mut result = self.reconcile_observed(transport, peer, contact).await;
+        let mut result = self
+            .reconcile_observed(transport, peer, contact, automatic)
+            .await;
         if let Ok(Exchanged { transfer, .. }) = &mut result
             && let Some(partial) = self.observations.partial_transfer(&peer.to_hex())
         {
@@ -2010,6 +2013,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
     ) -> Result<Exchanged, Failure> {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
@@ -2020,7 +2024,9 @@ impl Node {
                 crate::AttemptOperation::Reconcile,
                 crate::AttemptStage::ResolveRoute,
             );
-            result = self.exchange(transport, peer, contact, &mut attempt).await;
+            result = self
+                .exchange(transport, peer, contact, automatic, &mut attempt)
+                .await;
             if result.is_err()
                 && attempt.current_stage() == crate::AttemptStage::ResolveRoute
                 && let Some(link) = self
@@ -2084,10 +2090,11 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
         let mut attempt = None;
         let result = self
-            .request_link_observed(transport, peer, contact, &mut attempt)
+            .request_link_observed(transport, peer, contact, automatic, &mut attempt)
             .await;
         if let Some(attempt) = attempt {
             let failure = result
@@ -2103,6 +2110,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        automatic: bool,
         attempt: &mut Option<crate::status::Attempt>,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
         let addresses = contact.addresses(transport);
@@ -2116,6 +2124,18 @@ impl Node {
             service.live.wait_inbound_short(peer).await?;
             if let Some(open) = service.live.handle(peer) {
                 return Ok(open);
+            }
+            if automatic
+                && self
+                    .retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&peer)
+                    .is_some_and(|state| !state.retry.ready())
+            {
+                return Err(
+                    ServiceError::dial_failed("peer dial is deferred by backoff".into()).into(),
+                );
             }
             let _opening = self.opening(&service, peer);
             let current_attempt = attempt.insert(self.observations.begin(

@@ -324,7 +324,8 @@ async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Fai
                 .next()
                 .ok_or("peer")?;
             let service = a.current().ok_or("service")?;
-            a.request_link(&*service.transport, peer, &contact).await?;
+            a.request_link(&*service.transport, peer, &contact, false)
+                .await?;
             let (first, second) = (service.live.short(peer), service.live.short(peer));
             drop(first);
             assert!(service.live.handle(peer).is_some());

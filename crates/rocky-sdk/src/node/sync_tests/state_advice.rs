@@ -36,7 +36,7 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
                 .1;
             let transport = change_driven::transport(&c).await?;
             let importing = c.bootstrap.lock().await;
-            let mut exchange = Box::pin(c.reconcile(&*transport, key, &contact));
+            let mut exchange = Box::pin(c.reconcile(&*transport, key, &contact, false));
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), exchange.as_mut())
                     .await
@@ -184,7 +184,9 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                         .1;
                     let keep = |_, _, _| true;
                     let upstream = Upstream {
-                        link: c.request_link(&*service.transport, owner, &contact).await?,
+                        link: c
+                            .request_link(&*service.transport, owner, &contact, false)
+                            .await?,
                         observations: &c.observations,
                         peer: owner,
                         contacts: None,
@@ -233,7 +235,9 @@ async fn a_failed_scope_does_not_skip_the_next_scope_on_the_same_link() -> Resul
                 .1;
             let service = b.current().ok_or("service")?;
             let upstream = Upstream {
-                link: b.request_link(&*service.transport, peer, &contact).await?,
+                link: b
+                    .request_link(&*service.transport, peer, &contact, false)
+                    .await?,
                 observations: &b.observations,
                 peer,
                 contacts: None,
@@ -317,7 +321,9 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
                 .1;
             let service = b.current().ok_or("service")?;
             let upstream = Upstream {
-                link: b.request_link(&*service.transport, peer, &contact).await?,
+                link: b
+                    .request_link(&*service.transport, peer, &contact, false)
+                    .await?,
                 observations: &b.observations,
                 peer,
                 contacts: None,

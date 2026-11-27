@@ -48,6 +48,7 @@ async fn one_contact_hands_over_a_second_and_answers_a_request_for_a_third() -> 
                 &*a_link.as_ref().ok_or("link")?.transport,
                 c_key,
                 &c_contact,
+                false,
             )
             .await?;
             drop(a_link);

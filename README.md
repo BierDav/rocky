@@ -252,7 +252,6 @@ ones an application calls, and the sections below explain each.
 | | `link_requests`, `approve_link`, `unlink` | Adds or ends one of a person's devices |
 | Status | `status`, `status_changes` | Blockers, alerts, network and schema, now or as they change |
 | | `status().await?.schema_version()` | The schema version installed on this device |
-| | `renew` | Renews this device's credentials with an admin device now |
 
 ## Keys
 
@@ -885,7 +884,10 @@ required field without a default, or a foreign key over a field existing rows
 already hold. A new required field with a reference fails with
 `SchemaError::Change(RefusedChange::AddedReference(key))`, since existing rows
 would hold no parent: declare the field optional with `references` and fill it
-with an `UPDATE` migration step.
+with an `UPDATE` migration step. A referencing field never gains a default
+either, which fails with `RefusedChange::FilledReference`, since rows written
+under the earlier version would arrive holding a parent nobody checked: keep a
+required field with a default unreferenced and check its parent in the write.
 
 An admin device publishes a new version when it opens with it. A version that
 drops tables or fields or narrows a role fails to open with

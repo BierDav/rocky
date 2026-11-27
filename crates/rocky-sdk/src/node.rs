@@ -459,6 +459,13 @@ impl Node {
             .is_some()
             .then(|| crate::Error::schema_mismatch(installed, declared)))
     }
+    pub(crate) fn behind_a_removal_it_uses(&self) -> Result<Option<crate::Error>, Failure> {
+        Ok(self
+            .settings
+            .published()
+            .upgrade_required(&self.declared)?
+            .map(|(installed, declared)| crate::Error::schema_mismatch(installed, declared)))
+    }
     pub(crate) async fn refuse_sql_while_declared_ahead(&self) -> Result<(), Failure> {
         if self.declared_installed.load(Ordering::Acquire) {
             return Ok(());

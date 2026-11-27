@@ -109,7 +109,7 @@ async fn explained(
         unsupported: None,
         ..
     } = typed.kind()
-        && let Ok(Some(mismatch)) = node.removed_what_the_application_declares().await
+        && let Ok(Some(mismatch)) = node.behind_a_removal_it_uses()
     {
         return Box::new(mismatch);
     }

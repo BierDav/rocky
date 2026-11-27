@@ -1389,6 +1389,29 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
         "SQL naming the removed field says the application must upgrade: {refused}"
     );
     assert!(!refused.retryable());
+    let (refused, kept) = late
+        .bob
+        .database
+        .write(async |tx| {
+            let refused = tx
+                .execute(
+                    "INSERT INTO items(key,completed,title) VALUES('tea',0,'Tea')",
+                    Vec::new(),
+                )
+                .await
+                .err()
+                .map(|error| error.kind().clone());
+            let kept = tx
+                .execute("INSERT INTO items(key,completed) VALUES('tea',0)", Vec::new())
+                .await?;
+            Ok::<_, rocky_sdk::Error>((refused, kept))
+        })
+        .await?;
+    assert_eq!(
+        (refused, kept),
+        (Some(upgrade.clone()), 1),
+        "a statement refused for a removed field leaves the transaction open"
+    );
     late.bob.close().await;
 
     let refused = open(&late.path("bob"), &common::schema(), late.network("bob"))

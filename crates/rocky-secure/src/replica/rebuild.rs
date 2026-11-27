@@ -1,13 +1,10 @@
 use super::*;
 
-const OPERATION_SCOPE_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scope_status ON secure_operations(scope,status,hash)";
 const OPERATION_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_headers ON secure_operations(scope,status,hash,header)";
 const OPERATION_SCAN_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scan_headers ON secure_operations(status,hash,header)";
 const OPERATION_AUTHOR_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_author_status ON secure_operations(author,scope,status,sequence)";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_operation_scope_hash ON secure_operations(scope,hash)",
-    "CREATE INDEX IF NOT EXISTS secure_operation_status_hash ON secure_operations(status,hash)",
-    OPERATION_SCOPE_STATUS_INDEX,
     OPERATION_HEADERS_INDEX,
     OPERATION_SCAN_HEADERS_INDEX,
     OPERATION_AUTHOR_STATUS_INDEX,

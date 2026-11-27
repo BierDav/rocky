@@ -1049,3 +1049,90 @@ async fn interned_record_caches_stay_bounded_during_intake() {
         );
     }
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn single_row_sql_inserts_write_few_wal_frames() {
+    use super::compaction::{follow_main, insert, open};
+    const WARM_ROWS: usize = 64;
+    const MEASURED_INSERTS: i64 = 32;
+    const WAL_FRAMES_PER_INSERT: i64 = 64;
+    let lineage = super::generations::Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "frames", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    for row in 0..WARM_ROWS {
+        insert(&replica, &format!("warm{row}"), "warm").await;
+    }
+    let wal_frames = |mode: &'static str| {
+        let replica = &replica;
+        async move {
+            let inner = replica.inner.lock(crate::replica::Class::Background).await;
+            match rows(&inner.conn, &format!("PRAGMA wal_checkpoint({mode})"))
+                .await
+                .unwrap()
+                .first()
+                .map(Vec::as_slice)
+            {
+                Some([SqlValue::Integer(0), SqlValue::Integer(log), _]) => *log,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    let mut written = 0;
+    for row in 0..MEASURED_INSERTS {
+        assert_eq!(wal_frames("TRUNCATE").await, 0);
+        insert(&replica, &format!("single{row}"), "one row").await;
+        written += wal_frames("PASSIVE").await;
+    }
+    let per_insert = written / MEASURED_INSERTS;
+    assert!(
+        per_insert <= WAL_FRAMES_PER_INSERT,
+        "a single-row insert wrote {per_insert} WAL frames on average"
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn no_full_index_repeats_the_leading_columns_of_another() {
+    use super::compaction::{follow_main, insert, open};
+    let lineage = super::generations::Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "indexes", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "row", "value").await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let mut indexes = Vec::new();
+    for listed in rows(
+        &inner.conn,
+        "SELECT m.name,l.name FROM sqlite_schema m JOIN pragma_index_list(m.name) l WHERE m.type='table' AND l.partial=0",
+    )
+    .await
+    .unwrap()
+    {
+        let [SqlValue::Text(table), SqlValue::Text(index)] = listed.as_slice() else {
+            panic!("{listed:?}");
+        };
+        let columns: Vec<_> = rows(
+            &inner.conn,
+            &format!("SELECT name FROM pragma_index_info('{index}') ORDER BY seqno"),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|column| format!("{column:?}"))
+        .collect();
+        indexes.push((table.clone(), index.clone(), columns));
+    }
+    for (table, index, columns) in &indexes {
+        for (other_table, other, other_columns) in &indexes {
+            assert!(
+                table != other_table
+                    || index == other
+                    || other_columns.len() <= columns.len()
+                    || other_columns[..columns.len()] != columns[..],
+                "{index} on {table} repeats the leading columns of {other}"
+            );
+        }
+    }
+}

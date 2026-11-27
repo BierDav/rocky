@@ -1175,7 +1175,16 @@ async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result
         "reopening the owner's first device must not raise a membership alert"
     );
     owner.close().await;
-    let upgraded = common::build(common::shopping(2).table(common::items()));
+    let upgraded = common::build(
+        common::shopping(2)
+            .table(common::items())
+            .table(
+                rocky_sdk::Table::replayed("labels")
+                    .column(common::required("name", rocky_sdk::Affinity::Text))
+                    .primary_key(["name"]),
+            )
+            .migration(2, ["INSERT INTO labels(name) VALUES ('groceries')"]),
+    );
     let database = common::configuration(
         &directory.path().join("owner"),
         &upgraded,

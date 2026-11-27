@@ -608,11 +608,7 @@ impl Node {
         let full = self.replica.role().await?.role == rocky_secure::ReplicaRole::Full;
         let mut progress = Vec::new();
         for partition in settings.partitions(&domain)? {
-            let held = partition.record.current().is_some()
-                && partition
-                    .members
-                    .iter()
-                    .all(|member| settings.reads_partition(&domain, member));
+            let held = settings.holds_partition(&domain, &partition);
             let mut complete = held;
             for member in &partition.members {
                 if !complete {

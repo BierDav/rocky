@@ -868,6 +868,13 @@ impl Settings {
             .map(|record| GroupPartition::of(domain, record))
             .collect()
     }
+    pub(crate) fn holds_partition(&self, domain: &Domain, partition: &GroupPartition) -> bool {
+        partition.record.current().is_some()
+            && partition
+                .members
+                .iter()
+                .all(|member| self.reads_partition(domain, member))
+    }
     pub fn reads_whole(&self, domain: &Domain, scope: &rocky_core::ResourceScope) -> bool {
         let concrete = self.grants(domain).iter().any(|grant| {
             grant.scope == *scope

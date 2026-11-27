@@ -227,6 +227,8 @@ pub struct Me {
     pub owner: bool,
     /// The rights per table.
     pub tables: std::collections::BTreeMap<String, TableRights>,
+    /// The partitions this device holds the key of and may read in full.
+    pub partitions: Vec<crate::Partition>,
     /// When this device's credentials expire; a sync with an admin device renews them.
     pub expires: Timestamp,
 }

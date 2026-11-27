@@ -375,6 +375,13 @@ impl Node {
         let settings = self.settings_snapshot().await;
         let tables = self.table_rights(&settings)?;
         let node = rocky_secure::PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let domain = self.domain();
+        let partitions = settings
+            .partitions(&domain)?
+            .into_iter()
+            .filter(|partition| settings.holds_partition(&domain, partition))
+            .map(|partition| partition.record.partition())
+            .collect::<Result<_, _>>()?;
         Ok(Me {
             person: PersonId::new(settings.identity),
             device: DeviceId::new(node),
@@ -382,6 +389,7 @@ impl Node {
             admin: settings.issuer(),
             owner: settings.issuer() && settings.owns(),
             tables,
+            partitions,
             expires: seconds(settings.expires()),
         })
     }

@@ -243,7 +243,7 @@ ones an application calls, and the sections below explain each.
 | | `set_sync` | Switches `SyncMode` |
 | | `contact` | How other devices reach this one |
 | | `add_peer`, `remove_peer` | Adds or forgets a peer by contact or `DeviceId` |
-| People | `me` | Who this device belongs to and what it may do per table |
+| People | `me` | Who this device belongs to, what it may do per table and the partitions it holds |
 | | `people` | Every member, their access, partitions and devices; admins only |
 | | `invite`, `invitations`, `cancel_invitation` | Issues, lists and cancels invitations |
 | | `set_access`, `remove` | Changes or ends a member's access |
@@ -379,9 +379,11 @@ read returns the rows of the partitions they hold, also when its filter names
 others, and a write into a partition they do not hold, or no longer hold
 after `revoke_partition`, is `Denied` with `PartitionNotGranted`.
 
-`people()` lists each `Person` with the partitions granted to them in
-`Person::partitions`. `Full` and `Read` reach every partition without a
-grant, so an admin asking who reads a partition counts them too:
+On any device, `me().await?.partitions` lists the partitions this device holds,
+such as a clinician's own patients. `people()` lists each `Person` with the
+partitions granted to them in `Person::partitions`. `Full` and `Read` reach
+every partition without a grant, so an admin asking who reads a partition
+counts them too:
 
 ```rust crates/rocky-sdk/tests/integration/readme_examples.rs
 async fn readers(

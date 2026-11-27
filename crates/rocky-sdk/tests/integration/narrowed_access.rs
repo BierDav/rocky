@@ -352,6 +352,9 @@ async fn revoking_a_partition_deletes_its_rows_from_the_device() -> Result<(), F
         texts(&clinician, "SELECT body FROM notes ORDER BY body").await?,
         ["ada note", "bob note"]
     );
+    let mut held = clinician.database.me().await?.partitions;
+    held.sort_by_key(|partition| format!("{:?}", partition.values));
+    assert_eq!(held, [chart("ada"), chart("bob")]);
     assert!(
         !rows_holding(&directory, "ada drug")?.is_empty(),
         "the device held the partition's rows before the revocation"
@@ -373,6 +376,7 @@ async fn revoking_a_partition_deletes_its_rows_from_the_device() -> Result<(), F
         texts(&clinician, "SELECT body FROM notes").await?,
         ["bob note"]
     );
+    assert_eq!(clinician.database.me().await?.partitions, [chart("bob")]);
     clinician.close().await;
     for needle in ["ada note", "ada drug"] {
         assert!(

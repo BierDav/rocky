@@ -227,12 +227,9 @@ impl<A: RowApplication> Inner<A> {
         let frames = self.publication_frames(&publication, total).await?;
         self.record_publication(publication, total, &frames, Some(stage))
             .await?;
-        let node = self
-            .node_author
-            .as_ref()
-            .ok_or_else(|| denied("node author credential missing"))?
-            .key
-            .public_key();
+        if self.node_author.is_none() {
+            return Err(denied("node author credential missing"));
+        }
         let time = now()?;
         for position in 0..total {
             let handle = bundle_handle(&publication, position);
@@ -249,7 +246,7 @@ impl<A: RowApplication> Inner<A> {
                     .map(|(index, frame)| (frame, index as u16))
                     .collect();
                 self.publish_outcome(
-                    super::bundle::transaction_id(node, &handle),
+                    super::bundle::transaction_id(self.config.node.public_key(), &handle),
                     &held,
                     None,
                     time,

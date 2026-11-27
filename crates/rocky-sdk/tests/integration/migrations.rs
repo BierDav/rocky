@@ -2312,3 +2312,66 @@ async fn refused_local_table_change_reports_schema_error_not_unsupported_generat
     );
     Ok(())
 }
+
+fn budget(version: u32) -> Result<Schema, Failure> {
+    let memo = match version {
+        1 => Column::new("note", Affinity::Text),
+        _ => Column::new("memo", Affinity::Text).renamed_from("note"),
+    };
+    let builder = Schema::builder("budget", version).table(
+        Table::replayed("expenses")
+            .column(Column::new("cents", Affinity::Integer).required())
+            .column(memo),
+    );
+    Ok(match version {
+        1 => builder,
+        _ => builder
+            .table(Table::replayed("categories").column(Column::new("name", Affinity::Text)))
+            .migration(
+                version,
+                ["INSERT INTO categories(name) VALUES('groceries')"],
+            ),
+    }
+    .build()?)
+}
+
+async fn spend(
+    database: &rocky_sdk::Database,
+    column: &str,
+) -> Result<rocky_sdk::TransactionToken, rocky_sdk::Error> {
+    let insert = format!("INSERT INTO expenses(cents, {column}) VALUES(100, 'tea')");
+    database
+        .write(async |tx| {
+            tx.execute(&insert, Vec::new()).await?;
+            Ok::<_, rocky_sdk::Error>(tx.token())
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_right_after_publishing_a_version_has_an_outcome() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("alice");
+    let created = rocky_sdk::Configuration::new(&path, &budget(1)?)?
+        .create()
+        .await?;
+    let owner: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(created.owner);
+    let before = spend(&created.database, "note").await?;
+    created.database.flush().await?;
+    created.database.close().await?;
+    let alice = rocky_sdk::Configuration::new(&path, &budget(2)?)?
+        .identity(owner)
+        .open()
+        .await?;
+    let after = spend(&alice, "memo").await?;
+    alice.flush().await?;
+    for (written, token) in [("before the migration", before), ("after it", after)] {
+        let outcome = alice.transaction_outcome(token).await?;
+        assert!(
+            matches!(outcome, Some(rocky_sdk::TransactionOutcome::Applied { .. })),
+            "the write {written} has no applied outcome: {outcome:?}"
+        );
+    }
+    alice.close().await?;
+    Ok(())
+}

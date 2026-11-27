@@ -253,7 +253,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("node author credential missing"))?
             .key
             .public_key();
-        let transaction = transaction_id(node, &handle);
+        let transaction = transaction_id(self.config.node.public_key(), &handle);
         let mut plan = Vec::with_capacity(frames.len());
         let mut next = BTreeMap::new();
         let mut tips = BTreeMap::new();

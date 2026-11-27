@@ -208,6 +208,18 @@ impl Node {
             Exit::Close(reason) => {
                 #[cfg(test)]
                 service.live.closing.fetch_add(1, Ordering::SeqCst);
+                #[cfg(test)]
+                if reason == CloseReason::Authority {
+                    let gate = service
+                        .live
+                        .authority_close_gate
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    if let Some(gate) = gate {
+                        gate.acquire().await?.forget();
+                    }
+                }
                 if *peer_collects_health.borrow() && reason != CloseReason::Authority {
                     let _ =
                         rocky_platform::time::timeout(CLOSE, self.final_report(&writer, direction))

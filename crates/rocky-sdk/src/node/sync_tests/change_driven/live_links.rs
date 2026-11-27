@@ -695,7 +695,7 @@ async fn a_dial_only_device_redials_after_the_peers_authority_changes() -> Resul
 
             let first = links.live.id(server_key);
             let chain = server.settings.lock().await.credentials.clone();
-            server.replica.renew_credentials(chain.clone()).await?;
+            server.replica.renew_credentials(chain).await?;
             until(|| links.live.id(server_key) != first).await;
             assert!(
                 device.retry_deadline().is_none(),
@@ -705,6 +705,11 @@ async fn a_dial_only_device_redials_after_the_peers_authority_changes() -> Resul
             settled(&device).await;
 
             let second = links.live.id(server_key);
+            let device_chain = device.settings.lock().await.credentials.clone();
+            let contact = device.settings.lock().await.peers[&server_key].clone();
+            let gate = Arc::new(Semaphore::new(0));
+            *links.live.authority_close_gate.lock().unwrap() = Some(gate.clone());
+            let closing = links.live.closing.load(Ordering::SeqCst);
             device
                 .retries
                 .lock()
@@ -712,14 +717,24 @@ async fn a_dial_only_device_redials_after_the_peers_authority_changes() -> Resul
                 .get_mut(&server_key)
                 .ok_or("peer retry state")?
                 .repair_all();
-            server.replica.renew_credentials(chain).await?;
+            device.replica.renew_credentials(device_chain).await?;
+            until(|| links.live.closing.load(Ordering::SeqCst) > closing).await;
+            assert_eq!(links.live.id(server_key), second);
+            assert!(!links.live.contains(server_key));
+            let dials = hub.dials_to("server");
+            let mut opening =
+                Box::pin(device.request_link(&*links.transport, server_key, &contact, true));
+            assert!(futures_util::poll!(&mut opening).is_pending());
+            drop(opening);
+            device.open_links(&links).await;
+            assert_eq!(
+                hub.dials_to("server"),
+                dials,
+                "the old link still occupies the dial slot until its retry state is ready"
+            );
+            gate.add_permits(1);
             until(|| links.live.id(server_key) != second).await;
             let retry = device.retry_deadline().ok_or("repeated closes back off")?;
-            let dials = hub.dials_to("server");
-            let mut worked = device.worker_running.subscribe();
-            worked.wait_for(|running| *running).await?;
-            worked.wait_for(|running| !*running).await?;
-            let contact = device.settings.lock().await.peers[&server_key].clone();
             assert!(
                 device
                     .request_link(&*links.transport, server_key, &contact, true)

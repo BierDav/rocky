@@ -729,7 +729,8 @@ impl Settings {
         }
         let domain = self.domain()?;
         let targets: Vec<_> = invite.partitions.iter().map(Partition::target).collect();
-        domain.compile(&invite.access, &domain.partition_targets(&targets)?)?;
+        let granted = domain.compile(&invite.access, &domain.partition_targets(&targets)?)?;
+        domain.require_whole_groups(&granted, &invite.partitions)?;
         let person = match invite.person {
             Some(person) => {
                 let identity = person.key();

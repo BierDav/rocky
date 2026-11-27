@@ -531,3 +531,51 @@ async fn a_statement_over_the_intent_limit_fails_at_execute_and_a_blob_counts_it
     database.close().await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_for_a_role_that_reads_part_of_a_partition_group_is_refused()
+-> Result<(), Failure> {
+    const DESK: RoleName = RoleName::from_static("desk");
+    let patient_table = |name: &str| {
+        Table::replayed(name)
+            .column(Column::new("patient", Affinity::Text).required())
+            .primary_key(["patient", "id"])
+            .partition_by(["patient"])
+            .partition_group("patient")
+    };
+    let schema = Schema::builder("partial_groups", 1)
+        .table(patient_table("notes"))
+        .table(patient_table("intake"))
+        .role(Role::new(DESK).write("intake").per_partition("patient"))
+        .role(
+            Role::new(CLINICIAN)
+                .write("notes")
+                .write("intake")
+                .per_partition("patient"),
+        )
+        .build()?;
+    let root = tempfile::tempdir()?;
+    let database = Configuration::new(root.path().join("admin"), &schema)?
+        .network(Network::Owned(Arc::new(Hub::default()).connector("admin")))
+        .create()
+        .await?
+        .database;
+    let patient = Partition::new("patient", vec![SqlValue::Text("p-1".into())]);
+    let refused = database
+        .invite(Invite::new(Access::Role(DESK)).partition(patient.clone()))
+        .await
+        .err()
+        .ok_or("an invitation for part of a partition group was issued")?;
+    assert_eq!(
+        refused.kind(),
+        &ErrorKind::Access(rocky_sdk::AccessError::PartialGroup {
+            group: "patient".into()
+        }),
+        "{refused:?}"
+    );
+    database
+        .invite(Invite::new(Access::Role(CLINICIAN)).partition(patient))
+        .await?;
+    database.close().await?;
+    Ok(())
+}

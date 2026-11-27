@@ -60,6 +60,33 @@ pub(crate) fn granted_of(
 }
 
 impl Domain {
+    pub(crate) fn require_whole_groups(
+        &self,
+        granted: &Granted,
+        partitions: &[crate::Partition],
+    ) -> Result<(), Failure> {
+        for partition in partitions {
+            let group = crate::groups::GroupPartition::resolve(
+                self,
+                Some(&partition.group),
+                None,
+                partition.values.clone(),
+                |_| Ok([0; 32]),
+            )?;
+            let reads_every_member = group.members.iter().all(|member| {
+                granted.partitions.iter().any(|grant| {
+                    grant.table == member.scope.table
+                        && grant.rights.contains(&rocky_core::Right::Read)
+                })
+            });
+            if !reads_every_member {
+                return Err(Box::new(crate::AccessError::PartialGroup {
+                    group: partition.group.clone(),
+                }));
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn compile(
         &self,
         access: &Access,

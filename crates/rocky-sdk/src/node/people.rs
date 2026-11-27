@@ -599,16 +599,8 @@ impl Node {
             .group_partition(&partition.target(), super::partition::Naming::Known)
             .await?;
         if let Some(granted) = fresh {
-            let reads_every_member = group.members.iter().all(|member| {
-                granted.partitions.iter().any(|grant| {
-                    grant.table == member.scope.table && grant.rights.contains(&Right::Read)
-                })
-            });
-            if !reads_every_member {
-                return Err(Box::new(AccessError::PartialGroup {
-                    group: partition.group.clone(),
-                }));
-            }
+            self.domain()
+                .require_whole_groups(&granted, std::slice::from_ref(partition))?;
             let version = self.settings_snapshot().await.schema.version;
             self.change_rights_after(None, version, &[person], Reach::Wider)
                 .await?;

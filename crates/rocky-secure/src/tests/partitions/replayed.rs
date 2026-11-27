@@ -15,6 +15,137 @@ async fn lose_outcome_records(replica: &EncryptedReplica<TypedRows>) {
     }
 }
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn revoking_a_partition_preserves_a_saved_line_authors_drop_after_reopen() {
+    let root = Scratch::new().await;
+    let path = root.path().join("line-revocation.sqlite");
+    let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
+    let original = PrivateKey::new();
+    let identity = crate::tests::identity_of(&original);
+    let replica = f.open(&path, original.clone(), f.grant(None, &all())).await;
+    f.key(&replica, "A", [1; 32]).await;
+    f.key(&replica, "B", [2; 32]).await;
+    let genesis = replica.followed_tip().await;
+    let movement = rocky_credentials::SignedBookmarkMove::sign(
+        rocky_credentials::BookmarkMoveStatement {
+            format: rocky_credentials::BOOKMARK_MOVE_FORMAT,
+            scope: f.domain,
+            name: "main".into(),
+            from: None,
+            to: Some(genesis),
+        },
+        &f.publisher,
+    )
+    .unwrap();
+    replica
+        .receive_tip_statements(&[crate::TipStatement::Bookmark(movement)])
+        .await
+        .unwrap();
+    replica.follow_bookmark(f.domain, "main").await.unwrap();
+    let original_credentials = {
+        replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .config
+            .credentials
+            .clone()
+    };
+    let prefix = original_credentials.capabilities();
+    let signer = PrivateKey::new();
+    let line = crate::LineNode {
+        credentials: prefix
+            .certify_member(
+                &identity,
+                &signer,
+                1,
+                Some(original_credentials.certificate().unwrap().id().unwrap()),
+            )
+            .unwrap(),
+        key: signer.clone(),
+    };
+    replica.register_line_node(line.clone()).await.unwrap();
+    let frames = insert(
+        &f,
+        &replica,
+        &["A", "B"],
+        &[("A", "offline", 1), ("B", "retained", 2)],
+        91,
+    )
+    .await;
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.operation_ref().unwrap().header.public_key == signer.public_key())
+    );
+    let frame = frames
+        .iter()
+        .find(|frame| frame.scope().unwrap() == f.scope("A"))
+        .unwrap();
+    let token = transaction(frame, [1; 32], &f);
+    let dropped = Some(TransactionOutcome::Dropped {
+        reason: DropReason::Admission,
+        sealed: true,
+    });
+    let time = crate::tests::lifetime().0 + rocky_credentials::DAY;
+    let grant = Authority::owner(&f.publisher)
+        .issue_person(
+            identity.public_key(),
+            rocky_credentials::Granted {
+                partitions: vec![f.grant(Some(&["B"]), &all())],
+                ..Default::default()
+            },
+            rocky_credentials::Validity {
+                issued_at: time,
+                lifetime: std::time::Duration::from_secs(rocky_credentials::DAY),
+                clock_skew: std::time::Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+    let narrowed = CredentialChain(vec![grant])
+        .with_certificate(original_credentials.certificate().unwrap().clone());
+    replica.renew_credentials(narrowed.clone()).await.unwrap();
+    assert_eq!(replica.transaction_outcome(token).await.unwrap(), dropped);
+    assert!(
+        replica
+            .schema_drops()
+            .await
+            .unwrap()
+            .iter()
+            .any(|drop| drop.transaction == token && drop.reason == DropReason::Admission)
+    );
+    let drops = replica.schema_drops().await.unwrap();
+    assert!(
+        drops
+            .iter()
+            .any(|drop| drop.transaction == token && drop.node == original.public_key()),
+        "a local line author's drop belongs to the application-visible device: {drops:?}"
+    );
+    let config = SecureConfig {
+        publisher: f.publisher.public_key(),
+        manifest: f.manifest.clone(),
+        revocations: replica.revocations().await,
+        node: original,
+        credentials: narrowed,
+        keys: vec![KeyMaterial::new(f.scope("B"), 1, [2; 32])],
+    };
+    drop(replica);
+    let reopened = EncryptedReplica::open(&path, f.app(), config)
+        .await
+        .unwrap();
+    assert_eq!(reopened.transaction_outcome(token).await.unwrap(), dropped);
+    assert!(
+        reopened
+            .schema_drops()
+            .await
+            .unwrap()
+            .iter()
+            .any(|drop| drop.transaction == token && drop.reason == DropReason::Admission)
+    );
+    assert!(reopened.acknowledge_schema_drop(token).await.unwrap());
+    assert!(reopened.schema_drops().await.unwrap().is_empty());
+}
+
 async fn keys(
     f: &Fixture,
     replica: &EncryptedReplica<TypedRows>,

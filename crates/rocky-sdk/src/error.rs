@@ -387,7 +387,7 @@ impl Error {
 
     pub(crate) fn schema_mismatch(installed: u32, declared: u32) -> Self {
         let remedy = if installed > declared {
-            "it removed a table or field the application uses, so upgrade the application"
+            "it renamed or removed a table or field the application uses, so upgrade the application"
         } else {
             "an admin device must publish the declared version first, or this device sync with one that has"
         };

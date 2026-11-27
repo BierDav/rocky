@@ -1314,6 +1314,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         .await?;
         if matches!(setup.install, Install::Create { .. }) {
             node.follow_main().await?;
+            node.record_self().await?;
         }
         drain_migration_work(&replica, node.domain().scope).await?;
         fault::check(&directory, fault::Stage::Started)?;

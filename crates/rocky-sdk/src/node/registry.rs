@@ -80,7 +80,7 @@ impl Node {
         ))
         .await
     }
-    pub(super) async fn record_self(&self) -> Result<(), Failure> {
+    pub(crate) async fn record_self(&self) -> Result<(), Failure> {
         if !self.settings.lock().await.issuer() {
             return Ok(());
         }

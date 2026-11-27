@@ -941,6 +941,17 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
     Ok(())
 }
 
+async fn owner_devices(device: &Device) -> Result<Option<Vec<rocky_sdk::DeviceId>>, Failure> {
+    let me = device.database.me().await?.person;
+    Ok(device
+        .database
+        .people()
+        .await?
+        .into_iter()
+        .find(|person| person.id == me)
+        .map(|person| person.devices.into_iter().map(|device| device.id).collect()))
+}
+
 async fn trusted_alerts(device: &Device) -> Result<Vec<rocky_sdk::status::Alert>, Failure> {
     Ok(device
         .database
@@ -1142,6 +1153,11 @@ async fn owner_first_device_does_not_raise_admin_device_linked_alert() -> Result
     assert!(
         trusted_alerts(&owner).await?.is_empty(),
         "creating the owner's first device must not raise a membership alert"
+    );
+    assert_eq!(
+        owner_devices(&owner).await?,
+        Some(vec![owner.database.me().await?.device]),
+        "people() lists the owner with their first device from creation"
     );
     let invitation = owner
         .database

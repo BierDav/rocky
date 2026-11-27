@@ -30,7 +30,10 @@ async fn a_continue_seal_moves_the_bookmark_and_keeps_every_row() -> Result<(), 
     a.add(2, "eggs").await;
     let written = snap::ok(a.database.tip_status()).await;
     assert_eq!(written["bookmark"], "main");
-    assert_eq!(written["operations_since_seal"], 2);
+    assert_eq!(
+        written["operations_since_seal"], 3,
+        "two rows and the owner's registry record"
+    );
     assert_eq!(written["evidence_releasable"], Value::Null);
 
     let sealed = snap::ok(a.database.seal()).await;
@@ -108,7 +111,7 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
         .map(|record| record["rows"].as_u64().unwrap())
         .collect();
     rows.sort_unstable();
-    assert_eq!(rows, [0, 2]);
+    assert_eq!(rows, [2, 3], "two items and the owner's registry rows");
     assert_ne!(at_first[0]["scope"], at_first[1]["scope"]);
     let at_second = checkpoints_beside_seal(&second);
     assert_eq!(at_second.len(), 1);
@@ -123,12 +126,12 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
         let scope: rocky_core::ResourceScope = serde_json::from_value(record["scope"].clone())?;
         assert_eq!(scope.domain, rocky_sdk::extension::scope(&a.database));
     }
-    let empty_registry = at_first.iter().find(|record| record["rows"] == 0).unwrap();
+    let registry = at_first.iter().find(|record| record["rows"] == 3).unwrap();
     let changed = at_first.iter().find(|record| record["rows"] == 2).unwrap();
     assert_eq!(at_second[0]["scope"], changed["scope"]);
     assert_ne!(
-        at_second[0]["scope"], empty_registry["scope"],
-        "the unchanged empty registry keeps its signed base at the first seal"
+        at_second[0]["scope"], registry["scope"],
+        "the unchanged registry keeps its signed base at the first seal"
     );
     assert_ne!(at_second[0]["checkpoint"], changed["checkpoint"]);
     let items = ["bread/0", "eggs/1", "milk/0"];

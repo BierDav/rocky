@@ -119,6 +119,14 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
+        self.verified_credentials(chain, revocations, time)
+    }
+    pub(super) fn verified_credentials(
+        &self,
+        chain: &CredentialChain,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<rocky_credentials::VerifiedChain, Error> {
         self.crypto.verify(
             chain,
             self.config.publisher,

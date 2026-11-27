@@ -196,6 +196,28 @@ async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
     assert!(status.uncompacted.is_empty());
 }
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn checking_served_bases_again_reuses_the_verified_checkpoint_chain() {
+    use rocky_credentials::testing::chain_verifications_on_this_thread;
+    let lineage = Lineage::new();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "served", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "live", "kept").await;
+    seal(&lineage, &replica).await;
+    replica.compact(lineage.domain, 0).await.unwrap();
+    assert!(!replica.unserved_bases(lineage.domain).await.unwrap());
+    let before = chain_verifications_on_this_thread();
+    for _ in 0..3 {
+        assert!(!replica.unserved_bases(lineage.domain).await.unwrap());
+    }
+    assert_eq!(
+        chain_verifications_on_this_thread(),
+        before,
+        "each pass checks every served base without verifying its chain again"
+    );
+}
+
 pub(super) async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
     target
         .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())

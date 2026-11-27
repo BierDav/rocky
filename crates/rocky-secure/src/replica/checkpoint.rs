@@ -318,24 +318,18 @@ impl SignedCheckpoint {
         signed.to_bytes()?;
         Ok(signed)
     }
-    fn checkpoint_grants(
+    fn checkpoint_grants<A: RowApplication>(
         &self,
-        publisher: PublicKey,
+        inner: &Inner<A>,
         revocations: &RevocationSet,
         time: u64,
-        whole_tables: &rocky_credentials::WholeTables,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let verified = inner.verified_credentials(&self.credentials, revocations, time)?;
         match &self.statement.partition {
-            Some(tuple) => self
-                .credentials
-                .verified(publisher, revocations, time, whole_tables)
-                .map_err(credential)?
+            Some(tuple) => verified
                 .partition(self.node, self.statement.scope, tuple, revocations, time)
                 .map_err(credential),
-            None => self
-                .credentials
-                .verified(publisher, revocations, time, whole_tables)
-                .map_err(credential)?
+            None => verified
                 .selectors(self.node, revocations, time)
                 .map(|(grants, _)| grants)
                 .map_err(credential),
@@ -428,13 +422,12 @@ impl SignedCheckpoint {
             return Err(denied("checkpoint partition differs from its keyed scope"));
         }
         let grants = self.checkpoint_grants(
-            inner.config.publisher,
+            inner,
             inner.revocations_for(
                 inner.manifest_of_tip(self.statement.tip)?,
                 &inner.config.revocations,
             )?,
             time,
-            inner.whole_tables(),
         )?;
         if !grants.iter().any(|grant| {
             grant.scope == self.statement.scope

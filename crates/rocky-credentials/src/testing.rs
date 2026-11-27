@@ -205,3 +205,7 @@ pub fn key_provider_contract(provider: &dyn crate::KeyProvider) {
         "asking for a missing name never creates it"
     );
 }
+
+pub fn chain_verifications_on_this_thread() -> u64 {
+    crate::signed::CHAIN_VERIFICATIONS.with(std::cell::Cell::get)
+}

@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_ENDORSEMENT_BYTES: usize = 16 * 1024;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub(crate) static CHAIN_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Certificate {
     pub capability: Capability,
@@ -647,6 +652,8 @@ impl CredentialChain {
         time: u64,
         tables: &crate::WholeTables,
     ) -> Result<VerifiedChain, Error> {
+        #[cfg(any(test, feature = "test-support"))]
+        CHAIN_VERIFICATIONS.with(|count| count.set(count.get() + 1));
         let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
         Ok(VerifiedChain {
             leaf: leaf.clone(),

@@ -7,12 +7,18 @@ use chacha20poly1305::{
 use p2panda_core::{Body, Header, Operation, validate_operation};
 use rocky_core::{Commitment, ResourceScope, RowChange, RowFields, RowWrite};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 static DECODED: LazyLock<Mutex<HashMap<Hash, Operation<Extensions>>>> =
     LazyLock::new(Mutex::default);
 const DECODED_FRAMES: usize = 256;
+static VERIFIED: LazyLock<Mutex<HashSet<Hash>>> = LazyLock::new(Mutex::default);
+const VERIFIED_FRAMES: usize = 65_536;
+#[cfg(test)]
+thread_local! {
+    static SIGNATURE_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageKind {
@@ -210,7 +216,7 @@ impl EncryptedFrame {
         if let Some(operation) = decoded().get(&digest) {
             return Ok(operation.clone());
         }
-        let operation = self.decode_operation()?;
+        let operation = self.decode_operation(digest)?;
         let mut decoded = decoded();
         if decoded.len() >= DECODED_FRAMES {
             decoded.clear();
@@ -218,7 +224,7 @@ impl EncryptedFrame {
         decoded.insert(digest, operation.clone());
         Ok(operation)
     }
-    fn decode_operation(&self) -> Result<Operation<Extensions>, Error> {
+    fn decode_operation(&self, digest: Hash) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
         check_header(&header)?;
         let operation = Operation {
@@ -226,8 +232,18 @@ impl EncryptedFrame {
             header,
             body: Some(Body::new(&self.body)),
         };
-        validate_operation(&operation)
-            .map_err(|_| denied("invalid operation signature or payload"))?;
+        let verified = || VERIFIED.lock().unwrap_or_else(PoisonError::into_inner);
+        if !verified().contains(&digest) {
+            #[cfg(test)]
+            SIGNATURE_CHECKS.with(|checks| checks.set(checks.get() + 1));
+            validate_operation(&operation)
+                .map_err(|_| denied("invalid operation signature or payload"))?;
+            let mut verified = verified();
+            if verified.len() >= VERIFIED_FRAMES {
+                verified.clear();
+            }
+            verified.insert(digest);
+        }
         Ok(operation)
     }
 }
@@ -683,5 +699,71 @@ impl EncryptedPackage {
             "rocky.encrypted-package.v2",
             &encode(self)?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_frame(body: &[u8]) -> EncryptedFrame {
+        let key = PrivateKey::from_bytes(&[82; 32]);
+        let mut header = Header {
+            version: 1,
+            public_key: key.public_key(),
+            signature: None,
+            payload_size: body.len() as u64,
+            payload_hash: Some(Hash::new(body)),
+            timestamp: 1,
+            seq_num: 0,
+            backlink: None,
+            previous: vec![],
+            extensions: Extensions {
+                tip: rocky_core::TipId([1; 32]),
+                scope: ResourceScope {
+                    domain: rocky_core::Scope {
+                        mesh: rocky_core::MeshId([1; 16]),
+                        app: rocky_core::AppId([2; 16]),
+                        domain: rocky_core::DomainId([3; 16]),
+                    },
+                    encryption: [4; 32],
+                    table: [5; 32],
+                },
+                generation: rocky_core::KeyEpoch::new(1, &[6; 32]),
+                chain: [7; 32],
+                authored: true,
+                author_sequence: 1,
+                row_format: ROW_FORMAT,
+                births: vec![],
+            },
+        };
+        header.sign(&key);
+        EncryptedFrame::bare(header.to_bytes(), body.to_vec())
+    }
+    fn checks() -> u64 {
+        SIGNATURE_CHECKS.with(std::cell::Cell::get)
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_stored_frame_reread_after_its_decoding_is_evicted_is_not_verified_again() {
+        let frame = signed_frame(b"sealed payload");
+        let before = checks();
+        frame.operation_ref().unwrap();
+        assert_eq!(checks(), before + 1);
+        DECODED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let reread = signed_frame(b"sealed payload");
+        reread.operation_ref().unwrap();
+        assert_eq!(
+            checks(),
+            before + 1,
+            "the same header and body bytes keep their verified signature"
+        );
+        let mut altered = signed_frame(b"sealed payload");
+        altered.body = b"altered payload".to_vec();
+        assert!(altered.operation_ref().is_err());
+        assert_eq!(checks(), before + 2, "changed bytes are verified again");
     }
 }

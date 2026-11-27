@@ -70,10 +70,11 @@ async fn household() -> Result<Household, Failure> {
         "m1",
         Some(person(&path.join("person"))?),
     )
+    .fixture_person()
     .join(&owner.invite().await)
     .await?;
     let person_key = person(&path.join("person"))?;
-    let first = Device::new(first_opened.database)?;
+    let first = Device::new(first_opened)?;
     common::introduce(&owner, &first).await;
     owner.add(1, "Milk").await;
     first.sync().await.map_err(|error| error.to_string())?;
@@ -313,7 +314,7 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn generated_linkable_identity_restores_from_phrase_and_secret_after_restart()
+async fn a_joined_generated_identity_reopens_from_its_phrase_and_links_after_restart()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
@@ -323,14 +324,22 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
     )
     .await?;
     let path = root.path().join("first");
+    let phrase = IdentityKey::generate().phrase();
+    let key = IdentityKey::from_phrase(&phrase)?;
     let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?
         .network(Network::Owned(hub.connector("first")));
-    let opened = config.join(&owner.invite().await).await?;
-    let phrase = opened.identity.ok_or("minted identity")?.phrase();
-    let key = IdentityKey::from_phrase(&phrase)?;
-    let contact = opened.database.contact().await?.uri;
-    opened.database.close().await?;
-    let reopened = config.open().await?;
+    let opened = config
+        .clone()
+        .identity(Arc::new(IdentityKey::from_phrase(&phrase)?))
+        .join(&owner.invite().await)
+        .await?;
+    let contact = opened.contact().await?.uri;
+    opened.close().await?;
+    let reopened = config
+        .identity(Arc::new(IdentityKey::from_phrase(&phrase)?))
+        .open()
+        .await?;
+    assert_eq!(reopened.me().await?.person.key(), key.person_key());
     let second_path = root.path().join("second");
     let second = common::link(
         open(&second_path, &hub, "second", None),
@@ -385,7 +394,37 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Failure> {
+async fn join_without_an_identity_is_refused_before_installing() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = Device::create(
+        &root.path().join("owner"),
+        Some(Network::Owned(hub.connector("owner"))),
+    )
+    .await?;
+    let path = root.path().join("member");
+    let refused = rocky_sdk::Configuration::new(&path, common::parsed_schema())?
+        .network(Network::Owned(hub.connector("member")))
+        .join(&owner.invite().await)
+        .await
+        .err()
+        .ok_or("a join without a person key succeeded")?;
+    assert_eq!(
+        refused.kind(),
+        &rocky_sdk::ErrorKind::Denied {
+            table: None,
+            need: rocky_sdk::Right::Sign,
+            reason: rocky_sdk::DenyReason::IdentityRequired,
+        }
+    );
+    assert!(!path.join("rocky.sqlite").exists());
+    assert!(!path.join("identity.join.json").exists());
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joined_identity_is_never_stored() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let owner = Device::create(
@@ -398,16 +437,14 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?;
     let path = root.path().join("member");
+    let person = IdentityKey::generate();
     let config = rocky_sdk::Configuration::new(&path, common::parsed_schema())?
-        .network(Network::Owned(hub.connector("member")));
+        .network(Network::Owned(hub.connector("member")))
+        .identity(Arc::new(identity_key(identity_secret(&person))));
     let joined = config.join(&invitation.code).await?;
-    let minted = joined.identity.ok_or("minted identity")?;
-    assert_eq!(
-        joined.database.me().await?.person.key(),
-        minted.person_key()
-    );
-    no_identity_secret(&path, &[identity_secret(&minted)])?;
-    joined.database.close().await?;
+    assert_eq!(joined.me().await?.person.key(), person.person_key());
+    no_identity_secret(&path, &[identity_secret(&person)])?;
+    joined.close().await?;
     let opened = config.open().await?;
     assert_eq!(
         outcome(async {
@@ -418,7 +455,7 @@ async fn a_minted_identity_is_returned_once_and_never_stored() -> Result<(), Fai
         .0,
         "ok"
     );
-    no_identity_secret(&path, &[identity_secret(&minted)])?;
+    no_identity_secret(&path, &[identity_secret(&person)])?;
     opened.close().await?;
     owner.close().await;
     Ok(())
@@ -590,10 +627,11 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             };
             let name = format!("member{index}");
             let member_opened = open(&path.join(&name), &hub, &name, Some(personal.clone()))
+                .fixture_person()
                 .join(&owner.invite_as(profile).await)
                 .await?;
             let db_personal = personal.clone();
-            let member = Device::new(member_opened.database)?;
+            let member = Device::new(member_opened)?;
             common::introduce(&owner, &member).await;
             if index == 0 {
                 owner
@@ -886,7 +924,7 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
     owner_database
         .approve_link(pending.device(), pending.code())
         .await?;
-    let linked = pending.confirm().await?.database;
+    let linked = pending.confirm().await?;
     let saved: rocky_credentials::CredentialChain =
         serde_json::from_value(identity(directory.path(), "new")?["credentials"].clone())?;
     assert_eq!(
@@ -935,9 +973,10 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
             .await?,
     )?;
     let first_opened = open(&path.join("first"), &hub, "first", Some(personal.clone()))
+        .fixture_person()
         .join(&owner.invite_as(rocky_sdk::Access::Full).await)
         .await?;
-    let first = Device::new(first_opened.database)?;
+    let first = Device::new(first_opened)?;
     common::introduce(&owner, &first).await;
     let person = personal.public_key()?.to_hex();
     owner

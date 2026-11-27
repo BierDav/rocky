@@ -81,6 +81,7 @@ async fn pair(root: &Path) -> Result<(Device, Device), Failure> {
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.join("b"), Some(&hub), "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

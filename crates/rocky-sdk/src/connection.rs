@@ -42,6 +42,7 @@ pub(crate) struct Page {
     pub(crate) columns: Vec<String>,
     pub(crate) rows: Vec<Vec<SqlValue>>,
     pub(crate) done: bool,
+    pub(crate) changes: u64,
 }
 
 pub(crate) mod code {
@@ -163,6 +164,9 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
                 IntentRefusal::GeneratedIdFromSelect { table } => {
                     crate::Unsupported::SelectWithoutId(table.clone())
                 }
+                IntentRefusal::CorrelatedRead { table } => crate::Unsupported::CorrelatedRead {
+                    table: table.clone(),
+                },
                 _ => crate::Unsupported::Statement,
             };
             let hint = match &unsupported {
@@ -170,6 +174,9 @@ pub(crate) fn sql_error(error: &SqlError, detail: String) -> crate::Error {
                     "; compute the value in the application and bind it as a parameter"
                 }
                 crate::Unsupported::With => "; write the subquery inline instead",
+                crate::Unsupported::CorrelatedRead { .. } => {
+                    "; select the matching keys without naming the outer table, as in WHERE key IN (SELECT key FROM other WHERE ...)"
+                }
                 crate::Unsupported::Statement
                 | crate::Unsupported::KeyUpdate { .. }
                 | crate::Unsupported::SelectWithoutId(_) => "",
@@ -382,19 +389,28 @@ enum Pending {
     Rows {
         columns: Vec<String>,
         rows: VecDeque<Vec<SqlValue>>,
+        changes: u64,
     },
     Cursor(SnapshotCursor),
 }
 impl Pending {
     fn rows(columns: Vec<String>, rows: Vec<Vec<SqlValue>>) -> Self {
+        Self::written(columns, rows, 0)
+    }
+    fn written(columns: Vec<String>, rows: Vec<Vec<SqlValue>>, changes: u64) -> Self {
         Self::Rows {
             columns,
             rows: rows.into(),
+            changes,
         }
     }
     async fn page(&mut self) -> Result<Page, Failure> {
         match self {
-            Self::Rows { columns, rows } => {
+            Self::Rows {
+                columns,
+                rows,
+                changes,
+            } => {
                 let mut page = Vec::new();
                 let mut bytes = 0;
                 while let Some(row) = rows.front() {
@@ -409,6 +425,7 @@ impl Pending {
                     columns: columns.clone(),
                     rows: page,
                     done: rows.is_empty(),
+                    changes: std::mem::take(changes),
                 })
             }
             Self::Cursor(cursor) => {
@@ -417,6 +434,7 @@ impl Pending {
                     columns: names(cursor),
                     rows: page.rows,
                     done: page.done,
+                    changes: 0,
                 })
             }
         }
@@ -690,7 +708,7 @@ impl State {
         } else if control == Control::Statement && self.writes.len() < MAX_EXPLAINED_WRITES {
             self.writes.insert(sql.to_owned());
         }
-        Ok(Pending::rows(rows.columns, rows.rows))
+        Ok(Pending::written(rows.columns, rows.rows, rows.changes))
     }
 
     async fn read(&mut self, sql: &str, params: &[SqlValue]) -> Result<Pending, Failure> {

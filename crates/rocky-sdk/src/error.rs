@@ -224,6 +224,12 @@ pub enum Unsupported {
     /// An `INSERT … SELECT` into a table with a generated id that does not name `id`; insert the
     /// rows with `VALUES`, and Rocky fills each id.
     SelectWithoutId(String),
+    /// A subquery reads `table`, another table or partition, and refers to the outer row; Rocky
+    /// reads it once when the write runs, so it cannot vary per outer row.
+    CorrelatedRead {
+        /// The table the subquery reads.
+        table: String,
+    },
 }
 
 impl ErrorKind {

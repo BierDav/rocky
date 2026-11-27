@@ -1,6 +1,9 @@
 #![cfg(target_family = "wasm")]
 use rocky_platform::fs::Scratch;
-use rocky_sdk::{Affinity, Column, Configuration, Database, Network, Schema, Table, params};
+use rocky_sdk::{
+    Affinity, Column, Configuration, Database, IdentityKey, Network, Schema, Table, params,
+};
+use std::sync::Arc;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 type Failure = Box<dyn std::error::Error>;
@@ -44,8 +47,10 @@ async fn join_write_and_reopen(
     let schema = Schema::builder("browser_sync", 1)
         .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
         .build()?;
-    let configuration = Configuration::new(directory, &schema)?.network(network);
-    let db = configuration.join(&invitation.parse()?).await?.database;
+    let configuration = Configuration::new(directory, &schema)?
+        .network(network)
+        .identity(Arc::new(IdentityKey::generate()));
+    let db = configuration.join(&invitation.parse()?).await?;
     db.set_sync(rocky_sdk::SyncMode::Manual).await?;
     db.sync_now().await?;
     assert_eq!(bodies(&db, "from %").await?, ["from native"]);
@@ -87,6 +92,6 @@ async fn a_browser_node_dials_a_native_websocket_server() -> Result<(), Failure>
         .as_str()
         .ok_or("no WebSocket invitation")?;
     let directory = Scratch::new().await;
-    let network: Network = rocky_tcp::Options::browser().into();
+    let network: Network = rocky_tcp::Options::dialer().into();
     join_write_and_reopen(directory.path(), network, invitation).await
 }

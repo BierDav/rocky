@@ -78,7 +78,9 @@ impl Db {
             crate::common::configuration(directory, schema, secrets, None, Some(network));
         let engine = match mode {
             OpenMode::Create => configuration.create().await?.database,
-            OpenMode::Join { invitation } => configuration.join(&invitation).await?.database,
+            OpenMode::Join { invitation } => {
+                configuration.fixture_person().join(&invitation).await?
+            }
             OpenMode::Resume => configuration.open().await?,
         };
         let scope = rocky_sdk::extension::scope(&engine);

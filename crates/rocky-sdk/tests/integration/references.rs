@@ -103,6 +103,7 @@ async fn pair(root: &Path) -> Result<(Device, Device), Failure> {
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.join("b"), Some(&hub), "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -396,6 +397,7 @@ async fn a_five_table_fk_chain_syncs_without_channel_deadlock() -> Result<(), Fa
             None,
             Some(Network::Owned(hub.connector("b"))),
         )
+        .fixture_person()
         .join(&invitation)
         .await?,
     )?;
@@ -506,6 +508,7 @@ async fn a_one_parent_four_children_star_syncs_without_channel_deadlock() -> Res
             None,
             Some(Network::Owned(hub.connector("b"))),
         )
+        .fixture_person()
         .join(&invitation)
         .await?,
     )?;

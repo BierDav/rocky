@@ -14,8 +14,8 @@ use crate::{
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Authority, EpochRequest, IdentityKey, IdentityProvider, MAX_LIVE_REVOCATIONS,
-    REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
+    Authority, EpochRequest, IdentityProvider, MAX_LIVE_REVOCATIONS, REVOCATION_SET_FULL,
+    RenewRequest, Renewal, Revocation,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -504,15 +504,11 @@ pub(crate) struct Intent {
     pub(crate) installation: String,
     nonce: String,
     identity: PublicKey,
-    minted: bool,
 }
 pub(crate) struct Prepared {
     pub(crate) intent: Intent,
     pub(crate) vault: Vault,
-    pub(crate) provider: Arc<dyn IdentityProvider>,
-    pub(crate) minted: Option<IdentityKey>,
 }
-const MINTED_ROLE: &str = "identity.minted";
 impl Intent {
     pub(crate) fn path(identity: &Path) -> std::path::PathBuf {
         identity
@@ -524,85 +520,39 @@ impl Intent {
         path: &Path,
         purpose: Commitment,
         store: &std::sync::Arc<dyn crate::SecretStore>,
-        provider: Option<&Arc<dyn IdentityProvider>>,
+        provider: &Arc<dyn IdentityProvider>,
     ) -> Result<Prepared, Failure> {
+        let identity = provider.public_key()?;
         if rocky_platform::fs::exists(path) {
             let previous: Self = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
             let vault = Vault::new(store.clone(), &previous.installation);
-            let resumed = match (previous.purpose == purpose, provider, previous.minted) {
-                (true, Some(provider), false) => {
-                    if provider.public_key()? != previous.identity {
-                        return Err("unfinished enrollment needs its original identity; resume with the supplied provider".into());
-                    }
-                    Some((provider.clone(), None))
+            if previous.purpose == purpose {
+                if identity != previous.identity {
+                    return Err("unfinished enrollment needs its original identity; resume with the supplied provider".into());
                 }
-                (true, None, true) => {
-                    let minted =
-                        rocky_credentials::key_bytes::identity_key(vault.get(MINTED_ROLE)?);
-                    (minted.person_key() == previous.identity).then(|| {
-                        let provider: Arc<dyn IdentityProvider> =
-                            Arc::new(rocky_credentials::key_bytes::identity_key(
-                                rocky_credentials::key_bytes::identity_secret(&minted),
-                            ));
-                        (provider, Some(minted))
-                    })
-                }
-                _ => None,
-            };
-            if let Some((provider, minted)) = resumed {
                 return Ok(Prepared {
                     intent: previous,
                     vault,
-                    provider,
-                    minted,
                 });
             }
             rocky_platform::fs::remove_file(path)?;
-            vault.forget(
-                ["node", "transport", MINTED_ROLE]
-                    .into_iter()
-                    .map(String::from),
-            )?;
+            vault.forget(["node", "transport"].into_iter().map(String::from))?;
         }
-        let minted = provider.is_none().then(IdentityKey::generate);
-        let provider: Arc<dyn IdentityProvider> = match (provider, &minted) {
-            (Some(provider), _) => provider.clone(),
-            (None, Some(minted)) => Arc::new(rocky_credentials::key_bytes::identity_key(
-                rocky_credentials::key_bytes::identity_secret(minted),
-            )),
-            (None, None) => return Err("an installation needs an identity".into()),
-        };
         let intent = Self {
             purpose,
             installation: HEXLOWER.encode(&random::<16>()),
             nonce: HEXLOWER.encode(&random::<32>()),
-            identity: provider.public_key()?,
-            minted: minted.is_some(),
+            identity,
         };
         let vault = Vault::new(store.clone(), &intent.installation);
         for role in ["node", "transport"] {
             vault.create(role)?;
         }
-        if let Some(minted) = &minted {
-            vault.put(
-                MINTED_ROLE,
-                &rocky_credentials::key_bytes::identity_secret(minted),
-            )?;
-        }
         write_private(path, &serde_json::to_vec(&intent)?)?;
-        Ok(Prepared {
-            intent,
-            vault,
-            provider,
-            minted,
-        })
+        Ok(Prepared { intent, vault })
     }
-    pub(crate) fn finish(&self, path: &Path, vault: &Vault) -> Result<(), Failure> {
-        rocky_platform::fs::remove_file(Self::path(path))?;
-        if self.minted {
-            vault.forget([MINTED_ROLE.to_owned()])?;
-        }
-        Ok(())
+    pub(crate) fn finish(&self, path: &Path) -> Result<(), Failure> {
+        Ok(rocky_platform::fs::remove_file(Self::path(path))?)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

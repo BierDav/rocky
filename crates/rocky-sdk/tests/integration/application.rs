@@ -204,13 +204,9 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .await?;
     assert!(invitation.code.to_string().starts_with("rocky://invite/"));
     let member_configuration = Configuration::new(member_directory.path(), &schema()?)?
-        .network(Network::Owned(hub.connector("member")));
-    let joined = member_configuration.join(&invitation.code).await?;
-    assert!(
-        joined.identity.is_some(),
-        "a joiner without an identity gets a fresh one, returned once"
-    );
-    let member = joined.database;
+        .network(Network::Owned(hub.connector("member")))
+        .identity(Arc::new(rocky_sdk::IdentityKey::generate()));
+    let member = member_configuration.join(&invitation.code).await?;
     member.set_sync(rocky_sdk::SyncMode::Manual).await?;
     issuer.set_sync(rocky_sdk::SyncMode::Manual).await?;
     member.sync_now().await?;
@@ -456,9 +452,9 @@ async fn invite_refuses_a_label_over_256_bytes() -> Result<(), Failure> {
         .await?;
     let joined = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")))
+        .fixture_person()
         .join(&invitation.code)
-        .await?
-        .database;
+        .await?;
     joined.close().await?;
     Ok(issuer.close().await?)
 }

@@ -33,6 +33,21 @@ impl Probe {
     }
 }
 
+impl crate::Configuration {
+    pub fn fixture_person(self) -> Self {
+        if self.identity.is_some() {
+            return self;
+        }
+        let secret = rocky_core::commitment(
+            "rocky.sdk.fixture-person",
+            self.directory.to_string_lossy().as_bytes(),
+        );
+        self.identity(std::sync::Arc::new(
+            rocky_credentials::key_bytes::identity_key(secret),
+        ))
+    }
+}
+
 impl Database {
     pub async fn tip_status(&self) -> Result<TipStatus, crate::Error> {
         self.send(|reply| crate::request::Request::Tips(Probe::Status(reply)))

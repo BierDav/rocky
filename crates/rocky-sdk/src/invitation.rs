@@ -834,20 +834,13 @@ impl Settings {
     pub(crate) fn prepare_invited(
         path: &Path,
         store: &Arc<dyn crate::SecretStore>,
-        provider: Option<&Arc<dyn IdentityProvider>>,
+        provider: &Arc<dyn IdentityProvider>,
         code: &InvitationCode,
     ) -> Result<crate::enrollment::Prepared, Failure> {
-        match (code.person(), provider) {
-            (Some(_), None) => {
-                return Err(Box::new(crate::Error::refused(
-                    crate::Right::Sign,
-                    crate::DenyReason::IdentityRequired,
-                )));
-            }
-            (Some(person), Some(provider)) if provider.public_key()? != person => {
-                return Err(Box::new(JoinError::OtherIdentity));
-            }
-            _ => {}
+        if let Some(person) = code.person()
+            && provider.public_key()? != person
+        {
+            return Err(Box::new(JoinError::OtherIdentity));
         }
         Intent::resume(&Intent::path(path), code.intent(), store, provider)
     }
@@ -910,7 +903,7 @@ impl Settings {
             provider,
         )?;
         settings.save(path).await?;
-        intent.finish(path, &vault)?;
+        intent.finish(path)?;
         Ok(settings)
     }
 }

@@ -77,6 +77,7 @@ impl Venue {
             .await?;
         let device = Device::new(
             Self::open(self.root.path(), &self.schema, &self.hub, role.as_str())
+                .fixture_person()
                 .join(&invitation.code)
                 .await?,
         )?;
@@ -124,7 +125,7 @@ impl Venue {
         self.admin.close().await;
     }
 }
-async fn write(device: &Device, sql: &str, params: Vec<SqlValue>) -> Result<(), rocky_sdk::Error> {
+async fn write(device: &Device, sql: &str, params: Vec<SqlValue>) -> Result<u64, rocky_sdk::Error> {
     let mut at_statement = None;
     let written = device
         .database
@@ -150,7 +151,8 @@ async fn insert(device: &Device, table: &str, value: &str) -> Result<(), rocky_s
                 &format!("INSERT INTO {table}({column}) VALUES(?)"),
                 vec![SqlValue::Text(value.into())],
             )
-            .await
+            .await?;
+            Ok(())
         })
         .await
 }
@@ -184,7 +186,7 @@ async fn notes(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
         .map(|row| Ok(row.get_at::<String>(0)?))
         .collect()
 }
-fn refused(result: Result<(), rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
+fn refused<T>(result: Result<T, rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
     let error = result.err().ok_or("the call was refused")?;
     assert!(!error.retryable(), "a refusal is final: {error}");
     Ok(error.kind().clone())
@@ -247,6 +249,7 @@ async fn a_store_only_device_reading_is_refused_as_store_only() -> Result<(), Fa
         Configuration::store_only(venue.root.path().join("store"))
             .network(Network::Owned(venue.hub.connector("store")))
             .identity(Arc::new(IdentityKey::generate()))
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;

@@ -48,7 +48,7 @@ pub enum IntentRefusal {
     Autoincrement,
     KeyUpdate { table: String, column: String },
     GeneratedIdFromSelect { table: String },
-    CorrelatedSubquery,
+    CorrelatedRead { table: String },
     With,
     Unavailable { table: String, reason: Unavailable },
     TooManyPartitions(usize),
@@ -77,9 +77,10 @@ impl std::fmt::Display for IntentRefusal {
                 f,
                 "an INSERT … SELECT into {table} must name its generated id; insert the rows with VALUES so Rocky fills the id"
             ),
-            Self::CorrelatedSubquery => {
-                f.write_str("a read of other partitions refers to the outer statement")
-            }
+            Self::CorrelatedRead { table } => write!(
+                f,
+                "a read of {table} refers to the outer row, but another table or partition is read once when the write runs and cannot vary per outer row; read it without referring to the outer statement"
+            ),
             Self::With => f.write_str("WITH in a replayed statement"),
             Self::Unavailable { table, reason } => {
                 write!(f, "{table} is not available: {reason:?}")
@@ -970,7 +971,12 @@ impl<E> VisitorMut for Split<'_, E> {
             return ControlFlow::Continue(());
         }
         if correlated(query) {
-            return ControlFlow::Break(IntentRefusal::CorrelatedSubquery.into());
+            return ControlFlow::Break(
+                IntentRefusal::CorrelatedRead {
+                    table: read_table(query, &self.name),
+                }
+                .into(),
+            );
         }
         match self.replace(expr) {
             Ok(()) => ControlFlow::Continue(()),
@@ -1032,6 +1038,31 @@ fn sources(item: &TableWithJoins, out: &mut Vec<(String, String)>) {
     for join in &item.joins {
         factor(&join.relation, out);
     }
+}
+fn read_table(query: &Query, target: &str) -> String {
+    struct First<'t> {
+        target: &'t str,
+        other: Option<String>,
+    }
+    impl Visitor for First<'_> {
+        type Break = ();
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+            if let TableFactor::Table { name, .. } = factor
+                && let Some(ObjectNamePart::Identifier(name)) = name.0.last()
+                && !name.value.eq_ignore_ascii_case(self.target)
+            {
+                self.other = Some(name.value.clone());
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut first = First {
+        target,
+        other: None,
+    };
+    let _ = query.visit(&mut first);
+    first.other.unwrap_or_else(|| target.to_owned())
 }
 fn correlated(query: &Query) -> bool {
     #[derive(Default)]

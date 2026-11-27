@@ -708,6 +708,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
             None,
             Some(Network::Borrowed(gate.clone())),
         )
+        .fixture_person()
         .join(&invitation)
         .await?,
     )?;
@@ -787,6 +788,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
             None,
             Some(Network::Owned(hub.connector("unmet"))),
         )
+        .fixture_person()
         .join(&invitation)
         .await?,
     )?;
@@ -805,6 +807,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
             None,
             Some(Network::Owned(hub.connector("member"))),
         )
+        .fixture_person()
         .join(&invitation)
         .await?,
     )?;

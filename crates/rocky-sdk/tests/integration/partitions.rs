@@ -88,10 +88,10 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .await
         .unwrap();
     let reader = open(&reader_path, &hub)
+        .fixture_person()
         .join(&invitation.code)
         .await
-        .unwrap()
-        .database;
+        .unwrap();
     let reader_identity = reader.status().await.unwrap().authority().principal;
     snap::ok(db.grant_partition(
         reader_identity,

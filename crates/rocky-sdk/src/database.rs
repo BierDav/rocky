@@ -34,7 +34,6 @@ pub struct Created {
     /// storage and pass it to `Configuration::identity`.
     pub owner: crate::IdentityKey,
 }
-type Minted = Arc<std::sync::Mutex<Option<crate::IdentityKey>>>;
 pub(crate) enum Install {
     Create {
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
@@ -46,7 +45,6 @@ pub(crate) enum Install {
     },
     Invited {
         code: crate::InvitationCode,
-        minted: Minted,
     },
     Installed,
 }
@@ -59,16 +57,6 @@ impl Install {
             root: std::sync::Mutex::new(Some(root)),
             owner,
         }
-    }
-    pub(crate) fn invited(code: &crate::InvitationCode) -> (Self, Minted) {
-        let minted = Arc::new(std::sync::Mutex::new(None));
-        (
-            Self::Invited {
-                code: code.clone(),
-                minted: minted.clone(),
-            },
-            minted,
-        )
     }
     fn bootstraps_from_checkpoint(&self) -> bool {
         matches!(self, Self::Identity { .. } | Self::Invited { .. })
@@ -828,27 +816,25 @@ async fn identity(
                 }
             }
         }
-        Install::Invited { code, minted } => {
+        Install::Invited { code } => {
             let network =
                 network.ok_or(ServiceError::NetworkRequired("join with an invitation"))?;
-            let prepared = Settings::prepare_invited(path, secrets, setup.identity.as_ref(), code)?;
+            let provider = setup.identity.clone().ok_or_else(|| {
+                crate::Error::refused(crate::Right::Sign, crate::DenyReason::IdentityRequired)
+            })?;
+            let prepared = Settings::prepare_invited(path, secrets, &provider, code)?;
             let key = Settings::route_secret(&prepared.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_invited(
                 (path, schema.as_ref()),
                 (prepared.intent, prepared.vault),
-                prepared.provider.clone(),
+                provider.clone(),
                 code,
                 &*transport,
             )
             .await
             {
-                Ok(settings) => {
-                    if let Ok(mut slot) = minted.lock() {
-                        *slot = prepared.minted;
-                    }
-                    Ok((settings, Some((transport, owned)), Some(prepared.provider)))
-                }
+                Ok(settings) => Ok((settings, Some((transport, owned)), Some(provider))),
                 Err(error) => {
                     if owned {
                         transport.close().await;

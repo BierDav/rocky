@@ -79,6 +79,7 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -155,6 +156,7 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -180,7 +182,12 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
     let a = Device::new(open(&root.path().join("a"), &hub, "a").create().await?)?;
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let directory = root.path().join("b");
-    let b = Device::new(open(&directory, &hub, "b").join(&invitation).await?)?;
+    let b = Device::new(
+        open(&directory, &hub, "b")
+            .fixture_person()
+            .join(&invitation)
+            .await?,
+    )?;
     b.sync().await.map_err(|error| error.to_string())?;
     introduce(&a, &b).await;
     let sync = || async {
@@ -230,6 +237,7 @@ async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failur
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

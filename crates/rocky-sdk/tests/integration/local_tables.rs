@@ -16,9 +16,10 @@ fn schema() -> Result<Schema, Failure> {
         .build()?)
 }
 async fn write(database: &Database, sql: &str) -> Result<(), Failure> {
-    Ok(database
+    database
         .write(async |tx| tx.execute(sql, params![]).await)
-        .await?)
+        .await?;
+    Ok(())
 }
 async fn count(database: &Database, table: &str) -> Result<usize, Failure> {
     let rows = database
@@ -44,7 +45,10 @@ async fn rows_of_a_local_table_never_leave_the_device_and_survive_reopening() ->
     };
     let till = open("till").create().await?.database;
     let invitation = till.invite(Invite::new(Access::Full)).await?;
-    let office = open("office").join(&invitation.code).await?.database;
+    let office = open("office")
+        .fixture_person()
+        .join(&invitation.code)
+        .await?;
 
     write(&till, "INSERT INTO sales(total) VALUES(1200)").await?;
     write(&till, "INSERT INTO parked(cart) VALUES('cart-1')").await?;
@@ -122,7 +126,10 @@ async fn roles_do_not_govern_local_tables_or_next_id() -> Result<(), Failure> {
             "viewer",
         )?)))
         .await?;
-    let viewer = open("viewer").join(&invitation.code).await?.database;
+    let viewer = open("viewer")
+        .fixture_person()
+        .join(&invitation.code)
+        .await?;
     write(&viewer, "INSERT INTO parked(cart) VALUES('c1')").await?;
     write(&viewer, "DELETE FROM parked WHERE cart = 'c1'").await?;
     let error = viewer

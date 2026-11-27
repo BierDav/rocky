@@ -228,6 +228,7 @@ async fn a_join_the_issuer_certificate_fails_names_the_tls_error_as_its_source()
     let code = issuer.invite().await;
     let failed = Configuration::new(root.path().join("member"), crate::common::parsed_schema())?
         .network(websocket())
+        .fixture_person()
         .join(&code)
         .await
         .err()

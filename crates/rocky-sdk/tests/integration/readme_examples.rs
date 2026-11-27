@@ -32,7 +32,10 @@ async fn open_ward(admin: &Database, doctor: PersonId, ward: &str) -> Result<(),
     admin.grant_partition(doctor, &partition).await?;
     let admit = "INSERT INTO charts(ward, note) VALUES(?, 'admitted')";
     admin
-        .write(async |tx| tx.execute(admit, params![ward]).await)
+        .write(async |tx| {
+            tx.execute(admit, params![ward]).await?;
+            Ok(())
+        })
         .await
 }
 
@@ -90,9 +93,30 @@ const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NUL
 
 async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
     database
-        .write(async |tx| tx.execute(FILL_SLUGS, params![]).await)
+        .write(async |tx| {
+            tx.execute(FILL_SLUGS, params![]).await?;
+            Ok(())
+        })
         .await
 }
+
+fn shop(version: u32) -> Result<Schema, rocky_sdk::Error> {
+    let mut customers = Table::replayed("customers")
+        .column(Column::new("code", Affinity::Text).required())
+        .primary_key(["code"]);
+    let orders = Table::replayed("orders")
+        .column(Column::new("customer", Affinity::Text).required())
+        .column(Column::new("cents", Affinity::Integer).required());
+    let mut schema = Schema::builder("shop", version);
+    if version >= 2 {
+        customers = customers.column(Column::new("vip", Affinity::Integer).default(0));
+        schema = schema.migration(2, [MARK_VIPS]);
+    }
+    schema.table(customers).table(orders).build()
+}
+
+const MARK_VIPS: &str = "UPDATE customers SET vip = 1 \
+    WHERE code IN (SELECT customer FROM orders WHERE cents >= 100000)";
 
 async fn link_device(
     existing: &Database,
@@ -107,7 +131,7 @@ async fn link_device(
         .find(|request| request.device == pending.device() && &request.code == pending.code())
         .ok_or("no matching link request")?;
     existing.approve_link(request.device, &request.code).await?;
-    Ok(pending.confirm().await?.database)
+    Ok(pending.confirm().await?)
 }
 
 mod one_device {
@@ -203,7 +227,12 @@ async fn the_readme_partition_flow_denies_a_read_before_the_grant_and_lists_its_
         .database
         .invite(rocky_sdk::Invite::new(Access::Role(DOCTOR)))
         .await?;
-    let doctor = crate::common::Device::new(configure("doctor")?.join(&invitation.code).await?)?;
+    let doctor = crate::common::Device::new(
+        configure("doctor")?
+            .fixture_person()
+            .join(&invitation.code)
+            .await?,
+    )?;
     let refused = charts(&doctor.database)
         .await
         .err()
@@ -293,7 +322,8 @@ async fn note(database: &Database, title: &str) -> Result<(), rocky_sdk::Error> 
     database
         .write(async |tx| {
             tx.execute("INSERT INTO notes(title) VALUES(?)", params![title])
-                .await
+                .await?;
+            Ok(())
         })
         .await
 }
@@ -333,6 +363,7 @@ async fn the_readme_slug_rule_fills_a_late_write_from_an_older_version_after_syn
     let invitation = owner.invite_as(rocky_sdk::Access::Full).await;
     let member = crate::common::Device::new(
         configure(&member_path, "member", &notes(1)?)
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -410,5 +441,65 @@ async fn the_readme_device_link_flow_links_a_second_device_and_syncs()
     assert_eq!(titles, vec!["Synced".to_owned()]);
     laptop.close().await?;
     created.database.close().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_readme_backfill_reads_another_table_uncorrelated_where_a_correlated_read_is_refused()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let created = Configuration::new(root.path(), &shop(1)?)?.create().await?;
+    created
+        .database
+        .write(async |tx| {
+            for code in ["ada", "bob"] {
+                tx.execute("INSERT INTO customers(code) VALUES(?)", params![code])
+                    .await?;
+            }
+            tx.execute(
+                "INSERT INTO orders(customer, cents) VALUES('ada', 150000), ('bob', 500)",
+                params![],
+            )
+            .await
+        })
+        .await?;
+    created.database.close().await?;
+    let owner: Arc<IdentityKey> = Arc::new(created.owner);
+    let database = Configuration::new(root.path(), &shop(2)?)?
+        .identity(owner)
+        .open()
+        .await?;
+    let vips: Vec<(String, i64)> = database
+        .query("SELECT code, vip FROM customers ORDER BY code", params![])
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|row| Ok((row.get("code")?, row.get("vip")?)))
+        .collect::<Result<_, rocky_sdk::Error>>()?;
+    assert_eq!(vips, [("ada".into(), 1), ("bob".into(), 0)]);
+    let refused = database
+        .write(async |tx| {
+            tx.execute(
+                "UPDATE customers SET vip = 1 WHERE EXISTS \
+                 (SELECT 1 FROM orders WHERE orders.customer = customers.code)",
+                params![],
+            )
+            .await
+        })
+        .await
+        .err()
+        .ok_or("a correlated read of orders was accepted")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Sql {
+                unsupported: Some(rocky_sdk::Unsupported::CorrelatedRead { table }),
+                ..
+            } if table == "orders"
+        ),
+        "{refused:?}"
+    );
+    database.close().await?;
     Ok(())
 }

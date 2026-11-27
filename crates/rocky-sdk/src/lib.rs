@@ -95,8 +95,8 @@ pub use invitation::{
 pub(crate) use partitions::*;
 pub use partitions::{CreatedPartition, Partition};
 pub use people::{
-    AccessError, Device, DeviceId, LinkCode, LinkError, LinkRequest, Logout, Me, Opened,
-    PendingLink, Person, PersonId, Removal, ReportedSchema, TableRights,
+    AccessError, Device, DeviceId, LinkCode, LinkError, LinkRequest, Logout, Me, PendingLink,
+    Person, PersonId, Removal, ReportedSchema, TableRights,
 };
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};

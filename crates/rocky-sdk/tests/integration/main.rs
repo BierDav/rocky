@@ -24,6 +24,8 @@ mod engine;
 #[cfg(not(target_family = "wasm"))]
 mod exact;
 #[cfg(not(target_family = "wasm"))]
+mod execute_counts;
+#[cfg(not(target_family = "wasm"))]
 mod faults;
 #[cfg(not(target_family = "wasm"))]
 mod generations;

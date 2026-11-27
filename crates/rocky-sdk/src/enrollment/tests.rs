@@ -924,3 +924,25 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn an_unfinished_join_intent_written_before_join_stopped_minting_keys_is_refused()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let path = Intent::path(&directory.path().join("rocky.sqlite"));
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
+    let person: Arc<dyn IdentityProvider> = Arc::new(crate::IdentityKey::generate());
+    let purpose = rocky_core::commitment("fixture.join", b"invitation");
+    Intent::resume(&path, purpose, &store, &person)?;
+    let mut written: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    written["minted"] = json!(true);
+    std::fs::write(&path, serde_json::to_vec(&written)?)?;
+    let refused = Intent::resume(&path, purpose, &store, &person)
+        .err()
+        .ok_or("a pre-upgrade join intent resumed")?;
+    assert!(
+        refused.to_string().contains("unknown field `minted`"),
+        "{refused}"
+    );
+    Ok(())
+}

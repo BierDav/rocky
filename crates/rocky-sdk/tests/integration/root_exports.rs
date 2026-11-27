@@ -6,9 +6,9 @@ use rocky_sdk::{
     Access, Affinity, AlertKind, BlockerKind, ChangeCause, ClearsBy, Column, Configuration,
     Created, Database, DatabaseStatus, DeclaredSchema, DeleteAction, DenyReason, Device, DeviceId,
     DropReason, DroppedTransaction, Error, ErrorKind, ForeignKey, IdentityKey, IdentityProvider,
-    Index, Invitation, Invite, JoinError, Limit, MigrationStep, Network, Opened, Partition,
-    PendingLink, Person, PersonId, RefusedChange, Removal, Right, Role, RoleInUse, RolloutImpact,
-    RootKey, RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport,
+    Index, Invitation, Invite, JoinError, Limit, MigrationStep, Network, Partition, PendingLink,
+    Person, PersonId, RefusedChange, Removal, Right, Role, RoleInUse, RolloutImpact, RootKey,
+    RowIdentity, Schema, SchemaBuilder, SchemaError, ServiceError, SyncMode, SyncReport,
     TRANSACTION_TIMEOUT, Table, TableChange, TableEvents, Timestamp, Transaction,
     TransactionOutcome, TransactionToken, Unsupported,
 };

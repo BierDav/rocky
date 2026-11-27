@@ -42,7 +42,7 @@ async fn a_joined_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> Re
             Some(Network::Owned(hub.connector("writer"))),
         )
     };
-    let writer = Device::new(open().join(&issuer.invite().await).await?)?;
+    let writer = Device::new(open().fixture_person().join(&issuer.invite().await).await?)?;
     let before = snap::ok(snap::device(&writer.database)).await;
     let own = before["node"].as_str().ok_or("node missing")?.to_owned();
     writer.add(1, "first").await;

@@ -1095,6 +1095,7 @@ impl<A: RowApplication> SecureSql<A> {
                     .into_iter()
                     .map(|row| row.into_iter().map(storage::sql_value).collect())
                     .collect::<Result<_, _>>()?,
+                changes: if ran.read_only { 0 } else { ran.changes },
                 ..empty(lease, state)
             }),
             Ok(Run::Oversized(_)) => Err(Error::Quota {
@@ -1497,7 +1498,7 @@ fn empty<A: RowApplication>(lease: &Lease<A>, state: SqlState) -> SecureRows {
     SecureRows {
         columns: Vec::new(),
         rows: Vec::new(),
-        changes: lease.observed.changes as u64,
+        changes: 0,
         last_insert_rowid: lease.observed.last_insert_rowid,
         state,
         committed: None,

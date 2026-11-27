@@ -46,6 +46,7 @@ async fn venue_with_scanner(root: &Path, hub: &Arc<Hub>) -> Result<(Device, Devi
         .await?;
     let scanner = Device::new(
         open(&root.join("scanner"), &schema, hub, "scanner")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -108,7 +109,7 @@ async fn insert(device: &Device, table: &str, values: [&str; 2]) -> Result<(), F
         "check_ins" => "code,gate",
         _ => "ward,note",
     };
-    Ok(device
+    device
         .database
         .write(async |tx| {
             tx.execute(
@@ -120,10 +121,11 @@ async fn insert(device: &Device, table: &str, values: [&str; 2]) -> Result<(), F
             )
             .await
         })
-        .await?)
+        .await?;
+    Ok(())
 }
 async fn ward_name(device: &Device, name: &str) -> Result<(), Failure> {
-    Ok(device
+    device
         .database
         .write(async |tx| {
             tx.execute(
@@ -132,13 +134,15 @@ async fn ward_name(device: &Device, name: &str) -> Result<(), Failure> {
             )
             .await
         })
-        .await?)
+        .await?;
+    Ok(())
 }
 async fn write(device: &Device, sql: &str) -> Result<(), Failure> {
-    Ok(device
+    device
         .database
         .write(async |tx| tx.execute(sql, Vec::new()).await)
-        .await?)
+        .await?;
+    Ok(())
 }
 fn holds_reader_key(directory: &Path, table: &str) -> Result<bool, Failure> {
     let identity = common::authority_json(directory, "identity")?;
@@ -170,6 +174,7 @@ async fn a_scanner_reads_tickets_and_only_appends_check_ins() -> Result<(), Fail
     let scanner_dir = root.path().join("scanner");
     let scanner = Device::new(
         open(&scanner_dir, &schema, &hub, "scanner")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -260,6 +265,7 @@ async fn a_person_downgraded_to_read_can_no_longer_write() -> Result<(), Failure
         .await?;
     let member = Device::new(
         open(&root.path().join("member"), &schema, &hub, "member")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -310,6 +316,7 @@ async fn a_removed_clinician_reads_no_chart_written_after_removal() -> Result<()
         .await?;
     let clinician = Device::new(
         open(&root.path().join("clinician"), &schema, &hub, "clinician")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -364,11 +371,13 @@ async fn a_granted_chart_reaches_the_phone_and_the_laptop() -> Result<(), Failur
         .database
         .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)))
         .await?;
-    let mut opened = open(&root.path().join("phone"), &schema, &hub, "phone")
+    let identity: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(rocky_sdk::IdentityKey::generate());
+    let opened = open(&root.path().join("phone"), &schema, &hub, "phone")
+        .identity(identity.clone())
+        .fixture_person()
         .join(&invitation.code)
         .await?;
-    let identity: Arc<dyn rocky_sdk::IdentityProvider> =
-        Arc::new(opened.identity.take().ok_or("a minted identity")?);
     let phone = Device::new(opened)?;
     synced(&phone).await?;
     let laptop = Device::new(
@@ -431,6 +440,7 @@ async fn a_clinician_reads_only_the_wards_an_admin_granted() -> Result<(), Failu
         .await?;
     let clinician = Device::new(
         open(&root.path().join("clinician"), &schema, &hub, "clinician")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -670,9 +680,14 @@ impl Clinic {
             .database
             .invite(rocky_sdk::Invite::new(Access::Role(CLINICIAN)).label(name))
             .await?;
-        let mut opened = self.open(name).join(&invitation.code).await?;
         let identity: Arc<dyn rocky_sdk::IdentityProvider> =
-            Arc::new(opened.identity.take().ok_or("a minted identity")?);
+            Arc::new(rocky_sdk::IdentityKey::generate());
+        let opened = self
+            .open(name)
+            .identity(identity.clone())
+            .fixture_person()
+            .join(&invitation.code)
+            .await?;
         let device = Device::new(opened)?;
         synced(&device).await?;
         Ok((device, identity))
@@ -711,6 +726,7 @@ impl Clinic {
         Device::new(
             self.open(name)
                 .identity(identity)
+                .fixture_person()
                 .join(&invitation.code)
                 .await?,
         )
@@ -948,7 +964,13 @@ async fn a_role_holding_only_partitioned_tables_opens_and_names_the_missing_gran
         .database
         .invite(rocky_sdk::Invite::new(Access::Role(INSPECTOR)))
         .await?;
-    let tablet = Device::new(clinic.open("tablet").join(&invitation.code).await?)?;
+    let tablet = Device::new(
+        clinic
+            .open("tablet")
+            .fixture_person()
+            .join(&invitation.code)
+            .await?,
+    )?;
     synced(&tablet).await?;
     let refused = rows(&tablet, "SELECT note FROM charts")
         .await
@@ -1021,6 +1043,7 @@ async fn an_append_and_an_update_of_named_columns_compose_on_one_table() -> Resu
         .await?;
     let dispatcher = Device::new(
         open(&root.path().join("dispatcher"), &schema, &hub, "dispatcher")
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;

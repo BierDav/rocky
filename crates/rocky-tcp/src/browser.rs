@@ -12,11 +12,6 @@ use ws_stream_wasm::{WsMessage, WsMeta, WsStream};
 const CHUNK: usize = 64 * 1024;
 
 impl Options {
-    /// Options for a browser: it dials `ws://` and `wss://` routes through the browser's
-    /// WebSocket and trust store, listens nowhere and names no route.
-    pub fn browser() -> Self {
-        Self {}
-    }
     pub(super) async fn serve(&self, owned: bool) -> Result<Attachment, Failure> {
         Ok(Attachment::build(None, None, owned, Dialer))
     }

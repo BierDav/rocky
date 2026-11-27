@@ -1,16 +1,27 @@
-import init, { Notes } from "./pkg/browser_notes.js";
+import init, { Notes, newPersonPhrase } from "./pkg/browser_notes.js";
 
-const ready = init().then(() => Notes.open(location.hash.slice(1) || undefined));
 const show = async (notes) => postMessage({ notes: await notes.list() });
-
-ready.then((notes) => {
+const open = async (phrase) => {
+  await init();
+  if (!phrase) {
+    phrase = newPersonPhrase();
+    postMessage({ phrase });
+  }
+  const notes = await Notes.open(phrase, location.hash.slice(1) || undefined);
   show(notes);
   notes.watch(() => show(notes));
-}).catch((error) => postMessage({ error: String(error) }));
+  return notes;
+};
 
+let ready;
 onmessage = async ({ data }) => {
   try {
-    await (await ready).add(data.add);
+    if ("phrase" in data) {
+      ready = open(data.phrase);
+      await ready;
+    } else {
+      await (await ready).add(data.add);
+    }
   } catch (error) {
     postMessage({ error: String(error) });
   }

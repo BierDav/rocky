@@ -76,3 +76,31 @@ impl Database {
         self.send(|reply| Request::ActivityNext(after, reply)).await
     }
 }
+impl crate::DatabaseStatus {
+    /// This device's credentials in detail.
+    pub fn authority(&self) -> crate::status::AuthorityStatus {
+        self.authority.clone()
+    }
+    /// The local data in detail.
+    pub fn data(&self) -> crate::status::DataStatus {
+        self.data.clone()
+    }
+    /// The network and peers in detail.
+    pub fn network(&self) -> crate::status::NetworkStatus {
+        self.network.clone()
+    }
+    /// Every device's health report, or `None` on a device that is not an admin's.
+    pub fn mesh(&self) -> Option<Vec<crate::status::MeshDevice>> {
+        self.mesh.clone()
+    }
+}
+impl crate::SyncReport {
+    /// Each peer the pass knew.
+    pub fn peers(&self) -> &[crate::status::PeerReconciliation] {
+        &self.peers
+    }
+    /// Contact resolutions in the pass.
+    pub fn contact_resolutions(&self) -> &[crate::status::AttemptObservation] {
+        &self.contact_resolutions
+    }
+}

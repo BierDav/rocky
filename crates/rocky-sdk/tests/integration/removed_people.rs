@@ -11,7 +11,8 @@ async fn commit(device: &Device, title: &str) -> Result<(), rocky_sdk::Error> {
                     "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
                     vec![SqlValue::Text(title.into()), SqlValue::Text(title.into())],
                 )
-                .await
+                .await?;
+            Ok(())
         })
         .await
 }

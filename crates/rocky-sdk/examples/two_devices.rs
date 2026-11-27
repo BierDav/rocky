@@ -1,5 +1,7 @@
-use rocky_sdk::{Access, Affinity, Column, Configuration, Invite, Network, Schema, Table, params};
-use std::net::SocketAddr;
+use rocky_sdk::{
+    Access, Affinity, Column, Configuration, IdentityKey, Invite, Network, Schema, Table, params,
+};
+use std::{net::SocketAddr, sync::Arc};
 
 fn loopback() -> Network {
     let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -23,8 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let invitation = alice.database.invite(Invite::new(Access::Full)).await?;
 
+    let bob_key = IdentityKey::generate();
+    println!(
+        "Bob's person key, for the app's secure storage: {}",
+        bob_key.phrase()
+    );
     let bob = Configuration::new(directory.join("bob"), &schema)?
         .network(loopback())
+        .identity(Arc::new(bob_key))
         .join(&invitation.code)
         .await?;
 
@@ -34,12 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(async |tx| tx.execute(insert, params!["Hello from Alice"]).await)
         .await?;
 
-    let report = bob.database.sync_now().await?;
+    let report = bob.sync_now().await?;
     println!("Bob's sync: {report}");
-    let rows = bob
-        .database
-        .query("SELECT body FROM notes", params![])
-        .await?;
+    let rows = bob.query("SELECT body FROM notes", params![]).await?;
     let note: String = rows
         .collect()
         .await?
@@ -48,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get("body")?;
     println!("Bob reads: {note}");
 
-    bob.database.close().await?;
+    bob.close().await?;
     alice.database.close().await?;
     Ok(std::fs::remove_dir_all(directory)?)
 }

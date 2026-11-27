@@ -117,10 +117,10 @@ impl Office {
             .await
             .unwrap();
         configuration(&self.directory.path().join(name), &self.hub, name)
+            .fixture_person()
             .join(&invitation.code)
             .await
             .unwrap()
-            .database
     }
     async fn counters(&self, database: &Database) -> Counters {
         Counters::connect(database.clone(), &self.bundle)

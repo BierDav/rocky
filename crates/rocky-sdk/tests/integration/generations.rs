@@ -435,11 +435,13 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     )?;
     let b = Device::new(
         open(&dirs("b"), &nullable_position(), network("b"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
     let c = Device::new(
         open(&dirs("c"), &nullable_position(), network("c"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -898,6 +900,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     a.set(2, &apples, "note", json!("fresh")).await;
     let b = Device::new(
         open(&b_dir, &common::schema(), network("b"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -1017,6 +1020,7 @@ async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it(
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     let b = Device::new(
         open(&b_dir, &second(), network("b"))
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -1050,6 +1054,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     let a = Device::create(&a_dir, network("a")).await?;
     let b = Device::new(
         open(&b_dir, &common::schema(), network("b"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -1240,6 +1245,7 @@ async fn issuers_that_publish_different_schemas_apart_end_on_one_winner() -> Res
     let a = Device::create(&a_dir, network("a")).await?;
     let b = Device::new(
         open(&b_dir, &common::schema(), network("b"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;

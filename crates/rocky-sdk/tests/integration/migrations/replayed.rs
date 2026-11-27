@@ -45,6 +45,7 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     )?;
     let b = Device::new(
         open(&b_dir, &common::schema(), network("b"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -178,6 +179,7 @@ impl Listed {
         )?;
         let b = Device::new(
             open(&listed.path("b"), &partitioned(1, 0, 0), network("b"))
+                .fixture_person()
                 .join(&a.invite().await)
                 .await?,
         )?;

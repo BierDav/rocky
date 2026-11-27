@@ -126,14 +126,23 @@ would match rows or none, so a refused statement records nothing; partition
 rights are checked as soon as the statement knows its rows. A statement refused
 before it runs leaves the transaction open for the body to go on.
 
+`Transaction::execute` returns how many rows its `INSERT`, `UPDATE` or `DELETE`
+changed in the local SQLite database: 0 for a read or a guarded `UPDATE` that
+matched nothing, and never the rows a cascade or trigger changed. It counts a
+row rewritten with identical values, although such a write syncs nothing and
+`transaction_outcome` reports no outcome for it, so `transaction_outcome`, not
+the count, says what synced.
+
 ## Two devices
 
 Alice creates the database and invites Bob over TCP on loopback. Bob joins,
 Alice writes, and Bob syncs and reads Alice's note.
 
 ```rust crates/rocky-sdk/examples/two_devices.rs
-use rocky_sdk::{Access, Affinity, Column, Configuration, Invite, Network, Schema, Table, params};
-use std::net::SocketAddr;
+use rocky_sdk::{
+    Access, Affinity, Column, Configuration, IdentityKey, Invite, Network, Schema, Table, params,
+};
+use std::{net::SocketAddr, sync::Arc};
 
 fn loopback() -> Network {
     let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -157,8 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let invitation = alice.database.invite(Invite::new(Access::Full)).await?;
 
+    let bob_key = IdentityKey::generate();
+    println!(
+        "Bob's person key, for the app's secure storage: {}",
+        bob_key.phrase()
+    );
     let bob = Configuration::new(directory.join("bob"), &schema)?
         .network(loopback())
+        .identity(Arc::new(bob_key))
         .join(&invitation.code)
         .await?;
 
@@ -168,12 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(async |tx| tx.execute(insert, params!["Hello from Alice"]).await)
         .await?;
 
-    let report = bob.database.sync_now().await?;
+    let report = bob.sync_now().await?;
     println!("Bob's sync: {report}");
-    let rows = bob
-        .database
-        .query("SELECT body FROM notes", params![])
-        .await?;
+    let rows = bob.query("SELECT body FROM notes", params![]).await?;
     let note: String = rows
         .collect()
         .await?
@@ -182,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get("body")?;
     println!("Bob reads: {note}");
 
-    bob.database.close().await?;
+    bob.close().await?;
     alice.database.close().await?;
     Ok(std::fs::remove_dir_all(directory)?)
 }
@@ -247,18 +259,21 @@ ones an application calls, and the sections below explain each.
 | Key | What it is | Who holds it | Needed for |
 | --- | --- | --- | --- |
 | Root key and its 24-word phrase (`Created::root`, `RootKey`) | The database's offline authority | The owner, offline; Rocky never stores it | `make_admin`, `revoke_admin` and `Counters::register` only |
-| Person key (`Created::owner`, `Opened::identity`, `IdentityKey`) | One person's identity | The app, in its secure storage; `IdentityKey::phrase` and `IdentityKey::from_phrase` move it as 24 words | Every open, through `Configuration::identity`: it signs the session's invitations, links, unlinks and schema publications |
+| Person key (`Created::owner`, `IdentityKey`) | One person's identity | The app, in its secure storage; `IdentityKey::phrase` and `IdentityKey::from_phrase` move it as 24 words | `join` and `link`, and any session that signs, through `Configuration::identity`: invitations, links, unlinks and schema publications; a database opened without it reads and writes but refuses those |
 | Device key | One device's identity | Rocky, under the database directory or in `Configuration::secrets` | Opening and renewing the device's credentials; it never leaves the device |
 
-`create` returns the root and the owner's person key once, and `join` returns a
-minted person key in `Opened::identity`; each of those sessions signs with its
-key. The owner's person key is derived from the root, so `RootKey::identity`
+`create` is the only call that returns keys: the root and the owner's person
+key, once. Every other entry point, `create_with_root`, `open`,
+`open_confirmed`, `join` and `PendingLink::confirm`, returns a `Database` and
+signs with the key in `Configuration::identity`; a new person joins with
+`IdentityKey::generate()` after storing its phrase. The owner's person key is derived from the root, so `RootKey::identity`
 recovers it from the root phrase. `PersonId::of(&key)?` names the person any
 `IdentityProvider` signs for, as `Invite::for_identity` and `remove` take it.
 An `IdentityKey` is not `Clone`: share it as an `Arc<IdentityKey>`, which
 `Configuration::identity` accepts as an `Arc<dyn IdentityProvider>`. Later
 opens get the person key from `Configuration::identity`, and a call that needs
-it without one is `Denied` with `IdentityRequired`. `create_with_root(root,
+it without one, `join` and `link` included, is `Denied` with
+`IdentityRequired`. `create_with_root(root,
 owner)` takes signers the application keeps elsewhere, such as passkey-backed
 ones. Rocky never stores a person key: its one persisted form is the 24-word
 phrase, which the app keeps in its own storage and reopens with
@@ -272,8 +287,8 @@ needs the issuing device online when it redeems the code. An invite can add
 `partition`s, a `label` for the device and, on the first invitation, the
 person, and a validity from one minute to 30 days (`Invite::valid_for`, ten
 minutes by default). Every code admits one device once. A default code admits
-whoever holds it, as a person key Rocky mints and returns in
-`Opened::identity`. A code prints as one URL-safe line of about 260 characters
+whoever holds it, as the person whose key is in `Configuration::identity`. A
+code prints as one URL-safe line of about 260 characters
 with a TCP route and 400 with an iroh route (`Display`, and `FromStr` to read it back) holding a secret, the database, the
 issuing device and its routes at issue time: an admin device that issues codes
 for later binds a fixed port or sets `rocky_tcp::Options::advertise` to a
@@ -288,14 +303,18 @@ credentials (`status().credentials_expired()`) until it does.
 `Database::invitations` lists open and redeemed invitations, and
 `cancel_invitation` ends an unused one.
 
-`Access` is `Full`, `Read`, `Store` or
-`Access::Role(RoleName::from_static("doctor"))`, naming a `Role` the schema
-declares with `SchemaBuilder::role`. A role reads, writes, appends to or
+`Access` is `Full`, `Read`, `Store` or `Access::Role(name)`, naming a `Role`
+the schema declares with `SchemaBuilder::role`. Declare each role name once as
+a constant, as in `const SCANNER: RoleName = RoleName::from_static("scanner");`,
+and use the same constant in `Role::new(SCANNER)` and `Access::Role(SCANNER)`,
+as `DOCTOR` here. A role reads, writes, appends to or
 updates named columns of the tables it lists, and grants on one table compose:
 this doctor reads wards, adds charts and edits only their notes, in the wards
 they are granted.
 
 ```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+const DOCTOR: RoleName = RoleName::from_static("doctor");
+
 fn clinic() -> Result<Schema, rocky_sdk::Error> {
     let charts = Table::replayed("charts")
         .column(Column::new("ward", Affinity::Text).required())
@@ -341,7 +360,10 @@ async fn open_ward(admin: &Database, doctor: PersonId, ward: &str) -> Result<(),
     admin.grant_partition(doctor, &partition).await?;
     let admit = "INSERT INTO charts(ward, note) VALUES(?, 'admitted')";
     admin
-        .write(async |tx| tx.execute(admit, params![ward]).await)
+        .write(async |tx| {
+            tx.execute(admit, params![ward]).await?;
+            Ok(())
+        })
         .await
 }
 ```
@@ -414,7 +436,7 @@ async fn link_device(
         .find(|request| request.device == pending.device() && &request.code == pending.code())
         .ok_or("no matching link request")?;
     existing.approve_link(request.device, &request.code).await?;
-    Ok(pending.confirm().await?.database)
+    Ok(pending.confirm().await?)
 }
 ```
 
@@ -478,13 +500,13 @@ each host:
 1. On an admin device that stays online, issue one default invitation per host
    with `Invite::new(access).valid_for(..)` and hand the host its code, one
    line that fits an environment variable or a provisioning file.
-2. At boot, the host calls `open`, configured with
-   `Configuration::identity(Arc::new(IdentityKey::from_phrase(&phrase)?))`
-   once it holds a stored phrase; on `NoDatabase` or `JoinUnfinished` it calls
-   `join` with its code instead, which needs the issuing admin device online.
-3. `join` returns the person key it minted in `Opened::identity`, once: the
-   host stores `identity.phrase()` in its own storage before anything else, and
-   every later boot reopens from that phrase.
+2. On first boot the host generates its person key with
+   `IdentityKey::generate()` and stores `phrase()` in its own storage before
+   anything else.
+3. At every boot, the host calls `open`, configured with
+   `Configuration::identity(Arc::new(IdentityKey::from_phrase(&phrase)?))`; on
+   `NoDatabase` or `JoinUnfinished` it calls `join` with its code and the same
+   identity instead, which needs the issuing admin device online.
 
 ## How merging works
 
@@ -510,8 +532,9 @@ no key gets a generated `id` holding a `RowIdentity`, which Rocky fills when an
 row from child rows, and `next_id_in(table, partition_values)` does so in a
 partition. A table partitioned by its own id names
 the id `next_id` allocated in every insert. Ids need no coordination; gap-free
-numbers come from `rocky-coordinator`. A `RowIdentity` prints as hex and parses
-back with `str::parse`, and a `Timestamp` column value prints as RFC 3339 in
+numbers come from `rocky-coordinator`. A `RowIdentity` prints as 80 hex
+characters, its writer's 32 bytes and an 8-byte sequence, and parses back with
+`str::parse`; compare it in full and never truncate it for display or lookup, and a `Timestamp` column value prints as RFC 3339 in
 UTC. `Transaction::token()` names the transaction for `transaction_outcome`
 and drop reports, already inside the body, so an outbox row can store it. A
 transaction that changes no replayed row—whether it ran no write statement,
@@ -520,9 +543,10 @@ nothing, so its token never gets an outcome. `flush` makes every write that
 returned durable.
 
 `Database::status_changes()` streams snapshots as status changes; in
-`SyncMode::Live`, await partition grants or revocations on
-`status.data().partitions`, admin promotion on `status.authority().is_issuer`,
-and removal on `status.authority().verified_revocation`.
+`SyncMode::Live`, await admin promotion on `status.admin()` and data that
+arrives, such as a newly granted partition, on `status.blockers()` emptying.
+A removed device learns it at its next sync, after which reads, commits and
+`sync_now` fail with `ErrorKind::Removed`.
 
 `Table::local(name)` declares a table whose rows stay on the device: they
 never sync, are kept across reopening, are not governed by roles, and are
@@ -561,8 +585,11 @@ transaction with `ErrorKind::Sql { unsupported, .. }`:
   `Unsupported::NonDeterministic(function)`, whose message says to bind the
   value as a parameter instead;
 - a `WITH` clause is `Unsupported::With`;
-- a correlated subquery—any subquery reading another table or partition that
-  refers to the outer statement—is refused with `Unsupported::Statement`;
+- a subquery that reads another table or partition and refers to the outer row
+  is `Unsupported::CorrelatedRead { table }`: Rocky reads the other table once
+  when the write runs, so its value cannot vary per outer row; select the
+  matching keys without naming the outer table instead, as the backfill under
+  [schema evolution](#schema-evolution) does;
 - a write to a primary-key column, including `id` and the partition columns, is
   `Unsupported::KeyUpdate`, since a row's key never changes; delete the row and
   insert it again;
@@ -775,7 +802,16 @@ and declare the SQL that brings the data there with
 `SchemaBuilder::migration(version, steps)`. A step may read the previous
 version's rows, under that version's names, as `parent.<table>`; as in any
 replayed write, no subquery reading another table (including `parent.<table>`)
-may refer to the outer statement. When a step fails, `MigrationFailed {
+may refer to the outer statement. A backfill that needs another table's rows
+selects the matching keys in an uncorrelated `IN (SELECT …)`:
+
+```rust crates/rocky-sdk/tests/integration/readme_examples.rs
+const MARK_VIPS: &str = "UPDATE customers SET vip = 1 \
+    WHERE code IN (SELECT customer FROM orders WHERE cents >= 100000)";
+```
+
+`WHERE EXISTS (SELECT 1 FROM orders WHERE orders.customer = customers.code)`
+would refer to the outer row and fails with `Unsupported::CorrelatedRead`. When a step fails, `MigrationFailed {
 version, step }` counts steps from 1. Adding a nullable column needs no step:
 existing rows hold `NULL`, or the column's default.
 
@@ -801,7 +837,10 @@ const FILL_SLUGS: &str = "UPDATE notes SET slug = lower(title) WHERE slug IS NUL
 
 async fn fill_slugs(database: &Database) -> Result<(), rocky_sdk::Error> {
     database
-        .write(async |tx| tx.execute(FILL_SLUGS, params![]).await)
+        .write(async |tx| {
+            tx.execute(FILL_SLUGS, params![]).await?;
+            Ok(())
+        })
         .await
 }
 ```
@@ -921,10 +960,10 @@ syncs.
   application's own HTTP routes, `rocky_tcp::Attachment::external(url)` with
   `admit_websocket` serves connections the application's HTTP server upgraded;
   `cargo run -p rocky-sdk --example websocket_server` shows it with hyper.
-- **Browser**: `rocky_tcp::Options::browser()` dials `ws://` and `wss://`
-  routes through the browser's own WebSocket and trust store.
-- **Dial-only**: `rocky_tcp::Options::dialer()` natively, and every browser
-  transport, listen nowhere and name no route. Such a device syncs over the
+- **Browser**: the same `rocky_tcp::Options::dialer()` dials `ws://` and
+  `wss://` routes through the browser's own WebSocket and trust store.
+- **Dial-only**: `rocky_tcp::Options::dialer()` on every target, and every
+  browser transport, listen nowhere and name no route. Such a device syncs over the
   connections it opens itself; its peers never dial it and keep no route to it,
   so their syncs stay complete without it. Its `status().dial_only()` is
   true.
@@ -1180,7 +1219,7 @@ The same crates build for `wasm32-unknown-unknown`. Rocky must run in a
 dedicated Worker, where it keeps each database in the origin's private file
 system (OPFS); the directory you pass to `Configuration` names it there. In the
 browser, a database dials a WebSocket server with
-`rocky_tcp::Options::browser()`, or reaches any peer through `rocky-iroh`'s
+`rocky_tcp::Options::dialer()`, or reaches any peer through `rocky-iroh`'s
 relays; see [who can reach whom](#who-can-reach-whom) and
 [a browser app](#a-browser-app).
 
@@ -1207,8 +1246,8 @@ depends on it with `default-features = false`, since rusqlite's default
 
 [examples/browser-notes](examples/browser-notes) is a notes app to copy. Its
 [`src/lib.rs`](examples/browser-notes/src/lib.rs) owns the `Database`, keeps it
-in OPFS, dials with `rocky_tcp::Options::browser()` and exports `Notes.open`,
-`add`, `list` and `watch` to JavaScript through wasm-bindgen;
+in OPFS, dials with `rocky_tcp::Options::dialer()` and exports `newPersonPhrase`,
+`Notes.open`, `add`, `list` and `watch` to JavaScript through wasm-bindgen;
 [`www/worker.js`](examples/browser-notes/www/worker.js) runs it in a dedicated
 Worker, and [`www/index.html`](examples/browser-notes/www/index.html) talks to
 the Worker with messages. Its peer is the `websocket_server` example, which
@@ -1227,9 +1266,10 @@ the invitation code after `#`; later visits open the database from OPFS and
 need no code. The server keeps its database in `local/notes-server` and the
 owner's phrase in `local/notes-server.owner-phrase`, so it invites again on
 every start. A deployed page sits behind an HTTPS proxy and syncs over
-`wss://`, which the same dialer opens. `join` mints the browser's person key in
-`Opened::identity` and the example drops it, so the browser reads and writes
-but cannot link another device; keep its phrase if it should. Outside this
+`wss://`, which the same dialer opens. On its first visit the page generates
+the browser's person key with `IdentityKey::generate()` and keeps its phrase in
+`localStorage`, which every later visit passes to `Configuration::identity`; an
+app that must not lose the person stores the phrase somewhere sturdier. Outside this
 repository, install the `wasm-bindgen` CLI of the version in your `Cargo.lock`
 with `cargo install wasm-bindgen-cli --version <it>`.
 
@@ -1255,7 +1295,7 @@ a relay and a WebSocket listener that rocky-sdk's `browser_sync` tests join.
 ### Size
 
 A browser app that joins and syncs with `rocky-sdk` and
-`rocky_tcp::Options::browser()` measured, before `wasm-bindgen`, with Rust 1.99
+`rocky_tcp::Options::dialer()` measured, before `wasm-bindgen`, with Rust 1.99
 on wasm32 (each row adds to the one above):
 
 | Release profile | `.wasm` | gzip -9 |

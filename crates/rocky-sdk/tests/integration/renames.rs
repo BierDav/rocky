@@ -71,6 +71,7 @@ impl Household {
         let member = Device::new(
             household
                 .configuration("member", &v1())
+                .fixture_person()
                 .join(&owner.invite().await)
                 .await?,
         )?;

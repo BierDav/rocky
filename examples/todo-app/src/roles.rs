@@ -1,6 +1,6 @@
 use crate::{Configuration, Failure, LIST_GROUP, TodoError, Todos};
-use rocky_sdk::{Access, RoleName, RowIdentity, params};
-use std::collections::BTreeSet;
+use rocky_sdk::{Access, IdentityKey, RoleName, RowIdentity, params};
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
@@ -62,7 +62,14 @@ pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, 
 
 pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Result<Todos, Failure> {
     let (role, uri) = parse_invitation(code)?;
-    let todos = Todos::new(configuration.join(&uri.parse()?).await?.database);
+    let person = Arc::new(IdentityKey::generate());
+    let todos = Todos::new(
+        configuration
+            .clone()
+            .identity(person)
+            .join(&uri.parse()?)
+            .await?,
+    );
     todos.register(role, name).await?;
     Ok(todos)
 }
@@ -81,8 +88,7 @@ impl Todos {
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
         let node = self.node().await?;
         let name = crate::title(name)?;
-        Ok(self
-            .database
+        self.database
             .write(async |transaction| {
                 transaction
                     .execute(
@@ -92,7 +98,8 @@ impl Todos {
                     )
                     .await
             })
-            .await?)
+            .await?;
+        Ok(())
     }
     pub async fn remove_device(&self, node: &str) -> Result<(), Failure> {
         if node == self.node().await? {

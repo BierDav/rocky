@@ -263,9 +263,9 @@ async fn join(
     let invitation = issuer.invite(profile).await?;
     let device = Device::new(
         open(&directory, hub, name)?
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
         directory,
         name,
         hub,

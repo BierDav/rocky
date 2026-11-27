@@ -166,15 +166,6 @@ impl std::fmt::Display for LinkError {
 }
 impl std::error::Error for LinkError {}
 
-/// A database that joined or linked, with the person key it minted, if any.
-pub struct Opened {
-    /// The open database.
-    pub database: Database,
-    /// The person key a default invitation minted, returned once for the app to store; `None` when
-    /// the person brought their own.
-    pub identity: Option<crate::IdentityKey>,
-}
-
 /// A link waiting for approval on another device of the person.
 pub struct PendingLink {
     pub(crate) configuration: Configuration,
@@ -191,16 +182,12 @@ impl PendingLink {
         DeviceId(self.awaiting.node)
     }
     /// Finishes the link after the other device approved it and opens the database.
-    pub async fn confirm(&self) -> Result<Opened, crate::Error> {
+    pub async fn confirm(&self) -> Result<Database, crate::Error> {
         let install = crate::database::Install::Identity {
             contact: self.contact.clone(),
             confirmed: Some(self.awaiting.clone()),
         };
-        let database = Database::launch(&self.configuration, install, None).await?;
-        Ok(Opened {
-            database,
-            identity: None,
-        })
+        Database::launch(&self.configuration, install, None).await
     }
 }
 impl std::fmt::Debug for PendingLink {

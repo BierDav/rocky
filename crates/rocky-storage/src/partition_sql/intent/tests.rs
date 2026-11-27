@@ -567,7 +567,9 @@ fn reads_of_other_partitions_are_evaluated_once_and_bound() {
         refused(
             "UPDATE items SET amount = (SELECT value FROM totals WHERE totals.name = items.list)"
         ),
-        IntentRefusal::CorrelatedSubquery,
+        IntentRefusal::CorrelatedRead {
+            table: "totals".into()
+        },
         "a read of other partitions that names the outer row has no single value"
     );
 }

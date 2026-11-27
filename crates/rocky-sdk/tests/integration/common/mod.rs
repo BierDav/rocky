@@ -69,11 +69,6 @@ impl From<Database> for Opened {
         }
     }
 }
-impl From<rocky_sdk::Opened> for Opened {
-    fn from(opened: rocky_sdk::Opened) -> Self {
-        opened.database.into()
-    }
-}
 impl From<Created> for Opened {
     fn from(created: Created) -> Self {
         Self {
@@ -167,9 +162,10 @@ impl Device {
         network: Network,
     ) -> Result<Self, Failure> {
         let joined = open(directory, Some(external_identity(directory)), Some(network))
+            .fixture_person()
             .join(invitation)
             .await?;
-        Self::new(joined.database)
+        Self::new(joined)
     }
     pub async fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
         Self::new(
@@ -442,7 +438,7 @@ pub async fn link(
     assert_eq!(&shown.code, pending.code());
     assert!(!shown.approved);
     responder.approve_link(shown.device, &shown.code).await?;
-    Ok(pending.confirm().await?.database)
+    Ok(pending.confirm().await?)
 }
 
 const INVITE_PREFIX: &str = "rocky://invite/";

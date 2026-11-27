@@ -84,7 +84,11 @@ impl Member {
         hub: &Arc<Hub>,
         code: &crate::InvitationCode,
     ) -> Result<(), Failure> {
-        self.start(hub, Install::invited(code).0).await
+        if self.identity.is_none() {
+            self.identity = Some(Arc::new(crate::IdentityKey::generate()));
+        }
+        self.start(hub, Install::Invited { code: code.clone() })
+            .await
     }
     pub(super) async fn open(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
         self.start(hub, Install::Installed).await

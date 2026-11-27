@@ -56,7 +56,7 @@ async fn open_rolled_out(
     }
 }
 async fn check_in(database: &Database, code: &str) -> Result<(), Failure> {
-    Ok(database
+    database
         .write(async |tx| {
             let id = tx.next_id("check_ins").await?;
             tx.execute(
@@ -69,7 +69,8 @@ async fn check_in(database: &Database, code: &str) -> Result<(), Failure> {
             )
             .await
         })
-        .await?)
+        .await?;
+    Ok(())
 }
 fn settings(directory: &Path) -> Result<Settings, Failure> {
     Settings::load(&directory.join("rocky.sqlite"))
@@ -99,9 +100,9 @@ async fn narrow_through_a_crash_at(stage: fault::Stage) -> Result<(), Failure> {
         .database;
     let invitation = admin.invite(Invite::new(Access::Role(SCANNER))).await?;
     let scanner = configuration(&scanner_dir, &wide()?, &hub)?
+        .fixture_person()
         .join(&invitation.code)
-        .await?
-        .database;
+        .await?;
     scanner.sync_now().await?;
     check_in(&scanner, "T1").await?;
     scanner.sync_now().await?;
@@ -190,9 +191,9 @@ async fn a_crash_between_narrowing_access_and_its_revocation_still_revokes_once(
         .database;
     let invitation = admin.invite(Invite::new(Access::Full)).await?;
     let member = configuration(&member_dir, &wide()?, &hub)?
+        .fixture_person()
         .join(&invitation.code)
-        .await?
-        .database;
+        .await?;
     member.sync_now().await?;
     let person = member.me().await?.person;
     let statements = revocations(&admin).await?;
@@ -252,7 +253,7 @@ async fn a_promotion_made_while_the_person_joins_reaches_their_device() -> Resul
     let invitation = owner.invite(Invite::new(Access::Full)).await?;
     let server = root.path().join("server");
     let (bootstrapping, finish_join) = crate::pause::arm(&server, crate::pause::Point::Bootstrap);
-    let joining_configuration = configuration(&server, &schema, &hub)?;
+    let joining_configuration = configuration(&server, &schema, &hub)?.fixture_person();
     let mut joining = std::pin::pin!(joining_configuration.join(&invitation.code));
     tokio::select! {
         biased;
@@ -268,7 +269,7 @@ async fn a_promotion_made_while_the_person_joins_reaches_their_device() -> Resul
         .ok_or("the redeemed invitation lists no person")?;
     owner.make_admin(joined.id, root_key).await?;
     let _ = finish_join.send(());
-    let server = joining.await?.database;
+    let server = joining.await?;
     server.sync_now().await?;
     assert!(
         server.me().await?.admin,
@@ -290,7 +291,10 @@ async fn a_live_promotion_reaches_the_promoted_device_without_a_sync_call() -> R
     let created = live("owner")?.create().await?;
     let owner = created.database;
     let invitation = owner.invite(Invite::new(Access::Full)).await?;
-    let member = live("member")?.join(&invitation.code).await?.database;
+    let member = live("member")?
+        .fixture_person()
+        .join(&invitation.code)
+        .await?;
     member.sync_now().await?;
     owner.sync_now().await?;
     let mut changes = member.status_changes();
@@ -337,7 +341,10 @@ async fn live_partition_grant_revocation_and_removal_arrive_via_status_changes()
     let invitation = owner
         .invite(Invite::new(Access::Role(RoleName::new("clinician")?)))
         .await?;
-    let clinician = live("clinician")?.join(&invitation.code).await?.database;
+    let clinician = live("clinician")?
+        .fixture_person()
+        .join(&invitation.code)
+        .await?;
     clinician.sync_now().await?;
     owner.sync_now().await?;
     let mut changes = clinician.status_changes();

@@ -110,6 +110,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
         open(&b_dir, &shelved(), network("b"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -203,7 +204,7 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     )?;
     let join = |name: &str, invitation: rocky_sdk::InvitationCode| {
         let configuration = open(&directory(name), &noted(1), network(name));
-        async move { Device::new(configuration.join(&invitation).await?) }
+        async move { Device::new(configuration.fixture_person().join(&invitation).await?) }
     };
     let c = join("c", a.invite_as(rocky_sdk::Access::Full).await).await?;
     a.admit(&c).await;
@@ -303,6 +304,7 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
         open(&b_dir, &shelved(), network("b"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -516,6 +518,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     let a = Device::new(open(&a_dir, &shelved(), network("a")).create().await?)?;
     let b = Device::new(
         open(&b_dir, &shelved(), network("b"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;
@@ -561,6 +564,7 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let peer_dir = root.path().join("peer");
     let peer = Device::new(
         open(&peer_dir, &shelved(), network("peer"))
+            .fixture_person()
             .join(&a.invite_as(rocky_sdk::Access::Full).await)
             .await?,
     )?;

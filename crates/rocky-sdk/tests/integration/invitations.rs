@@ -1,7 +1,7 @@
 use crate::common::{self, Device, Failure};
 use rocky_sdk::{
-    Configuration, DenyReason, DeviceId, ErrorKind, IdentityKey, IdentityProvider, Invite,
-    InviteError, JoinError, Network, Opened, PersonId, Right, ServiceError, transport::memory::Hub,
+    Configuration, Database, DenyReason, DeviceId, ErrorKind, IdentityKey, IdentityProvider,
+    Invite, InviteError, JoinError, Network, PersonId, Right, ServiceError, transport::memory::Hub,
 };
 use serde_json::json;
 use std::{path::Path, sync::Arc};
@@ -43,20 +43,21 @@ fn joining(
     let configuration = Configuration::new(directory, common::parsed_schema())?
         .network(Network::Owned(hub.connector(&directory.to_string_lossy())))
         .sync(rocky_sdk::SyncMode::Manual);
-    Ok(match person {
-        Some(person) => configuration.identity(person.clone()),
-        None => configuration,
-    })
+    Ok(configuration
+        .identity(person.map_or_else(|| common::external_identity(directory), Arc::clone)))
 }
 async fn join(
     directory: &Path,
     hub: &Arc<Hub>,
     person: Option<&Arc<dyn IdentityProvider>>,
     code: &rocky_sdk::InvitationCode,
-) -> Result<Opened, rocky_sdk::Error> {
-    joining(directory, hub, person)?.join(code).await
+) -> Result<Database, rocky_sdk::Error> {
+    joining(directory, hub, person)?
+        .fixture_person()
+        .join(code)
+        .await
 }
-fn refusal(outcome: Result<Opened, rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
+fn refusal(outcome: Result<Database, rocky_sdk::Error>) -> Result<ErrorKind, Failure> {
     match outcome {
         Ok(_) => Err("the invitation was accepted".into()),
         Err(error) => Ok(error.kind().clone()),
@@ -81,16 +82,20 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
         !format!("{:?}", invitation.code).contains(&invitation.code.to_string()[15..]),
         "a code redacts itself in debug output"
     );
-    let opened = join(&root.path().join("member"), &hub, None, &invitation.code).await?;
-    let minted = opened
-        .identity
-        .ok_or("a joiner without an identity gets one")?;
-    let member = Device::new(opened.database)?;
+    let person = generated_identity();
+    let opened = join(
+        &root.path().join("member"),
+        &hub,
+        Some(&person),
+        &invitation.code,
+    )
+    .await?;
+    let member = Device::new(opened)?;
     let me = member.database.me().await?;
     assert_eq!(
         me.person,
-        PersonId::of(&minted)?,
-        "the minted key names the joined person"
+        PersonId::of(&*person)?,
+        "the configured key names the joined person"
     );
     assert_eq!(me.access, writer());
     common::introduce(&owner, &member).await;
@@ -100,13 +105,13 @@ async fn a_token_admits_one_device_under_a_fresh_identity_and_no_other() -> Resu
     let pending = owner.database.invitations().await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].label.as_deref(), Some("Alice"));
-    assert_eq!(pending[0].redeemed_by, Some(PersonId::of(&minted)?));
+    assert_eq!(pending[0].redeemed_by, Some(PersonId::of(&*person)?));
     let recorded = owner
         .database
         .people()
         .await?
         .into_iter()
-        .find(|record| Ok(record.id) == PersonId::of(&minted))
+        .find(|record| Ok(record.id) == PersonId::of(&*person))
         .ok_or("the issuer recorded no admission")?;
     assert_eq!(recorded.invitation, Some(invitation.id));
     assert_eq!(recorded.label.as_deref(), Some("Alice"));
@@ -165,7 +170,12 @@ async fn an_identity_code_admits_only_that_identity() -> Result<(), Failure> {
         "a provider of another identity is refused before it asks the issuer"
     );
     assert_eq!(
-        refusal(join(&root.path().join("nobody"), &hub, None, &invitation.code).await)?,
+        refusal(
+            Configuration::new(root.path().join("nobody"), common::parsed_schema())?
+                .network(Network::Owned(hub.connector("nobody")))
+                .join(&invitation.code)
+                .await
+        )?,
         ErrorKind::Denied {
             table: None,
             need: Right::Sign,
@@ -179,12 +189,8 @@ async fn an_identity_code_admits_only_that_identity() -> Result<(), Failure> {
         &invitation.code,
     )
     .await?;
-    assert!(
-        opened.identity.is_none(),
-        "a configured identity is never returned"
-    );
     assert_eq!(
-        opened.database.me().await?.person,
+        opened.me().await?.person,
         PersonId::of(&*person)?,
         "the configured provider names the joined person"
     );
@@ -202,7 +208,7 @@ async fn an_identity_code_admits_only_that_identity() -> Result<(), Failure> {
         Some(ErrorKind::Invite(InviteError::AlreadyMember)),
         "a member is not invited into other access"
     );
-    opened.database.close().await?;
+    opened.close().await?;
     owner.close().await;
     Ok(())
 }
@@ -237,11 +243,11 @@ async fn a_cancelled_invitation_admits_no_one_and_leaves_no_record() -> Result<(
     let again = owner.database.invite(Invite::new(writer())).await?;
     let opened = join(&root.path().join("member"), &hub, None, &again.code).await?;
     assert_eq!(
-        Some(opened.database.me().await?.person.key()),
-        opened.identity.as_ref().map(IdentityKey::person_key),
+        opened.me().await?.person.key(),
+        common::external_key(&root.path().join("member")).person_key(),
         "the refused join resumes in the same directory with a newer invitation"
     );
-    opened.database.close().await?;
+    opened.close().await?;
     owner.close().await;
     Ok(())
 }
@@ -349,6 +355,7 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
     let owner = issuer(&root.path().join("issuer"), &hub).await?;
     let invitation = owner.database.invite(Invite::new(writer())).await?;
     let without_network = Configuration::new(root.path().join("member"), common::parsed_schema())?
+        .fixture_person()
         .join(&invitation.code)
         .await
         .err()
@@ -360,17 +367,23 @@ async fn an_invitation_travels_only_over_a_network() -> Result<(), Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
+async fn a_person_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let owner = issuer(&root.path().join("issuer"), &hub).await?;
     owner.add(1, "Milk").await;
     let invitation = owner.database.invite(Invite::new(writer())).await?;
-    let opened = join(&root.path().join("phone"), &hub, None, &invitation.code).await?;
-    let phrase = opened.identity.ok_or("minted identity")?.phrase();
+    let phrase = IdentityKey::generate().phrase();
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&phrase)?);
-    let phone = Device::new(opened.database)?;
+    let opened = join(
+        &root.path().join("phone"),
+        &hub,
+        Some(&person),
+        &invitation.code,
+    )
+    .await?;
+    let phone = Device::new(opened)?;
     common::introduce(&owner, &phone).await;
     phone.sync().await.map_err(|error| error.to_string())?;
 
@@ -427,7 +440,7 @@ async fn a_minted_phrase_links_a_second_device_and_an_admin_unlinks_a_lost_one()
 }
 
 async fn writes_an_item(device: &Device, title: &str) -> Result<(), Failure> {
-    Ok(device
+    device
         .database
         .write(async |tx| {
             tx.execute(
@@ -439,7 +452,8 @@ async fn writes_an_item(device: &Device, title: &str) -> Result<(), Failure> {
             )
             .await
         })
-        .await?)
+        .await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -452,10 +466,16 @@ async fn wider_access_and_admin_rights_reach_each_device_at_its_next_sync() -> R
         .database
         .invite(Invite::new(rocky_sdk::Access::Read))
         .await?;
-    let opened = join(&root.path().join("phone"), &hub, None, &invitation.code).await?;
-    let phrase = opened.identity.ok_or("minted identity")?.phrase();
+    let phrase = IdentityKey::generate().phrase();
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::from_phrase(&phrase)?);
-    let phone = Device::new(opened.database)?;
+    let opened = join(
+        &root.path().join("phone"),
+        &hub,
+        Some(&person),
+        &invitation.code,
+    )
+    .await?;
+    let phone = Device::new(opened)?;
     common::introduce(&owner, &phone).await;
     phone.sync().await.map_err(|error| error.to_string())?;
     let laptop = Device::new(
@@ -573,9 +593,10 @@ async fn a_join_that_fails_is_unfinished_until_the_same_invitation_resumes_it()
     let owner = reopened(&root.path().join("issuer"), &hub).await?;
     owner.add(1, "Milk").await;
     let joined = join(&member, &hub, None, &invitation.code).await?;
-    assert!(
-        joined.identity.is_some(),
-        "the resumed join keeps its minted key"
+    assert_eq!(
+        joined.me().await?.person.key(),
+        common::external_key(&member).person_key(),
+        "the resumed join keeps its person"
     );
     let member = Device::new(joined)?;
     assert_eq!(member.titles().await, ["Milk"]);
@@ -592,6 +613,7 @@ async fn a_code_no_attached_transport_routes_is_refused_as_no_route() -> Result<
     let invitation = owner.database.invite(Invite::new(writer())).await?;
     let refused = Configuration::new(root.path().join("member"), common::parsed_schema())?
         .network(rocky_tcp::Options::dialer().into())
+        .fixture_person()
         .join(&invitation.code)
         .await
         .err()
@@ -627,6 +649,8 @@ async fn a_code_for_another_application_is_refused_once_the_issuer_answers_and_r
         .build()?;
     let refused = Configuration::new(root.path().join("member"), &notes)?
         .network(Network::Owned(hub.connector("member")))
+        .identity(common::external_identity(&root.path().join("member")))
+        .fixture_person()
         .join(&invitation.code)
         .await
         .err()
@@ -647,13 +671,15 @@ async fn a_code_for_another_application_is_refused_once_the_issuer_answers_and_r
         .ok_or("a refused join opened")?;
     assert_eq!(reopened.kind(), &ErrorKind::JoinUnfinished);
     let resumed = joining(&root.path().join("member"), &hub, None)?
+        .fixture_person()
         .join(&invitation.code)
         .await?;
-    assert!(
-        resumed.identity.is_some(),
-        "the issuer recognizes the refused device and the join keeps its minted key"
+    assert_eq!(
+        resumed.me().await?.person.key(),
+        common::external_key(&root.path().join("member")).person_key(),
+        "the issuer recognizes the refused device and the join keeps its person"
     );
-    resumed.database.close().await?;
+    resumed.close().await?;
     owner.close().await;
     Ok(())
 }

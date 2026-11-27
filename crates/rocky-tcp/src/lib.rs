@@ -121,7 +121,7 @@ struct Shared {
 }
 
 /// Where a TCP attachment listens, the route it tells peers to dial and whom it trusts when it
-/// dials; pass it to `Network::from` or call `start`.
+/// dials; pass it to `Network::from` or call `start`. In a browser only `dialer` exists.
 #[derive(Clone, Debug)]
 pub struct Options {
     #[cfg(not(target_family = "wasm"))]
@@ -130,6 +130,16 @@ pub struct Options {
     roots: Vec<Vec<u8>>,
 }
 impl Options {
+    /// Options that only dial out, listening nowhere and naming no route; in a browser they dial
+    /// `ws://` and `wss://` through the browser's WebSocket and trust store.
+    pub fn dialer() -> Self {
+        Self {
+            #[cfg(not(target_family = "wasm"))]
+            listener: None,
+            #[cfg(not(target_family = "wasm"))]
+            roots: Vec::new(),
+        }
+    }
     /// Binds and returns an attachment the application keeps, for `Network::Borrowed`; closing a
     /// database never closes it.
     pub async fn start(&self) -> Result<Attachment, Failure> {

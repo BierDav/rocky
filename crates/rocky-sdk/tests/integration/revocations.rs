@@ -51,7 +51,12 @@ async fn join(
         .invite(rocky_sdk::Invite::new(profile))
         .await?
         .code;
-    let device = Device::new(open(&root.join(name), hub, name).join(&invitation).await?)?;
+    let device = Device::new(
+        open(&root.join(name), hub, name)
+            .fixture_person()
+            .join(&invitation)
+            .await?,
+    )?;
     issuer.database.add_peer(&device.contact().await).await?;
     Ok(device)
 }
@@ -284,6 +289,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     let a = create(root, &hub, "a").await?;
     let early = Device::new(
         open(&root.join("early"), &hub, "early")
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -295,6 +301,7 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
             .await?;
         let issuer = Device::new(
             open(&root.join(name), &hub, name)
+                .fixture_person()
                 .join(&invitation.code)
                 .await?,
         )?;

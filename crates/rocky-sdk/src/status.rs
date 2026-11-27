@@ -902,25 +902,6 @@ impl DatabaseStatus {
         self.network.last_reconciliation.as_ref()
     }
 }
-#[cfg(any(test, feature = "test-support"))]
-impl DatabaseStatus {
-    /// This device's credentials in detail.
-    pub fn authority(&self) -> AuthorityStatus {
-        self.authority.clone()
-    }
-    /// The local data in detail.
-    pub fn data(&self) -> DataStatus {
-        self.data.clone()
-    }
-    /// The network and peers in detail.
-    pub fn network(&self) -> NetworkStatus {
-        self.network.clone()
-    }
-    /// Every device's health report, or `None` on a device that is not an admin's.
-    pub fn mesh(&self) -> Option<Vec<MeshDevice>> {
-        self.mesh.clone()
-    }
-}
 /// One known peer device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerStatus {
@@ -1038,17 +1019,6 @@ pub struct SyncReport {
     pub(crate) started_at_epoch_millis: Option<u64>,
     pub(crate) ended_at_epoch_millis: Option<u64>,
     pub(crate) peers: Vec<PeerReconciliation>,
-}
-#[cfg(any(test, feature = "test-support"))]
-impl SyncReport {
-    /// Each peer the pass knew.
-    pub fn peers(&self) -> &[PeerReconciliation] {
-        &self.peers
-    }
-    /// Contact resolutions in the pass.
-    pub fn contact_resolutions(&self) -> &[AttemptObservation] {
-        &self.contact_resolutions
-    }
 }
 impl SyncReport {
     /// When the pass started.

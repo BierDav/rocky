@@ -44,7 +44,7 @@ async fn open_tenants(
             .network(rocky_iroh::Options::default().into())
             .identity(identity.clone());
         let database = match invitation {
-            Some(invitation) => configuration.join(&invitation.parse()?).await?.database,
+            Some(invitation) => configuration.join(&invitation.parse()?).await?,
             None => configuration.open().await?,
         };
         println!("{directory}: {}", database.contact().await?.uri);

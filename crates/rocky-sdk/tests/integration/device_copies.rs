@@ -15,7 +15,8 @@ async fn try_add(device: &Device, key: &str) -> Result<(), rocky_sdk::Error> {
                 "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
                 vec![SqlValue::Text(key.into()), SqlValue::Text(key.into())],
             )
-            .await
+            .await?;
+            Ok(())
         })
         .await
 }

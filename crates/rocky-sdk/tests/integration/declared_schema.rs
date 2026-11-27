@@ -25,7 +25,8 @@ async fn write(database: &Database) -> Result<(), rocky_sdk::Error> {
     database
         .write(async |tx| {
             tx.execute("INSERT INTO notes(body) VALUES('late')", params![])
-                .await
+                .await?;
+            Ok(())
         })
         .await
 }
@@ -60,6 +61,7 @@ async fn an_application_ahead_of_its_database_is_refused_sql_but_keeps_status_an
     let invitation = owner.invite_as(Access::Full).await;
     let member = Device::new(
         open(&member_path, &hub, "member", 1)
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

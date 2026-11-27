@@ -92,7 +92,12 @@ pub(crate) async fn join(
     access: rocky_sdk::Access,
 ) -> Result<Device, Failure> {
     let invite = issuer.invite_as(access).await;
-    let device = Device::new(open(&root.join(name), hub, name).join(&invite).await?)?;
+    let device = Device::new(
+        open(&root.join(name), hub, name)
+            .fixture_person()
+            .join(&invite)
+            .await?,
+    )?;
     issuer.database.add_peer(&device.contact().await).await?;
     settle(&device).await;
     Ok(device)

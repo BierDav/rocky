@@ -1,6 +1,6 @@
 use rocky_sdk::{
-    Access, Affinity, Column, Configuration, Database, IdentityProvider, Invite, Network, Schema,
-    SyncMode, Table, params, transport::memory::Hub,
+    Access, Affinity, Column, Configuration, Database, IdentityKey, IdentityProvider, Invite,
+    Network, Schema, SyncMode, Table, params, transport::memory::Hub,
 };
 use std::{path::Path, sync::Arc};
 
@@ -30,7 +30,10 @@ fn configure(
 async fn spend(database: &Database, cents: i64, note: &str) -> Result<(), rocky_sdk::Error> {
     let insert = "INSERT INTO expenses(cents, note) VALUES(?, ?)";
     database
-        .write(async |transaction| transaction.execute(insert, params![cents, note]).await)
+        .write(async |transaction| {
+            transaction.execute(insert, params![cents, note]).await?;
+            Ok(())
+        })
         .await
 }
 
@@ -56,13 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let alice_key: Arc<dyn IdentityProvider> = Arc::new(alice.owner);
     let invitation = alice.database.invite(Invite::new(Access::Full)).await?;
+    let bob_key: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
     let bob = configure(&hub, &directory, "bob", &v1, SyncMode::Manual)?
+        .identity(bob_key.clone())
         .join(&invitation.code)
         .await?;
-    let bob_key: Arc<dyn IdentityProvider> = Arc::new(bob.identity.ok_or("Bob has a person key")?);
     spend(&alice.database, 4_200, "groceries").await?;
-    bob.database.sync_now().await?;
-    bob.database.close().await?;
+    bob.sync_now().await?;
+    bob.close().await?;
     alice.database.close().await?;
 
     let alice = configure(&hub, &directory, "alice", &v2, SyncMode::Manual)?

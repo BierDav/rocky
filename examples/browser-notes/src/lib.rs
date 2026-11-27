@@ -1,6 +1,9 @@
 #![cfg(target_family = "wasm")]
 
-use rocky_sdk::{Affinity, Column, Configuration, Database, ErrorKind, Schema, Table, params};
+use rocky_sdk::{
+    Affinity, Column, Configuration, Database, ErrorKind, IdentityKey, Schema, Table, params,
+};
+use std::sync::Arc;
 use wasm_bindgen::{JsError, JsValue, prelude::wasm_bindgen};
 
 const DIRECTORY: &str = "browser-notes";
@@ -11,14 +14,20 @@ fn schema() -> Result<Schema, rocky_sdk::Error> {
         .build()
 }
 
+#[wasm_bindgen(js_name = newPersonPhrase)]
+pub fn new_person_phrase() -> String {
+    IdentityKey::generate().phrase()
+}
+
 #[wasm_bindgen]
 pub struct Notes(Database);
 
 #[wasm_bindgen]
 impl Notes {
-    pub async fn open(invitation: Option<String>) -> Result<Notes, JsError> {
+    pub async fn open(phrase: String, invitation: Option<String>) -> Result<Notes, JsError> {
         let configuration = Configuration::new(DIRECTORY, &schema()?)?
-            .network(rocky_tcp::Options::browser().into());
+            .network(rocky_tcp::Options::dialer().into())
+            .identity(Arc::new(IdentityKey::from_phrase(&phrase)?));
         match configuration.open().await {
             Ok(database) => Ok(Notes(database)),
             Err(error)
@@ -28,7 +37,7 @@ impl Notes {
                 ) =>
             {
                 let code = invitation.ok_or(error)?.parse()?;
-                Ok(Notes(configuration.join(&code).await?.database))
+                Ok(Notes(configuration.join(&code).await?))
             }
             Err(error) => Err(error.into()),
         }

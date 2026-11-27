@@ -44,9 +44,10 @@ fn open(directory: &Path, network: Option<Network>) -> rocky_sdk::Configuration 
 }
 
 async fn write(database: &Database, sql: &str) -> Result<(), Failure> {
-    Ok(database
+    database
         .write(async |tx| tx.execute(sql, Vec::new()).await)
-        .await?)
+        .await?;
+    Ok(())
 }
 
 async fn seed(database: &Database, keys: &[&str]) -> Result<(), Failure> {
@@ -150,6 +151,7 @@ async fn l2_interactive_writes_while_receiving_small_writes() -> Result<(), Fail
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.path().join("b"), network("b"))
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

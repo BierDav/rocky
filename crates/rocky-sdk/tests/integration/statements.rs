@@ -41,7 +41,10 @@ async fn write(
     params: Vec<SqlValue>,
 ) -> Result<(), rocky_sdk::Error> {
     database
-        .write(async |tx| tx.execute(sql, params).await)
+        .write(async |tx| {
+            tx.execute(sql, params).await?;
+            Ok(())
+        })
         .await
 }
 async fn titles(
@@ -76,6 +79,7 @@ async fn is_comparisons_read_and_replay_on_another_device() -> Result<(), Failur
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(root.path(), &schema, &hub, "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

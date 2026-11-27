@@ -162,6 +162,7 @@ async fn simulator_peer() -> Result<(), Failure> {
             None,
             Some(starter(None, true)),
         )
+        .fixture_person()
         .join(&invitation.parse()?)
         .await?,
     )?;

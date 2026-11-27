@@ -117,9 +117,19 @@ async fn noop_dml_and_unchanged_reinsert_emit_no_frames_and_keep_replicas_bounde
 
     let a = Device::new(open(&dir_a, &schema, &hub, "a").create().await?)?;
     let inv_b = a.invite_as(rocky_sdk::Access::Full).await;
-    let b = Device::new(open(&dir_b, &schema, &hub, "b").join(&inv_b).await?)?;
+    let b = Device::new(
+        open(&dir_b, &schema, &hub, "b")
+            .fixture_person()
+            .join(&inv_b)
+            .await?,
+    )?;
     let inv_c = a.invite_as(rocky_sdk::Access::Full).await;
-    let c = Device::new(open(&dir_c, &schema, &hub, "c").join(&inv_c).await?)?;
+    let c = Device::new(
+        open(&dir_c, &schema, &hub, "c")
+            .fixture_person()
+            .join(&inv_c)
+            .await?,
+    )?;
 
     introduce(&a, &b).await;
     introduce(&a, &c).await;

@@ -374,6 +374,7 @@ pub struct Rows<'a> {
     columns: Arc<Vec<String>>,
     pending: VecDeque<Vec<SqlValue>>,
     done: bool,
+    changes: u64,
 }
 impl<'a> Rows<'a> {
     async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, Error> {
@@ -385,6 +386,7 @@ impl<'a> Rows<'a> {
             columns: Arc::default(),
             pending: VecDeque::new(),
             done: false,
+            changes: 0,
         };
         let page = rows
             .source
@@ -392,6 +394,7 @@ impl<'a> Rows<'a> {
             .ok_or_else(closed)?
             .execute(statement, sql.into(), params)
             .await?;
+        rows.changes = page.changes;
         rows.page(page);
         Ok(rows)
     }
@@ -402,6 +405,7 @@ impl<'a> Rows<'a> {
             columns: Arc::default(),
             pending: VecDeque::new(),
             done: false,
+            changes: page.changes,
         };
         rows.page(page);
         rows
@@ -533,17 +537,19 @@ impl Transaction {
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
     }
-    /// Runs a statement that returns no rows; a statement the device's access does not allow is
-    /// refused with `Denied` before it runs, even when it would match no row.
-    pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), Error> {
+    /// Runs a statement that returns no rows and returns the rows its `INSERT`, `UPDATE` or
+    /// `DELETE` changed in the local database, without cascades or triggers, and 0 for a read; an
+    /// identical rewrite counts though it syncs nothing, so `Database::transaction_outcome` is
+    /// authoritative.
+    pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<u64, Error> {
         let rows = self.query(sql, params).await?;
-        if rows.done {
-            return Ok(());
+        let changes = rows.changes;
+        if !rows.done
+            && let Some(connection) = rows.source.connection()
+        {
+            connection.finish(rows.statement).await?;
         }
-        match rows.source.connection() {
-            Some(connection) => connection.finish(rows.statement).await,
-            None => Ok(()),
-        }
+        Ok(changes)
     }
     /// Runs a statement inside the transaction and returns its rows; `BEGIN`, `COMMIT` and
     /// `ROLLBACK` are refused, as `Database::write` ends the transaction.

@@ -157,7 +157,7 @@ impl Settings {
             &Intent::path(path),
             rocky_core::commitment("rocky.sdk.identity-join.v2", record.node.as_bytes()),
             store,
-            Some(provider),
+            provider,
         )
     }
     pub(crate) async fn enroll_identity(
@@ -338,7 +338,7 @@ impl Settings {
             return Err("the membership link is void; retry to link a fresh node".into());
         }
         settings.save(path).await?;
-        intent.finish(path, &vault)?;
+        intent.finish(path)?;
         Ok(settings)
     }
 }

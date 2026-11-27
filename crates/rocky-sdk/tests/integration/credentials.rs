@@ -58,7 +58,12 @@ async fn join(
     name: &str,
     invitation: &rocky_sdk::InvitationCode,
 ) -> Result<Device, Failure> {
-    Device::new(open(&root.join(name), hub, name).join(invitation).await?)
+    Device::new(
+        open(&root.join(name), hub, name)
+            .fixture_person()
+            .join(invitation)
+            .await?,
+    )
 }
 async fn reopen(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
     Device::new(open(&root.join(name), hub, name).open().await?)

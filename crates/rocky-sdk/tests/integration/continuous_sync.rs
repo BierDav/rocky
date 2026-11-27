@@ -22,7 +22,8 @@ async fn replace_row(database: &Database, key: &str, title: &str) -> Result<(), 
                 "INSERT INTO items(key,title,completed) VALUES(?,?,0)",
                 vec![SqlValue::Text(key.into()), SqlValue::Text(title.into())],
             )
-            .await
+            .await?;
+            Ok(())
         })
         .await
 }

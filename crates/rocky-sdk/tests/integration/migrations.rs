@@ -212,10 +212,11 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a")).await?;
     let b_opened = open(&b_dir, &common::schema(), network("b"))
+        .fixture_person()
         .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
     let b_identity = common::external_identity(&b_dir);
-    let b = Device::new(b_opened.database)?;
+    let b = Device::new(b_opened)?;
     a.admit(&b).await;
     introduce(&a, &b).await;
     a.add(1, "apples").await;
@@ -323,10 +324,11 @@ async fn an_issuer_migrates_the_household_once_a_members_list_key_reaches_it() -
         .await?,
     )?;
     let b_opened = open(&b_dir, &lists(), network("b"))
+        .fixture_person()
         .join(&a.invite_as(rocky_sdk::Access::Full).await)
         .await?;
     let b_identity = common::external_identity(&b_dir);
-    let b = Device::new(b_opened.database)?;
+    let b = Device::new(b_opened)?;
     a.admit(&b).await;
     introduce(&a, &b).await;
     list(&a, "From a").await?;
@@ -538,6 +540,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let clock = std::time::Instant::now();
     let c = Device::new(
         open(&c_dir, &fill, network("publication-peer"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -716,6 +719,7 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     )?;
     let b = Device::new(
         open(&b_dir, &lists(), network("b"))
+            .fixture_person()
             .join(&a.invite().await)
             .await?,
     )?;
@@ -831,6 +835,7 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     let invitation = a.invite().await;
     let b = Device::new(
         open(&root.path().join("member"), &positioned(), network("b"))
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;
@@ -905,6 +910,7 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
             &schema,
             Some(Network::Owned(hub.connector("c"))),
         )
+        .fixture_person()
         .join(&a.invite().await)
         .await?,
     )?;
@@ -1150,6 +1156,7 @@ async fn a_member_joining_after(rollouts: &[Schema], read: &str) -> Result<(), F
     assert_eq!(held.as_array().map(Vec::len), Some(3), "{held}");
     let member = Device::new(
         open(&dirs("member"), &last, network("member"))
+            .fixture_person()
             .join(&owner.invite().await)
             .await?,
     )?;
@@ -1514,6 +1521,7 @@ async fn a_device_past_a_removal_waits_for_an_admin_and_its_reads_say_why() -> R
             .sync(rocky_sdk::SyncMode::Manual)
             .network(Network::Owned(hub.connector("relay")))
             .identity(person)
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;
@@ -1694,11 +1702,13 @@ async fn offline_v1_peer_syncs_v2_with_restricted_foreign_key() -> Result<(), Fa
     )?;
     let bob = Device::new(
         open(&dirs("bob"), &v1, network("bob"))
+            .fixture_person()
             .join(&alice.invite().await)
             .await?,
     )?;
     let carol = Device::new(
         open(&dirs("carol"), &v1, network("carol"))
+            .fixture_person()
             .join(&alice.invite().await)
             .await?,
     )?;
@@ -1936,11 +1946,13 @@ async fn rewinding_multi_table_restricted_foreign_key_write_succeeds() -> Result
         )?;
         let bob = Device::new(
             open(&dirs("bob"), &schema, network("bob"))
+                .fixture_person()
                 .join(&alice.invite().await)
                 .await?,
         )?;
         let carol = Device::new(
             open(&dirs("carol"), &schema, network("carol"))
+                .fixture_person()
                 .join(&alice.invite().await)
                 .await?,
         )?;
@@ -2151,6 +2163,7 @@ async fn adding_optional_reference_to_new_table_in_v2_succeeds() -> Result<(), F
         )?;
         let bob = Device::new(
             open(&dirs("bob"), &v1, network("bob"))
+                .fixture_person()
                 .join(&alice.invite().await)
                 .await?,
         )?;

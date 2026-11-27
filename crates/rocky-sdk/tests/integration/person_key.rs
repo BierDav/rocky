@@ -157,6 +157,7 @@ async fn the_person_key_invites_without_the_root() -> Result<(), Failure> {
             &owned.hub,
             None,
         )
+        .fixture_person()
         .join(&invitation.code)
         .await?,
     )?;

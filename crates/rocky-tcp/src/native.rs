@@ -24,14 +24,6 @@ impl Options {
             roots: Vec::new(),
         }
     }
-    /// Options that only dial out: the device listens nowhere, names no route and syncs over
-    /// the connections it opens itself.
-    pub fn dialer() -> Self {
-        Self {
-            listener: None,
-            roots: Vec::new(),
-        }
-    }
     /// The `tcp://`, `ws://` or `wss://` URL peers dial, as when the bound address is not reachable
     /// from them; without it, peers dial the bound address. A dial-only attachment ignores it.
     pub fn advertise(mut self, route: impl Into<String>) -> Self {

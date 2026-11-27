@@ -137,9 +137,9 @@ async fn exercise(count: usize) -> Result<(), Failure> {
         let invitation = owner.database.invite(crate::Invite::new(profile)).await?;
         let device = Device::new(
             open(&dir, &schema, &hub, kind)?
+                .fixture_person()
                 .join(&invitation.code)
-                .await?
-                .database,
+                .await?,
         );
         device.add_peer(&contact).await.map_err(|e| e.to_string())?;
         let provisioned = device.database.me().await?.person;

@@ -58,6 +58,7 @@ async fn venue_with(root: &Path, role: RoleName) -> Result<(Device, Device), Fai
         .await?;
     let member = Device::new(
         configuration(&root.join("member"), &schema, &hub)
+            .fixture_person()
             .join(&invitation.code)
             .await?,
     )?;

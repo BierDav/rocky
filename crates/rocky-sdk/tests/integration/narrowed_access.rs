@@ -88,6 +88,7 @@ impl Clinic {
         let invitation = self.admin.database.invite(Invite::new(access)).await?;
         let device = Device::new(
             Self::configuration(self.root.path(), &self.schema, &self.hub, name)
+                .fixture_person()
                 .join(&invitation.code)
                 .await?,
         )?;

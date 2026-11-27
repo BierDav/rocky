@@ -133,10 +133,10 @@ impl Peer {
         Ok(id.to_string())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        Ok(self
-            .database
+        self.database
             .write(async |tx| tx.execute(sql, Vec::new()).await)
-            .await?)
+            .await?;
+        Ok(())
     }
     async fn column(&self, sql: &str) -> Result<Vec<Value>, Failure> {
         let page = snap::read(&self.database, sql, Vec::new()).await?;
@@ -206,9 +206,9 @@ async fn checkpoint_writer(
     let writer_path = root.join("writer");
     let writer = Peer::new(
         at(&writer_path, hub, "writer", schema)
+            .fixture_person()
             .join(&invite.code)
-            .await?
-            .database,
+            .await?,
     )?;
     writer.sync_now().await?;
     assert_eq!(
@@ -249,9 +249,9 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         .await?;
     let writer = Peer::new(
         at(&root.path().join("writer"), &hub, "writer", &ordered())
+            .fixture_person()
             .join(&invite.code)
-            .await?
-            .database,
+            .await?,
     )?;
     writer.sync_now().await?;
     let prepared = snap::value(writer.database.next_partition("lists")).await?;
@@ -378,9 +378,9 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         .await?;
     let reader = Peer::new(
         open(&root.path().join("reader"), &hub, "reader")
+            .fixture_person()
             .join(&read_invite.code)
-            .await?
-            .database,
+            .await?,
     )?;
     assert!(
         snap::value(reader.database.next_partition("lists"))
@@ -412,9 +412,9 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     only_explicit_syncs(&[&issuer, &writer]).await?;
 
@@ -529,9 +529,9 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     writer.sync_now().await?;
     snap::value(issuer.database.next_partition("lists")).await?;
@@ -642,9 +642,9 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
         .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     writer.sync_now().await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
@@ -765,9 +765,9 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         .code;
     let writer = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
@@ -846,9 +846,9 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         .code;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     b.sync_now().await?;
     assert_eq!(
@@ -896,9 +896,9 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         .code;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     a.database
         .make_admin(
@@ -950,7 +950,12 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?
         .code;
-    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
+    let writer = Peer::new(
+        open(&b, &hub, "b")
+            .fixture_person()
+            .join(&invitation)
+            .await?,
+    )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -1057,7 +1062,12 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?
         .code;
-    let writer = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
+    let writer = Peer::new(
+        open(&b, &hub, "b")
+            .fixture_person()
+            .join(&invitation)
+            .await?,
+    )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(
@@ -1168,9 +1178,9 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
         .code;
     let writer = Peer::new(
         at_without_identity(&b, &hub, "b", &first())
+            .fixture_person()
             .join(&invitation)
-            .await?
-            .database,
+            .await?,
     )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
@@ -1288,7 +1298,12 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         .invite(rocky_sdk::Invite::new(rocky_sdk::Access::Full))
         .await?
         .code;
-    let member = Peer::new(open(&b, &hub, "b").join(&invitation).await?.database)?;
+    let member = Peer::new(
+        open(&b, &hub, "b")
+            .fixture_person()
+            .join(&invitation)
+            .await?,
+    )?;
     snap::value(issuer.database.next_partition("lists")).await?;
     let list = issuer
         .insert(

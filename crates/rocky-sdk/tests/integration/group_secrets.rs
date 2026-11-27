@@ -240,10 +240,10 @@ impl Peer {
             .unwrap();
         let store = Arc::new(Store::default());
         let database = open(directory, &groups(), &store, &self.hub)
+            .fixture_person()
             .join(&invitation.code)
             .await
-            .unwrap()
-            .database;
+            .unwrap();
         let authority = database.status().await.unwrap().authority();
         (
             Peer::new(database, store, self.hub.clone()),
@@ -921,10 +921,10 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         .unwrap();
     let first = Peer::new(
         open_with_identity(&first_directory, &first_store, &issuer.hub, &person)
+            .fixture_person()
             .join(&invitation.code)
             .await
-            .unwrap()
-            .database,
+            .unwrap(),
         first_store,
         issuer.hub.clone(),
     );
@@ -1033,10 +1033,10 @@ async fn full_person(issuer: &Peer, root: &Path, name: &str) -> (Peer, Peer, Pub
             &issuer.hub,
             &person,
         )
+        .fixture_person()
         .join(&invitation.code)
         .await
-        .unwrap()
-        .database,
+        .unwrap(),
         laptop_store,
         issuer.hub.clone(),
     );

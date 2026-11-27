@@ -171,9 +171,9 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
         &root.path().join("b"),
         Some(Network::Owned(memory(&hub, "b"))),
     )
+    .fixture_person()
     .join(&invitation)
-    .await?
-    .database;
+    .await?;
     member.sync_now().await?;
     member.close().await?;
     creator.close().await?;
@@ -286,9 +286,9 @@ async fn borrowed_networks_outlive_a_detach_and_owned_ones_are_released() -> Res
         &root.path().join("b"),
         Some(Network::Attached(dialing.clone())),
     )
+    .fixture_person()
     .join(&invitation)
-    .await?
-    .database;
+    .await?;
     assert_eq!(
         transport(&member).await,
         ["memory"],
@@ -378,9 +378,9 @@ async fn a_detach_cancels_work_that_outlasts_its_drain() -> Result<(), Failure> 
         &root.path().join("b"),
         Some(Network::Owned(memory(&hub, "b"))),
     )
+    .fixture_person()
     .join(&invitation)
-    .await?
-    .database;
+    .await?;
     add(&member, 1, "Milk").await;
 
     hub.stalled.store(true, Ordering::SeqCst);

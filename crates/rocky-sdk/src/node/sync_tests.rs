@@ -136,7 +136,8 @@ async fn enrolled_schema(
     let path = root.join("rocky.sqlite");
     if let Some((issuer, profile)) = issuer {
         let invitation = issuer.invite(&crate::Invite::new(profile)).await?;
-        let prepared = Settings::prepare_invited(&path, &store, None, &invitation.code)?;
+        let person: Arc<dyn crate::IdentityProvider> = Arc::new(crate::IdentityKey::generate());
+        let prepared = Settings::prepare_invited(&path, &store, &person, &invitation.code)?;
         let vault = prepared.vault.clone();
         let transport = hub
             .connector(name)
@@ -145,7 +146,7 @@ async fn enrolled_schema(
         let settings = Settings::enroll_invited(
             (&path, Some(schema)),
             (prepared.intent, prepared.vault),
-            prepared.provider,
+            person,
             &invitation.code,
             &*transport,
         )

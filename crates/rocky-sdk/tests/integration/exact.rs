@@ -50,7 +50,7 @@ async fn write(
 }
 
 async fn create(database: &Database, key: &str, amount: i64) -> Result<(), Failure> {
-    Ok(database
+    database
         .write(async |tx| {
             tx.execute(
                 "INSERT INTO balances(key,amount,fee,bonus) VALUES(?,?,0,0)",
@@ -58,7 +58,8 @@ async fn create(database: &Database, key: &str, amount: i64) -> Result<(), Failu
             )
             .await
         })
-        .await?)
+        .await?;
+    Ok(())
 }
 
 async fn balances(database: &Database) -> Result<Vec<(String, i64, i64, i64)>, Failure> {
@@ -148,6 +149,7 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
     let invitation = a.invite_as(rocky_sdk::Access::Full).await;
     let b = Device::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(&invitation)
             .await?,
     )?;

@@ -151,10 +151,10 @@ impl Peer {
         Ok(moved.to_string())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        Ok(self
-            .database
+        self.database
             .write(async |tx| tx.execute(sql, Vec::new()).await)
-            .await?)
+            .await?;
+        Ok(())
     }
     async fn rows(&self, sql: &str) -> Result<Vec<Vec<Value>>, Failure> {
         let page = snap::read(&self.database, sql, Vec::new()).await?;
@@ -220,20 +220,20 @@ async fn topology() -> Result<Topology, Failure> {
     )?;
     let custody = Peer::new(
         open(&root.path().join("custody"), &hub, "custody")
+            .fixture_person()
             .join(&a.invite(rocky_sdk::Access::Store).await?)
-            .await?
-            .database,
+            .await?,
     )?;
     let b = Peer::new(
         open(&root.path().join("b"), &hub, "b")
+            .fixture_person()
             .join(
                 &a.invite(rocky_sdk::Access::Role(rocky_sdk::RoleName::from_static(
                     "shopper",
                 )))
                 .await?,
             )
-            .await?
-            .database,
+            .await?,
     )?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
@@ -359,9 +359,9 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     a.move_item(&weekly, &milk, &weekend).await?;
     let c = Peer::new(
         open(&_root.path().join("c"), &hub, "c")
+            .fixture_person()
             .join(&a.invite(rocky_sdk::Access::Full).await?)
-            .await?
-            .database,
+            .await?,
     )?;
     c.sync().await?;
     c.sync().await?;

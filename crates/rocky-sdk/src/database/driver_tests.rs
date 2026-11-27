@@ -637,9 +637,9 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
         &root.path().join("b"),
         Some(Network::Owned(hub.connector("b"))),
     )?
+    .fixture_person()
     .join(&invitation.code)
-    .await?
-    .database;
+    .await?;
     snap::value(b.sync_now()).await?;
 
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
@@ -729,7 +729,10 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
             rocky_sdk::RoleName::from_static("list_reader"),
         )))
         .await?;
-    let b = setup(&b_path, "b")?.join(&invitation.code).await?.database;
+    let b = setup(&b_path, "b")?
+        .fixture_person()
+        .join(&invitation.code)
+        .await?;
     {
         let reader = b.connect(READER).await?;
         all(&reader, "SELECT * FROM lists", vec![]).await?;
@@ -810,8 +813,14 @@ async fn a_live_commit_reaches_a_connected_peer_without_sync_now_or_a_tick() -> 
             )
             .await?;
             let invitation = a.invite(crate::Invite::new(crate::Access::Full)).await?;
-            let (joining, _) = super::Install::invited(&invitation.code);
-            let b = super::Database::launch_local(&live("b")?, joining).await?;
+            let joining = super::Install::Invited {
+                code: invitation.code.clone(),
+            };
+            let b = super::Database::launch_local(
+                &live("b")?.identity(Arc::new(crate::IdentityKey::generate())),
+                joining,
+            )
+            .await?;
             for database in [&a, &b] {
                 loop {
                     let status = database.status().await?;
@@ -895,9 +904,9 @@ async fn an_observer_hears_only_of_changed_rows_not_of_renewals_or_idle_syncs()
         &root.path().join("b"),
         Some(Network::Owned(hub.connector("b"))),
     )?
+    .fixture_person()
     .join(&invitation.code)
-    .await?
-    .database;
+    .await?;
     snap::value(b.sync_now()).await?;
     let mut events = b.observe(&[]).await?;
     b.renew().await?;
@@ -950,7 +959,7 @@ async fn join_returns_once_its_first_pull_brought_the_issuers_rows() -> Result<(
     let b_path = root.path().join("b");
     let (bootstrapping, finish_bootstrap) =
         crate::pause::arm(&b_path, crate::pause::Point::Bootstrap);
-    let configuration = open(&b_path, Some(Network::Owned(hub.connector("b"))))?;
+    let configuration = open(&b_path, Some(Network::Owned(hub.connector("b"))))?.fixture_person();
     let mut joining = std::pin::pin!(configuration.join(&invitation.code));
     tokio::select! {
         biased;
@@ -963,7 +972,7 @@ async fn join_returns_once_its_first_pull_brought_the_issuers_rows() -> Result<(
         () = tokio::task::yield_now() => {}
     }
     let _ = finish_bootstrap.send(());
-    let b = joining.await?.database;
+    let b = joining.await?;
     let reader = b.connect(READER).await?;
     assert_eq!(
         count(&reader, "items").await?,

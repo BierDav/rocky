@@ -30,6 +30,7 @@ async fn invited_relay(
         .invite(Invite::new(store_only()).for_identity(person.public_key()?.into()))
         .await?;
     let relay = relay_configuration(directory, hub, &person)
+        .fixture_person()
         .join(&invitation.code)
         .await?;
     Ok((Device::new(relay)?, person))
@@ -196,9 +197,9 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
     assert_eq!(
         refusal(
             relay_configuration(&root.path().join("writer"), &hub, &person)
+                .fixture_person()
                 .join(&writer.code)
                 .await
-                .map(|opened| opened.database)
         ),
         Some(StoreOnlyRefusal::ReadableAccess)
     );
@@ -206,9 +207,9 @@ async fn a_store_only_configuration_refuses_readable_access_and_creating() -> Re
         refusal(
             Configuration::store_only(root.path().join("bearer"))
                 .network(Network::Owned(hub.connector("bearer")))
+                .fixture_person()
                 .join(&issuer.invite().await)
                 .await
-                .map(|opened| opened.database)
         ),
         Some(StoreOnlyRefusal::ReadableAccess)
     );

@@ -6,7 +6,9 @@
 <ul id="notes"></ul>
 <script type="module">
   const worker = new Worker(`worker.js${location.hash}`, { type: "module" });
+  worker.postMessage({ phrase: localStorage.getItem("rocky-notes-phrase") });
   worker.onmessage = ({ data }) => {
+    if (data.phrase) localStorage.setItem("rocky-notes-phrase", data.phrase);
     document.getElementById("error").textContent = data.error ?? "";
     if (!data.notes) return;
     document.getElementById("notes").replaceChildren(

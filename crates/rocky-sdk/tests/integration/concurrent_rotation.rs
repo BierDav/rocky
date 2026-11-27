@@ -50,7 +50,7 @@ async fn join(
     let invitation = a.invite_as(access).await;
     let directory = root.join(name);
     let options = open_with(&directory, hub, name, schema);
-    let device = Device::new(options.join(&invitation).await?)?;
+    let device = Device::new(options.fixture_person().join(&invitation).await?)?;
     a.database.add_peer(&device.contact().await).await?;
     fixture::settle(&device).await;
     Ok(device)

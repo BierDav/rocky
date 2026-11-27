@@ -1,6 +1,5 @@
 use crate::{
-    Created, Database, IdentityProvider, Network, Opened, Schema, SecretStore, SyncMode,
-    database::Install,
+    Created, Database, IdentityProvider, Network, Schema, SecretStore, SyncMode, database::Install,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -122,12 +121,7 @@ impl Configuration {
     /// Starts linking this device to a person who holds another device, reached at `contact`; needs
     /// that person's key in `identity`.
     pub async fn link(&self, contact: &str) -> Result<crate::PendingLink, crate::Error> {
-        if self.identity.is_none() {
-            return Err(crate::Error::refused(
-                crate::Right::Sign,
-                crate::DenyReason::IdentityRequired,
-            ));
-        }
+        self.require_identity()?;
         let install = Install::Identity {
             contact: contact.into(),
             confirmed: None,
@@ -150,13 +144,22 @@ impl Configuration {
             },
         }
     }
-    /// Redeems an invitation with the issuing device and returns after the first pull from it, so
-    /// the first read sees the issuer's rows.
-    pub async fn join(&self, code: &crate::InvitationCode) -> Result<Opened, crate::Error> {
-        let (install, minted) = Install::invited(code);
+    /// Redeems an invitation as the person in `identity` and returns after the first pull from the
+    /// issuing device, so the first read sees the issuer's rows.
+    pub async fn join(&self, code: &crate::InvitationCode) -> Result<Database, crate::Error> {
+        self.require_identity()?;
+        let install = Install::Invited { code: code.clone() };
         let database = Database::launch(self, install, None).await?;
-        let identity = minted.lock().ok().and_then(|mut minted| minted.take());
         database.send(crate::request::Request::FirstPull).await?;
-        Ok(Opened { database, identity })
+        Ok(database)
+    }
+    fn require_identity(&self) -> Result<(), crate::Error> {
+        match self.identity {
+            Some(_) => Ok(()),
+            None => Err(crate::Error::refused(
+                crate::Right::Sign,
+                crate::DenyReason::IdentityRequired,
+            )),
+        }
     }
 }

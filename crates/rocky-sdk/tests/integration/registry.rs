@@ -75,6 +75,7 @@ async fn join(
     Device::new(
         open(directory, Some(network))
             .identity(identity)
+            .fixture_person()
             .join(invitation)
             .await?,
     )
@@ -753,6 +754,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         let requesting = Arc::new(Faults::default());
         let device = Device::new(
             open(&root.join(name), Some(faulty(&hub, name, &requesting)))
+                .fixture_person()
                 .join(&keys.code)
                 .await?,
         )?;
@@ -831,9 +833,9 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         rocky_sdk::Configuration::new(root.join(&name), common::parsed_schema())?
             .network(memory(&hub, &name))
             .sync(rocky_sdk::SyncMode::Manual)
+            .fixture_person()
             .join(&code)
             .await?
-            .database
             .close()
             .await?;
     }

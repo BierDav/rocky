@@ -1402,7 +1402,10 @@ async fn an_application_behind_a_removal_it_uses_must_upgrade() -> Result<(), Fa
                 .err()
                 .map(|error| error.kind().clone());
             let kept = tx
-                .execute("INSERT INTO items(key,completed) VALUES('tea',0)", Vec::new())
+                .execute(
+                    "INSERT INTO items(key,completed) VALUES('tea',0)",
+                    Vec::new(),
+                )
                 .await?;
             Ok::<_, rocky_sdk::Error>((refused, kept))
         })

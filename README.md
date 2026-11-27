@@ -116,6 +116,9 @@ that from its first statement is rolled back and fails with
 `ErrorKind::TimedOut`, so keep slow work such as network calls outside the
 body. Reads never wait for a write: `query` and `observe` beside an open write
 see the last commit, and `status` returns the status last observed before it.
+An observer can see a local commit before the `write` future returns. Use
+`flush().await?` when the app needs commits from completed writes to be
+durable on disk.
 
 `Transaction::execute` and `query` refuse a statement the device's access can
 never allow before it runs, with `Denied` naming the `Right`: an `INSERT` needs
@@ -668,20 +671,27 @@ changes it:
 
 | `SyncMode` | Serves peers | Reaches out |
 | --- | --- | --- |
-| `Live` (default) | Yes | On its own, and pushes each commit to connected peers at once |
+| `Live` (default) | Yes | Automatically sends commits and catches up with peers |
 | `Manual` | Yes | Only on `sync_now` |
 | `Off` | No | Never |
 
 When a peer drops or closes its live link, for example because it restarts, a
 `Live` device that dialed the peer redials it on its own, with a backoff that
 starts near a second and doubles up to a minute, until the peer answers or the
-database closes.
+database closes. A link closed because authority changed gets an immediate
+attempt at fresh admission; repeated closes can still back off.
+
+A successful `write` is a local commit. Live sync may send several commits
+together, and delivery can pause while peers catch up, including after
+compaction. To react to a change on another device, observe and read the
+table on that device.
 
 `sync_now` runs one pass and fails with `ServiceError::SyncOff` when sync is
 off and with `NoPeerReached(report)` when no peer reconciled, which is also
 what an owner with no other device yet gets. Its `SyncReport` prints as one
 line; `complete()` is true when every known peer reconciled or another peer
-covered it, and `pulled()` and `pushed()` count encrypted frames, not rows.
+covered it, and `pulled()` and `pushed()` count encrypted frames transferred
+in that pass. Live deliveries outside the pass do not count toward its totals.
 `add_peer`, `remove_peer` and `contact` manage peers, each named by its
 `DeviceId`. `remove_peer` forgets a peer however the device learned it and
 keeps a handover or discovery from bringing it back, also after a restart,
@@ -907,10 +917,15 @@ old name has to upgrade, though the writes it made before the device learned of
 the rename still land under the new name. Rocky queues no writes for it: a
 refused statement leaves the transaction open, so the application can keep the
 write itself, for example in a `Table::local` table, and replay it once it runs
-the new version. An application that declares a newer
-version than the database runs (`DeclaredSchema::Ahead`) gets
+the new version.
+
+An application that declares a newer version than the database runs
+(`DeclaredSchema::Ahead`) gets
 `SchemaMismatch` from every read and write until an admin device publishes that
-version and this device syncs with it.
+version and this device syncs with it. If the app still ships the installed
+schema, it can close and reopen with that version to work offline, including
+with local tables. After the device syncs the upgrade, reopen with the new
+schema.
 
 A write made under an earlier version that a later one can no longer apply,
 such as a late write into a removed field, including one that a later version

@@ -480,6 +480,50 @@ async fn a_removed_clinician_keeps_no_chart_text_on_disk() -> Result<(), Failure
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_write_into_a_revoked_partition_is_denied_not_blocked() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    clinic.admit("ada", "ada note", "ada drug").await?;
+    clinic.admit("bob", "bob note", "bob drug").await?;
+    let (clinician, person) = clinic.clinician(&["ada", "bob"]).await?;
+    let note = async |body: &str| {
+        clinician
+            .database
+            .write(async |tx| {
+                tx.execute(
+                    "INSERT INTO notes(patient, body) VALUES('ada', ?)",
+                    rocky_sdk::params![body],
+                )
+                .await
+            })
+            .await
+    };
+    note("clinician note").await?;
+    clinic.exchange(&clinician).await?;
+    clinic
+        .admin
+        .database
+        .revoke_partition(person, &chart("ada"))
+        .await?;
+    clinic.exchange(&clinician).await?;
+    let refused = note("after the revocation")
+        .await
+        .err()
+        .ok_or("a write into a revoked partition succeeded")?;
+    assert!(
+        matches!(
+            refused.kind(),
+            ErrorKind::Denied {
+                reason: DenyReason::PartitionNotGranted { .. },
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    clinic.close([clinician]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn purge_on_close_removes_the_directory() -> Result<(), Failure> {
     let clinic = Clinic::new().await?;
     let member = clinic.invited("member", Access::Read).await?;

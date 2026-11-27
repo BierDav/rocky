@@ -310,7 +310,7 @@ impl<A: RowApplication> Inner<A> {
         );
         if blockers.is_empty() {
             for scope in scopes {
-                if self.restoring(*scope).await? {
+                if self.restoring(*scope).await? && self.holds(*scope).await? {
                     blockers.push(blocker(
                         scope_label(scope),
                         BlockerKind::RestorationGuard,

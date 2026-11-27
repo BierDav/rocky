@@ -376,8 +376,8 @@ rather than return no rows, which would look like a ward with no charts: show
 the person that they wait for an admin's grant, and read again when
 `status_changes()` drops the blocker. Once the person holds a partition, a
 read returns the rows of the partitions they hold, also when its filter names
-others, and a write into a partition they do not hold is `Denied` with
-`PartitionNotGranted`.
+others, and a write into a partition they do not hold, or no longer hold
+after `revoke_partition`, is `Denied` with `PartitionNotGranted`.
 
 `people()` lists each `Person` with the partitions granted to them in
 `Person::partitions`. `Full` and `Read` reach every partition without a

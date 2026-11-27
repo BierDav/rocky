@@ -1012,3 +1012,32 @@ async fn reads_across_held_partitions_agree_inside_and_after_transactions() {
         );
     }
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn forgetting_everything_drops_the_partition_values_it_held() {
+    let root = rocky_platform::fs::Scratch::new().await;
+    let f = Fixture::new();
+    let replica = f
+        .open(
+            &root.path().join("removed.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+        )
+        .await;
+    f.key(&replica, "patient-7", [3; 32]).await;
+    let held = async || {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        let stored = crate::storage::rows(&inner.conn, "SELECT tuple FROM secure_partitions")
+            .await
+            .unwrap()
+            .len();
+        (stored, inner.partition_names.len())
+    };
+    assert_eq!(held().await, (1, 1));
+    replica.forget_everything().await.unwrap();
+    assert_eq!(
+        held().await,
+        (0, 0),
+        "a removed device keeps no partition values"
+    );
+}

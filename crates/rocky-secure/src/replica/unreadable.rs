@@ -326,11 +326,13 @@ impl<A: RowApplication> Inner<A> {
                 .execute(format!("DELETE FROM {table}"), ())
                 .await?;
         }
-        for table in ["secure_keys", "secure_key_epochs"] {
+        for table in ["secure_keys", "secure_key_epochs", "secure_partitions"] {
             self.conn
                 .execute(format!("DELETE FROM {table}"), ())
                 .await?;
         }
+        self.partitions.clear();
+        self.partition_names.clear();
         self.conn
             .execute("UPDATE secure_retained SET records=0,bytes=0", ())
             .await?;

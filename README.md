@@ -773,14 +773,17 @@ Other kinds an application meets:
   database, already holds one, or holds a join to repeat.
 - `Blocked { table, blockers }`: the data has not arrived; retry after the
   named blockers clear. It always names at least one.
+- `AuthorityChanged`: the device's credentials changed or expired during the
+  call, for example right after a grant, a revocation or `make_admin`; retry.
+- `Conflict`: a concurrent change conflicted; retry.
 - `Busy`: another write held the database for all of `TRANSACTION_TIMEOUT`,
   or too many calls are pending; retry.
 - `TimedOut`: the write body held the database past `TRANSACTION_TIMEOUT` and
   was rolled back; move slow work out of the body.
 - `TooLarge { limit, size, max }`: a write exceeds a size limit.
 - `SchemaMismatch { installed, declared }`: the database runs a schema version
-  this application cannot use. When `installed` is newer, it removed something
-  the application declares: upgrade the application. When `declared` is newer,
+  this application cannot use. When `installed` is newer, it renamed or removed
+  something the application declares: upgrade the application. When `declared` is newer,
   an admin device must publish it first, or this device sync with one that has;
   until then every read and write is refused before it runs, while `status` and
   sync keep working.

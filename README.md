@@ -904,7 +904,10 @@ reads the installed version) keeps working. Only when a newer version removed
 or renamed a table or field it declares does open, or a statement using it,
 fail with `SchemaMismatch { installed, declared }`: an application still on the
 old name has to upgrade, though the writes it made before the device learned of
-the rename still land under the new name. An application that declares a newer
+the rename still land under the new name. Rocky queues no writes for it: a
+refused statement leaves the transaction open, so the application can keep the
+write itself, for example in a `Table::local` table, and replay it once it runs
+the new version. An application that declares a newer
 version than the database runs (`DeclaredSchema::Ahead`) gets
 `SchemaMismatch` from every read and write until an admin device publishes that
 version and this device syncs with it.

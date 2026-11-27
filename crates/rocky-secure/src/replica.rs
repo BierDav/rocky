@@ -601,7 +601,7 @@ pub(super) struct Flusher {
     copy: std::sync::Mutex<Option<PathBuf>>,
 }
 impl Flusher {
-    async fn run(self: Arc<Self>, commit: LockedCommit) -> Result<(), Error> {
+    pub(crate) async fn run(self: Arc<Self>, commit: LockedCommit) -> Result<(), Error> {
         if self.durable() >= commit.count() {
             #[cfg(feature = "qualification")]
             self.measurements.flush(std::time::Duration::ZERO);

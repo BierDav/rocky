@@ -273,3 +273,37 @@ async fn orphaned_pulled_payload_cleanup_is_bounded_and_resumes_after_reopen() {
     assert_eq!(before, 0);
     replica.audit(t.items).await.unwrap();
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(flavor = "current_thread")]
+async fn a_link_scope_token_waits_for_its_flush_without_blocking_the_executor() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let replica = t
+        .open(
+            &dir.path().join("token.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = buffered(&replica, t.items).await;
+    insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
+        .await
+        .unwrap();
+    let (entered, resume) = replica.pause_flush().await;
+    let release_a_blocked_executor = resume.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let _ = release_a_blocked_executor.send(());
+    });
+    let token = crate::network::link::scope_token(&replica, t.items);
+    tokio::pin!(token);
+    tokio::select! {
+        biased;
+        result = &mut token => panic!("the flush blocked the executor until it ended: {result:?}"),
+        result = entered => result.unwrap(),
+    }
+    resume.send(()).unwrap();
+    token.await.unwrap();
+}

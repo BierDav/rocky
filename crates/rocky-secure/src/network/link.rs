@@ -446,7 +446,7 @@ pub async fn scope_token<A: RowApplication>(
         ))?;
         (bytes, inner.flusher.clone(), inner.locked_commit())
     };
-    flusher.flush(commit)?;
+    flusher.run(commit).await?;
     Ok(rocky_core::commitment("rocky.link-scope.v2", &bytes))
 }
 impl NativeSession {

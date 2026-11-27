@@ -376,6 +376,16 @@ pub struct Rows<'a> {
     done: bool,
     changes: u64,
 }
+impl std::fmt::Debug for Rows<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Rows")
+            .field("columns", &self.columns)
+            .field("buffered", &self.pending.len())
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
 impl<'a> Rows<'a> {
     async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, Error> {
         let closed = || Error::closed("the transaction is finished");

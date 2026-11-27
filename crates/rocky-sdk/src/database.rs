@@ -2213,8 +2213,7 @@ mod tests {
         let err = database
             .query("SELECT * FROM no_such_table", Vec::new())
             .await
-            .err()
-            .expect("invalid table should fail");
+            .expect_err("invalid table should fail");
         assert!(matches!(err.kind(), crate::ErrorKind::Sql { .. }), "{err}");
 
         let rows = database

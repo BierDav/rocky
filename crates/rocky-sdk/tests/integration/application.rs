@@ -110,11 +110,12 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
         .await
     })
     .await?;
-    let rows = db
-        .query("SELECT body FROM notes", params![])
-        .await?
-        .collect()
-        .await?;
+    let pending = db.query("SELECT body FROM notes", params![]).await;
+    assert!(
+        format!("{pending:?}").contains("Rows"),
+        "a query result is printable, so tests can expect_err on it"
+    );
+    let rows = pending?.collect().await?;
     assert_eq!(
         rows.len(),
         1,

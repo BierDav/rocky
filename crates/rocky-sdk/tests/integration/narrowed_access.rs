@@ -441,6 +441,45 @@ async fn a_removed_device_keeps_no_replicated_rows_on_disk() -> Result<(), Failu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_removed_clinician_keeps_no_chart_text_on_disk() -> Result<(), Failure> {
+    let clinic = Clinic::new().await?;
+    clinic.admit("ada", "ada note", "ada metformin").await?;
+    let (clinician, person) = clinic.clinician(&["ada"]).await?;
+    assert_eq!(
+        texts(&clinician, "SELECT body FROM notes").await?,
+        ["ada note"]
+    );
+    clinic
+        .admin
+        .database
+        .write(async |tx| tx.execute("DELETE FROM prescriptions", Vec::new()).await)
+        .await?;
+    clinic.exchange(&clinician).await?;
+    assert_eq!(
+        texts(&clinician, "SELECT drug FROM prescriptions").await?,
+        Vec::<String>::new()
+    );
+    clinic.admin.database.remove(person).await?;
+    let _refused_until_the_device_renews = clinic.admin.database.sync_now().await;
+    let removed = clinician
+        .sync_now()
+        .await
+        .err()
+        .ok_or("a removed device synced")?;
+    assert_eq!(removed.kind(), &ErrorKind::Removed, "{removed}");
+    clinician.close().await;
+    let directory = clinic.directory("clinician");
+    for needle in ["ada note", "ada metformin"] {
+        assert!(
+            !file_holds(&directory, needle)?,
+            "{needle} stays in the removed device's file"
+        );
+    }
+    clinic.close([]).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn purge_on_close_removes_the_directory() -> Result<(), Failure> {
     let clinic = Clinic::new().await?;
     let member = clinic.invited("member", Access::Read).await?;

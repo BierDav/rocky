@@ -11,7 +11,9 @@ impl DatabaseOwner {
         &self.path
     }
     pub fn connect(&self) -> Result<sqlite::Connection, Error> {
-        Ok(sqlite::Connection::open(&self.path)?)
+        let connection = sqlite::Connection::open(&self.path)?;
+        connection.rows(ZERO_DELETED_CONTENT, ())?;
+        Ok(connection)
     }
     pub async fn open(path: &Path) -> Result<(Self, sqlite::Connection), Error> {
         let path_string = path
@@ -64,6 +66,7 @@ impl WalIndex {
 }
 
 const INCREMENTAL_AUTO_VACUUM: &str = "PRAGMA auto_vacuum=INCREMENTAL";
+pub const ZERO_DELETED_CONTENT: &str = "PRAGMA secure_delete=FAST";
 
 fn has_data(path: &Path) -> bool {
     fs::len(path).is_ok_and(|len| len > 0)
@@ -188,6 +191,30 @@ mod tests {
                 assert!(!directory.path().join("file.sqlite-wal").exists());
             }
         }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_deleted_row_leaves_no_content_in_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rows.sqlite");
+        let (owner, conn) = DatabaseOwner::open(&path).await.unwrap();
+        conn.execute("CREATE TABLE notes(body TEXT)", ())
+            .await
+            .unwrap();
+        for body in ["kept note", "deleted metformin note"] {
+            conn.execute("INSERT INTO notes VALUES(?)", [body])
+                .await
+                .unwrap();
+        }
+        conn.execute("DELETE FROM notes WHERE body LIKE 'deleted%'", ())
+            .await
+            .unwrap();
+        conn.rows("PRAGMA wal_checkpoint(TRUNCATE)", ()).unwrap();
+        drop(conn);
+        drop(owner);
+        let bytes = std::fs::read(&path).unwrap();
+        let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+        assert!(holds(b"kept note"));
+        assert!(!holds(b"metformin"), "the deleted row stays in the file");
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn application_table_suffixes_are_not_schema_metadata() {

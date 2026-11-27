@@ -359,8 +359,12 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     async fn secure_delete(&self, on: bool) -> Result<(), Error> {
-        let mode = if on { "ON" } else { "OFF" };
-        rows(&self.conn, &format!("PRAGMA secure_delete={mode}")).await?;
+        let mode = if on {
+            "PRAGMA secure_delete=ON"
+        } else {
+            rocky_storage::database::ZERO_DELETED_CONTENT
+        };
+        rows(&self.conn, mode).await?;
         Ok(())
     }
     async fn scrub(&mut self) -> Result<(), Error> {

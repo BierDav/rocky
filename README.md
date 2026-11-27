@@ -485,12 +485,13 @@ or LUKS, the platform's data protection on phones, and file permissions. In a
 browser the store lives in the origin's private file system, open to that
 origin's code.
 
-When a device deletes rows it can no longer read, SQLite overwrites their
-content in the file, Rocky releases the freed pages and truncates the
-write-ahead log; a read still running at that moment delays the truncation to
-the next checkpoint. Rocky cannot reach copies outside the database file, such
-as backups, file system snapshots, swap or the application's own copies, and a
-device that has not synced since a change still holds what it held.
+SQLite zeroes a deleted row's content in its page with every delete. When a
+device deletes rows it can no longer read, SQLite also overwrites the pages it
+frees, Rocky releases them and truncates the write-ahead log; a read still
+running at that moment delays the truncation to the next checkpoint. Rocky
+cannot reach copies outside the database file, such as backups, file system
+snapshots, swap or the application's own copies, and a device that has not
+synced since a change still holds what it held.
 
 ## Unattended hosts
 
